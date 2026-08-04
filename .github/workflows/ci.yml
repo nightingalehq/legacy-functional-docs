@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install package
+        run: pip install -e ".[dev]"
+
+      - name: Run pytest
+        run: pytest -v
+
+      - name: Run pipeline against bundled fixtures
+        # project.yml (checked in at repo root) points at examples/fixtures/
+        # and is the same config the worked example was generated from.
+        # Its quality_gates are intentionally set to real-engagement
+        # thresholds, and the fixtures deliberately omit some call targets to
+        # exercise the gap machinery -- so `mfdoc gate` on this config is
+        # expected to fail here. Gate behaviour itself is covered by
+        # tests/test_gate.py against controlled thresholds.
+        run: |
+          mfdoc ingest   --config project.yml
+          mfdoc derive   --config project.yml
+          mfdoc coverage --config project.yml
+
+      - name: Validate the worked example
+        run: mfdoc validate --config project.yml --docs examples

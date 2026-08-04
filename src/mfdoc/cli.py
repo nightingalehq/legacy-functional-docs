@@ -1,11 +1,12 @@
 """mfdoc — command line for the legacy-functional-docs pipeline.
 
-    python -m mfdoc ingest   --config project.yml
-    python -m mfdoc derive   --config project.yml
-    python -m mfdoc brief    --config project.yml [--module NAME | --entity NAME | --system]
-    python -m mfdoc coverage --config project.yml
-    python -m mfdoc validate --config project.yml --docs docs/functional
-    python -m mfdoc export   --config project.yml --json out/index.json
+    mfdoc ingest   --config project.yml
+    mfdoc derive   --config project.yml
+    mfdoc coverage --config project.yml
+    mfdoc gate     --config project.yml
+    mfdoc brief    --config project.yml [--module NAME | --entity NAME | --system]
+    mfdoc validate --config project.yml --docs docs/functional
+    mfdoc export   --config project.yml --json out/index.json
 """
 
 from __future__ import annotations
@@ -186,6 +187,60 @@ def cmd_coverage(args) -> int:
     return 0
 
 
+# Each gate: (options key, coverage key, comparison, what a failure blocks).
+# comparison is "min" (coverage must be >= threshold) or "max" (coverage must
+# be <= threshold).
+GATES = [
+    ("min_line_recognition_rate", "line_recognition_rate", "min",
+     "the dialect scanner is mismatched to this codebase; narrative built on "
+     "unrecognised lines will miss business rules silently"),
+    ("min_call_resolution_rate", "call_resolution_rate", "min",
+     "source is missing for too many call targets; process-flow and process "
+     "documentation will be incomplete"),
+    ("min_entity_definition_rate", "entity_definition_rate", "min",
+     "data definitions are missing for too many stores; field-level meaning "
+     "cannot be documented and must not be guessed from field names"),
+    ("max_high_severity_gaps", "gaps_high", "max",
+     "too many unresolved high-severity items to write reliable narrative "
+     "from; resolve or triage them first"),
+]
+
+
+def cmd_gate(args) -> int:
+    """Evaluate coverage against options.quality_gates and exit non-zero on
+    failure, so a weak index is a stop rather than an instruction a model
+    (or a person under deadline) can skip."""
+    cfg = load_config(args.config)
+    conn = connect(Path(args.config).parent / cfg["index_db"])
+    cov = graph.coverage(conn)
+    conn.commit()
+    gates = (cfg["options"] or {}).get("quality_gates") or {}
+
+    failed = []
+    for opt_key, cov_key, kind, blocks in GATES:
+        if opt_key not in gates:
+            continue
+        threshold = gates[opt_key]
+        actual = cov.get(cov_key, 0)
+        ok = actual >= threshold if kind == "min" else actual <= threshold
+        rel = ">=" if kind == "min" else "<="
+        status = "PASS" if ok else "FAIL"
+        print(f"{status}  {cov_key} = {actual}  (needs {rel} {threshold})")
+        if not ok:
+            gap = (threshold - actual) if kind == "min" else (actual - threshold)
+            failed.append((opt_key, cov_key, actual, threshold, gap, blocks))
+
+    if not failed:
+        print("\nall configured gates passed")
+        return 0
+
+    print(f"\n{len(failed)} gate(s) failed:")
+    for opt_key, cov_key, actual, threshold, gap, blocks in failed:
+        print(f"  - {opt_key}: {cov_key}={actual}, needed {threshold} (off by {gap:.4g})")
+        print(f"    blocks: {blocks}")
+    return 1
+
+
 def cmd_validate(args) -> int:
     from .validate import validate_tree
     cfg = load_config(args.config)
@@ -215,7 +270,8 @@ def main(argv=None) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    for name, fn in (("ingest", cmd_ingest), ("derive", cmd_derive), ("coverage", cmd_coverage)):
+    for name, fn in (("ingest", cmd_ingest), ("derive", cmd_derive), ("coverage", cmd_coverage),
+                     ("gate", cmd_gate)):
         p = sub.add_parser(name)
         p.add_argument("--config", required=True)
         p.set_defaults(func=fn)
