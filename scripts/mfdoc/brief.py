@@ -24,11 +24,18 @@ def _cite(name: str, line: int | None, end: int | None = None) -> str:
 
 
 def module_brief(conn, member_name: str, excerpt_rules: bool = True) -> str:
-    m = conn.execute(
-        "SELECT * FROM member WHERE UPPER(name)=UPPER(?) LIMIT 1", (member_name,)
-    ).fetchone()
-    if not m:
+    matches = conn.execute(
+        "SELECT * FROM member WHERE UPPER(name)=UPPER(?)", (member_name,)
+    ).fetchall()
+    if not matches:
         return f"# {member_name}\n\nNo such member in the index.\n"
+    if len(matches) > 1:
+        libs = ", ".join(sorted({r["library"] or "?" for r in matches}))
+        return (
+            f"# {member_name}\n\nMember name is ambiguous across libraries ({libs}). "
+            f"Re-run with a library-qualified name.\n"
+        )
+    m = matches[0]
     mid, name = m["id"], m["name"]
     out: list[str] = []
     add = out.append

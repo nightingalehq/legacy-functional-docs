@@ -146,10 +146,15 @@ def extract_ddm(conn, member_id, lines, member_name="?") -> dict:
     for line_no, seq, raw in lines:
         insert(conn, "source_line", member_id=member_id, line_no=line_no, seq=seq, text=raw,
                is_comment=0)
-        if re.match(r"^\s*[-=]{4,}", raw):
+        # The column-header separator is a full line of dashes/equals with
+        # spaces between them (e.g. "- - -- ---- -- - ----"), not a single
+        # unbroken run, so match on line composition rather than a run length.
+        if raw.strip() and re.fullmatch(r"[-=\s]+", raw.strip()):
             in_fields = True
             continue
         if not raw.strip():
+            continue
+        if not in_fields:
             continue
         if (s := RE_DDM_SUPER.match(raw)):
             insert(conn, "entity_field", entity_id=eid, name=s.group("name").upper(),

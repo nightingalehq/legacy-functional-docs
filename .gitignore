@@ -2,3 +2,4 @@
 .mfdoc/
 __pycache__/
 *.pyc
+.claude/

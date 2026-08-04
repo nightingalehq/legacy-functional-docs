@@ -31,7 +31,7 @@ Two obligations:
    on this dialect and rarely on others. Put it above `natural` and `mantis` if it
    is more specific, since ordering breaks ties.
 3. Add the entry to `DIALECT_ROUTER` and `DIALECT_DEFAULT_TYPE` in `cli.py`.
-4. Add a fixture under `evals/fixtures/<name>/` and a source set in the example
+4. Add a fixture under `examples/fixtures/<name>/` and a source set in the example
    config.
 5. If members arrive concatenated, add a splitter to `normalise.DEFAULT_SPLITTERS`
    with a named `name` group.

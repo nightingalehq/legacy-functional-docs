@@ -149,6 +149,31 @@ NUMLIT = re.compile(r"(?<![A-Z0-9#\-])\d+(?:\.\d+)?")
 
 CONTINUATION_TAIL = re.compile(r"(\b(AND|OR|NOT|THRU|THROUGH|TO|WITH|BY)\s*$)|([=<>,+\-*/]\s*$)", re.I)
 
+# Bounds how far the continuation-fold below will look ahead per line. Without
+# this, a source file where most lines end in a continuation token (adversarial
+# or just malformed input) makes every line rescan the rest of the file, which
+# is O(n^2) in file length.
+MAX_CONTINUATION_LOOKAHEAD = 25
+
+# Maps an END-xxx keyword to the opener label(s) it can legitimately close.
+# Keywords not listed here (READ, FIND, HISTOGRAM, WORK, SUBROUTINE, WHILE,
+# ALL, PROCESS, NOREC, BEFORE) have no matching opener tracked in open_blocks
+# -- e.g. READ/FIND/HISTOGRAM never push -- so their END- must be a no-op
+# rather than popping an unrelated block (previously this silently corrupted
+# nesting for any IF/DECIDE/FOR/REPEAT wrapping a READ...END-READ).
+_END_TO_OPENERS = {
+    "IF": {"IF", "IF NO RECORDS FOUND"},
+    "NOREC": {"IF NO RECORDS FOUND"},
+    "DECIDE": {"DECIDE"},
+    "FOR": {"FOR"},
+    "REPEAT": {"REPEAT"},
+    "ERROR": {"ON ERROR"},
+    "BREAK": {"AT-EVENT"},
+    "ENDDATA": {"AT-EVENT"},
+    "START": {"AT-EVENT"},
+    "TOPPAGE": {"AT-EVENT"},
+}
+
 
 def _clean_target(tok: str) -> tuple[str, bool]:
     """Return (name, is_dynamic). Quoted literal => static; bare #VAR => dynamic."""
@@ -232,7 +257,11 @@ def extract(conn, member_id: int, lines: list[tuple[int, str | None, str]], memb
         # Fold obvious continuations so key expressions survive intact.
         stmt = code
         look = idx
-        while CONTINUATION_TAIL.search(stmt.rstrip()) and look + 1 < len(lines):
+        while (
+            CONTINUATION_TAIL.search(stmt.rstrip())
+            and look + 1 < len(lines)
+            and look - idx < MAX_CONTINUATION_LOOKAHEAD
+        ):
             look += 1
             nxt_code, nxt_comment = strip_comment(lines[look][2])
             if nxt_comment:
@@ -550,10 +579,12 @@ def _match_rules(conn, member_id, line_no, stmt, masked, depth, open_blocks):
                depth=depth, fields_used=fields[:500] or None, literals=lits[:500] or None,
                raw=stmt.strip()[:500])
 
-    if RE_END_ANY.match(masked):
-        if open_blocks:
+    if (m := RE_END_ANY.match(masked)):
+        openers = _END_TO_OPENERS.get(m.group(1).upper())
+        if openers and open_blocks and open_blocks[-1][0] in openers:
             open_blocks.pop()
-        return True, max(depth - 1, 0), open_blocks
+            return True, max(depth - 1, 0), open_blocks
+        return True, depth, open_blocks
     if RE_IF_NO.match(masked):
         rec("IF NO RECORDS FOUND", "no records found for preceding database loop")
         open_blocks.append(("IF NO RECORDS FOUND", line_no))

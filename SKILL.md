@@ -71,6 +71,7 @@ Copy `config/project.example.yml`, set the source paths, pin the `dialect` for
 each source set rather than relying on sniffing, then:
 
 ```bash
+export PYTHONPATH=scripts
 python -m mfdoc ingest   --config project.yml
 python -m mfdoc derive   --config project.yml
 python -m mfdoc coverage --config project.yml
@@ -100,6 +101,7 @@ Report these numbers to the user honestly, including when they are poor.
 For each unit of documentation:
 
 ```bash
+export PYTHONPATH=scripts
 python -m mfdoc brief --config project.yml --module MMP0100 --out .mfdoc/briefs/MMP0100.md
 python -m mfdoc brief --config project.yml --entity MILL-ORDER
 python -m mfdoc brief --config project.yml --system
@@ -121,6 +123,7 @@ Suggested document set, in this order (each builds vocabulary the next needs):
 ### 5. Validate
 
 ```bash
+export PYTHONPATH=scripts
 python -m mfdoc validate --config project.yml --docs docs/functional
 ```
 

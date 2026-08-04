@@ -1,12 +1,16 @@
-# mfdoc project configuration
+# mfdoc project configuration — starter template
 #
-# Copy to the root of the codebase being documented, adjust paths, commit it.
-# The config is the record of how the index was built, so keeping it in version
-# control alongside the generated docs is what makes a documentation run
-# reproducible six months later when somebody disputes a business rule.
+# Copy this file to the root of the codebase being documented (as project.yml),
+# fill in the placeholders below, and commit it. The config is the record of
+# how the index was built, so keeping it in version control alongside the
+# generated docs is what makes a documentation run reproducible six months
+# later when somebody disputes a business rule.
+#
+# For a fully worked example pointed at this repo's own sample fixtures, see
+# the root `project.yml` and `examples/MMP0100-worked-example.md`.
 
-project: Mill Order Management
-system: MOM
+project: <PROJECT NAME>          # e.g. Order Management
+system: <SYSTEM CODE>            # short code used to group generated docs, e.g. OM
 index_db: .mfdoc/index.db
 docs_root: docs/functional
 
@@ -23,48 +27,25 @@ docs_root: docs/functional
 #   sequence_columns  'auto' (default), 'none', or '73:80' to force
 #
 sources:
-  - path: examples/fixtures/natural
+  - path: source/natural
     glob: ["*.nsp", "*.nsn", "*.nss", "*.nsc", "*.txt", "*.lst"]
     dialect: natural
-    library: MILLPROD
-    system: MOM
+    library: <NATURAL LIBRARY>
+    system: <SYSTEM CODE>
     sequence_columns: auto
 
-  - path: examples/fixtures/ddm
+  - path: source/ddm
     glob: ["*.ddm", "*.txt", "*.lst"]
     dialect: ddm
-    system: MOM
+    system: <SYSTEM CODE>
 
-  - path: examples/fixtures/fdt
+  - path: source/fdt
     glob: ["*.fdt", "*.rep", "*.txt", "*.lst"]
     dialect: adabas_fdt
-    system: MOM
+    system: <SYSTEM CODE>
 
-  - path: examples/fixtures/mantis
-    glob: ["*.mantis", "*.mts", "*.txt"]
-    dialect: mantis
-    library: STEELLIB
-    system: OE
-
-  - path: examples/fixtures/supra
-    glob: ["*.dir", "*.txt", "*.rep"]
-    dialect: supra_dir
-    system: OE
-
-  - path: examples/fixtures/ddl
-    glob: ["*.sql", "*.ddl"]
-    dialect: sql_ddl
-    system: MOM
-
-  - path: examples/fixtures/jcl
-    glob: ["*.jcl", "*.job", "*.txt"]
-    dialect: jcl
-    system: MOM
-
-  - path: examples/fixtures/csd
-    glob: ["*.csd", "*.txt"]
-    dialect: cics_csd
-    system: MOM
+  # Delete or add source sets for the dialects actually present in this
+  # codebase: mantis, supra_dir, sql_ddl, cobol_copybook, jcl, cics_csd.
 
 # -------------------------------------------------------------------- options
 options:
@@ -92,16 +73,10 @@ options:
     modules_per_doc: 1
     include_source_excerpts: true
     max_excerpt_lines: 12
-    # Terms the client uses, so generated prose matches the business vocabulary
+    # Terms the business uses, so generated prose matches their vocabulary
     # rather than inventing synonyms. Extend as SMEs correct drafts.
-    lexicon:
-      "MILL-ORDER": "mill order"
-      "HEAT-NO": "heat number"
-      "CAST-DATE": "cast date"
-      "GRADE-CODE": "steel grade"
-      "RLSD": "released to production"
-      "CONF": "confirmed"
-      "PART": "partially released"
+    lexicon: {}
+    #   "SOME-FIELD": "business term"
 
   # Redaction applied to source excerpts and literal values before they reach
   # any generated document. Useful when literals embed real customer data.

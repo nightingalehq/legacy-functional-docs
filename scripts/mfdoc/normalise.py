@@ -165,6 +165,12 @@ def infer_natural_object_type(lines: list[str], ext_hint: str | None) -> str | N
     if re.search(r"^\s*DEFINE\s+DATA\s+PARAMETER\b", body, re.I | re.M) or re.search(
         r"^\s*PARAMETER\s*$", body, re.I | re.M
     ):
+        # A PARAMETER data area only proves the object accepts external
+        # parameters. Those can arrive via CALLNAT (subprogram) or via a
+        # stacked batch INPUT for a program started directly from JCL, so
+        # trust a known extension over this content guess when one exists.
+        if ext_hint in NATURAL_EXTENSION_MAP:
+            return NATURAL_EXTENSION_MAP[ext_hint]
         return "subprogram"
     if ext_hint in NATURAL_EXTENSION_MAP:
         return NATURAL_EXTENSION_MAP[ext_hint]
@@ -226,7 +232,22 @@ def derive_member_name(path: Path) -> tuple[str, str | None]:
     return (name or path.stem).upper(), hint
 
 
+# Legacy mainframe sources are untrusted input (any customer's export, possibly
+# malformed or adversarial). Without a cap, a single huge file can pin a CPU
+# core and exhaust memory during ingest with no circuit breaker.
+MAX_SOURCE_BYTES = 50 * 1024 * 1024
+
+
+class SourceTooLargeError(ValueError):
+    pass
+
+
 def read_source(path: Path, forced_encoding: str | None = None) -> tuple[list[str], str, str]:
+    size = path.stat().st_size
+    if size > MAX_SOURCE_BYTES:
+        raise SourceTooLargeError(
+            f"{path} is {size} bytes, exceeding the {MAX_SOURCE_BYTES}-byte ingest limit"
+        )
     raw = path.read_bytes()
     enc = sniff_encoding(raw, forced_encoding)
     text = raw.decode(enc, errors="replace")

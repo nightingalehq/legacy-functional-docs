@@ -129,9 +129,11 @@ def extract(conn, member_id: int, lines, member_name: str = "?") -> dict:
 
         if current_ds and (m := RE_ELEMENT_ROW.match(raw)):
             t = TYPE_MAP.get(m.group("type").upper(), m.group("type").upper()[:1])
+            dec = m.group("dec")
+            has_dec = dec and int(dec) > 0
             upsert_field(conn, current_ds[0], m.group("name").upper(),
                          format=t,
-                         length=m.group("len") + (("." + m.group("dec")) if m.group("dec") else ""),
+                         length=m.group("len") + (("." + dec) if has_dec else ""),
                          occurrences=m.group("occ") or None, defined_line=line_no,
                          remark=(m.group("rest") or "").strip()[:120] or None)
             counts["elements"] += 1

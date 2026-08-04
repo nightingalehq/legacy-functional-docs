@@ -23,7 +23,7 @@ from . import graph, normalise
 from .db import add_gap, connect, insert, upsert_member
 from .dialects import adabas, environment, mantis, natural, supra
 
-VERSION = "0.1.0-draft"
+VERSION = "0.1.0"
 
 DIALECT_ROUTER = {
     "natural": lambda conn, mid, lines, name: natural.extract(conn, mid, lines, name),
@@ -82,7 +82,12 @@ def cmd_ingest(args) -> int:
             print(f"  ! no files matched {root} {globs}", file=sys.stderr)
 
         for path in sorted(set(files)):
-            lines, enc, sha = normalise.read_source(path, forced_enc)
+            try:
+                lines, enc, sha = normalise.read_source(path, forced_enc)
+            except normalise.SourceTooLargeError as exc:
+                add_gap(conn, "source_too_large", str(exc), severity="high")
+                print(f"  ! skipped {path}: {exc}", file=sys.stderr)
+                continue
             if seq_cfg == "auto":
                 seq_cols = normalise.detect_seq_columns(lines)
             elif seq_cfg in (None, False, "none"):
@@ -124,7 +129,7 @@ def cmd_ingest(args) -> int:
                     conn, ch.name, dialect,
                     object_type=otype or DIALECT_DEFAULT_TYPE.get(dialect),
                     library=ch.library, system=system, source_file_id=sf_id,
-                    first_line=ch.first_line, last_line=ch.first_line + len(ch.lines))
+                    first_line=ch.first_line, last_line=ch.first_line + len(ch.lines) - 1)
                 conn.execute("DELETE FROM source_line WHERE member_id=?", (mid,))
                 DIALECT_ROUTER[dialect](conn, mid, ch.lines, ch.name)
                 total_members += 1

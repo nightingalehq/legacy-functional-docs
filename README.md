@@ -26,6 +26,16 @@ rules require the claim to be dropped or marked `unresolved`. A validator then
 re-checks every citation against the index and fails the build on any that does not
 resolve.
 
+## Installing as a Claude Code skill
+
+Clone or copy this repository's contents into a `legacy-functional-docs/`
+directory under your Claude Code skills path (e.g. `~/.claude/skills/` for a
+personal install, or `.claude/skills/` at the root of a project for a
+project-scoped one). Claude Code discovers the skill from its `SKILL.md`
+front matter; no separate registration step is required. The Python pipeline
+under `scripts/mfdoc/` runs locally wherever Claude Code invokes shell
+commands — see Requirements below.
+
 ## Quick start
 
 ```bash
@@ -91,3 +101,7 @@ Stated up front rather than discovered later:
 - The Mantis and Supra packs need calibration against the target codebase. See
   `reference/mantis-supra.md`; below roughly 85% line recognition, calibrate before
   trusting anything built on the index.
+
+## License
+
+[MIT](LICENSE)

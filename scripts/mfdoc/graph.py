@@ -31,17 +31,30 @@ def reconcile_adabas_files(conn) -> int:
         "SELECT id, name, dbid, fnr FROM entity WHERE kind='adabas_file' AND name LIKE 'FILE-%'"
     ).fetchall()
     for p in placeholders:
-        target = conn.execute(
+        # Fetch every candidate rather than LIMIT 1: when the placeholder's
+        # DBID is unknown, FNR alone may match more than one named file
+        # across distinct databases. Merging on the first hit would fold two
+        # different files' facts together; only merge when the match is
+        # unambiguous, and record a gap otherwise.
+        candidates = conn.execute(
             """
             SELECT id FROM entity
              WHERE kind='adabas_file' AND id<>? AND name NOT LIKE 'FILE-%'
                AND IFNULL(fnr,'')=IFNULL(?,'') AND (IFNULL(dbid,'')=IFNULL(?,'') OR dbid IS NULL OR ? IS NULL)
-             LIMIT 1
             """,
             (p["id"], p["fnr"], p["dbid"], p["dbid"]),
-        ).fetchone()
-        if not target:
+        ).fetchall()
+        if len(candidates) != 1:
+            if len(candidates) > 1:
+                add_gap(
+                    conn, "ambiguous_adabas_file",
+                    f"FILE-{p['fnr']} matches {len(candidates)} named Adabas files with "
+                    f"differing DBIDs; left unreconciled to avoid merging distinct databases. "
+                    f"Confirm the correct DBID for FNR {p['fnr']}.",
+                    severity="medium",
+                )
             continue
+        target = candidates[0]
         conn.execute("UPDATE entity_field SET entity_id=? WHERE entity_id=?", (target["id"], p["id"]))
         conn.execute("UPDATE entity_link SET from_entity=? WHERE from_entity=?", (target["id"], p["id"]))
         conn.execute("UPDATE entity_link SET to_entity=? WHERE to_entity=?", (target["id"], p["id"]))

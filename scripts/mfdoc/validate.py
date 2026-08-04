@@ -131,14 +131,22 @@ def validate_doc(conn, path: Path) -> dict:
         member = m.group("member").upper()
         lf = int(m.group("from")) if m.group("from") else None
         lt = int(m.group("to")) if m.group("to") else lf
-        row = conn.execute(
-            "SELECT id, name, (SELECT MAX(line_no) FROM source_line WHERE member_id=member.id) AS maxline "
-            "FROM member WHERE UPPER(name)=? LIMIT 1", (member,)
-        ).fetchone()
+        rows = conn.execute(
+            "SELECT id, name, library, (SELECT MAX(line_no) FROM source_line WHERE member_id=member.id) AS maxline "
+            "FROM member WHERE UPPER(name)=?", (member,)
+        ).fetchall()
         valid, note = 1, None
-        if not row:
+        if not rows:
             valid, note = 0, f"member '{member}' is not in the index"
+        elif len(rows) > 1:
+            # The citation format [[MEMBER:LINE]] carries no library, but
+            # `member` allows the same name in different libraries. Picking
+            # one arbitrarily can validate a citation against the wrong
+            # member's line range, so flag it instead of guessing.
+            libs = ", ".join(sorted({r["library"] or "?" for r in rows}))
+            valid, note = 0, f"member name '{member}' is ambiguous across libraries ({libs}); citation needs a library qualifier"
         elif lf is not None:
+            row = rows[0]
             maxline = row["maxline"] or 0
             if lf < 1 or lf > maxline or (lt and lt > maxline):
                 valid, note = 0, f"line {lf}{'-' + str(lt) if lt and lt != lf else ''} outside 1..{maxline}"
