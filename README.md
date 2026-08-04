@@ -26,6 +26,23 @@ rules require the claim to be dropped or marked `unresolved`. A validator then
 re-checks every citation against the index and fails the build on any that does not
 resolve.
 
+## Documentation
+
+- **New to Claude Code, Python, or mainframe 4GLs?** Start with
+  [`docs/guides/getting-started.md`](docs/guides/getting-started.md) — a
+  no-assumed-background walkthrough of what this is and how to run it.
+- **Architecture overview** — [`docs/guides/architecture.md`](docs/guides/architecture.md)
+  covers the pipeline stage by stage, the data model, and where a model can
+  and can't reach.
+- **Security, data handling and compliance due diligence** —
+  [`docs/guides/security-and-compliance.md`](docs/guides/security-and-compliance.md)
+  covers what leaves the machine, redaction, credentials found in source,
+  the fact-store's status as a security artefact, and an engagement
+  checklist.
+- **Extending the tool** — [`docs/guides/extending.md`](docs/guides/extending.md)
+  is the developer guide for adding a dialect, a document type, or a CLI
+  command.
+
 ## Installing as a Claude Code skill
 
 Clone or copy this repository's contents into a `legacy-functional-docs/`
@@ -48,6 +65,11 @@ cp config/project.example.yml project.yml
 mfdoc ingest   --config project.yml
 mfdoc derive   --config project.yml
 mfdoc coverage --config project.yml     # read this before writing anything
+mfdoc gate     --config project.yml     # pass/fail check against options.quality_gates
+
+# Mantis and Supra usually need this before the gate passes -- see
+# reference/mantis-supra.md:
+mfdoc calibrate --config project.yml --dialect mantis
 
 mfdoc brief --config project.yml --system
 mfdoc brief --config project.yml --module MMP0100
@@ -86,6 +108,8 @@ src/mfdoc/            the extraction pipeline
 tests/                pytest suite (fixtures as golden tests)
 examples/             worked example + multi-dialect fixtures
 evals/                eval prompts (dev-time only; not installed)
+docs/guides/          getting-started, architecture, security/compliance, extending
+docs/plans/           working backlog and design-decision record
 ```
 
 ## Coverage gates
