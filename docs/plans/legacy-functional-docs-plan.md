@@ -12,6 +12,26 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-08-04):**
+- Done: 1.1 (pytest suite, 12 defect classes + coverage snapshot), 1.2
+  (pyproject.toml + src layout + console script), 1.3 (CI), 1.4 (above), 2.1
+  (`mfdoc gate`), 2.2 (`mfdoc calibrate`), 2.3 (redaction at brief time), 3
+  (`mfdoc batch`, option C), 4.1 (literal-bearing arithmetic as rule
+  candidates). Critical path (1.1 → 1.2 → 1.3 → 2.3) plus both decision
+  points are clear — repo is at the plan's bar for "safe to point at a
+  client codebase," modulo the items below.
+- Deferred, not started: 4.2 (transitive copycode in briefs), 4.3
+  (loop-label resolution), 4.4 (Natural map parser), 4.5 (continuation
+  folding rework), 4.6 (reporting-mode block inference), 4.7 (Adabas
+  coupling), 5.1 (run the eval prompts and record results), 5.2
+  (citation-accuracy sampling), 6 (indexes, incremental ingest, encoding
+  fixtures, synthetic scale fixture). None of these block using the tool on
+  a real engagement; they're correctness/coverage/scale improvements queued
+  by the priority order in Phase 4's table and the critical-path note above.
+- GitHub issue creation from the "Suggested issue breakdown" table hasn't
+  run — there's no GitHub remote for this repo yet. Do that once it's
+  pushed to the nightingalehq org.
+
 ## Purpose of this document
 
 Turn a working prototype into a maintainable asset. Phases below are sized to become
