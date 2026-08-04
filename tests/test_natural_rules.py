@@ -42,3 +42,37 @@ def test_write_audit_is_internal_subroutine_not_missing_module(indexed_db):
         "SELECT COUNT(*) AS n FROM gap WHERE gap_kind='unresolved_call' AND detail LIKE '%WRITE-AUDIT%'"
     ).fetchone()
     assert gap["n"] == 0
+
+
+def test_literal_bearing_moves_are_captured_as_rule_candidates(indexed_db):
+    """`MOVE 'RLSD' TO ORDER-VIEW.ORDER-STATUS` assigns a business status
+    code and must surface as a rule candidate -- previously MOVE/ADD/etc.
+    were matched and silently discarded regardless of content."""
+    conn = indexed_db
+    rows = {
+        r["line_no"]: r["literals"]
+        for r in conn.execute(
+            """
+            SELECT rc.line_no, rc.literals FROM rule_candidate rc
+            JOIN member m ON m.id = rc.member_id
+            WHERE m.name='MMP0100' AND rc.construct='MOVE'
+            """
+        ).fetchall()
+    }
+    assert rows.get(54) == "RLSD"
+    assert rows.get(56) == "PART"
+    assert rows.get(35) == "10"
+
+
+def test_pure_accumulation_without_a_literal_is_not_captured(indexed_db):
+    """`ADD STOCK-VIEW.AVAIL-WEIGHT TO #AVAIL-TOTAL` has no literal operand --
+    it's an accumulator, not a business threshold, and must not be captured
+    as a rule candidate (that would bury the moves that do matter)."""
+    conn = indexed_db
+    row = conn.execute(
+        """
+        SELECT 1 FROM rule_candidate rc JOIN member m ON m.id = rc.member_id
+        WHERE m.name='MMP0100' AND rc.construct='ADD' AND rc.condition LIKE '%AVAIL-TOTAL%'
+        """
+    ).fetchone()
+    assert row is None

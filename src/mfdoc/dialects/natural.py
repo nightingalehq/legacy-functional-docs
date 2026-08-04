@@ -139,6 +139,11 @@ RE_USING_MAP = re.compile(r"USING\s+MAP\s+(?P<map>'[^']+'|[A-Z0-9#@$&\-_.]+)", r
 RE_COMPUTE = re.compile(r"^\s*(?:COMPUTE|ADD|SUBTRACT|MULTIPLY|DIVIDE|MOVE|EXAMINE|COMPRESS|SEPARATE|ASSIGN)\b", re.I)
 RE_MSG_NUM = re.compile(r"\bMESSAGE\s+NUMBER\s+(?P<num>[0-9#A-Z\-]+)", re.I)
 
+# The classic loop-counter idiom: ADD 1 TO x / SUBTRACT 1 FROM x. Excluded
+# from arithmetic rule capture even though "1" is technically a literal,
+# because it is almost never a business decision.
+RE_LOOP_COUNTER = re.compile(r"^\s*(?:ADD\s+1\s+TO|SUBTRACT\s+1\s+FROM)\b", re.I)
+
 # Reporting-mode tells
 RE_REPORTING = re.compile(r"^\s*(LOOP\b|DO\b\s*$|DOEND\b)", re.I)
 
@@ -337,6 +342,10 @@ def extract(conn, member_id: int, lines: list[tuple[int, str | None, str]], memb
         if not matched:
             matched, depth, open_blocks = _match_rules(
                 conn, member_id, line_no, stmt, masked, depth, open_blocks)
+
+        # ------------------------------------------------ arithmetic candidates
+        if not matched:
+            matched = _match_arithmetic(conn, member_id, line_no, stmt, masked, depth)
 
         if not matched:
             if RE_COMPUTE.match(masked) or RE_END_ANY.match(masked):
@@ -569,6 +578,29 @@ def _match_interaction(conn, member_id, line_no, stmt, masked) -> bool:
                fields=(m.group("rest") or "").strip()[:300] or None)
         return True
     return False
+
+
+def _match_arithmetic(conn, member_id, line_no, stmt, masked, depth) -> bool:
+    """Capture COMPUTE/MOVE/ADD/SUBTRACT/MULTIPLY/DIVIDE/EXAMINE as a rule
+    candidate when a literal is involved -- assigning a fixed value to a
+    field (a status code, a threshold, a return code) is a business
+    decision. Pure variable-to-variable movement or accumulation (no
+    literal operand) and the ADD/SUBTRACT-1 loop-counter idiom are left
+    alone; capturing every arithmetic statement would bury the ones that
+    actually carry a decision under running totals and index increments.
+    """
+    if not RE_COMPUTE.match(masked) or RE_LOOP_COUNTER.match(masked):
+        return False
+    _, str_literals = mask_literals(stmt)
+    if not str_literals and not NUMLIT.search(masked):
+        return False
+    verb = masked.split()[0].upper()
+    fields, lits = _condition_facts(stmt)
+    insert(conn, "rule_candidate", member_id=member_id, line_no=line_no,
+           construct=verb, condition=stmt.strip()[:500] or None,
+           depth=depth, fields_used=fields[:500] or None, literals=lits[:500] or None,
+           raw=stmt.strip()[:500])
+    return True
 
 
 def _match_rules(conn, member_id, line_no, stmt, masked, depth, open_blocks):

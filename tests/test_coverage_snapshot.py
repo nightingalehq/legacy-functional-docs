@@ -22,7 +22,7 @@ EXPECTED_COVERAGE = {
     "entity_definition_rate": 0.6364,
     "entity_fields": 40,
     "data_accesses": 9,
-    "rule_candidates": 21,
+    "rule_candidates": 27,
     "invocation_edges": 12,
     "invocations_resolved": 2,
     "call_resolution_rate": 0.1667,
