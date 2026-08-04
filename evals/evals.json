@@ -1,0 +1,51 @@
+{
+  "skill_name": "legacy-functional-docs",
+  "evals": [
+    {
+      "id": 1,
+      "name": "natural-module-doc-from-scratch",
+      "prompt": "I've got a Natural/Adabas system dumped into examples/fixtures — programs, DDMs, an FDT report, JCL and a CICS CSD extract. Nobody left who knows it. Build me functional documentation for MMP0100 that I can put in front of a business analyst, and be straight with me about what you can't work out.",
+      "expected_output": "Runs the pipeline, reports coverage honestly, produces docs/functional/modules/MMP0100.md with valid front matter and [[MEMBER:LINE]] citations on every rule, and a gap register listing MMN0250/MMN0900/MMLDA01 as missing source plus the undefined STOCK-BALANCE and ORDER-AUDIT definitions. Validator passes.",
+      "files": ["examples/fixtures/"],
+      "assertions": [
+        "Runs mfdoc ingest, derive and coverage before writing any narrative",
+        "Reports the call_resolution_rate honestly rather than omitting it",
+        "Every business rule in the output carries a [[MEMBER:LINE]] citation",
+        "The literal 'CONF' appears as the confirmed-status condition, not a masked placeholder",
+        "The 2.5% tolerance is described as inferred, not asserted as fact",
+        "mfdoc validate exits 0 against the generated document",
+        "Missing modules MMN0250 and MMN0900 are listed as gaps, not described speculatively",
+        "WRITE-AUDIT is identified as an internal subroutine rather than a missing module"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "mantis-supra-calibration-first",
+      "prompt": "Here's a Mantis/Supra order enquiry system exported from the client's library. Can you document the data model and the enquiry process? The export came out of a utility so I'm not certain it's complete.",
+      "expected_output": "Ingests the Mantis and Supra sources, checks the Mantis recognition rate and states it, documents ORDERMST/ORDLINE and the ORDLNK linkpath, flags that screen definitions (ORDSCR1/ORDSCR2) were not supplied, and raises the EXTERNAL argument-order assumption for confirmation.",
+      "files": ["examples/fixtures/mantis/", "examples/fixtures/supra/"],
+      "assertions": [
+        "States the Mantis line recognition rate and whether it clears the gate",
+        "Documents the ORDLNK linkpath as the master-to-related relationship",
+        "Notes that ORDSCR1 and ORDSCR2 screen definitions were not supplied",
+        "Does not invent business meaning for Supra element names",
+        "Flags the EXTERNAL library-versus-program argument order as needing confirmation",
+        "ORDLINE appears once in the data model, not duplicated across Supra kinds"
+      ]
+    },
+    {
+      "id": 3,
+      "name": "batch-process-flow-with-natural-stack",
+      "prompt": "Document what the MMB0100 nightly job actually does, step by step, including which programs really run.",
+      "expected_output": "Reads the JCL, identifies that STEP010 runs NATBATCH but the real program is MMP0100 stacked on CMSYNIN after LOGON MILLPROD, records the COND=(4,LT) on STEP020 as conditional processing, traces the dataset created by STEP030, and does not invent call edges from the IDCAMS SYSIN control cards.",
+      "files": ["examples/fixtures/jcl/", "examples/fixtures/natural/"],
+      "assertions": [
+        "Identifies MMP0100 as the program actually executed in STEP010 via the CMSYNIN stack",
+        "Records COND=(4,LT) on STEP020 as conditional business processing",
+        "Does not list REPRO or OUTDATASET as programs",
+        "Excludes STEPLIB, DDCARD and CMPRINT from the business data model",
+        "Notes that scheduler-level job dependencies were not supplied"
+      ]
+    }
+  ]
+}

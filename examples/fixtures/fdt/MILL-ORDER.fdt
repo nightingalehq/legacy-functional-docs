@@ -1,0 +1,20 @@
+ADAREP  UTILITY REPORT                        DATABASE 012
+FILE NUMBER: 045   FILE NAME: MILL-ORDER
+
+Field Definition Table:
+ Level I Name I Length I Format I Options
+-------I------I--------I--------I-------------------
+   1   I  AA  I   10   I   A    I  DE,UQ
+   1   I  AB  I    8   I   A    I  DE,NU
+   1   I  AC  I        I        I
+   2   I  AD  I    6   I   A    I  DE
+   2   I  AE  I    4   I   A    I  NU
+   2   I  AF  I    5   I   P    I
+   1   I  AG  I    6   I   A    I  DE
+   1   I  AH  I   12   I   A    I  MU,NU
+   1   I  AI  I        I        I  PE
+   2   I  AJ  I    6   I   A    I
+   2   I  AK  I    4   I   P    I  NU
+
+Super Descriptor Definitions:
+  S1 = AA(1-10),AB(1-8)

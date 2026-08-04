@@ -1,0 +1,4 @@
+# Rebuildable from source at any time; not for version control.
+.mfdoc/
+__pycache__/
+*.pyc

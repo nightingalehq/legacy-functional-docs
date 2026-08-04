@@ -1,0 +1,110 @@
+# mfdoc project configuration
+#
+# Copy to the root of the codebase being documented, adjust paths, commit it.
+# The config is the record of how the index was built, so keeping it in version
+# control alongside the generated docs is what makes a documentation run
+# reproducible six months later when somebody disputes a business rule.
+
+project: Mill Order Management
+system: MOM
+index_db: .mfdoc/index.db
+docs_root: docs/functional
+
+# ---------------------------------------------------------------- source sets
+#
+# Order matters only for readability. Each entry becomes one or more members.
+#
+#   path              file or directory, relative to this config
+#   glob              patterns within a directory (default **/*)
+#   dialect           pin it rather than relying on sniffing, once you know it
+#   library           Natural library / Mantis library / PDS name
+#   system            logical subsystem, used to group generated docs
+#   encoding          force a code page, e.g. cp037, cp500; omit to auto-detect
+#   sequence_columns  'auto' (default), 'none', or '73:80' to force
+#
+sources:
+  - path: examples/fixtures/natural
+    glob: ["*.nsp", "*.nsn", "*.nss", "*.nsc", "*.txt", "*.lst"]
+    dialect: natural
+    library: MILLPROD
+    system: MOM
+    sequence_columns: auto
+
+  - path: examples/fixtures/ddm
+    glob: ["*.ddm", "*.txt", "*.lst"]
+    dialect: ddm
+    system: MOM
+
+  - path: examples/fixtures/fdt
+    glob: ["*.fdt", "*.rep", "*.txt", "*.lst"]
+    dialect: adabas_fdt
+    system: MOM
+
+  - path: examples/fixtures/mantis
+    glob: ["*.mantis", "*.mts", "*.txt"]
+    dialect: mantis
+    library: STEELLIB
+    system: OE
+
+  - path: examples/fixtures/supra
+    glob: ["*.dir", "*.txt", "*.rep"]
+    dialect: supra_dir
+    system: OE
+
+  - path: examples/fixtures/ddl
+    glob: ["*.sql", "*.ddl"]
+    dialect: sql_ddl
+    system: MOM
+
+  - path: examples/fixtures/jcl
+    glob: ["*.jcl", "*.job", "*.txt"]
+    dialect: jcl
+    system: MOM
+
+  - path: examples/fixtures/csd
+    glob: ["*.csd", "*.txt"]
+    dialect: cics_csd
+    system: MOM
+
+# -------------------------------------------------------------------- options
+options:
+  # Member splitters for concatenated unload files, keyed by dialect. These
+  # override the shipped defaults entirely for that dialect, so include the
+  # defaults you still want. Each pattern needs a named group `name`, and may
+  # supply `type`.
+  splitters: {}
+  #   natural:
+  #     - '^\*+\s*>{2,}\s*(?P<type>\w+)?\s*(?P<name>[A-Z0-9#\-_&$]{1,32})\s*<{2,}'
+
+  # Thresholds that decide whether a run is fit to build narrative on. These are
+  # starting points; tighten them once you have a baseline for the codebase.
+  quality_gates:
+    min_line_recognition_rate: 0.85
+    min_call_resolution_rate: 0.70
+    min_entity_definition_rate: 0.80
+    max_high_severity_gaps: 50
+
+  # Narrative pass controls
+  narrative:
+    audience: "business analyst inheriting the system, no mainframe background"
+    # Modules per document. 1 keeps citations tight; grouping is for tiny
+    # utility modules only.
+    modules_per_doc: 1
+    include_source_excerpts: true
+    max_excerpt_lines: 12
+    # Terms the client uses, so generated prose matches the business vocabulary
+    # rather than inventing synonyms. Extend as SMEs correct drafts.
+    lexicon:
+      "MILL-ORDER": "mill order"
+      "HEAT-NO": "heat number"
+      "CAST-DATE": "cast date"
+      "GRADE-CODE": "steel grade"
+      "RLSD": "released to production"
+      "CONF": "confirmed"
+      "PART": "partially released"
+
+  # Redaction applied to source excerpts and literal values before they reach
+  # any generated document. Useful when literals embed real customer data.
+  redact:
+    enabled: false
+    patterns: []

@@ -1,0 +1,16 @@
+DDM NAME: MILL-ORDER                      DEFAULT SEQUENCE: AA
+DB: 012  FILE: 045  - MILL-ORDER
+T L DB Name                             F Leng  S D Remark
+- - -- -------------------------------- - ---- -- - --------------------
+  1 AA ORDER-NO                         A   10    D primary order key
+  1 AB CUSTOMER-NO                      A    8  N D
+G 1 AC ORDER-DETAIL
+  2 AD GRADE-CODE                       A    6    D
+  2 AE ORDER-STATUS                     A    4  N
+  2 AF ORDER-WEIGHT                     P    9.3
+  1 AG DUE-DATE                         D    6    D
+M 1 AH ROUTE-STEP                       A   12  N
+P 1 AI DELIVERY
+  2 AJ DEL-DATE                         D    6
+  2 AK DEL-QTY                          P    7.3
+S ORDER-CUST-KEY = AA(1-10),AB(1-8)

@@ -1,0 +1,353 @@
+"""Stage 3 input — fact briefs.
+
+The narrative pass never reads raw source directly for its assertions. It reads a
+brief generated from the fact store, in which every line already carries a
+citation. This is the mechanism that makes "no uncited claims" enforceable rather
+than aspirational: if a fact is not in the brief, there is nothing to cite, and
+the writing instructions require the claim to be dropped or marked `unresolved`.
+
+Source excerpts are included for the *rule candidates only*, because paraphrasing
+a business rule without seeing its exact condition is where invention creeps in.
+"""
+
+from __future__ import annotations
+
+import json
+
+
+def _cite(name: str, line: int | None, end: int | None = None) -> str:
+    if line is None:
+        return f"[[{name}]]"
+    if end and end != line:
+        return f"[[{name}:{line}-{end}]]"
+    return f"[[{name}:{line}]]"
+
+
+def module_brief(conn, member_name: str, excerpt_rules: bool = True) -> str:
+    m = conn.execute(
+        "SELECT * FROM member WHERE UPPER(name)=UPPER(?) LIMIT 1", (member_name,)
+    ).fetchone()
+    if not m:
+        return f"# {member_name}\n\nNo such member in the index.\n"
+    mid, name = m["id"], m["name"]
+    out: list[str] = []
+    add = out.append
+
+    add(f"# Fact brief: {name}")
+    add("")
+    add(f"- dialect: {m['dialect']}")
+    add(f"- object_type: {m['object_type'] or 'unknown'}")
+    add(f"- library: {m['library'] or 'unknown'}")
+    if m["dialect"] == "natural":
+        add(f"- natural_mode: {m['mode'] or 'unknown'}")
+    add(f"- line_count: {conn.execute('SELECT COUNT(*) FROM source_line WHERE member_id=?', (mid,)).fetchone()[0]}")
+    add("")
+
+    # --- header comments often carry the only surviving prose description
+    # Only the leading contiguous comment block, and only lines with real content.
+    # Rule-of-thumb separators (`*`, `****`) and lone `*` spacers add noise that
+    # crowds out the two or three lines that actually say what the module is for.
+    all_lines = conn.execute(
+        "SELECT line_no, text, is_comment FROM source_line WHERE member_id=? ORDER BY line_no",
+        (mid,),
+    ).fetchall()
+    hdr = []
+    for r in all_lines:
+        if not r["is_comment"]:
+            if hdr:
+                break
+            if r["text"].strip():
+                break
+            continue
+        body_text = r["text"].strip().lstrip("*/%! ").rstrip("*/ ").strip()
+        if len(body_text) > 3:
+            hdr.append({"line_no": r["line_no"], "text": body_text})
+    if hdr:
+        add("## Header comments (unverified author prose — treat as claims, not facts)")
+        for r in hdr:
+            add(f"- {_cite(name, r['line_no'])} `{r['text'][:160]}`")
+        add("")
+
+    # --- interfaces
+    params = conn.execute(
+        "SELECT * FROM variable WHERE member_id=? AND scope IN ('parameter','entry') ORDER BY line_no",
+        (mid,),
+    ).fetchall()
+    if params:
+        add("## Interface (parameters)")
+        for r in params:
+            spec = f" ({r['format'] or ''}{r['length'] or ''})" if (r["format"] or r["length"]) else ""
+            add(f"- {_cite(name, r['line_no'])} level {r['level'] or '-'} `{r['name']}`{spec}")
+        add("")
+
+    views = conn.execute(
+        "SELECT * FROM variable WHERE member_id=? AND scope='view' ORDER BY line_no", (mid,)
+    ).fetchall()
+    if views:
+        add("## Data views declared")
+        for r in views:
+            add(f"- {_cite(name, r['line_no'])} view `{r['name']}` over `{r['view_of']}`")
+        add("")
+
+    # --- data access
+    acc = conn.execute(
+        "SELECT * FROM data_access WHERE member_id=? ORDER BY line_no", (mid,)
+    ).fetchall()
+    if acc:
+        add("## Data access (verified from source statements)")
+        for r in acc:
+            key = f" key/where: `{r['key_expr']}`" if r["key_expr"] else ""
+            desc = f" descriptor: `{r['descriptor']}`" if r["descriptor"] else ""
+            flag = "" if r["confidence"] == "verified" else f" **[{r['confidence']}]**"
+            add(f"- {_cite(name, r['line_no'])} `{r['verb']}` ({r['crud']}) on "
+                f"`{r['entity_name'] or 'UNKNOWN'}`{desc}{key}{flag}")
+        add("")
+
+    # --- transaction markers
+    tx = conn.execute(
+        "SELECT * FROM transaction_marker WHERE member_id=? ORDER BY line_no", (mid,)
+    ).fetchall()
+    if tx:
+        add("## Transaction boundaries")
+        for r in tx:
+            add(f"- {_cite(name, r['line_no'])} `{r['marker']}`"
+                + (f" restart data: `{r['et_data']}`" if r["et_data"] else ""))
+        add("")
+
+    # --- calls
+    calls = conn.execute(
+        "SELECT * FROM call_edge WHERE caller_id=? ORDER BY line_no", (mid,)
+    ).fetchall()
+    if calls:
+        add("## Outbound calls")
+        for r in calls:
+            if r["dynamic"]:
+                tag = " **[dynamic target — callee set unknown]**"
+            elif r["call_kind"] == "PERFORM_INTERNAL":
+                tag = " *(internal subroutine in this member)*"
+            elif r["resolved"]:
+                tag = ""
+            else:
+                tag = " **[source not supplied]**"
+            add(f"- {_cite(name, r['line_no'])} `{r['call_kind']}` -> `{r['callee_name']}`{tag}"
+                + (f" args: `{r['args']}`" if r["args"] else ""))
+        add("")
+
+    inbound = conn.execute(
+        """
+        SELECT c.name AS caller, ce.call_kind, ce.line_no
+          FROM call_edge ce JOIN member c ON c.id = ce.caller_id
+         WHERE UPPER(ce.callee_name)=UPPER(?) ORDER BY c.name, ce.line_no
+        """,
+        (name,),
+    ).fetchall()
+    if inbound:
+        add("## Inbound callers")
+        for r in inbound:
+            add(f"- {_cite(r['caller'], r['line_no'])} `{r['call_kind']}` from `{r['caller']}`")
+        add("")
+
+    # --- interactions
+    inter = conn.execute(
+        "SELECT * FROM interaction WHERE member_id=? ORDER BY line_no", (mid,)
+    ).fetchall()
+    if inter:
+        add("## User interaction points")
+        for r in inter:
+            add(f"- {_cite(name, r['line_no'])} `{r['kind']}`"
+                + (f" target `{r['target']}`" if r["target"] else "")
+                + (f" `{(r['fields'] or '')[:90]}`" if r["fields"] else ""))
+        add("")
+
+    msgs = conn.execute(
+        "SELECT * FROM message_ref WHERE member_id=? ORDER BY line_no", (mid,)
+    ).fetchall()
+    if msgs:
+        add("## Messages and error handling")
+        for r in msgs:
+            add(f"- {_cite(name, r['line_no'])} `{r['kind']}`"
+                + (f" number `{r['number']}`" if r["number"] else "")
+                + (f" text: \"{(r['text'] or '')[:120]}\"" if r["text"] else ""))
+        add("")
+
+    # --- rule candidates, with exact conditions
+    rules = conn.execute(
+        "SELECT * FROM rule_candidate WHERE member_id=? ORDER BY line_no", (mid,)
+    ).fetchall()
+    if rules:
+        add("## Candidate business rules (exact conditions — paraphrase, never invent)")
+        for r in rules:
+            bits = [f"{_cite(name, r['line_no'])} depth {r['depth']} `{r['construct']}`"]
+            if r["condition"]:
+                bits.append(f"condition: `{r['condition']}`")
+            if r["literals"]:
+                bits.append(f"literals: `{r['literals']}`")
+            add("- " + " — ".join(bits))
+        add("")
+
+    gaps = conn.execute(
+        "SELECT * FROM gap WHERE member_id=? ORDER BY severity DESC, line_no", (mid,)
+    ).fetchall()
+    if gaps:
+        add("## Known gaps for this module")
+        for r in gaps:
+            loc = _cite(name, r["line_no"]) if r["line_no"] else _cite(name, None)
+            add(f"- [{r['severity']}] {loc} {r['gap_kind']}: {r['detail']}")
+        add("")
+
+    return "\n".join(out) + "\n"
+
+
+def entity_brief(conn, entity_name: str) -> str:
+    e = conn.execute(
+        "SELECT * FROM entity WHERE UPPER(name)=UPPER(?) LIMIT 1", (entity_name,)
+    ).fetchone()
+    if not e:
+        return f"# {entity_name}\n\nNot in index.\n"
+    out = [f"# Fact brief: data store {e['name']}", ""]
+    out.append(f"- kind: {e['kind']}")
+    out.append(f"- physical: {e['physical_ref'] or 'unknown'}")
+    definer = None
+    if e["defined_in"]:
+        definer = conn.execute("SELECT name FROM member WHERE id=?", (e["defined_in"],)).fetchone()["name"]
+        out.append(f"- definition source: {_cite(definer, e['defined_line'])}")
+    else:
+        out.append("- definition source: **none supplied — field semantics unverifiable**")
+    out.append("")
+
+    fields = conn.execute(
+        "SELECT * FROM entity_field WHERE entity_id=? ORDER BY IFNULL(defined_line,0), id", (e["id"],)
+    ).fetchall()
+    if fields:
+        out.append("## Fields")
+        out.append("")
+        out.append("| level | name | short | format | length | occurs | descriptor | options | citation |")
+        out.append("|---|---|---|---|---|---|---|---|---|")
+        for f in fields:
+            cite = _cite(definer, f["defined_line"]) if definer else ""
+            out.append(
+                f"| {f['level'] or ''} | `{f['name']}` | {f['short_name'] or ''} | "
+                f"{f['format'] or ''} | {f['length'] or ''} | {f['occurrences'] or ''} | "
+                f"{f['descriptor_kind'] or ''} | {f['options'] or ''} | {cite} |"
+            )
+        out.append("")
+
+    links = conn.execute(
+        """
+        SELECT el.*, a.name AS from_name, b.name AS to_name, m.name AS via
+          FROM entity_link el
+          JOIN entity a ON a.id = el.from_entity
+          JOIN entity b ON b.id = el.to_entity
+          LEFT JOIN member m ON m.id = el.via_member
+         WHERE el.from_entity=? OR el.to_entity=?
+        """,
+        (e["id"], e["id"]),
+    ).fetchall()
+    if links:
+        out.append("## Relationships")
+        for l in links:
+            cite = _cite(l["via"], l["via_line"]) if l["via"] else ""
+            out.append(f"- {cite} `{l['from_name']}` --{l['link_kind']}"
+                       f"{'(' + l['link_name'] + ')' if l['link_name'] else ''}--> `{l['to_name']}`")
+        out.append("")
+
+    users = conn.execute(
+        """
+        SELECT m.name AS module, da.crud, da.verb, da.line_no, da.key_expr
+          FROM data_access da JOIN member m ON m.id = da.member_id
+         WHERE UPPER(da.entity_name)=UPPER(?) ORDER BY m.name, da.line_no
+        """,
+        (e["name"],),
+    ).fetchall()
+    if users:
+        out.append("## Accessed by")
+        for u in users:
+            out.append(f"- {_cite(u['module'], u['line_no'])} `{u['module']}` `{u['verb']}` ({u['crud']})"
+                       + (f" via `{u['key_expr'][:80]}`" if u["key_expr"] else ""))
+        out.append("")
+    else:
+        out.append("## Accessed by\n\n- No application access found in the ingested source. "
+                   "Either the consuming code was not supplied or the store is obsolete.\n")
+    return "\n".join(out) + "\n"
+
+
+def system_brief(conn) -> str:
+    out = ["# Fact brief: system overview", ""]
+    cov = {r["name"]: r["value"] for r in conn.execute(
+        "SELECT name, value FROM metric WHERE scope='global'").fetchall()}
+    out.append("## Index coverage")
+    for k, v in sorted(cov.items()):
+        out.append(f"- {k}: {v}")
+    out.append("")
+
+    out.append("## Members by dialect and type")
+    out.append("")
+    out.append("| dialect | object_type | count |")
+    out.append("|---|---|---|")
+    for r in conn.execute(
+        "SELECT dialect, IFNULL(object_type,'unknown') t, COUNT(*) n FROM member GROUP BY dialect, t ORDER BY dialect, t"
+    ).fetchall():
+        out.append(f"| {r['dialect']} | {r['t']} | {r['n']} |")
+    out.append("")
+
+    out.append("## Entry points (JCL steps and CICS transactions)")
+    for r in conn.execute(
+        """
+        SELECT m.name AS src, js.step_name, js.program, js.line_no
+          FROM job_step js JOIN member m ON m.id = js.member_id
+         WHERE js.program IS NOT NULL ORDER BY m.name, js.line_no
+        """
+    ).fetchall():
+        out.append(f"- {_cite(r['src'], r['line_no'])} job `{r['src']}` step `{r['step_name']}` "
+                   f"runs `{r['program']}`")
+    for r in conn.execute(
+        """
+        SELECT m.name AS src, cr.resource_name, cr.attributes, cr.line_no
+          FROM cics_resource cr JOIN member m ON m.id = cr.member_id
+         WHERE cr.resource_type='TRANSACTION' ORDER BY cr.resource_name
+        """
+    ).fetchall():
+        out.append(f"- {_cite(r['src'], r['line_no'])} CICS transaction `{r['resource_name']}` "
+                   f"({(r['attributes'] or '')[:100]})")
+    out.append("")
+
+    out.append("## CRUD matrix (module x data store)")
+    out.append("")
+    out.append("| module | data store | operations | verbs | first line |")
+    out.append("|---|---|---|---|---|")
+    for r in conn.execute(
+        """
+        SELECT m.name AS module, da.entity_name AS entity,
+               GROUP_CONCAT(DISTINCT da.crud) crud, GROUP_CONCAT(DISTINCT da.verb) verbs,
+               MIN(da.line_no) ln
+          FROM data_access da JOIN member m ON m.id = da.member_id
+         WHERE da.entity_name IS NOT NULL
+         GROUP BY m.name, da.entity_name ORDER BY m.name, da.entity_name
+        """
+    ).fetchall():
+        out.append(f"| `{r['module']}` | `{r['entity']}` | {r['crud']} | {r['verbs']} | "
+                   f"{_cite(r['module'], r['ln'])} |")
+    out.append("")
+
+    out.append("## Highest-severity gaps")
+    for r in conn.execute(
+        """
+        SELECT g.gap_kind, g.detail, g.severity, IFNULL(m.name,'-') mem, g.line_no
+          FROM gap g LEFT JOIN member m ON m.id = g.member_id
+         WHERE g.severity='high' ORDER BY g.gap_kind LIMIT 200
+        """
+    ).fetchall():
+        loc = _cite(r["mem"], r["line_no"]) if r["mem"] != "-" else ""
+        out.append(f"- {r['gap_kind']} {loc} {r['detail']}")
+    out.append("")
+    return "\n".join(out) + "\n"
+
+
+def json_index(conn) -> str:
+    """Machine-readable dump for downstream tooling."""
+    payload = {}
+    for table in ("member", "entity", "entity_field", "entity_link", "data_access",
+                  "call_edge", "transaction_marker", "interaction", "rule_candidate",
+                  "message_ref", "job_step", "job_dd", "cics_resource", "gap", "metric"):
+        payload[table] = [dict(r) for r in conn.execute(f"SELECT * FROM {table}").fetchall()]
+    return json.dumps(payload, indent=2)
