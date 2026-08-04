@@ -4,6 +4,7 @@
     mfdoc derive   --config project.yml
     mfdoc coverage --config project.yml
     mfdoc gate     --config project.yml
+    mfdoc calibrate --config project.yml --dialect mantis
     mfdoc brief    --config project.yml [--module NAME | --entity NAME | --system]
     mfdoc validate --config project.yml --docs docs/functional
     mfdoc export   --config project.yml --json out/index.json
@@ -173,6 +174,65 @@ def cmd_brief(args) -> int:
     return 0
 
 
+# Where to go looking when a dialect's recognition rate is weak. Not a
+# promise that these are the only tables involved -- a starting point for
+# the two or three iterations calibration normally takes.
+DIALECT_CALIBRATION_HINTS = {
+    "natural": ("src/mfdoc/dialects/natural.py",
+                "the RE_* statement patterns, or CONTINUATION_TAIL if conditions look truncated"),
+    "mantis": ("src/mfdoc/dialects/mantis.py",
+               "DECL_TYPES, COMMENT_PREFIXES, or the call/screen verb patterns"),
+    "supra_dir": ("src/mfdoc/dialects/supra.py",
+                  "LABELS or SUPRA_DML -- or override dialects.supra.labels in project config"),
+    "adabas_fdt": ("src/mfdoc/dialects/adabas.py", "RE_FDT_PIPE / RE_FDT_WS field-row patterns"),
+    "ddm": ("src/mfdoc/dialects/adabas.py", "RE_DDM_FIELD / RE_DDM_SUPER field-row patterns"),
+    "jcl": ("src/mfdoc/dialects/environment.py", "RE_EXEC / RE_DD / INFRASTRUCTURE_DDS"),
+    "cics_csd": ("src/mfdoc/dialects/environment.py", "the CSD resource-definition patterns"),
+    "sql_ddl": ("src/mfdoc/dialects/environment.py", "the DDL statement patterns"),
+    "cobol_copybook": ("src/mfdoc/dialects/environment.py", "the copybook PIC-clause patterns"),
+}
+
+
+def cmd_calibrate(args) -> int:
+    """Rank unparsed_line gaps for one dialect by leading-keyword shape.
+
+    Promotes the shape-analysis snippet that used to live embedded in
+    reference/mantis-supra.md into a real command, so it cannot drift from
+    the tool and does not depend on someone finding a code block in a doc.
+    """
+    cfg = load_config(args.config)
+    conn = connect(Path(args.config).parent / cfg["index_db"])
+    rows = conn.execute(
+        """
+        SELECT g.raw FROM gap g JOIN member m ON m.id = g.member_id
+         WHERE g.gap_kind='unparsed_line' AND g.raw IS NOT NULL AND m.dialect=?
+        """,
+        (args.dialect,),
+    ).fetchall()
+    if not rows:
+        print(f"no unparsed_line gaps for dialect '{args.dialect}' -- either it recognises "
+              f"everything ingested, or nothing of this dialect was ingested")
+        return 0
+
+    shapes: dict[str, dict] = {}
+    for r in rows:
+        raw = (r["raw"] or "").strip()
+        if not raw:
+            continue
+        kw = raw.split()[0].upper()
+        entry = shapes.setdefault(kw, {"count": 0, "sample": raw})
+        entry["count"] += 1
+
+    hint_file, hint_constants = DIALECT_CALIBRATION_HINTS.get(
+        args.dialect, (f"src/mfdoc/dialects/{args.dialect}.py", "the dialect's keyword tables"))
+    print(f"unparsed-line shapes for dialect '{args.dialect}', ranked by frequency:")
+    print(f"add recognised keywords to {hint_file} -- likely {hint_constants}")
+    print()
+    for kw, entry in sorted(shapes.items(), key=lambda kv: -kv[1]["count"])[: args.top]:
+        print(f"{entry['count']:5}  {kw:<20} e.g. {entry['sample'][:100]!r}")
+    return 0
+
+
 def cmd_coverage(args) -> int:
     cfg = load_config(args.config)
     conn = connect(Path(args.config).parent / cfg["index_db"])
@@ -277,6 +337,12 @@ def main(argv=None) -> int:
         p = sub.add_parser(name)
         p.add_argument("--config", required=True)
         p.set_defaults(func=fn)
+
+    p = sub.add_parser("calibrate")
+    p.add_argument("--config", required=True)
+    p.add_argument("--dialect", required=True)
+    p.add_argument("--top", type=int, default=30)
+    p.set_defaults(func=cmd_calibrate)
 
     p = sub.add_parser("brief")
     p.add_argument("--config", required=True)

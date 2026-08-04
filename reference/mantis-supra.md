@@ -32,17 +32,12 @@ index will be confidently incomplete.
 To calibrate, group the unparsed lines by shape and work down by frequency:
 
 ```bash
-python - <<'PY'
-import sqlite3, re, collections
-c = sqlite3.connect(".mfdoc/index.db")
-shapes = collections.Counter()
-for (raw,) in c.execute(
-        "SELECT raw FROM gap WHERE gap_kind='unparsed_line' AND raw IS NOT NULL"):
-    shapes[(raw.strip().split() or [""])[0].upper()] += 1
-for kw, n in shapes.most_common(30):
-    print(f"{n:5}  {kw}")
-PY
+mfdoc calibrate --config project.yml --dialect mantis
 ```
+
+This ranks unparsed `mantis` (or `supra_dir`, or any other dialect) statements by
+leading keyword, shows a sample line for each, and names the file and constants a
+fix would likely go in.
 
 The leading keyword of each unrecognised statement is almost always the thing to
 add. Most are one of:
