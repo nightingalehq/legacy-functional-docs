@@ -103,8 +103,10 @@ options:
       "CONF": "confirmed"
       "PART": "partially released"
 
-  # Redaction applied to source excerpts and literal values before they reach
-  # any generated document. Useful when literals embed real customer data.
+  # Redaction applied at brief-generation time -- before anything reaches a
+  # prompt, not only when a document is rendered. Patterns are regexes for
+  # specific values already found in this codebase; there are no built-in
+  # defaults. Matches are replaced with [REDACTED].
   redact:
     enabled: false
     patterns: []

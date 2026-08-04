@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import json
 
+from .redact import NULL_REDACTOR, Redactor
+
 
 def _cite(name: str, line: int | None, end: int | None = None) -> str:
     if line is None:
@@ -23,7 +25,8 @@ def _cite(name: str, line: int | None, end: int | None = None) -> str:
     return f"[[{name}:{line}]]"
 
 
-def module_brief(conn, member_name: str, excerpt_rules: bool = True) -> str:
+def module_brief(conn, member_name: str, excerpt_rules: bool = True,
+                  redact: Redactor = NULL_REDACTOR) -> str:
     matches = conn.execute(
         "SELECT * FROM member WHERE UPPER(name)=UPPER(?)", (member_name,)
     ).fetchall()
@@ -72,7 +75,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True) -> str:
     if hdr:
         add("## Header comments (unverified author prose — treat as claims, not facts)")
         for r in hdr:
-            add(f"- {_cite(name, r['line_no'])} `{r['text'][:160]}`")
+            add(f"- {_cite(name, r['line_no'])} `{redact(r['text'][:160])}`")
         add("")
 
     # --- interfaces
@@ -103,7 +106,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True) -> str:
     if acc:
         add("## Data access (verified from source statements)")
         for r in acc:
-            key = f" key/where: `{r['key_expr']}`" if r["key_expr"] else ""
+            key = f" key/where: `{redact(r['key_expr'])}`" if r["key_expr"] else ""
             desc = f" descriptor: `{r['descriptor']}`" if r["descriptor"] else ""
             flag = "" if r["confidence"] == "verified" else f" **[{r['confidence']}]**"
             add(f"- {_cite(name, r['line_no'])} `{r['verb']}` ({r['crud']}) on "
@@ -118,7 +121,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True) -> str:
         add("## Transaction boundaries")
         for r in tx:
             add(f"- {_cite(name, r['line_no'])} `{r['marker']}`"
-                + (f" restart data: `{r['et_data']}`" if r["et_data"] else ""))
+                + (f" restart data: `{redact(r['et_data'])}`" if r["et_data"] else ""))
         add("")
 
     # --- calls
@@ -137,7 +140,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True) -> str:
             else:
                 tag = " **[source not supplied]**"
             add(f"- {_cite(name, r['line_no'])} `{r['call_kind']}` -> `{r['callee_name']}`{tag}"
-                + (f" args: `{r['args']}`" if r["args"] else ""))
+                + (f" args: `{redact(r['args'])}`" if r["args"] else ""))
         add("")
 
     inbound = conn.execute(
@@ -163,7 +166,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True) -> str:
         for r in inter:
             add(f"- {_cite(name, r['line_no'])} `{r['kind']}`"
                 + (f" target `{r['target']}`" if r["target"] else "")
-                + (f" `{(r['fields'] or '')[:90]}`" if r["fields"] else ""))
+                + (f" `{redact((r['fields'] or '')[:90])}`" if r["fields"] else ""))
         add("")
 
     msgs = conn.execute(
@@ -174,7 +177,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True) -> str:
         for r in msgs:
             add(f"- {_cite(name, r['line_no'])} `{r['kind']}`"
                 + (f" number `{r['number']}`" if r["number"] else "")
-                + (f" text: \"{(r['text'] or '')[:120]}\"" if r["text"] else ""))
+                + (f" text: \"{redact((r['text'] or '')[:120])}\"" if r["text"] else ""))
         add("")
 
     # --- rule candidates, with exact conditions
@@ -186,9 +189,9 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True) -> str:
         for r in rules:
             bits = [f"{_cite(name, r['line_no'])} depth {r['depth']} `{r['construct']}`"]
             if r["condition"]:
-                bits.append(f"condition: `{r['condition']}`")
+                bits.append(f"condition: `{redact(r['condition'])}`")
             if r["literals"]:
-                bits.append(f"literals: `{r['literals']}`")
+                bits.append(f"literals: `{redact(r['literals'])}`")
             add("- " + " — ".join(bits))
         add("")
 
@@ -205,7 +208,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True) -> str:
     return "\n".join(out) + "\n"
 
 
-def entity_brief(conn, entity_name: str) -> str:
+def entity_brief(conn, entity_name: str, redact: Redactor = NULL_REDACTOR) -> str:
     e = conn.execute(
         "SELECT * FROM entity WHERE UPPER(name)=UPPER(?) LIMIT 1", (entity_name,)
     ).fetchone()
@@ -255,7 +258,7 @@ def entity_brief(conn, entity_name: str) -> str:
         for l in links:
             cite = _cite(l["via"], l["via_line"]) if l["via"] else ""
             out.append(f"- {cite} `{l['from_name']}` --{l['link_kind']}"
-                       f"{'(' + l['link_name'] + ')' if l['link_name'] else ''}--> `{l['to_name']}`")
+                       f"{'(' + redact(l['link_name']) + ')' if l['link_name'] else ''}--> `{l['to_name']}`")
         out.append("")
 
     users = conn.execute(
@@ -270,7 +273,7 @@ def entity_brief(conn, entity_name: str) -> str:
         out.append("## Accessed by")
         for u in users:
             out.append(f"- {_cite(u['module'], u['line_no'])} `{u['module']}` `{u['verb']}` ({u['crud']})"
-                       + (f" via `{u['key_expr'][:80]}`" if u["key_expr"] else ""))
+                       + (f" via `{redact(u['key_expr'][:80])}`" if u["key_expr"] else ""))
         out.append("")
     else:
         out.append("## Accessed by\n\n- No application access found in the ingested source. "
@@ -278,7 +281,7 @@ def entity_brief(conn, entity_name: str) -> str:
     return "\n".join(out) + "\n"
 
 
-def system_brief(conn) -> str:
+def system_brief(conn, redact: Redactor = NULL_REDACTOR) -> str:
     out = ["# Fact brief: system overview", ""]
     cov = {r["name"]: r["value"] for r in conn.execute(
         "SELECT name, value FROM metric WHERE scope='global'").fetchall()}
@@ -315,7 +318,7 @@ def system_brief(conn) -> str:
         """
     ).fetchall():
         out.append(f"- {_cite(r['src'], r['line_no'])} CICS transaction `{r['resource_name']}` "
-                   f"({(r['attributes'] or '')[:100]})")
+                   f"({redact((r['attributes'] or '')[:100])})")
     out.append("")
 
     out.append("## CRUD matrix (module x data store)")

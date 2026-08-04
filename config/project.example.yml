@@ -78,8 +78,15 @@ options:
     lexicon: {}
     #   "SOME-FIELD": "business term"
 
-  # Redaction applied to source excerpts and literal values before they reach
-  # any generated document. Useful when literals embed real customer data.
+  # Redaction applied at brief-generation time -- before anything reaches a
+  # prompt, not only when a document is rendered. Patterns are regexes for
+  # specific values already found in this codebase (exact literals, or
+  # shapes like a known account-number format); there are no built-in
+  # defaults, since guessing what counts as sensitive in an unfamiliar
+  # client's source is exactly the kind of invention this project avoids
+  # elsewhere. Matches are replaced with [REDACTED].
   redact:
     enabled: false
     patterns: []
+    #   - 'AB123456C'
+    #   - 'Tr0ub4dor&3'

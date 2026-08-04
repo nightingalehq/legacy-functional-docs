@@ -23,6 +23,7 @@ from . import brief as brief_mod
 from . import graph, normalise
 from .db import add_gap, connect, insert, upsert_member
 from .dialects import adabas, environment, mantis, natural, supra
+from .redact import Redactor
 
 VERSION = "0.1.0"
 
@@ -153,12 +154,13 @@ def cmd_derive(args) -> int:
 def cmd_brief(args) -> int:
     cfg = load_config(args.config)
     conn = connect(Path(args.config).parent / cfg["index_db"])
+    redact = Redactor.from_options(cfg["options"])
     if args.system:
-        out = brief_mod.system_brief(conn)
+        out = brief_mod.system_brief(conn, redact=redact)
     elif args.module:
-        out = brief_mod.module_brief(conn, args.module)
+        out = brief_mod.module_brief(conn, args.module, redact=redact)
     elif args.entity:
-        out = brief_mod.entity_brief(conn, args.entity)
+        out = brief_mod.entity_brief(conn, args.entity, redact=redact)
     else:
         print("specify --module, --entity or --system", file=sys.stderr)
         return 2
