@@ -22,7 +22,7 @@ are built to be tuned against real source rather than trusted out of the box.
 Run `ingest` on a representative sample, then:
 
 ```bash
-python -m mfdoc coverage --config project.yml
+mfdoc coverage --config project.yml
 ```
 
 Look at `line_recognition_rate` and at the `unparsed_line` gaps. Below roughly 85%
@@ -54,12 +54,12 @@ add. Most are one of:
   wrong comment marker makes every comment line look like an unparsed statement
   and drags the rate down for a trivial reason
 
-Add them to the tables in `scripts/mfdoc/dialects/mantis.py`, re-ingest, and check
+Add them to the tables in `src/mfdoc/dialects/mantis.py`, re-ingest, and check
 the rate moved. Two or three iterations is normal. Record what was changed and why
 in the project repo, because the next person to run this will need to know that the
 scanner was tuned for this codebase.
 
-For Supra, override `LABELS` in `scripts/mfdoc/dialects/supra.py` — or better,
+For Supra, override `LABELS` in `src/mfdoc/dialects/supra.py` — or better,
 `dialects.supra.labels` in project config — to match the site's directory report
 wording. If `datasets` comes back as zero, the report layout differs from the
 shipped patterns entirely.

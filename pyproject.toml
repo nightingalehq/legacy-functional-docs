@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mfdoc"
+version = "0.1.0"
+description = "Deterministic fact extraction and functional documentation for legacy mainframe 4GL codebases (Natural/Adabas, Mantis/Supra)"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = [
+    "PyYAML",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+
+[project.scripts]
+mfdoc = "mfdoc.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

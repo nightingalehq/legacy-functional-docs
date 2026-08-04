@@ -26,7 +26,7 @@ Two obligations:
 
 ## Registering it
 
-1. Create `scripts/mfdoc/dialects/<name>.py`.
+1. Create `src/mfdoc/dialects/<name>.py`.
 2. Add a signature to `normalise.DIALECT_SIGNATURES` — a regex that reliably fires
    on this dialect and rarely on others. Put it above `natural` and `mantis` if it
    is more specific, since ordering breaks ties.

@@ -33,33 +33,35 @@ directory under your Claude Code skills path (e.g. `~/.claude/skills/` for a
 personal install, or `.claude/skills/` at the root of a project for a
 project-scoped one). Claude Code discovers the skill from its `SKILL.md`
 front matter; no separate registration step is required. The Python pipeline
-under `scripts/mfdoc/` runs locally wherever Claude Code invokes shell
-commands — see Requirements below.
+under `src/mfdoc/` runs locally wherever Claude Code invokes shell commands;
+run `pip install -e .` from the skill directory once to get the `mfdoc`
+console script on `PATH` — see Requirements below.
 
 ## Quick start
 
 ```bash
+pip install -e .
+
 cp config/project.example.yml project.yml
 # edit source paths, pin the dialect for each source set
 
-export PYTHONPATH=scripts
-python -m mfdoc ingest   --config project.yml
-python -m mfdoc derive   --config project.yml
-python -m mfdoc coverage --config project.yml     # read this before writing anything
+mfdoc ingest   --config project.yml
+mfdoc derive   --config project.yml
+mfdoc coverage --config project.yml     # read this before writing anything
 
-python -m mfdoc brief --config project.yml --system
-python -m mfdoc brief --config project.yml --module MMP0100
-python -m mfdoc brief --config project.yml --entity MILL-ORDER
+mfdoc brief --config project.yml --system
+mfdoc brief --config project.yml --module MMP0100
+mfdoc brief --config project.yml --entity MILL-ORDER
 
 # ... write documents from the briefs, per reference/writing-rules.md ...
 
-python -m mfdoc validate --config project.yml --docs docs/functional
+mfdoc validate --config project.yml --docs docs/functional
 
 # smoke-test against the bundled fixtures and worked example:
-python -m mfdoc validate --config project.yml --docs examples
+mfdoc validate --config project.yml --docs examples
 ```
 
-`python -m mfdoc export --config project.yml --json out/index.json` dumps the whole
+`mfdoc export --config project.yml --json out/index.json` dumps the whole
 fact store for downstream tooling.
 
 ## Requirements
@@ -71,12 +73,14 @@ the machine.
 
 ```
 SKILL.md              the agent definition and workflow
+pyproject.toml        packaging; installs the `mfdoc` console script
 config/               example project configuration
 reference/            dialect packs and writing rules — read before use
 templates/            the seven document types
-scripts/mfdoc/        the extraction pipeline
-examples/               worked example + multi-dialect fixtures
-evals/                  eval prompts (dev-time only; not installed)
+src/mfdoc/            the extraction pipeline
+tests/                pytest suite (fixtures as golden tests)
+examples/             worked example + multi-dialect fixtures
+evals/                eval prompts (dev-time only; not installed)
 ```
 
 ## Coverage gates

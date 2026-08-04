@@ -71,10 +71,9 @@ Copy `config/project.example.yml`, set the source paths, pin the `dialect` for
 each source set rather than relying on sniffing, then:
 
 ```bash
-export PYTHONPATH=scripts
-python -m mfdoc ingest   --config project.yml
-python -m mfdoc derive   --config project.yml
-python -m mfdoc coverage --config project.yml
+mfdoc ingest   --config project.yml
+mfdoc derive   --config project.yml
+mfdoc coverage --config project.yml
 ```
 
 ### 3. Read the coverage report before writing anything
@@ -101,10 +100,9 @@ Report these numbers to the user honestly, including when they are poor.
 For each unit of documentation:
 
 ```bash
-export PYTHONPATH=scripts
-python -m mfdoc brief --config project.yml --module MMP0100 --out .mfdoc/briefs/MMP0100.md
-python -m mfdoc brief --config project.yml --entity MILL-ORDER
-python -m mfdoc brief --config project.yml --system
+mfdoc brief --config project.yml --module MMP0100 --out .mfdoc/briefs/MMP0100.md
+mfdoc brief --config project.yml --entity MILL-ORDER
+mfdoc brief --config project.yml --system
 ```
 
 Write from the brief. Read `reference/writing-rules.md` before the first
@@ -123,8 +121,7 @@ Suggested document set, in this order (each builds vocabulary the next needs):
 ### 5. Validate
 
 ```bash
-export PYTHONPATH=scripts
-python -m mfdoc validate --config project.yml --docs docs/functional
+mfdoc validate --config project.yml --docs docs/functional
 ```
 
 This fails the build on any citation that does not resolve to a real member and
@@ -156,7 +153,7 @@ statement forms, listing layouts and traps that the scanners rely on:
 ## Tooling map
 
 ```
-scripts/mfdoc/
+src/mfdoc/
   db.py               schema + fact-store helpers
   normalise.py        encoding, sequence columns, member splitting, dialect sniffing
   graph.py            derivation: resolution, CRUD matrix, orphans, transaction scopes
