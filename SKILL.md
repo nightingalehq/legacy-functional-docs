@@ -97,10 +97,34 @@ Report these numbers to the user honestly, including when they are poor.
 
 ### 4. Generate briefs and write
 
-For each unit of documentation:
+Module docs are high-volume and formulaic — one program or subprogram, one
+document, following `templates/module.md` mechanically. System overview,
+process flows and the gap register are low-volume and judgement-heavy —
+grouping, narrative structure, and deciding what's worth asking an SME
+depend on holding the whole system in mind at once. Route each accordingly:
+batch the module docs, write the rest interactively.
+
+**Module docs — `mfdoc batch`.** At a realistic engagement size (thousands
+of Natural members), writing one module document per chat turn does not
+scale on time or cost. `mfdoc batch` runs brief → model call → write →
+validate → retry once per module, unattended:
 
 ```bash
-mfdoc brief --config project.yml --module MMP0100 --out .mfdoc/briefs/MMP0100.md
+mfdoc batch --config project.yml --out docs/functional/modules
+```
+
+It only ever touches `natural`/`mantis` members with `object_type` in
+`program`/`subprogram`/`subroutine`/`copycode` — never system overview,
+data entities, process flows or the gap register. It's resumable (a run
+over thousands of members will be interrupted; unchanged members are
+skipped on re-run) and reports token counts, a cost figure (once
+`options.narrative.pricing` is set in project config), and a retry count.
+Needs `pip install 'mfdoc[batch]'` and `ANTHROPIC_API_KEY` set. See
+`--help` for concurrency and resume-state options.
+
+**Everything else — brief + write here, interactively:**
+
+```bash
 mfdoc brief --config project.yml --entity MILL-ORDER
 mfdoc brief --config project.yml --system
 ```
@@ -113,7 +137,7 @@ Suggested document set, in this order (each builds vocabulary the next needs):
 
 1. `system-overview.md` — from the system brief
 2. `data/<entity>.md` — one per data store
-3. `modules/<module>.md` — one per program or subprogram
+3. `modules/<module>.md` — one per program or subprogram (batched, above)
 4. `processes/<process>.md` — batch job or online transaction end-to-end
 5. `gap-register.md` — every unresolved item, as SME questions
 6. `coverage-report.md` — the numbers, unspun

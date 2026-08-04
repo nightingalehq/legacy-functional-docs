@@ -17,6 +17,9 @@ dependencies = [
 dev = [
     "pytest",
 ]
+batch = [
+    "anthropic",
+]
 
 [project.scripts]
 mfdoc = "mfdoc.cli:main"

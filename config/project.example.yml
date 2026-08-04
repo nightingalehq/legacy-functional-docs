@@ -77,6 +77,12 @@ options:
     # rather than inventing synonyms. Extend as SMEs correct drafts.
     lexicon: {}
     #   "SOME-FIELD": "business term"
+    # Used only by `mfdoc batch` to report a cost figure; omit to have it
+    # report token counts without a dollar amount. Check current per-model
+    # pricing before setting these -- it changes.
+    # pricing:
+    #   input_per_mtok: 3.0
+    #   output_per_mtok: 15.0
 
   # Redaction applied at brief-generation time -- before anything reaches a
   # prompt, not only when a document is rendered. Patterns are regexes for

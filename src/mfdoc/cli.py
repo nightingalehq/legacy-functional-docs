@@ -6,6 +6,7 @@
     mfdoc gate     --config project.yml
     mfdoc calibrate --config project.yml --dialect mantis
     mfdoc brief    --config project.yml [--module NAME | --entity NAME | --system]
+    mfdoc batch    --config project.yml --out docs/functional/modules
     mfdoc validate --config project.yml --docs docs/functional
     mfdoc export   --config project.yml --json out/index.json
 """
@@ -172,6 +173,62 @@ def cmd_brief(args) -> int:
     else:
         print(out)
     return 0
+
+
+def cmd_batch(args) -> int:
+    """Batch harness for the high-volume, formulaic module docs (option C).
+
+    System overview, process flows and the gap register are deliberately
+    not covered here -- generate those through the interactive CLI/Claude
+    Code path in SKILL.md, where judgement calls about grouping and
+    narrative structure matter more than throughput.
+    """
+    from . import batch as batch_mod
+
+    cfg = load_config(args.config)
+    base = Path(args.config).parent
+    conn = connect(base / cfg["index_db"])
+    redact = Redactor.from_options(cfg["options"])
+
+    members = args.members.split(",") if args.members else batch_mod.select_batch_members(conn)
+    if not members:
+        print("no batchable (natural/mantis program-level) members in the index")
+        return 0
+
+    writing_rules = (base / "reference" / "writing-rules.md").read_text(encoding="utf-8")
+    template = (base / "templates" / "module.md").read_text(encoding="utf-8")
+
+    if args.caller == "fake-echo":
+        # For dry runs / CI smoke tests: no network call, no API key needed.
+        def caller(prompt: str) -> batch_mod.ModelResponse:
+            return batch_mod.ModelResponse(text=prompt, input_tokens=0, output_tokens=0)
+    else:
+        from .anthropic_caller import AnthropicCaller
+        caller = AnthropicCaller(model=args.model)
+
+    pricing = ((cfg["options"] or {}).get("narrative") or {}).get("pricing") or {}
+    summary = batch_mod.run_batch(
+        conn, members, base / args.out, caller, writing_rules, template, redact=redact,
+        concurrency=args.concurrency,
+        state_path=(base / args.state) if args.state else None,
+        cost_per_mtok_in=pricing.get("input_per_mtok"),
+        cost_per_mtok_out=pricing.get("output_per_mtok"),
+    )
+
+    for r in summary.results:
+        status = "SKIP" if r.skipped else ("OK  " if r.ok else "FAIL")
+        print(f"{status} {r.member:<20} attempts={r.attempts} in={r.input_tokens} out={r.output_tokens}")
+        for p in r.problems:
+            print(f"       - {p}")
+
+    print(f"\n{summary.ok}/{len(summary.results)} ok, {summary.failed} failed, "
+          f"{summary.skipped} skipped (unchanged), {summary.retried} retried")
+    print(f"tokens: {summary.total_input_tokens} in, {summary.total_output_tokens} out")
+    if summary.cost_usd is not None:
+        print(f"cost: ${summary.cost_usd:.4f}")
+    else:
+        print("cost: unknown -- set options.narrative.pricing.input_per_mtok/output_per_mtok in project.yml")
+    return 0 if summary.failed == 0 else 1
 
 
 # Where to go looking when a dialect's recognition rate is weak. Not a
@@ -351,6 +408,19 @@ def main(argv=None) -> int:
     p.add_argument("--system", action="store_true")
     p.add_argument("--out")
     p.set_defaults(func=cmd_brief)
+
+    p = sub.add_parser("batch")
+    p.add_argument("--config", required=True)
+    p.add_argument("--out", default="docs/functional/modules")
+    p.add_argument("--members", help="comma-separated member names; default: all batchable members")
+    p.add_argument("--model", default="claude-sonnet-4-5")
+    p.add_argument("--concurrency", type=int, default=4)
+    p.add_argument("--state", default=".mfdoc/batch-state.json",
+                    help="resume-state file path, relative to --config's directory; "
+                         "empty string disables resume tracking")
+    p.add_argument("--caller", choices=["anthropic", "fake-echo"], default="anthropic",
+                    help="fake-echo makes no network call -- for CI/dry-run smoke tests")
+    p.set_defaults(func=cmd_batch)
 
     p = sub.add_parser("validate")
     p.add_argument("--config", required=True)

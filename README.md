@@ -54,6 +54,9 @@ mfdoc brief --config project.yml --module MMP0100
 mfdoc brief --config project.yml --entity MILL-ORDER
 
 # ... write documents from the briefs, per reference/writing-rules.md ...
+# module docs are high-volume and formulaic; batch them instead of writing
+# one at a time (needs `pip install 'mfdoc[batch]'` and ANTHROPIC_API_KEY):
+mfdoc batch --config project.yml --out docs/functional/modules
 
 mfdoc validate --config project.yml --docs docs/functional
 
@@ -67,7 +70,9 @@ fact store for downstream tooling.
 ## Requirements
 
 Python 3.10+ and PyYAML. No other dependencies, no network access, nothing leaves
-the machine.
+the machine -- with one exception: `mfdoc batch` (below) sends briefs to the
+Claude API, needs `pip install 'mfdoc[batch]'` and `ANTHROPIC_API_KEY`, and is
+entirely optional.
 
 ## Layout
 
