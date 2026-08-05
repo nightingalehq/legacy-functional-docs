@@ -227,10 +227,12 @@ def cmd_batch(args) -> int:
         from .vertex_caller import VertexCaller
         if not args.model:
             print(
-                "mfdoc batch --provider vertex requires --model with a Vertex-format "
-                "dated model id (e.g. claude-sonnet-4@20250514) -- the direct-Anthropic "
-                "model id is not valid on Vertex AI. See Vertex AI Model Garden for the "
-                "current id for this model."
+                "mfdoc batch --provider vertex requires --model. Current-generation "
+                "Claude models (e.g. claude-sonnet-4-5, claude-opus-4-1) use the same "
+                "bare id on Vertex AI as on the direct Anthropic API; only legacy "
+                "models use a Vertex-specific dated-snapshot id with an '@' separator "
+                "(e.g. claude-3-5-sonnet-v2@20241022, not claude-3-5-sonnet-v2-20241022). "
+                "See Vertex AI Model Garden for the current id for this model."
             )
             return 1
         caller = VertexCaller(model=args.model, project=args.gcp_project, region=args.gcp_region)
@@ -455,10 +457,12 @@ def main(argv=None) -> int:
     p.add_argument("--members", help="comma-separated member names; default: all batchable members")
     p.add_argument("--model", default=None,
                     help="defaults to claude-sonnet-4-5 for --provider anthropic; required "
-                         "(no default) for --provider vertex, since Vertex AI model ids are "
-                         "dated snapshots (e.g. claude-sonnet-4@20250514), not the bare id the "
-                         "direct Anthropic API uses -- see Vertex AI Model Garden for the "
-                         "current one")
+                         "(no default) for --provider vertex, so a stale hardcoded default "
+                         "can't silently point at a retired model. Current-generation Claude "
+                         "models use the same bare id on Vertex AI as on the direct Anthropic "
+                         "API; only legacy models need a Vertex-specific dated-snapshot id "
+                         "with an '@' separator (e.g. claude-3-5-sonnet-v2@20241022) -- see "
+                         "Vertex AI Model Garden for the current id for this model")
     p.add_argument("--concurrency", type=int, default=4)
     p.add_argument("--state", default=".mfdoc/batch-state.json",
                     help="resume-state file path, relative to --config's directory; "
