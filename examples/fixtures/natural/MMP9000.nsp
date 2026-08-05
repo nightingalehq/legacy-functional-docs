@@ -15,4 +15,7 @@ IF ORDER-VIEW.ORDER-STATUS = 'CONF'
   AND ORDER-VIEW.CUSTOMER-NO = 'C00123'
   MOVE 1 TO #FLAG
 END-IF
+* IGNORE is a real Natural no-op statement (issue 4.11) -- must be
+* recognised without generating an unparsed_line gap or a rule_candidate.
+IGNORE
 END

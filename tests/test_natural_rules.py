@@ -100,3 +100,47 @@ def test_pure_accumulation_without_a_literal_is_not_captured(indexed_db):
         """
     ).fetchone()
     assert row is None
+
+
+def test_reset_is_recognised_and_not_an_unparsed_line(indexed_db):
+    """MMP0100:31's `RESET #RETURN-CODE` was the one pre-existing
+    unparsed_line gap in this fixture set (issue 4.11, found via a smoke
+    test against SoftwareAG/adabas-natural-code-samples -- 36 occurrences
+    of RESET in that corpus alone). It's structural, not a business
+    decision, so it must be recognised without producing a rule_candidate."""
+    conn = indexed_db
+    gap = conn.execute(
+        """
+        SELECT 1 FROM gap WHERE gap_kind='unparsed_line' AND member_id=(
+            SELECT id FROM member WHERE name='MMP0100'
+        ) AND line_no=31
+        """
+    ).fetchone()
+    assert gap is None, "RESET #RETURN-CODE at MMP0100:31 must no longer be an unparsed_line gap"
+    rule = conn.execute(
+        """
+        SELECT 1 FROM rule_candidate rc JOIN member m ON m.id = rc.member_id
+        WHERE m.name='MMP0100' AND rc.line_no=31
+        """
+    ).fetchone()
+    assert rule is None, "RESET is structural, not a business rule -- must not become a rule_candidate"
+
+
+def test_ignore_is_recognised_and_not_an_unparsed_line(indexed_db):
+    """IGNORE (a real Natural no-op, 68 occurrences in the same corpus) must
+    be recognised the same way -- structural, no rule_candidate."""
+    conn = indexed_db
+    gap = conn.execute(
+        """
+        SELECT 1 FROM gap g JOIN member m ON m.id = g.member_id
+        WHERE g.gap_kind='unparsed_line' AND m.name='MMP9000' AND g.line_no=20
+        """
+    ).fetchone()
+    assert gap is None, "IGNORE at MMP9000:20 must no longer be an unparsed_line gap"
+    rule = conn.execute(
+        """
+        SELECT 1 FROM rule_candidate rc JOIN member m ON m.id = rc.member_id
+        WHERE m.name='MMP9000' AND rc.line_no=20
+        """
+    ).fetchone()
+    assert rule is None, "IGNORE is structural, not a business rule -- must not become a rule_candidate"

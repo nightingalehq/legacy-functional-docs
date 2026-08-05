@@ -108,6 +108,17 @@ RE_PROCESS_SQL = re.compile(r"^\s*PROCESS\s+SQL\b", re.I)
 RE_ET = re.compile(r"^\s*END\s+(?:OF\s+)?TRANSACTION\b(?P<rest>.*)$", re.I)
 RE_BT = re.compile(r"^\s*BACKOUT\s+TRANSACTION\b", re.I)
 
+# RESET sets a field back to its initial value; IGNORE is a no-op, most often
+# seen inside DELETE/loop processing. Neither carries a business decision by
+# itself -- structural syntax, like END-IF -- so they're recognised (to stop
+# them showing up as unparsed_line gaps) without capturing a rule_candidate.
+# Found via a smoke test against SoftwareAG/adabas-natural-code-samples
+# (issue 4.11): RESET was already the one pre-existing unparsed_line gap in
+# our own MMP0100.nsp fixture, just never named until that corpus made the
+# pattern obvious at scale.
+RE_RESET = re.compile(r"^\s*RESET\b(?P<rest>.*)$", re.I)
+RE_IGNORE = re.compile(r"^\s*IGNORE\s*$", re.I)
+
 RE_CALLNAT = re.compile(r"^\s*CALLNAT\s+(?P<target>'[^']+'|\"[^\"]+\"|[A-Z0-9#@$&\-_.]+)(?P<args>.*)$", re.I)
 RE_FETCH = re.compile(r"^\s*FETCH\s+(?P<ret>RETURN\s+|REPEAT\s+)?(?P<target>'[^']+'|\"[^\"]+\"|[A-Z0-9#@$&\-_.]+)(?P<args>.*)$", re.I)
 RE_PERFORM = re.compile(r"^\s*PERFORM\s+(?!BREAK)(?P<target>'[^']+'|[A-Z0-9#@$&\-_.]+)(?P<args>.*)$", re.I)
@@ -358,7 +369,8 @@ def extract(conn, member_id: int, lines: list[tuple[int, str | None, str]], memb
             matched = _match_arithmetic(conn, member_id, line_no, stmt, masked, depth)
 
         if not matched:
-            if RE_COMPUTE.match(masked) or RE_END_ANY.match(masked):
+            if RE_COMPUTE.match(masked) or RE_END_ANY.match(masked) \
+               or RE_RESET.match(masked) or RE_IGNORE.match(masked):
                 matched = True
             else:
                 stats["unparsed"] += 1

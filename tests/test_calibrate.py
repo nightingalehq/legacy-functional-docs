@@ -16,11 +16,15 @@ def _run_calibrate(project_config, indexed_db, dialect, capsys):
 
 
 def test_calibrate_ranks_unparsed_shapes_for_natural(project_config, indexed_db, capsys):
-    """MMP0100 has exactly one unparsed line (`RESET #RETURN-CODE`); the
-    command must surface it, labelled by its leading keyword."""
+    """RESET is now recognised (issue 4.11), so MMP0100 no longer has an
+    unparsed line. MMP9000's own continuation-fold fixture still has one by
+    design -- its "AND ..." line is folded correctly into the preceding IF
+    but is also visited (and not recognised) on its own once folded; see
+    that fixture's comment. The command must surface it, labelled by its
+    leading keyword."""
     rc, out = _run_calibrate(project_config, indexed_db, "natural", capsys)
     assert rc == 0
-    assert "RESET" in out
+    assert "AND" in out
     assert "src/mfdoc/dialects/natural.py" in out
 
 

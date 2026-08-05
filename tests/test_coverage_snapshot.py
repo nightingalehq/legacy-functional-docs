@@ -20,6 +20,13 @@ copycode member (object_type='copycode') with its own rule_candidate;
 MMP9100 INCLUDEs it and is itself uncalled by design. +2 members, +2
 code_members, +1 resolved include edge, +2 rule_candidates (the copycode's
 own IF and MOVE), +1 orphan_module (MMP9100).
+
+2026-08-05: RESET is now recognised (issue 4.11, found via a smoke test
+against SoftwareAG/adabas-natural-code-samples) -- MMP0100:31's
+`RESET #RETURN-CODE` was the one pre-existing unparsed_line gap in this
+fixture set since before any of the above, just never named. -1
+unparsed_line, -1 gaps_total (the remaining unparsed_line is MMP9000's
+"AND ..." continuation artifact, described above).
 """
 
 from __future__ import annotations
@@ -29,9 +36,9 @@ from mfdoc import graph
 EXPECTED_COVERAGE = {
     "members": 12,
     "code_members": 6,
-    "source_lines": 278,
-    "unparsed_lines": 2,
-    "line_recognition_rate": 0.9928,
+    "source_lines": 281,
+    "unparsed_lines": 1,
+    "line_recognition_rate": 0.9964,
     "entities": 11,
     "entities_with_definition": 7,
     "entity_definition_rate": 0.6364,
@@ -46,7 +53,7 @@ EXPECTED_COVERAGE = {
     "includes_resolved": 1,
     "include_resolution_rate": 0.1429,
     "gaps_high": 17,
-    "gaps_total": 23,
+    "gaps_total": 22,
 }
 
 
