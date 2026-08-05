@@ -18,9 +18,16 @@ from __future__ import annotations
 
 import argparse
 import pathlib
+import shutil
+import tempfile
 import urllib.parse
 import urllib.request
 
+# Resolved from this script's own location, not the process's cwd -- `cd
+# scripts && python fetch_cobol_course_fixtures.py` must still land files
+# under the repo's examples/external/ (the directory .gitignore anchors),
+# not under scripts/examples/external/, which .gitignore would not cover.
+REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 REPO = "openmainframeproject/cobol-programming-course"
 # Pinned so a re-run six months from now can't silently start exercising
 # different upstream content. Bump deliberately; re-run the smoke test after.
@@ -51,21 +58,36 @@ FILES = [
 
 
 def fetch(dest: pathlib.Path) -> None:
-    dest.mkdir(parents=True, exist_ok=True)
-    (dest / "SOURCE.txt").write_text(
-        f"{LICENSE_NOTE}\nFetched at commit {COMMIT_SHA}.\n"
-        f"Regenerate with scripts/fetch_cobol_course_fixtures.py.\n"
-    )
-    for repo_path in FILES:
-        url = (
-            f"https://raw.githubusercontent.com/{REPO}/{COMMIT_SHA}/"
-            + urllib.parse.quote(repo_path)
+    # Fetch into a fresh scratch directory first, then swap it into place --
+    # a re-run after COMMIT_SHA is bumped (a file renamed or dropped
+    # upstream) must not leave last time's stale file sitting next to this
+    # time's, silently mismatched with SOURCE.txt's own "fetched at commit
+    # <SHA>" claim; a fetch that fails partway must not leave `dest` in a
+    # half-old-half-new state either.
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp_dir = pathlib.Path(tempfile.mkdtemp(prefix=".fetch_cobol_course_fixtures-", dir=dest.parent))
+    try:
+        (tmp_dir / "SOURCE.txt").write_text(
+            f"{LICENSE_NOTE}\nFetched at commit {COMMIT_SHA}.\n"
+            f"Regenerate with scripts/fetch_cobol_course_fixtures.py.\n",
+            encoding="utf-8",
         )
-        out_name = pathlib.Path(repo_path).name
-        out_path = dest / out_name
-        print(f"fetching {repo_path} -> {out_path}")
-        with urllib.request.urlopen(url, timeout=30) as resp:
-            out_path.write_bytes(resp.read())
+        for repo_path in FILES:
+            url = (
+                f"https://raw.githubusercontent.com/{REPO}/{COMMIT_SHA}/"
+                + urllib.parse.quote(repo_path)
+            )
+            out_name = pathlib.Path(repo_path).name
+            out_path = tmp_dir / out_name
+            print(f"fetching {repo_path} -> {dest / out_name}")
+            with urllib.request.urlopen(url, timeout=30) as resp:
+                out_path.write_bytes(resp.read())
+        if dest.exists():
+            shutil.rmtree(dest)
+        tmp_dir.rename(dest)
+    except BaseException:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
     print(f"\n{len(FILES)} files written to {dest}")
 
 
@@ -74,8 +96,9 @@ def main() -> int:
     parser.add_argument(
         "--dest",
         type=pathlib.Path,
-        default=pathlib.Path("examples/external/cobol_course"),
-        help="Destination directory (default: examples/external/cobol_course)",
+        default=REPO_ROOT / "examples" / "external" / "cobol_course",
+        help="Destination directory (default: examples/external/cobol_course, "
+             "relative to the repo root, not the current directory)",
     )
     args = parser.parse_args()
     fetch(args.dest)
