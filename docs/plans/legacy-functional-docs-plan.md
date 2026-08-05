@@ -181,8 +181,33 @@ GitHub org.
   and a no-op incremental run, a changed file re-extracted without
   touching any other member, and a member dropped from a changed
   multi-member file being purged rather than orphaned.
-  `docs/guides/architecture.md` updated with both behaviours. EBCDIC
-  fixtures (the last #9 sub-item) still open.
+  `docs/guides/architecture.md` updated with both behaviours.
+- 2026-08-05: done: Phase 6 EBCDIC-fixtures sub-item (last of #9). New
+  `examples/fixtures/natural/encoding/MMP0200.{cp037,cp500}.nsp` --
+  `MMP0200.nsp` re-encoded with Python's own codecs, chosen because it
+  already contains `#` (one of the characters `reference/natural-adabas.md`
+  flags as moving between EBCDIC code pages). Live in a subdirectory the
+  natural source spec's non-recursive `*.nsp` glob never reaches, so they
+  don't touch project.yml or the coverage snapshot -- exercised only by
+  `tests/test_ebcdic_fixtures.py`, standalone. Found and documented a real,
+  pre-existing sniffing limitation along the way rather than papering over
+  it: `sniff_encoding` cannot distinguish cp037 from cp500 for content with
+  none of the differentiating characters, since cp037 is tried first in
+  `EBCDIC_CODEPAGES` and also decodes cp500-encoded bytes of this shape
+  just fine -- confirmed a genuinely-cp500 fixture auto-detects as cp037.
+  Not a bug to fix here (the heuristic's own doc comment already says
+  "detection is heuristic; the config can force an encoding" and
+  `reference/natural-adabas.md`'s Traps section already told users to pin
+  `encoding:` when the sniffer gets it wrong) -- the test asserts what
+  actually matters (EBCDIC bytes are recognised as *some* EBCDIC codepage,
+  never mis-detected as latin-1/utf-8) and separately proves the forced-
+  encoding path round-trips correctly for both codepages specifically,
+  plus a full-pipeline test confirming cp037- and cp500-encoded sources
+  produce identical `source_line` rows to the UTF-8 original.
+  `reference/natural-adabas.md`'s EBCDIC trap entry cross-references the
+  new fixtures and states the limitation explicitly. **Phase 6 / issue #9
+  is now fully closed** (indexes, incremental ingest, EBCDIC fixtures, and
+  the synthetic scale fixture that proved the indexes' win).
 
 ## Purpose of this document
 
