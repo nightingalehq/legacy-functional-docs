@@ -238,6 +238,15 @@ register as an update. All keyword matching runs against a copy with literals
 masked to equal-length placeholders, and captured groups are sliced back out of the
 original so business values like `'CONF'` survive.
 
+**Statement labels.** A generic label (`SETA. MOVE 'CONF' TO #STATUS`) defeats
+every verb pattern's leading anchor — a label is not the R#/F#/H# loop-label
+convention above, which is verb-specific and captured inline. Detected and
+stripped as a fallback, tried only after the unstripped statement has already
+failed every matcher, so it can never pre-empt a more specific match. If the
+label-stripped remainder still doesn't match anything, it's still an honest
+`unparsed_line` gap, not a guess — a label doesn't make an unrecognised verb
+recognised.
+
 **Double extensions from file transfer.** Members frequently arrive as
 `MMP0100.NSP.TXT` after an FTP through a text-mode gateway, or as `MEMBER.LST` from
 captured `LIST` output. `normalise.derive_member_name` strips the whole chain of

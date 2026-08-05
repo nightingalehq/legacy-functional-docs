@@ -1,0 +1,14 @@
+** MMP9400 - LABELLED STATEMENT REGRESSION FIXTURE (ISSUE #25)
+** SETA./SETB./SETC. are generic labels preceding recognised verbs -- the
+** label must not defeat the verb match. SETD. precedes a genuinely
+** unrecognised statement, which must still raise an honest unparsed_line
+** gap rather than a false-positive match.
+DEFINE DATA LOCAL
+1 #STATUS (A1)
+END-DEFINE
+SETA. MOVE 'CONF' TO #STATUS
+SETB. CALLNAT 'PROGA'
+SETC. IF #STATUS = 'CONF'
+END-IF
+SETD. FROBNICATE #STATUS
+END

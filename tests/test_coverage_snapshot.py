@@ -65,6 +65,22 @@ dialect content matching runs. +1 member/code_member, +16 source_lines,
 (uncalled by design, as usual for these regression-only fixtures) --
 line_recognition_rate improves slightly since every line but one now
 parses.
+
+2026-08-05: numbers moved again when MMP9400.nsp was added (issue 4.11b/#25
+regression fixture for generic statement labels, e.g. "SETA. MOVE ...").
+Every RE_* verb pattern anchors on a leading "^\\s*", so a leading label defeats all of
+them except the R#/F#/H# loop-label groups already inline in
+RE_READ/RE_FIND/RE_HISTOGRAM (a different, narrower thing -- issue 4.3);
+a generic strip_generic_label() fallback, tried only after the unstripped
+statement has already failed every matcher, recovers the labelled MOVE,
+CALLNAT and IF in this fixture. Its SETD. line precedes a genuinely
+unrecognised verb and correctly stays an unparsed_line gap -- a label must
+never make an unrecognised statement match. +1 member/code_member, +15
+source_lines, +1 unparsed_line (the SETD. gap), +2 rule_candidates (the
+labelled MOVE and IF), +1 invocation_edge (the labelled CALLNAT, to a
+target -- PROGA -- nothing in this fixture set defines, so also +1
+unresolved_call/gaps_high), +1 orphan_module (uncalled by design, as usual
+for these regression-only fixtures) -- +3 gaps_total in total.
 """
 
 from __future__ import annotations
@@ -72,26 +88,26 @@ from __future__ import annotations
 from mfdoc import graph
 
 EXPECTED_COVERAGE = {
-    "members": 17,
-    "code_members": 9,
-    "source_lines": 348,
-    "unparsed_lines": 1,
-    "line_recognition_rate": 0.9971,
+    "members": 18,
+    "code_members": 10,
+    "source_lines": 363,
+    "unparsed_lines": 2,
+    "line_recognition_rate": 0.9945,
     "entities": 13,
     "entities_with_definition": 9,
     "entity_definition_rate": 0.6923,
     "entity_fields": 46,
     "data_accesses": 12,
-    "rule_candidates": 32,
-    "invocation_edges": 12,
+    "rule_candidates": 34,
+    "invocation_edges": 13,
     "invocations_resolved": 2,
-    "call_resolution_rate": 0.1667,
+    "call_resolution_rate": 0.1538,
     "dynamic_call_edges": 1,
     "include_edges": 7,
     "includes_resolved": 1,
     "include_resolution_rate": 0.1429,
-    "gaps_high": 18,
-    "gaps_total": 28,
+    "gaps_high": 19,
+    "gaps_total": 31,
 }
 
 
@@ -105,8 +121,8 @@ def test_coverage_matches_snapshot(indexed_db, derive_result):
 
 
 def test_run_all_summary_matches_snapshot(derive_result):
-    assert derive_result["unresolved_calls"] == 12
+    assert derive_result["unresolved_calls"] == 13
     assert derive_result["undefined_entities"] == 3
     assert derive_result["adabas_entities_merged"] == 2
-    assert derive_result["orphans"] == 5
+    assert derive_result["orphans"] == 6
     assert derive_result["transaction_scopes"] == 3
