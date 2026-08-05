@@ -208,6 +208,25 @@ GitHub org.
   new fixtures and states the limitation explicitly. **Phase 6 / issue #9
   is now fully closed** (indexes, incremental ingest, EBCDIC fixtures, and
   the synthetic scale fixture that proved the indexes' win).
+- 2026-08-05: done: 4.11b (labelled statements, #25) -- split from #19.
+  Every `RE_*` verb pattern anchors on `^\s*`, so a generic label
+  (`SETA. MOVE 'CONF' TO #STATUS`) defeats all of them except the R#/F#/H#
+  loop-label groups already inline in `RE_READ`/`RE_FIND`/`RE_HISTOGRAM`
+  (issue 4.3's narrower, verb-specific thing, tracking which entity a
+  labelled database loop opened -- untouched by this change). New
+  `strip_generic_label()` is tried only as a last resort, after the
+  unstripped statement has already failed every matcher in the cascade --
+  this ordering is load-bearing, since trying it first would strip R#/F#/H#
+  labels too (the regex can't tell them apart from a generic label; nothing
+  distinguishes `R1.` from `SETA.` syntactically) and silently break issue
+  4.3's resolution. New `MMP9400.nsp` fixture: labelled `MOVE`/`CALLNAT`/`IF`
+  now extract correctly (literal survives unmasking, call edge recorded,
+  condition captured), and a labelled but genuinely unrecognised verb still
+  raises the honest `unparsed_line` gap rather than a false-positive match --
+  a label must never manufacture a match. `tests/test_labelled_statements.py`
+  covers both paths plus an explicit regression check against MMP9200 (the
+  4.3 fixture) to prove the ordering guarantee holds.
+  `reference/natural-adabas.md`'s Traps section updated.
 
 ## Purpose of this document
 

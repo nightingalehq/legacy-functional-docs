@@ -65,6 +65,35 @@ def strip_comment(text: str) -> tuple[str, bool]:
     return text, False
 
 
+# A generic Natural statement label (e.g. "SETA. SETTIME") -- not the
+# R#/F#/H# loop-label convention specific verbs already capture inline (see
+# RE_READ/RE_FIND/RE_HISTOGRAM), but an arbitrary label preceding any
+# statement. The char class excludes "." on purpose: it's what terminates
+# the label, and Natural identifiers with a qualifying dot (VIEW.FIELD, e.g.
+# "CERT-VIEW.HEAT-NO") never have whitespace right after that dot, whereas a
+# label always does -- `\.\s+` is what tells the two apart.
+RE_GENERIC_LABEL = re.compile(r"^\s*(?P<label>[A-Z][A-Z0-9#@$&\-_]*)\.\s+(?P<rest>.+)$", re.I)
+
+
+def strip_generic_label(stmt: str, masked: str) -> tuple[str, str, str] | None:
+    """Strip a leading "LABEL. " prefix, returning (label, stripped_stmt, stripped_masked).
+
+    Matches against `masked` (consistent with every other matcher, and so a
+    quoted literal at the start of a statement is never mistaken for a
+    label), then slices the same offset out of both `stmt` and `masked` --
+    masking preserves length, so the two stay aligned and `orig()` keeps
+    working on whatever calls this returns. Returns None if the line has no
+    such prefix. Callers must only use this as a fallback after the normal
+    matcher cascade has already had its unstripped chance -- see extract()'s
+    comment at the call site for why.
+    """
+    m = RE_GENERIC_LABEL.match(masked)
+    if not m:
+        return None
+    label_end = m.start("rest")
+    return m.group("label").upper(), stmt[label_end:], masked[label_end:]
+
+
 # ------------------------------------------------------------------- patterns
 
 RE_DEFINE_DATA = re.compile(r"^\s*DEFINE\s+DATA\b(.*)$", re.I)
@@ -414,15 +443,46 @@ def extract(conn, member_id: int, lines: list[tuple[int, str | None, str]], memb
             matched = _match_arithmetic(conn, member_id, line_no, stmt, masked, depth)
 
         if not matched:
-            if RE_COMPUTE.match(masked) or RE_END_ANY.match(masked) \
-               or RE_RESET.match(masked) or RE_IGNORE.match(masked):
-                matched = True
-            else:
-                stats["unparsed"] += 1
-                if len(masked.strip()) > 3:
-                    add_gap(conn, "unparsed_line",
-                            f"Statement not recognised by the Natural scanner in {member_name}.",
-                            member_id=member_id, line_no=line_no, severity="low", raw=stmt.strip()[:400])
+            matched = RE_COMPUTE.match(masked) or RE_END_ANY.match(masked) \
+                or RE_RESET.match(masked) or RE_IGNORE.match(masked)
+
+        # ---------------------------------------------- labelled statements
+        # Last resort: a generic statement label ("SETA. SETTIME") defeats
+        # every verb pattern above, since they all anchor on ^\s* and none
+        # (other than RE_READ/RE_FIND/RE_HISTOGRAM's own inline R#/F#/H#
+        # groups, a different, narrower thing -- see label_to_view) expect
+        # a label prefix. Only tried after every matcher above has already
+        # had its unstripped chance, so it can never pre-empt one of those
+        # more specific matches -- most importantly the R#/F#/H# loop-label
+        # capture in _match_data_access, which this must not disturb.
+        # Whatever inserted row ends up carrying a `raw`/`condition` excerpt
+        # for the stripped-and-rematched statement won't include the label
+        # text in that excerpt, but the label is not lost: source_line
+        # (inserted above, unconditionally) still holds the full original
+        # line verbatim, which is what the citation actually anchors to.
+        if not matched and (stripped := strip_generic_label(stmt, masked)):
+            _label, stmt2, masked2 = stripped
+            matched = (
+                _match_data_access(conn, member_id, line_no, stmt2, masked2, view_to_ddm, label_to_view)
+                or _match_calls(conn, member_id, line_no, stmt2, masked2, internal_subroutines, member_id)
+                or _match_interaction(conn, member_id, line_no, stmt2, masked2)
+                or (is_map and _match_map_body(conn, member_id, line_no, stmt2, masked2))
+            )
+            if not matched:
+                matched, depth, open_blocks = _match_rules(
+                    conn, member_id, line_no, stmt2, masked2, depth, open_blocks)
+            if not matched:
+                matched = _match_arithmetic(conn, member_id, line_no, stmt2, masked2, depth)
+            if not matched:
+                matched = RE_COMPUTE.match(masked2) or RE_END_ANY.match(masked2) \
+                    or RE_RESET.match(masked2) or RE_IGNORE.match(masked2)
+
+        if not matched:
+            stats["unparsed"] += 1
+            if len(masked.strip()) > 3:
+                add_gap(conn, "unparsed_line",
+                        f"Statement not recognised by the Natural scanner in {member_name}.",
+                        member_id=member_id, line_no=line_no, severity="low", raw=stmt.strip()[:400])
 
         idx += 1
 
