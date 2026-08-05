@@ -222,6 +222,12 @@ enough not to warrant a config knob yet.
 in the wrong code page corrupts only the accented and special characters, which is
 subtle — check `£`, `@`, `#` and `!` if something looks off, since these move
 between EBCDIC code pages and `#` is a legal character in Natural variable names.
+`tests/test_ebcdic_fixtures.py` (fixtures under
+`examples/fixtures/natural/encoding/`) confirms this concretely: content
+without one of those differentiating characters auto-detects as cp037 even
+when it's actually cp500, since cp037 is tried first and also decodes it
+plausibly — pin `encoding:` explicitly rather than trusting auto-detection
+whenever you know which code page an export actually used.
 
 **System variables look like comments.** `*ERROR-NR`, `*DATX`, `*USER`, `*PROGRAM`
 begin with `*`, and so do comment lines. The scanner treats `*` as a comment only
