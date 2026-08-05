@@ -1,0 +1,12 @@
+** MMP9100 - TRANSITIVE COPYCODE REGRESSION FIXTURE
+** Includes MMC0100, which contains a real business rule ('X9' grade check).
+** Issue 4.2: that rule must surface when briefing MMP9100, not only when
+** briefing MMC0100 directly -- otherwise a reader of MMP9100 never sees a
+** validation rule the module actually depends on.
+DEFINE DATA LOCAL
+1 #GRADE-CODE (A6)
+1 #VALIDATION-RC (N2)
+END-DEFINE
+*
+INCLUDE MMC0100
+END
