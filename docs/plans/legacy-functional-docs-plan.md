@@ -37,7 +37,14 @@ GitHub org.
   apply — we document, we don't translate, and we have one model path. Two
   new low-effort items added (4.8 stable rule IDs, 4.9 glossary support);
   cross-reference notes added to 4.2, 4.5 and the Phase 6 incremental-ingest
-  item.
+  item. Also opened 3.x (Vertex AI support, #12) after a client asked about
+  GCP-only model routing.
+- 2026-08-05: working through the open backlog in priority order. Done:
+  4.5 (continuation folding, #4) — `CONTINUATION_TAIL` only continued when
+  the *current* line ended in a connective; real Natural just as often
+  wraps *before* the connective, silently truncating the statement while
+  the citation still looked complete. Fixed with a `CONTINUATION_LEAD`
+  peek at the next line.
 
 ## Purpose of this document
 
