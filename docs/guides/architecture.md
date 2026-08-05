@@ -55,6 +55,17 @@ Reads whatever files `project.yml` points at, per source set:
   `mantis`, `adabas_fdt`, `ddm`, `supra_dir`, `sql_ddl`, `cobol_copybook`,
   `jcl`, `cics_csd`.
 
+Ingest is incremental: a file whose `sha256` matches the `source_file` row
+from the last run is skipped outright, and everything it owns (members,
+derived facts) is left exactly as it was. A changed file's members are
+purged and re-extracted (`db.purge_member_facts`, keeping the member's `id`
+stable if its identity — name/library/dialect — is unchanged) rather than
+appended alongside the stale rows; a member a changed file no longer
+produces at all is purged outright (`db.purge_member`). This is what makes
+running `mfdoc ingest` a second time against a large, mostly-unchanged
+codebase cheap, and it's what `mfdoc derive` also has to be idempotent
+against — see its own note below.
+
 Every ingested line is recorded verbatim in `source_line`, keyed by member
 and a 1-based `line_no` — this is the addressing scheme every citation in
 every generated document ultimately points back to. Ambiguous or
@@ -107,6 +118,12 @@ Joins raw facts into structures no single scanner pass can produce alone:
   severity) that `mfdoc gate` checks against `options.quality_gates`.
 
 Everything here is still deterministic and still free of model calls.
+`run_all` is idempotent — it purges its own previously-derived gap rows
+(`DERIVED_GAP_KINDS`: `orphan_module`, `unresolved_call`, `no_ddl_for_entity`,
+`ambiguous_adabas_file`, `sme_question`) before re-deriving, so running
+`mfdoc derive` twice against an unchanged index — a normal thing to do now
+that `mfdoc ingest` can legitimately no-op — reproduces the same `coverage()`
+output rather than doubling every gap.
 
 ### Quality gate (`mfdoc gate`, `GATES` in `cli.py`)
 

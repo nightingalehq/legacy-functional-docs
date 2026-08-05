@@ -358,6 +358,62 @@ def add_gap(conn, gap_kind, detail, member_id=None, line_no=None, severity="medi
     )
 
 
+# Every table a dialect extractor (src/mfdoc/dialects/*.py) writes into for a
+# given member_id, keyed NOT NULL member_id -- these are wholly owned by the
+# member and deleted outright on re-ingest. Kept as one list so a new dialect
+# fact table only needs adding here, not re-derived by hand at every call
+# site that needs to purge stale facts before re-extracting a changed file.
+_MEMBER_OWNED_TABLES = (
+    "source_line", "variable", "data_access", "transaction_marker",
+    "interaction", "rule_candidate", "message_ref", "job_step", "job_dd",
+    "cics_resource",
+)
+
+
+def purge_member_facts(conn, member_id: int) -> None:
+    """Delete everything a member owns, without deleting the member row itself.
+
+    Re-running extraction for a member without this first would leave every
+    prior run's rows sitting alongside the new ones -- upsert_member reuses
+    the same member_id across runs (matched by name/library/dialect), but
+    the dialect extractors it feeds into only ever INSERT. Use this (not
+    purge_member) when the member row is being kept and re-extracted into,
+    e.g. cmd_ingest's per-chunk loop -- deleting the row here would just
+    force upsert_member to immediately recreate an identical one, and would
+    incorrectly null out cross-references from *other* members that are
+    still valid because this member still exists.
+    """
+    for table in _MEMBER_OWNED_TABLES:
+        conn.execute(f"DELETE FROM {table} WHERE member_id=?", (member_id,))
+    conn.execute("DELETE FROM gap WHERE member_id=?", (member_id,))
+    conn.execute("DELETE FROM call_edge WHERE caller_id=?", (member_id,))
+
+
+def purge_member(conn, member_id: int) -> None:
+    """Delete a member outright, along with everything it owns.
+
+    Beyond purge_member_facts, this also clears the nullable cross-references
+    *other* rows hold into this member -- call_edge.callee_id (another
+    member's call landing here), entity.defined_in, entity_link.via_member --
+    rather than deleting those rows, since the fact they describe (the call
+    was made; the entity exists) is still true even though this member is
+    gone. The next `mfdoc derive` re-resolves them against whatever the
+    fresh ingest wrote. Used when a member has genuinely stopped existing --
+    a changed file no longer produces it (a concatenated member removed
+    from the file, a banner pattern that no longer matches), or its
+    source_file was removed from the source set entirely -- not for
+    re-extracting an existing member in place; see purge_member_facts for
+    that.
+    """
+    purge_member_facts(conn, member_id)
+    conn.execute(
+        "UPDATE call_edge SET callee_id=NULL, resolved=0 WHERE callee_id=?", (member_id,)
+    )
+    conn.execute("UPDATE entity SET defined_in=NULL WHERE defined_in=?", (member_id,))
+    conn.execute("UPDATE entity_link SET via_member=NULL WHERE via_member=?", (member_id,))
+    conn.execute("DELETE FROM member WHERE id=?", (member_id,))
+
+
 def set_metric(conn, scope, name, value):
     conn.execute("DELETE FROM metric WHERE scope=? AND name=?", (scope, name))
     insert(conn, "metric", scope=scope, name=name, value=json.dumps(value) if isinstance(value, (dict, list)) else str(value))
