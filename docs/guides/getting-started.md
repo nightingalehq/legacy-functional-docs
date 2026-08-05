@@ -71,7 +71,75 @@ You do **not** need an Anthropic/Claude API key or account to run the core
 pipeline. That's only needed for the optional `mfdoc batch` command, covered
 below.
 
+## Getting the code onto your machine
+
+This project lives on GitHub, a website that hosts code. "Git" is the
+version-control tool GitHub is built on; you don't need to understand either
+in depth — you just need the files sitting in a folder on your machine. Two
+ways to get there:
+
+**Option A — download a ZIP (simplest, no extra software).** On the GitHub
+page for this repository, click the green **Code** button, then **Download
+ZIP**. Unzip it wherever you keep projects (e.g. your Documents folder or
+home directory). This gives you a snapshot — fine if you're just going to
+run the tool and won't be pulling in later updates yourself.
+
+**Option B — `git clone` (better if you'll update it later).** This needs
+Git installed:
+
+- Check with `git --version` in a terminal. If it's not recognised, install
+  it from [git-scm.com](https://git-scm.com/downloads) (Windows/Mac) or via
+  your package manager (Linux, e.g. `sudo apt install git`).
+- Then, in a terminal, navigate to where you want the folder to end up (e.g.
+  `cd ~/Documents`) and run:
+
+  ```bash
+  git clone <repository-url>
+  ```
+
+  replacing `<repository-url>` with the URL from the same green **Code**
+  button on GitHub (use the HTTPS one unless you already have SSH keys set
+  up — if that sentence means nothing to you, use HTTPS). This downloads the
+  files into a new `legacy-functional-docs` folder, and later, `git pull`
+  from inside that folder fetches any updates.
+
+Either way, you should end up with a folder containing `SKILL.md`,
+`pyproject.toml`, and the other files listed under "Layout" in the
+[README](../../README.md). Everything from here on assumes your terminal is
+open *inside* that folder — `cd` into it if it isn't
+(`cd legacy-functional-docs` or `cd path/to/wherever/you/put/it`).
+
 ## Installing it
+
+### (Optional but recommended) set up a virtual environment first
+
+A "virtual environment" is a self-contained pocket of Python packages for
+one project, so what you install here can't clash with anything else on your
+machine (or vice versa) — like a project having its own toolbox rather than
+sharing the house one. Skipping this step won't stop the tool from working;
+it just means the packages install machine-wide instead.
+
+From inside the project folder:
+
+```bash
+python3 -m venv .venv
+```
+
+This creates a `.venv` folder holding the isolated environment (one-time
+step). Then activate it — you'll need to do this once per new terminal
+session, not just once ever:
+
+- **Mac/Linux:** `source .venv/bin/activate`
+- **Windows (PowerShell):** `.venv\Scripts\Activate.ps1`
+- **Windows (Command Prompt):** `.venv\Scripts\activate.bat`
+
+Your terminal prompt should now show `(.venv)` at the start of the line —
+that's confirmation it's active. Everything installed below (`pip install
+-e .`, etc.) now goes into this pocket rather than system-wide. To leave it
+later, run `deactivate`; to come back, `cd` into the project folder and
+activate it again.
+
+### Install the tool
 
 Open a terminal, navigate into this folder (`cd` followed by the path — e.g.
 `cd ~/legacy-functional-docs`), and run:

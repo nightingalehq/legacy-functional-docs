@@ -45,7 +45,13 @@ resolve.
 
 ## Installing as a Claude Code skill
 
-Clone or copy this repository's contents into a `legacy-functional-docs/`
+**New to git, GitHub, or the command line?** See
+[`docs/guides/getting-started.md`](docs/guides/getting-started.md) first —
+it covers downloading this repository onto your machine (with or without
+git) and setting up a Python virtual environment, step by step. The summary
+below assumes you've already got the files locally.
+
+Copy or clone this repository's contents into a `legacy-functional-docs/`
 directory under your Claude Code skills path (e.g. `~/.claude/skills/` for a
 personal install, or `.claude/skills/` at the root of a project for a
 project-scoped one). Claude Code discovers the skill from its `SKILL.md`
@@ -57,6 +63,9 @@ console script on `PATH` — see Requirements below.
 ## Quick start
 
 ```bash
+# optional: isolate dependencies in a virtual environment first
+# python3 -m venv .venv && source .venv/bin/activate   (Windows: .venv\Scripts\Activate.ps1)
+
 pip install -e .
 
 cp config/project.example.yml project.yml
