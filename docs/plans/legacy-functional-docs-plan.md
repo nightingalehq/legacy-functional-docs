@@ -186,6 +186,19 @@ Depends on the A/B/C decision above. Assuming C:
   interrupted.
 - Keep system overview, process flows and gap register in the CLI path.
 
+### 3.x Multi-provider `ModelCaller` (Vertex AI support)
+
+`batch.py` already talks to models only through the `ModelCaller` contract
+(`str -> ModelResponse`), with all Anthropic-specific code isolated in
+`anthropic_caller.py`. Adding Vertex AI is a new caller module, not a change
+to `batch.py`/`brief.py`/`validate.py`. Two distinct asks: (1) Claude models
+routed through Vertex — likely a data-residency/procurement ask, low risk,
+same model family our prompts are built against; (2) Google's own Gemini
+models via Vertex — a different model family that our writing-rules
+citation discipline has never been exercised against, and needs eval
+coverage (5.1) against it specifically before it's trusted client-facing.
+Tracked as issue #12.
+
 **Acceptance:** 9 fixtures produce 9 valid documents unattended, with a cost figure
 and a retry count reported.
 
@@ -283,33 +296,37 @@ Flagging these because they need answering once, up front, not per project:
 
 ## Suggested issue breakdown
 
-| Issue | Phase | Blocks | Rough size |
-|---|---|---|---|
-| Add pytest suite covering the twelve known defect classes | 1.1 | everything | 1–2 days |
-| pyproject.toml + console script | 1.2 | CI | half day |
-| GitHub Actions: pytest + pipeline + validate | 1.3 | — | half day |
-| Decide licensing and repo posture | 1.4 | client work | discussion |
-| `mfdoc gate` command | 2.1 | CI gating | half day |
-| `mfdoc calibrate` command | 2.2 | Mantis/Supra engagements | 1 day |
-| Implement redaction | 2.3 | any real client source | 1 day |
-| Decide narrative orchestration (A/B/C) | 3 | Phase 3 | discussion |
-| Batch narrative harness | 3 | scale | 2–3 days |
-| Extract arithmetic as rule candidates | 4.1 | — | half day |
-| Transitive copycode in briefs | 4.2 | — | half day |
-| Loop-label resolution | 4.3 | — | 1 day |
-| Natural map parser | 4.4 | — | 1–2 days |
-| Continuation folding rework | 4.5 | — | 1–2 days |
-| Reporting-mode inference | 4.6 | — | 2–3 days |
-| Adabas coupling | 4.7 | — | half day |
-| Stable rule IDs in generated docs | 4.8 | — | half day |
-| Glossary support | 4.9 | — | half day |
-| Run eval prompts, record results | 5.1 | confidence in workflow | 1 day |
-| Citation-accuracy sampling | 5.2 | client assurance claims | 2 days |
-| Indexes + incremental ingest + scale fixture | 6 | large engagements | 2 days |
+| Issue | Phase | Blocks | Rough size | GitHub issue |
+|---|---|---|---|---|
+| Add pytest suite covering the twelve known defect classes | 1.1 | everything | 1–2 days | done, predates issue tracker |
+| pyproject.toml + console script | 1.2 | CI | half day | done, predates issue tracker |
+| GitHub Actions: pytest + pipeline + validate | 1.3 | — | half day | done, predates issue tracker |
+| Decide licensing and repo posture | 1.4 | client work | discussion | done, predates issue tracker |
+| `mfdoc gate` command | 2.1 | CI gating | half day | done, predates issue tracker |
+| `mfdoc calibrate` command | 2.2 | Mantis/Supra engagements | 1 day | done, predates issue tracker |
+| Implement redaction | 2.3 | any real client source | 1 day | done, predates issue tracker |
+| Decide narrative orchestration (A/B/C) | 3 | Phase 3 | discussion | done, predates issue tracker |
+| Batch narrative harness | 3 | scale | 2–3 days | done, predates issue tracker |
+| Multi-provider `ModelCaller` (Vertex AI support) | 3.x | GCP-only client environments | 1–2 days | [#12](https://github.com/nightingalehq/legacy-functional-docs/issues/12) |
+| Extract arithmetic as rule candidates | 4.1 | — | half day | done, predates issue tracker |
+| Transitive copycode in briefs | 4.2 | — | half day | [#1](https://github.com/nightingalehq/legacy-functional-docs/issues/1) |
+| Loop-label resolution | 4.3 | — | 1 day | [#2](https://github.com/nightingalehq/legacy-functional-docs/issues/2) |
+| Natural map parser | 4.4 | — | 1–2 days | [#3](https://github.com/nightingalehq/legacy-functional-docs/issues/3) |
+| Continuation folding rework | 4.5 | — | 1–2 days | [#4](https://github.com/nightingalehq/legacy-functional-docs/issues/4) |
+| Reporting-mode inference | 4.6 | — | 2–3 days | [#5](https://github.com/nightingalehq/legacy-functional-docs/issues/5) |
+| Adabas coupling | 4.7 | — | half day | [#6](https://github.com/nightingalehq/legacy-functional-docs/issues/6) |
+| Stable rule IDs in generated docs | 4.8 | — | half day | [#10](https://github.com/nightingalehq/legacy-functional-docs/issues/10) |
+| Glossary support | 4.9 | — | half day | [#11](https://github.com/nightingalehq/legacy-functional-docs/issues/11) |
+| Run eval prompts, record results | 5.1 | confidence in workflow | 1 day | [#7](https://github.com/nightingalehq/legacy-functional-docs/issues/7) |
+| Citation-accuracy sampling | 5.2 | client assurance claims | 2 days | [#8](https://github.com/nightingalehq/legacy-functional-docs/issues/8) |
+| Indexes + incremental ingest + scale fixture | 6 | large engagements | 2 days | [#9](https://github.com/nightingalehq/legacy-functional-docs/issues/9) |
 
 Critical path to "safe to point at a client codebase": **1.1 → 1.2 → 1.3 → 2.3**,
 plus the licensing and orchestration decisions. Everything else is improvement rather
 than risk reduction.
+
+All open items (issues #1–#12) are also tracked on the [legacy-functional-docs
+GitHub Project board](https://github.com/orgs/nightingalehq/projects/1).
 
 ---
 
