@@ -45,6 +45,14 @@ fixture was built to test, just a true side effect of not adding one) and
 +2 gaps_total (that plus the DELETE (X9.) dynamic_target gap, which is the
 point of the fixture); +1 orphan_module (uncalled by design, as usual for
 these regression-only fixtures).
+
+2026-08-05: numbers moved again when MMM9000.nsm was added (issue 4.4
+Natural map parser). Maps are excluded from the orphan check by design
+(object_type='map' is in orphans()'s exclusion list already), so no new
+orphan_module gap; +1 member/code_member, +1 gaps_total (the
+map_body_unverified gap this fixture is meant to raise -- map body
+recognition is unverified against a real client export, flagged
+accordingly on every map member).
 """
 
 from __future__ import annotations
@@ -52,11 +60,11 @@ from __future__ import annotations
 from mfdoc import graph
 
 EXPECTED_COVERAGE = {
-    "members": 15,
-    "code_members": 7,
-    "source_lines": 317,
+    "members": 16,
+    "code_members": 8,
+    "source_lines": 332,
     "unparsed_lines": 1,
-    "line_recognition_rate": 0.9968,
+    "line_recognition_rate": 0.997,
     "entities": 13,
     "entities_with_definition": 9,
     "entity_definition_rate": 0.6923,
@@ -71,7 +79,7 @@ EXPECTED_COVERAGE = {
     "includes_resolved": 1,
     "include_resolution_rate": 0.1429,
     "gaps_high": 18,
-    "gaps_total": 26,
+    "gaps_total": 27,
 }
 
 

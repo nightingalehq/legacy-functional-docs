@@ -24,7 +24,7 @@ docs_root: docs/functional
 #
 sources:
   - path: examples/fixtures/natural
-    glob: ["*.nsp", "*.nsn", "*.nss", "*.nsc", "*.txt", "*.lst"]
+    glob: ["*.nsp", "*.nsn", "*.nss", "*.nsc", "*.nsm", "*.txt", "*.lst"]
     dialect: natural
     library: MILLPROD
     system: MOM

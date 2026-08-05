@@ -28,7 +28,7 @@ docs_root: docs/functional
 #
 sources:
   - path: source/natural
-    glob: ["*.nsp", "*.nsn", "*.nss", "*.nsc", "*.txt", "*.lst"]
+    glob: ["*.nsp", "*.nsn", "*.nss", "*.nsc", "*.nsm", "*.txt", "*.lst"]
     dialect: natural
     library: <NATURAL LIBRARY>
     system: <SYSTEM CODE>

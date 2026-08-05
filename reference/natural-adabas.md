@@ -22,7 +22,7 @@ Reference for the `natural`, `ddm` and `adabas_fdt` dialects.
 | Subroutine | `.nss` | `PERFORM` | external subroutine |
 | Copycode | `.nsc` | `INCLUDE` | textual inclusion at compile time |
 | Helproutine | `.nsh` | help key on a map field | |
-| Map | `.nsm` | `INPUT USING MAP` | screen layout |
+| Map | `.nsm` | `INPUT USING MAP` | screen layout; field/text extraction is best-effort and unverified against a real client export -- see `map_body_unverified` gap |
 | LDA / GDA / PDA | `.nsl` `.nsg` `.nsa` | `DEFINE DATA ... USING` | data areas |
 | DDM | `.nsd` | `VIEW OF` | logical file definition |
 
@@ -106,6 +106,17 @@ logic in the system.
 **User interaction.** `INPUT`, `INPUT USING MAP`, `REINPUT` (redisplay with an
 error message — the message text is user-visible business validation and worth
 extracting), `WRITE`, `DISPLAY`, `PRINT`.
+
+**Map body (`.nsm`).** After the map's own `DEFINE DATA`/`END-DEFINE` (parsed the
+same as any other member), the body is a sequence of tagged lines: a level, a `T`
+(constant/text, e.g. a screen label) or `F` (field, a variable reference) tag, the
+content, optional parenthesised attributes (edit mask, colour/intensity, etc.),
+and a row/column position. This is the documented Natural map-source convention —
+**no shipped fixture or public sample was available to verify it against a real
+client export**, unlike the FDT/DDM formats. Every map member raises a
+`map_body_unverified` gap for exactly this reason; treat extracted field names,
+prompt text and edit masks as needing SME/screen confirmation, not as settled
+fact, until calibrated against a real export.
 
 ## DDM versus FDT — the distinction that matters most
 
