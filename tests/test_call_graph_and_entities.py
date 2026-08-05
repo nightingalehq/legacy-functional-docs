@@ -15,8 +15,12 @@ def test_ordline_resolves_to_exactly_one_entity(indexed_db):
 def test_mill_order_adabas_file_is_merged_not_duplicated(indexed_db, derive_result):
     """The DDM names MILL-ORDER's physical file only by DBID/FNR (FILE-045);
     the FDT names it properly. Left unreconciled, the data model shows two
-    stores where there is one -- a phantom entity."""
-    assert derive_result["adabas_entities_merged"] == 1
+    stores where there is one -- a phantom entity.
+
+    2026-08-05: TEST-COUPLE.ddm/.fdt (issue 4.7's coupling fixture) is the
+    same shape -- DDM-only FNR 090, reconciled against its own FDT -- so
+    this now merges two pairs, not one."""
+    assert derive_result["adabas_entities_merged"] == 2
     conn = indexed_db
     placeholder = conn.execute(
         "SELECT 1 FROM entity WHERE kind='adabas_file' AND name LIKE 'FILE-%'"

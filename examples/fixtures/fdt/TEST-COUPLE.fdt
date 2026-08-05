@@ -1,0 +1,9 @@
+ADAREP  UTILITY REPORT                        DATABASE 012
+FILE NUMBER: 090   FILE NAME: TEST-COUPLE
+
+Field Definition Table:
+ Level I Name I Length I Format I Options
+-------I------I--------I--------I-------------------
+   1   I  AA  I   10   I   A    I  DE,UQ
+   1   I  AB  I    8   I   A    I  DE,NU
+   1   I  AC  I    8   I   A    I  NU
