@@ -73,6 +73,25 @@ GitHub org.
   `module_brief`/`entity_brief`, filtered to terms that actually appear in
   that member's own facts (not the whole glossary dumped in regardless of
   relevance). No new `reference/glossary.yml` file format was needed.
+- 2026-08-05: corrected a claim from the #7/#13 work above — the user
+  pointed at `SoftwareAG/adabas-natural-code-samples`, a real, official,
+  public Natural/Adabas corpus, disproving "no public corpus exists for
+  Natural/Mantis/Adabas/Supra" for the Natural/Adabas half of that claim
+  (Mantis/Supra still has none found). #13 narrowed back to the COBOL
+  course repo's JCL/SQL-DDL content it was actually about; opened #19 for
+  the Natural-specific findings. Smoke-tested the scanner against all 227
+  real samples from that repo (not committed — exploratory, scratch-dir
+  only): no crashes, but `line_recognition_rate` dropped to 0.68 (vs. 0.99
+  on our own fixtures), which is real signal our synthetic fixtures don't
+  give. `mfdoc calibrate` ranked the gaps; fixed the two cheapest,
+  highest-confidence ones from that ranking (4.11, #19 partial) —
+  `RESET` and `IGNORE` are real Natural statements with no scanner support
+  at all. `RESET #RETURN-CODE` turns out to have been the one pre-existing
+  unparsed_line gap in our own MMP0100.nsp fixture since before any of
+  today's other fixes, just never named. The rest of #19 (report-writer
+  column-position continuations, labelled statements, sequence-number
+  stripping) needs proper fixture design, not a one-line regex, and stays
+  open.
 
 ## Purpose of this document
 
@@ -354,6 +373,7 @@ Flagging these because they need answering once, up front, not per project:
 | Stable rule IDs in generated docs | 4.8 | — | half day | [#10](https://github.com/nightingalehq/legacy-functional-docs/issues/10) |
 | Glossary support | 4.9 | — | half day | [#11](https://github.com/nightingalehq/legacy-functional-docs/issues/11) |
 | System-wide rules register | 4.10 | — | 1 day | [#16](https://github.com/nightingalehq/legacy-functional-docs/issues/16) |
+| Real Natural gaps vs. SoftwareAG/adabas-natural-code-samples — RESET/IGNORE done, rest open | 4.11 | — | low (done part); medium (rest) | [#19](https://github.com/nightingalehq/legacy-functional-docs/issues/19) |
 | Run eval prompts, record results | 5.1 | confidence in workflow | 1 day | [#7](https://github.com/nightingalehq/legacy-functional-docs/issues/7) |
 | Citation-accuracy sampling | 5.2 | client assurance claims | 2 days | [#8](https://github.com/nightingalehq/legacy-functional-docs/issues/8) |
 | Fetch-on-demand JCL/SQL-DDL fixtures | 5.3 | — | half–1 day | [#13](https://github.com/nightingalehq/legacy-functional-docs/issues/13) |
