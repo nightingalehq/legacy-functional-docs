@@ -1,0 +1,16 @@
+** MMP9500 - REPORT-WRITER COLUMN-SPEC CONTINUATION FIXTURE (ISSUE #24)
+** 5T/30T (Natural's "tab to column n") appear on their own continuation
+** lines within this WRITE statement's operand list. CONTINUATION_LEAD_COLSPEC
+** must fold them into the WRITE so its interaction row carries the whole
+** operand list, not just "'CERTIFICATE REPORT'". Per the same accepted
+** behaviour as the 4.5/MMP9000 fixture, each folded continuation line is
+** still independently visited by the main loop and (correctly) doesn't
+** stand alone as its own statement -- see test_coverage_snapshot.py's note.
+DEFINE DATA LOCAL
+1 #HEAT-NO (A8)
+1 #CAST-DATE (D)
+END-DEFINE
+WRITE 'CERTIFICATE REPORT'
+  5T 'HEAT NO:' #HEAT-NO
+  30T 'DATE:' #CAST-DATE
+END
