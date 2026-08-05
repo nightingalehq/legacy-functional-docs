@@ -31,6 +31,13 @@ GitHub org.
 - GitHub issue creation from the "Suggested issue breakdown" table hasn't
   run — there's no GitHub remote for this repo yet. Do that once it's
   pushed to the nightingalehq org.
+- 2026-08-05: reviewed Azure-Samples/Legacy-Modernization-Agents (a
+  COBOL-reverse-engineer-then-convert tool) for applicable concepts. Its
+  conversion/translation machinery and multi-provider LLM abstraction don't
+  apply — we document, we don't translate, and we have one model path. Two
+  new low-effort items added (4.8 stable rule IDs, 4.9 glossary support);
+  cross-reference notes added to 4.2, 4.5 and the Phase 6 incremental-ingest
+  item.
 
 ## Purpose of this document
 
@@ -191,12 +198,14 @@ Ordered by documentation value per unit of effort, with my honest read of each.
 | # | Item | Why it matters | Effort |
 |---|---|---|---|
 | 4.1 | **Extract `COMPUTE` / `MOVE` / `EXAMINE` as rule candidates** | Currently matched and discarded. Pricing, tolerance and unit-conversion arithmetic *is* business logic — arguably the most sought-after kind in a metals context, where yield and weight conversions carry real money | low |
-| 4.2 | **Transitive copycode in briefs** | Rules inside copycode are attributed to the copycode. A reader of the including module never sees them, so a module document can be complete and still miss its own validation rules | low |
+| 4.2 | **Transitive copycode in briefs** | Rules inside copycode are attributed to the copycode. A reader of the including module never sees them, so a module document can be complete and still miss its own validation rules. *Cf. Azure-Samples/Legacy-Modernization-Agents' signature-registry pattern for cross-chunk consistency — same class of boundary problem, worth reviewing as an implementation reference* | low |
 | 4.3 | **Loop-label resolution for `UPDATE (label)` / `DELETE (label)`** | Currently flagged `unresolved`. Track labelled loops and their views; converts a recurring gap into a fact | medium |
 | 4.4 | **Natural map (`.nsm`) parser** | No dialect exists. Field-level validation, prompts and edit masks live in maps, and they are user-visible business rules | medium |
-| 4.5 | **Better continuation folding** | `CONTINUATION_TAIL` is a heuristic on trailing tokens. Real Natural wraps without them, so long `FIND ... WITH` clauses can be truncated mid-condition — a silent partial rule, the worst failure mode | medium |
+| 4.5 | **Better continuation folding** | `CONTINUATION_TAIL` is a heuristic on trailing tokens. Real Natural wraps without them, so long `FIND ... WITH` clauses can be truncated mid-condition — a silent partial rule, the worst failure mode. *Cf. Azure-Samples/Legacy-Modernization-Agents' signature-registry pattern for cross-chunk consistency — same class of boundary problem, worth reviewing as an implementation reference* | medium |
 | 4.6 | **Reporting-mode block inference** | Currently flagged and abandoned. Indentation plus `LOOP` gives a usable guess, marked `inferred`. Reporting-mode members are the oldest and most business-critical code, so leaving them unstructured concedes the most valuable ground | high |
 | 4.7 | **Adabas coupling** | `entity_link` supports `coupled` but nothing emits it. Physical relationships between Adabas files are currently invisible | low |
+| 4.8 | **Stable rule IDs in generated docs** | Citations (`[[MEMBER:LINE]]`) are precise but not a stable handle for referencing a rule across doc revisions or in a gap-register conversation with an SME. Assign a stable ID (e.g. `BR-001`) alongside each citation in `templates/module.md` — a writing-rules/template change, not an extraction change. *Idea from reviewing Azure-Samples/Legacy-Modernization-Agents, which does this* | low |
+| 4.9 | **Glossary support** | We cite raw field names verbatim (`WS-CUST-BAL`); a human-curated `reference/glossary.yml` mapping field names to business terms, consumed at brief-generation time, would raise readability without inventing facts — the mapping is human-supplied, not model-guessed, so it doesn't touch citation discipline. *Idea from reviewing Azure-Samples/Legacy-Modernization-Agents' `Data/glossary.json`* | low |
 
 Deliberately *not* on this list: IDMS, IMS, ADSO, RPG. `reference/adding-a-dialect.md`
 documents the contract; build them when a client actually has one, because speculative
@@ -235,7 +244,11 @@ Not urgent, and cheap to do wrong later, so worth noting now.
   `UPPER(callee_name)`. Fine at 9 members, quadratic-ish at 5,000. Add expression
   indexes and re-measure on a synthetic large codebase.
 - **Incremental ingest.** Currently a full rebuild. `source_file.sha256` is already
-  recorded, so skipping unchanged files is straightforward.
+  recorded, so skipping unchanged files is straightforward. Extend the same idea to
+  skip regenerating unchanged *briefs*, not only unchanged ingest rows — a cheap
+  extension once the file-level check exists (cf. Azure-Samples/
+  Legacy-Modernization-Agents' `--reuse-re` flag, which persists and reuses prior
+  analysis rather than recomputing it).
 - **Encoding sniffing.** Heuristic and untested against real EBCDIC with mixed
   content. Worth a fixture set in cp037 and cp500 once you have real samples; until
   then, tell users to pin `encoding:`.
@@ -287,6 +300,9 @@ Flagging these because they need answering once, up front, not per project:
 | Natural map parser | 4.4 | — | 1–2 days |
 | Continuation folding rework | 4.5 | — | 1–2 days |
 | Reporting-mode inference | 4.6 | — | 2–3 days |
+| Adabas coupling | 4.7 | — | half day |
+| Stable rule IDs in generated docs | 4.8 | — | half day |
+| Glossary support | 4.9 | — | half day |
 | Run eval prompts, record results | 5.1 | confidence in workflow | 1 day |
 | Citation-accuracy sampling | 5.2 | client assurance claims | 2 days |
 | Indexes + incremental ingest + scale fixture | 6 | large engagements | 2 days |
