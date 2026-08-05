@@ -39,8 +39,17 @@ for a specific engagement.
    - Writing the document yourself, or via a Claude Code chat session,
      from the brief. Whatever's in the brief reaches whatever model backs
      that session.
-   - `mfdoc batch`, which sends the brief to the Claude API directly over
-     HTTPS, via the official `anthropic` Python SDK.
+   - `mfdoc batch --provider anthropic` (the default), which sends the brief
+     to the Claude API directly over HTTPS, via the official `anthropic`
+     Python SDK.
+   - `mfdoc batch --provider vertex`, which sends the same brief to the same
+     Claude model, but routed through Google Cloud Vertex AI instead — a
+     different egress path (your GCP project, not Anthropic's endpoint
+     directly), which changes whose infrastructure the brief transits and
+     which data-processing terms apply. Needs `pip install 'mfdoc[vertex]'`
+     and a GCP project with Vertex's Claude models enabled; credentials come
+     from the ambient environment (Application Default Credentials), never
+     handled by this tool directly.
 5. **Validation.** Reads generated documents and the local database only.
    No network calls.
 
@@ -65,7 +74,10 @@ can reveal infrastructure layout. Decide, per engagement, whether:
   brief works too, briefs are designed to be human-readable);
 - a hosted model is acceptable for this engagement, and if so, which
   provider and which data-handling terms apply (Anthropic's, if using
-  `mfdoc batch` or Claude Code directly against the Claude API).
+  `mfdoc batch --provider anthropic` or Claude Code directly against the
+  Claude API; Google Cloud's, if using `mfdoc batch --provider vertex` — the
+  model is the same Claude model either way, but the egress path and the
+  applicable data-processing agreement are not).
 
 This is a decision to make explicitly, once per engagement, not something
 the tool decides for you. It cannot know your contract terms.
@@ -163,8 +175,12 @@ writing prose in a word processor.
   library. This is deliberate — these commands are meant to run inside
   client environments with restricted or no internet egress, and a smaller
   dependency surface is a smaller thing to have reviewed.
-- **`mfdoc batch` only:** the `anthropic` package, declared as the optional
-  `batch` extra (`pip install 'mfdoc[batch]'`), never installed by default.
+- **`mfdoc batch --provider anthropic` (default) only:** the `anthropic`
+  package, declared as the optional `batch` extra
+  (`pip install 'mfdoc[batch]'`), never installed by default.
+- **`mfdoc batch --provider vertex` only:** the `anthropic` package's Vertex
+  extra (which pulls in `google-auth`), declared as the optional `vertex`
+  extra (`pip install 'mfdoc[vertex]'`), never installed by default.
 - **Dev-only:** `pytest`, declared as the `dev` extra, not installed or
   needed to run the tool itself.
 
@@ -175,9 +191,10 @@ writing prose in a word processor.
   live mainframe.
 - It does not phone home, collect telemetry, or transmit anything to its
   own maintainers. The only outbound network calls anywhere in this
-  codebase are the explicit, user-initiated calls to the Anthropic API in
-  `mfdoc batch` — there is no other network code in the repository to
-  audit for this.
+  codebase are the explicit, user-initiated calls `mfdoc batch` makes to
+  whichever provider `--provider` selects (the Anthropic API directly, or
+  the same Claude models via Google Cloud Vertex AI) — there is no other
+  network code in the repository to audit for this.
 - It does not claim citation *accuracy*, only citation *resolution* —
   `mfdoc validate` proves every citation points at a real line; it does not
   prove that line actually supports the claim next to it. A citation

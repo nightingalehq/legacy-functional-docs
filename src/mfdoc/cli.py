@@ -6,6 +6,7 @@
     mfdoc gate     --config project.yml
     mfdoc calibrate --config project.yml --dialect mantis
     mfdoc brief    --config project.yml [--module NAME | --entity NAME | --system]
+    mfdoc rules-register --config project.yml --out docs/functional/rules-register.md
     mfdoc batch    --config project.yml --out docs/functional/modules
     mfdoc validate --config project.yml --docs docs/functional
     mfdoc export   --config project.yml --json out/index.json
@@ -176,6 +177,20 @@ def cmd_brief(args) -> int:
     return 0
 
 
+def cmd_rules_register(args) -> int:
+    cfg = load_config(args.config)
+    conn = connect(Path(args.config).parent / cfg["index_db"])
+    redact = Redactor.from_options(cfg["options"])
+    out = brief_mod.rules_register(conn, redact=redact)
+    if args.out:
+        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.out).write_text(out, encoding="utf-8")
+        print(f"wrote {args.out}")
+    else:
+        print(out)
+    return 0
+
+
 def cmd_batch(args) -> int:
     """Batch harness for the high-volume, formulaic module docs (option C).
 
@@ -203,6 +218,9 @@ def cmd_batch(args) -> int:
         # For dry runs / CI smoke tests: no network call, no API key needed.
         def caller(prompt: str) -> batch_mod.ModelResponse:
             return batch_mod.ModelResponse(text=prompt, input_tokens=0, output_tokens=0)
+    elif args.provider == "vertex":
+        from .vertex_caller import VertexCaller
+        caller = VertexCaller(model=args.model, project=args.gcp_project, region=args.gcp_region)
     else:
         from .anthropic_caller import AnthropicCaller
         caller = AnthropicCaller(model=args.model)
@@ -413,6 +431,11 @@ def main(argv=None) -> int:
     p.add_argument("--out")
     p.set_defaults(func=cmd_brief)
 
+    p = sub.add_parser("rules-register")
+    p.add_argument("--config", required=True)
+    p.add_argument("--out", help="write to this path instead of stdout")
+    p.set_defaults(func=cmd_rules_register)
+
     p = sub.add_parser("batch")
     p.add_argument("--config", required=True)
     p.add_argument("--out", default="docs/functional/modules")
@@ -424,6 +447,13 @@ def main(argv=None) -> int:
                          "empty string disables resume tracking")
     p.add_argument("--caller", choices=["anthropic", "fake-echo"], default="anthropic",
                     help="fake-echo makes no network call -- for CI/dry-run smoke tests")
+    p.add_argument("--provider", choices=["anthropic", "vertex"], default="anthropic",
+                    help="which egress path serves the model call when --caller=anthropic: "
+                         "the Anthropic API directly, or Claude via Google Cloud Vertex AI "
+                         "(needs `pip install 'mfdoc[vertex]'`)")
+    p.add_argument("--gcp-project", help="Vertex only; default GOOGLE_CLOUD_PROJECT env var")
+    p.add_argument("--gcp-region", help="Vertex only; default ANTHROPIC_VERTEX_REGION env var "
+                                        "or us-east5")
     p.set_defaults(func=cmd_batch)
 
     p = sub.add_parser("validate")

@@ -463,6 +463,59 @@ def system_brief(conn, redact: Redactor = NULL_REDACTOR) -> str:
     return "\n".join(out) + "\n"
 
 
+def rules_register(conn, redact: Redactor = NULL_REDACTOR) -> str:
+    """A flat, system-wide index of every `MEMBER:BR-nnn` rule ID, generated
+    straight from the fact store so it can never drift from what the module
+    docs themselves carry (see #10/4.8 for where the ID scheme comes from).
+
+    Scoped to the same members `mfdoc batch` treats as batchable — this is
+    where `_rule_id`'s numbering lives, so a rule listed here has exactly the
+    ID a direct brief of its own member would show, whether or not anything
+    currently includes that member as copycode.
+
+    Deliberately not run through the narrative pass: there is no judgement
+    call here, only extraction, so a deterministic report (like `mfdoc
+    coverage`) is a better fit than a model-authored doc_type. Regenerating
+    against unchanged source reproduces this string byte-for-byte — no
+    timestamp is embedded, on purpose, since one would defeat that guarantee
+    without adding any real information (the index's own `generated_at` on
+    the `ingest_run` row already records when the source was last read).
+    """
+    from .batch import select_batch_members  # local: avoids a circular import at load time
+
+    out = ["# System-wide rules register", "", (
+        "Every candidate business rule found across the index, keyed by its "
+        "stable `MEMBER:BR-nnn` ID. Look one up here when it's referenced in "
+        "conversation or a review comment without already knowing which "
+        "module doc it lives in. Regenerate with `mfdoc rules-register` "
+        "after any source change; do not hand-edit."
+    ), ""]
+    out.append("| BR-ID | member | line | depth | construct | condition | literals |")
+    out.append("|---|---|---|---|---|---|---|")
+    total = 0
+    members = select_batch_members(conn)
+    for member_name in members:
+        mid_row = conn.execute("SELECT id FROM member WHERE name=?", (member_name,)).fetchone()
+        if mid_row is None:
+            continue
+        rules = conn.execute(
+            "SELECT * FROM rule_candidate WHERE member_id=? ORDER BY line_no", (mid_row["id"],)
+        ).fetchall()
+        for n, r in enumerate(rules, start=1):
+            total += 1
+            cond = redact(r["condition"]) if r["condition"] else ""
+            lits = redact(r["literals"]) if r["literals"] else ""
+            out.append(
+                f"| **{_rule_id(member_name, n)}** | `{member_name}` | "
+                f"{_cite(member_name, r['line_no'])} | {r['depth']} | `{r['construct']}` | "
+                f"`{cond}` | `{lits}` |"
+            )
+    out.append("")
+    out.append(f"Total: {total} rule candidate(s) across {len(members)} batchable module(s).")
+    out.append("")
+    return "\n".join(out) + "\n"
+
+
 def json_index(conn) -> str:
     """Machine-readable dump for downstream tooling."""
     payload = {}

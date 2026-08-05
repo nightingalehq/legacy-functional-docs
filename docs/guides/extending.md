@@ -138,6 +138,30 @@ don't add unbounded retries; a module that fails twice should surface as a
   just that a row was inserted. A row existing with the wrong content is a
   worse failure than a missing row, because it looks like success.
 
+## Supplementary smoke fixtures from public corpora
+
+`examples/fixtures/` is small and golden-tested; it was written to exercise
+specific known defect classes, not to be representative of real source's
+variety. Where a public, appropriately-licensed corpus exists, it's worth
+using as a supplementary robustness signal without ever committing it
+wholesale (not ours to redistribute, and upstream can change underneath us).
+
+- `scripts/fetch_cobol_course_fixtures.py` pulls a small, pinned-by-commit-SHA
+  set of JCL files (including DB2 JCL with embedded SQL DDL) from
+  `openmainframeproject/cobol-programming-course` (CC-BY-4.0) into
+  `examples/external/cobol_course/` — gitignored, opt-in, not run in CI.
+- `tests/test_external_fixtures_smoke.py` skips automatically unless that
+  directory has been populated. Run the fetch script first, then
+  `pytest tests/test_external_fixtures_smoke.py -v`. It only asserts nothing
+  crashes and the recognition rate stays above a loose floor — it does not
+  extend `EXPECTED_COVERAGE` in `test_coverage_snapshot.py`, which stays keyed
+  to the checked-in fixture set.
+- Any real gap this surfaces becomes its own issue with a small, targeted
+  fixture extracted from the specific failing line shape (the same way
+  `MMP9000.nsp`/`MMC0100.nsc` were built) — never by committing the source
+  corpus itself. See issue #19/#24-26 for the precedent this followed against
+  `SoftwareAG/adabas-natural-code-samples`.
+
 ## Style and dependency discipline
 
 - Python ≥ 3.10 syntax is used throughout (`X | Y` unions, walrus operator).

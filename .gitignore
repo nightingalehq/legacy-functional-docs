@@ -1,5 +1,8 @@
 # Rebuildable from source at any time; not for version control.
 .mfdoc/
+# Third-party fixtures pulled by scripts/fetch_cobol_course_fixtures.py --
+# not ours to redistribute wholesale, and upstream could change.
+examples/external/
 __pycache__/
 *.pyc
 .claude/
