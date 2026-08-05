@@ -149,8 +149,40 @@ GitHub org.
   to measure this kind of change against; confirmed with it at 5,000
   members / 20,000 call edges: `mfdoc derive` went from ~23.6s unindexed to
   ~0.19s indexed. `EXPLAIN QUERY PLAN` before/after documented in
-  `docs/guides/extending.md`'s new "Measuring scale" section. Incremental
-  ingest and EBCDIC fixtures (the rest of #9) are still open.
+  `docs/guides/extending.md`'s new "Measuring scale" section.
+- 2026-08-05: done: Phase 6 incremental-ingest sub-item (rest of #9, minus
+  EBCDIC fixtures). `mfdoc ingest` now skips a source_file whose `sha256`
+  matches the prior run's row outright; a changed file keeps its
+  `source_file` row (UPDATEd in place, not delete-and-reinsert) so
+  `upsert_member` can still match its members by name/library/dialect and
+  reuse their existing ids across a content change, rather than every
+  changed file minting new member ids. A member a changed file no longer
+  produces at all (a concatenated member dropped from a multi-member
+  unload) is purged outright. New `db.purge_member_facts`/`db.purge_member`
+  centralise what was previously a single bare `DELETE FROM source_line`
+  before re-extraction -- that alone was already stale, since every other
+  dialect-extractor fact table (variable, data_access, call_edge,
+  rule_candidate, ...) was never purged before a member's second
+  extraction, so re-running ingest on a *changed* file would have silently
+  duplicated all of those rows even before incremental skip-when-unchanged
+  existed to make a second run reachable at all.
+
+  Along the way, found and fixed a second, adjacent idempotency bug:
+  `graph.run_all()` never purged its own previously-derived gap rows
+  (`orphan_module`, `unresolved_call`, `no_ddl_for_entity`,
+  `ambiguous_adabas_file`, `sme_question`) before re-deriving, so running
+  `mfdoc derive` twice against an unchanged index doubled every one of
+  them -- invisible before this issue, since `mfdoc ingest` twice always
+  crashed on `source_file.path`'s UNIQUE constraint beforehand, so the
+  "run derive again against the same index" path was never actually
+  reachable in practice. Fixed with a `DERIVED_GAP_KINDS` purge at the top
+  of `run_all()`. New `tests/test_incremental_ingest.py` covers: full skip
+  on an unchanged run, `mfdoc coverage` identical between a full rebuild
+  and a no-op incremental run, a changed file re-extracted without
+  touching any other member, and a member dropped from a changed
+  multi-member file being purged rather than orphaned.
+  `docs/guides/architecture.md` updated with both behaviours. EBCDIC
+  fixtures (the last #9 sub-item) still open.
 
 ## Purpose of this document
 

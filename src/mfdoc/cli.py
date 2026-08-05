@@ -24,7 +24,7 @@ import yaml
 
 from . import brief as brief_mod
 from . import graph, normalise
-from .db import add_gap, connect, insert, upsert_member
+from .db import add_gap, connect, insert, purge_member, purge_member_facts, upsert_member
 from .dialects import adabas, environment, mantis, natural, supra
 from .redact import Redactor
 
@@ -68,6 +68,7 @@ def cmd_ingest(args) -> int:
         splitters[d] = pats
 
     total_members = 0
+    skipped_unchanged = 0
     for spec in cfg["sources"]:
         root = (base / spec["path"]).resolve()
         globs = spec.get("glob") or ["**/*"]
@@ -93,6 +94,34 @@ def cmd_ingest(args) -> int:
                 add_gap(conn, "source_too_large", str(exc), severity="high")
                 print(f"  ! skipped {path}: {exc}", file=sys.stderr)
                 continue
+
+            # Incremental ingest: a file whose content hasn't changed since
+            # the last run produces byte-identical facts if re-extracted, so
+            # skip it outright rather than paying the parse+extract cost
+            # again. A changed file keeps its source_file row (UPDATEd
+            # below, not delete-and-reinsert) so that upsert_member can still
+            # match this file's members by name/library/dialect and reuse
+            # their existing ids -- member identity across a content change
+            # should be stable for anything that references a member_id
+            # externally, not just re-derived every time.
+            existing_sf = conn.execute(
+                "SELECT id, sha256 FROM source_file WHERE path=?", (str(path),)
+            ).fetchone()
+            if existing_sf and existing_sf["sha256"] == sha:
+                skipped_unchanged += 1
+                continue
+            # Members this file owned before this (re-)ingest -- anything in
+            # here that the new chunking doesn't touch no longer exists in
+            # the changed file and must be purged outright, not left behind
+            # as a stale row nothing will ever update again.
+            prior_member_ids = set()
+            if existing_sf:
+                prior_member_ids = {
+                    r["id"] for r in conn.execute(
+                        "SELECT id FROM member WHERE source_file_id=?", (existing_sf["id"],)
+                    ).fetchall()
+                }
+
             leading_seq_width = None
             if seq_cfg == "auto":
                 seq_cols = normalise.detect_seq_columns(lines)
@@ -122,16 +151,26 @@ def cmd_ingest(args) -> int:
                 seq_cols_record = f"L{leading_seq_width}"
             else:
                 seq_cols_record = None
-            sf_id = insert(conn, "source_file", path=str(path), origin_path=str(path),
-                           sha256=sha, encoding_in=enc,
-                           seq_cols=seq_cols_record,
-                           line_count=len(lines), ingest_run_id=run_id)
+            if existing_sf:
+                sf_id = existing_sf["id"]
+                conn.execute(
+                    "UPDATE source_file SET sha256=?, encoding_in=?, seq_cols=?, "
+                    "line_count=?, ingest_run_id=? WHERE id=?",
+                    (sha, enc, seq_cols_record, len(lines), run_id, sf_id),
+                )
+            else:
+                sf_id = insert(conn, "source_file", path=str(path), origin_path=str(path),
+                               sha256=sha, encoding_in=enc,
+                               seq_cols=seq_cols_record,
+                               line_count=len(lines), ingest_run_id=run_id)
 
             if dialect == "unknown":
                 add_gap(conn, "ambiguous_dialect",
                         f"Could not determine the dialect of {path.name}; it was skipped. "
                         f"Set `dialect:` explicitly for this source in project config.",
                         severity="high")
+                for stale_id in prior_member_ids:
+                    purge_member(conn, stale_id)
                 continue
             if len(ranking) > 1 and ranking[0][1] < ranking[1][1] * 2 and not hint:
                 add_gap(conn, "ambiguous_dialect",
@@ -143,6 +182,7 @@ def cmd_ingest(args) -> int:
             chunks = normalise.split_members(
                 lines, dialect, default_name=member_name, seq_cols=seq_cols,
                 splitters=splitters, library=library, leading_seq_width=leading_seq_width)
+            touched_member_ids = set()
             for ch in chunks:
                 otype = ch.object_type
                 if dialect == "natural" and not otype:
@@ -153,14 +193,29 @@ def cmd_ingest(args) -> int:
                     object_type=otype or DIALECT_DEFAULT_TYPE.get(dialect),
                     library=ch.library, system=system, source_file_id=sf_id,
                     first_line=ch.first_line, last_line=ch.first_line + len(ch.lines) - 1)
-                conn.execute("DELETE FROM source_line WHERE member_id=?", (mid,))
+                purge_member_facts(conn, mid)
                 DIALECT_ROUTER[dialect](conn, mid, ch.lines, ch.name)
+                touched_member_ids.add(mid)
                 total_members += 1
+            # A member this file owned before a content change that the new
+            # chunking no longer produces (a concatenated member removed
+            # from the file, a banner pattern that no longer matches) no
+            # longer exists -- purge it outright rather than leaving a
+            # source_file_id-linked row nothing will ever touch again.
+            for stale_id in prior_member_ids - touched_member_ids:
+                purge_member(conn, stale_id)
             conn.commit()
         print(f"  ingested {spec['path']} -> {total_members} members so far")
 
     conn.commit()
-    print(f"ingest complete: {total_members} members")
+    # Report the true total in the index, not just what this run touched --
+    # on an incremental run where every file was skipped, total_members is
+    # 0, and "ingest complete: 0 members" would read as the index having
+    # been emptied rather than confirmed unchanged.
+    index_total = conn.execute("SELECT COUNT(*) FROM member").fetchone()[0]
+    skip_note = f", {skipped_unchanged} unchanged file(s) skipped" if skipped_unchanged else ""
+    print(f"ingest complete: {index_total} members in index "
+          f"({total_members} (re-)processed this run{skip_note})")
     return 0
 
 

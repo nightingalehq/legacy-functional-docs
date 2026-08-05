@@ -16,6 +16,19 @@ from .db import add_gap, set_metric
 # Members that are entry points by construction rather than by being called.
 ENTRY_KINDS = {"EXEC_PGM"}
 
+# gap_kinds this module's own functions add. Unlike extraction-time gaps
+# (unparsed_line, dynamic_target, ...), which cli.py's incremental ingest
+# already keeps in sync via purge_member_facts, nothing purges these before
+# they're regenerated -- run_all() re-derives everything from the current
+# fact store every time it's called, so without this, running `mfdoc derive`
+# twice against an unchanged index (now a normal thing to do, since
+# incremental ingest can legitimately no-op and still be followed by a
+# derive pass) would silently double every one of these gap rows.
+DERIVED_GAP_KINDS = (
+    "ambiguous_adabas_file", "no_ddl_for_entity", "unresolved_call",
+    "orphan_module", "sme_question",
+)
+
 
 def reconcile_adabas_files(conn) -> int:
     """Merge `FILE-nnn` placeholders into the named file from the FDT.
@@ -300,6 +313,11 @@ def coverage(conn) -> dict:
 
 
 def run_all(conn) -> dict:
+    # Re-derive from a clean slate -- see DERIVED_GAP_KINDS' comment.
+    conn.execute(
+        f"DELETE FROM gap WHERE gap_kind IN ({','.join('?' * len(DERIVED_GAP_KINDS))})",
+        DERIVED_GAP_KINDS,
+    )
     res = resolve(conn)
     orph = orphans(conn)
     scopes = transaction_scopes(conn)
