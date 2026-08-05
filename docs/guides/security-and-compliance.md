@@ -22,6 +22,7 @@ for a specific engagement.
 | Can sensitive literals be scrubbed before anything is sent anywhere? | Yes, via `options.redact` in `project.yml` — see "Redaction" below. It is opt-in and does nothing by default. |
 | Is a run reproducible and auditable after the fact? | Yes — see "Audit trail" below. |
 | Are there hard dependencies beyond the standard library? | `PyYAML` only, for the core pipeline. `anthropic` is required only for `mfdoc batch` and is declared as an optional extra, not a default dependency. |
+| What can we do with this codebase under its license? | It's [MIT-licensed](../../LICENSE) — free to use commercially, modify, and redistribute, with no obligation to open-source your changes. Only condition: keep the copyright/license notice with any copy you redistribute. See "Licensing" below. |
 
 ## Data flow, in order
 
@@ -201,6 +202,37 @@ for the full list. The two most likely to matter for a sign-off decision:
   such code are incomplete *by nature*, not by tooling gap, and are
   reported as such rather than hidden — do not represent them to a client
   as complete.
+
+## Licensing — what the MIT license permits
+
+This repository is [MIT-licensed](../../LICENSE). That's a permissive
+license, relevant to procurement/legal sign-off separately from the data-
+handling questions above:
+
+- **Free to use, including commercially.** No fee, no royalty, no
+  restriction on using it for a paid client engagement.
+- **Free to copy, modify and redistribute.** You can fork it, change the
+  scanners or templates for a client's dialect, bundle it into an internal
+  toolset, or hand modified copies to a third party — the license doesn't
+  restrict any of that.
+- **No obligation to share changes back.** Unlike a copyleft license
+  (e.g. GPL), MIT does not require you to publish modifications or make
+  derivative works open source. Internal, private forks are fine.
+- **Only real condition: keep the copyright notice and license text.**
+  The MIT text in `LICENSE` must be included with any copy or substantial
+  portion of the software you redistribute — including a modified fork.
+  That's the entire obligation; there's no notice requirement toward end
+  clients whose *source code* you run it against, only toward recipients of
+  the tool itself.
+- **No warranty, no liability.** The software is provided "as is" — the
+  license disclaims all warranties and caps the authors' liability at
+  nothing. This is standard for open-source software and is separate from
+  whatever warranty terms your own engagement contract with a client sets;
+  the MIT license governs the tool, not your service agreement.
+- **What it does *not* grant:** the license covers this codebase only. It
+  says nothing about the client's source code you feed into it — that
+  remains the client's property under whatever terms your engagement
+  contract sets, untouched by this tool's own license.
 
 ## Checklist before a new engagement touches this tool
 
