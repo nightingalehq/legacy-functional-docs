@@ -54,7 +54,17 @@ GitHub org.
   is a fit for hardening the `jcl`/`sql_ddl` dialects specifically; spun
   out as its own smaller follow-up (5.3, #13) rather than folded in here.
   From here on, work is landing as one branch/PR per issue rather than
-  direct commits to `main`.
+  direct commits to `main`, merged as soon as each PR's own tests pass
+  rather than left to accumulate and conflict with each other. Also done:
+  4.2 (transitive copycode, #1) — module briefs now surface rule
+  candidates from any copycode a module `INCLUDE`s, cited against the
+  copycode's own lines. And 4.8 (stable rule IDs, #10) — every rule
+  candidate in a brief now carries a `MEMBER:BR-nnn` ID (qualified with
+  the member name so it's unique system-wide, not just per-module) for a
+  human to reference later without needing the full citation. Raised in
+  review: there's nowhere yet to look up a `BR-nnn` without knowing which
+  module doc it's in — filed as its own follow-up (4.10, #16) rather than
+  built here, since it's a new doc type/report, not a brief change.
 
 ## Purpose of this document
 
@@ -236,6 +246,7 @@ Ordered by documentation value per unit of effort, with my honest read of each.
 | 4.7 | **Adabas coupling** | `entity_link` supports `coupled` but nothing emits it. Physical relationships between Adabas files are currently invisible | low |
 | 4.8 | **Stable rule IDs in generated docs** | Citations (`[[MEMBER:LINE]]`) are precise but not a stable handle for referencing a rule across doc revisions or in a gap-register conversation with an SME. Assign a stable ID (e.g. `BR-001`) alongside each citation in `templates/module.md` — a writing-rules/template change, not an extraction change. *Idea from reviewing Azure-Samples/Legacy-Modernization-Agents, which does this* | low |
 | 4.9 | **Glossary support** | We cite raw field names verbatim (`WS-CUST-BAL`); a human-curated `reference/glossary.yml` mapping field names to business terms, consumed at brief-generation time, would raise readability without inventing facts — the mapping is human-supplied, not model-guessed, so it doesn't touch citation discipline. *Idea from reviewing Azure-Samples/Legacy-Modernization-Agents' `Data/glossary.json`* | low |
+| 4.10 | **System-wide rules register** | 4.8 gave every rule a `MEMBER:BR-nnn` ID, but there's nowhere to look one up without already knowing which module doc it's in. A generated, regeneratable index of every `rule_candidate` across the whole system, with its ID, citation and a condition excerpt — a flat table straight from the fact store, not hand-maintained | low–medium |
 
 Deliberately *not* on this list: IDMS, IMS, ADSO, RPG. `reference/adding-a-dialect.md`
 documents the contract; build them when a client actually has one, because speculative
@@ -334,6 +345,7 @@ Flagging these because they need answering once, up front, not per project:
 | Adabas coupling | 4.7 | — | half day | [#6](https://github.com/nightingalehq/legacy-functional-docs/issues/6) |
 | Stable rule IDs in generated docs | 4.8 | — | half day | [#10](https://github.com/nightingalehq/legacy-functional-docs/issues/10) |
 | Glossary support | 4.9 | — | half day | [#11](https://github.com/nightingalehq/legacy-functional-docs/issues/11) |
+| System-wide rules register | 4.10 | — | 1 day | [#16](https://github.com/nightingalehq/legacy-functional-docs/issues/16) |
 | Run eval prompts, record results | 5.1 | confidence in workflow | 1 day | [#7](https://github.com/nightingalehq/legacy-functional-docs/issues/7) |
 | Citation-accuracy sampling | 5.2 | client assurance claims | 2 days | [#8](https://github.com/nightingalehq/legacy-functional-docs/issues/8) |
 | Fetch-on-demand JCL/SQL-DDL fixtures | 5.3 | — | half–1 day | [#13](https://github.com/nightingalehq/legacy-functional-docs/issues/13) |
