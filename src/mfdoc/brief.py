@@ -73,7 +73,7 @@ def _cite(name: str, line: int | None, end: int | None = None) -> str:
 
 
 def module_brief(conn, member_name: str, excerpt_rules: bool = True,
-                  redact: Redactor = NULL_REDACTOR) -> str:
+                  redact: Redactor = NULL_REDACTOR, lexicon: dict[str, str] | None = None) -> str:
     matches = conn.execute(
         "SELECT * FROM member WHERE UPPER(name)=UPPER(?)", (member_name,)
     ).fetchall()
@@ -99,6 +99,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
         add(f"- natural_mode: {m['mode'] or 'unknown'}")
     add(f"- line_count: {conn.execute('SELECT COUNT(*) FROM source_line WHERE member_id=?', (mid,)).fetchone()[0]}")
     add("")
+    vocab_insert_at = len(out)
 
     # --- header comments often carry the only surviving prose description
     # Only the leading contiguous comment block, and only lines with real content.
@@ -278,10 +279,30 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
             add(f"- [{r['severity']}] {loc} {r['gap_kind']}: {r['detail']}")
         add("")
 
+    # --- vocabulary, filtered to terms this member's own facts actually
+    # mention. options.narrative.lexicon is human-supplied per engagement
+    # (see project.yml), so surfacing it here doesn't invent anything; it
+    # just makes it reach mfdoc batch's headless prompts too, not only a
+    # human who happens to have project.yml open alongside a chat session.
+    if lexicon:
+        haystack = "\n".join(out)
+        hits = [(k, v) for k, v in lexicon.items() if k in haystack]
+        if hits:
+            vocab = [
+                "## Business vocabulary (from `options.narrative.lexicon` in "
+                "project.yml — use these terms verbatim; do not invent synonyms)",
+                "",
+            ]
+            for k, v in hits:
+                vocab.append(f"- `{k}` -> {redact(v)}")
+            vocab.append("")
+            out[vocab_insert_at:vocab_insert_at] = vocab
+
     return "\n".join(out) + "\n"
 
 
-def entity_brief(conn, entity_name: str, redact: Redactor = NULL_REDACTOR) -> str:
+def entity_brief(conn, entity_name: str, redact: Redactor = NULL_REDACTOR,
+                  lexicon: dict[str, str] | None = None) -> str:
     e = conn.execute(
         "SELECT * FROM entity WHERE UPPER(name)=UPPER(?) LIMIT 1", (entity_name,)
     ).fetchone()
@@ -297,6 +318,7 @@ def entity_brief(conn, entity_name: str, redact: Redactor = NULL_REDACTOR) -> st
     else:
         out.append("- definition source: **none supplied — field semantics unverifiable**")
     out.append("")
+    vocab_insert_at = len(out)
 
     fields = conn.execute(
         "SELECT * FROM entity_field WHERE entity_id=? ORDER BY IFNULL(defined_line,0), id", (e["id"],)
@@ -351,6 +373,21 @@ def entity_brief(conn, entity_name: str, redact: Redactor = NULL_REDACTOR) -> st
     else:
         out.append("## Accessed by\n\n- No application access found in the ingested source. "
                    "Either the consuming code was not supplied or the store is obsolete.\n")
+
+    if lexicon:
+        haystack = "\n".join(out)
+        hits = [(k, v) for k, v in lexicon.items() if k in haystack]
+        if hits:
+            vocab = [
+                "## Business vocabulary (from `options.narrative.lexicon` in "
+                "project.yml — use these terms verbatim; do not invent synonyms)",
+                "",
+            ]
+            for k, v in hits:
+                vocab.append(f"- `{k}` -> {redact(v)}")
+            vocab.append("")
+            out[vocab_insert_at:vocab_insert_at] = vocab
+
     return "\n".join(out) + "\n"
 
 

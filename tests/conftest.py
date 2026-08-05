@@ -65,3 +65,12 @@ def indexed_db(derive_result, cli_args):
     conn = connect(cfg["index_db"])
     yield conn
     conn.close()
+
+
+@pytest.fixture(scope="session")
+def project_lexicon(cli_args) -> dict:
+    """The repo's own options.narrative.lexicon, as real config -- not a
+    hand-rolled test dict that could drift from what project.yml actually
+    documents to a user."""
+    cfg = cli.load_config(cli_args.config)
+    return (cfg["options"].get("narrative") or {}).get("lexicon") or {}

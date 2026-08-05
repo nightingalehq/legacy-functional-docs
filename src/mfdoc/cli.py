@@ -157,12 +157,13 @@ def cmd_brief(args) -> int:
     cfg = load_config(args.config)
     conn = connect(Path(args.config).parent / cfg["index_db"])
     redact = Redactor.from_options(cfg["options"])
+    lexicon = ((cfg["options"] or {}).get("narrative") or {}).get("lexicon") or {}
     if args.system:
         out = brief_mod.system_brief(conn, redact=redact)
     elif args.module:
-        out = brief_mod.module_brief(conn, args.module, redact=redact)
+        out = brief_mod.module_brief(conn, args.module, redact=redact, lexicon=lexicon)
     elif args.entity:
-        out = brief_mod.entity_brief(conn, args.entity, redact=redact)
+        out = brief_mod.entity_brief(conn, args.entity, redact=redact, lexicon=lexicon)
     else:
         print("specify --module, --entity or --system", file=sys.stderr)
         return 2
@@ -206,13 +207,16 @@ def cmd_batch(args) -> int:
         from .anthropic_caller import AnthropicCaller
         caller = AnthropicCaller(model=args.model)
 
-    pricing = ((cfg["options"] or {}).get("narrative") or {}).get("pricing") or {}
+    narrative_opts = (cfg["options"] or {}).get("narrative") or {}
+    pricing = narrative_opts.get("pricing") or {}
+    lexicon = narrative_opts.get("lexicon") or {}
     summary = batch_mod.run_batch(
         conn, members, base / args.out, caller, writing_rules, template, redact=redact,
         concurrency=args.concurrency,
         state_path=(base / args.state) if args.state else None,
         cost_per_mtok_in=pricing.get("input_per_mtok"),
         cost_per_mtok_out=pricing.get("output_per_mtok"),
+        lexicon=lexicon,
     )
 
     for r in summary.results:
