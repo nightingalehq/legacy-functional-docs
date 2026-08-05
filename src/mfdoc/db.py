@@ -49,6 +49,11 @@ CREATE TABLE IF NOT EXISTS member (
     UNIQUE(name, library, dialect)
 );
 CREATE INDEX IF NOT EXISTS ix_member_dialect ON member(dialect);
+-- graph.resolve()'s callee-name lookup and orphans()'s NOT EXISTS both
+-- compare UPPER(name); a plain index on name can't serve that predicate,
+-- so this is an expression index, matched only when the query uses the
+-- identical UPPER(...) expression.
+CREATE INDEX IF NOT EXISTS ix_member_upper_name ON member(UPPER(name));
 
 CREATE TABLE IF NOT EXISTS source_line (
     member_id     INTEGER NOT NULL REFERENCES member(id),
@@ -72,6 +77,10 @@ CREATE TABLE IF NOT EXISTS entity (
     notes         TEXT,
     UNIQUE(name, kind)
 );
+-- resolve_entity() and graph.resolve()'s entity_name lookup both compare
+-- UPPER(name); see ix_member_upper_name's comment for why this needs to be
+-- an expression index rather than a plain one.
+CREATE INDEX IF NOT EXISTS ix_entity_upper_name ON entity(UPPER(name));
 
 CREATE TABLE IF NOT EXISTS entity_field (
     id            INTEGER PRIMARY KEY,
@@ -151,6 +160,17 @@ CREATE TABLE IF NOT EXISTS call_edge (
     resolved      INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS ix_call_caller ON call_edge(caller_id);
+-- graph.resolve()'s member lookup and orphans()'s NOT EXISTS both compare
+-- UPPER(callee_name); see ix_member_upper_name's comment for why this
+-- needs to be an expression index rather than a plain one.
+CREATE INDEX IF NOT EXISTS ix_call_edge_upper_callee ON call_edge(UPPER(callee_name));
+-- orphans()'s NOT EXISTS subquery ORs `ce.callee_id = m.id` against the
+-- UPPER(callee_name) comparison above -- without an index on callee_id too,
+-- SQLite can't apply its multi-index OR optimisation and falls back to a
+-- full scan of call_edge per candidate orphan (confirmed with
+-- EXPLAIN QUERY PLAN; adding this index changes that plan to
+-- "MULTI-INDEX OR" over ix_call_edge_callee_id + ix_call_edge_upper_callee).
+CREATE INDEX IF NOT EXISTS ix_call_edge_callee_id ON call_edge(callee_id);
 
 -- Transaction boundaries: essential for describing units of work honestly
 CREATE TABLE IF NOT EXISTS transaction_marker (
