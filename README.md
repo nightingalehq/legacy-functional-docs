@@ -11,6 +11,59 @@ in a gap register phrased as a question for a domain expert. Humans supplement a
 approve; the skill's job is to get them most of the way there without inventing
 anything.
 
+## Capabilities
+
+### What it reads
+
+- **Natural/Adabas** — Natural source (programs, subprograms, subroutines,
+  copycode, maps), Adabas DDM listings and FDT reports (ADAREP/ADACMP) for
+  the same physical files.
+- **Mantis/Supra** — Mantis source and Supra directory reports/linkpaths.
+  Calibration against the target codebase is expected (`mfdoc calibrate`,
+  `reference/mantis-supra.md`).
+- **Surrounding orchestration and data definitions** — DB2/SQL DDL, COBOL
+  copybooks, JCL (including embedded SQL), and CICS CSD extracts.
+- Mainframe-specific input handling: EBCDIC code pages (`cp037`/`cp500` etc.),
+  sequence-number columns, and splitting one exported listing into many
+  logical members.
+
+### What it derives
+
+From the extracted facts, deterministically: a call graph with resolved and
+unresolved (missing-source or dynamic-target) targets, a CRUD matrix, Adabas
+coupling/Supra linkpaths as entity relationships, transaction scopes, orphan
+detection, and coverage metrics (`line_recognition_rate`,
+`call_resolution_rate`, `entity_definition_rate`, gap counts by severity).
+`mfdoc gate` checks these against configurable thresholds before anything is
+written.
+
+### What it produces
+
+Seven markdown document types (`templates/`): system overview, module docs,
+data entity docs, process flows, a CRUD/coverage report, and a gap register
+phrased as SME interview questions. Every business rule carries a
+`[[MEMBER:LINE]]` citation and a confidence flag; `mfdoc validate` fails the
+build on any citation that doesn't resolve or any uncited, unhedged
+assertion. A flat `rules-register` indexes every `MEMBER:BR-nnn` rule ID
+across the whole doc set. `mfdoc export --json` dumps the full fact store for
+downstream tooling.
+
+### How narrative gets written
+
+Two paths, chosen per document type: `mfdoc batch` generates high-volume
+module docs unattended via a pluggable model caller — direct Anthropic API
+or Claude on Vertex AI (`--provider vertex`) — with a `fake-echo` caller for
+network-free dry runs; or the interactive Claude Code path for documents
+that benefit from a session holding the whole system in mind (system
+overview, entity docs, process flows, gap register).
+
+### Data handling
+
+Redaction (`mfdoc brief`, before anything is written or sent anywhere), a
+gitignored local fact store, and a documented default posture of no network
+access except the two model-calling paths above. See
+[`docs/guides/security-and-compliance.md`](docs/guides/security-and-compliance.md).
+
 ## Why two stages
 
 An LLM reading raw 4GL source will produce fluent documentation containing business
