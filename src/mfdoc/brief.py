@@ -49,6 +49,21 @@ def _copycode_rule_candidates(conn, mid: int, _seen: set | None = None) -> list[
     return out
 
 
+def _rule_id(member_name: str, n: int) -> str:
+    """A stable handle for one rule candidate, e.g. `MMP0100:BR-003`.
+
+    Qualified with the member name so it is unique across the whole system,
+    not just within one module's doc -- an unqualified `BR-003` would mean a
+    different rule in every module that has one. Numbered in the order
+    rules appear in that member's own brief, which is itself ordered by
+    source line, so for unchanged source, re-running the pipeline produces
+    the same IDs. This is a positional scheme, not a content hash:
+    inserting a new rule earlier in the source shifts every later ID in
+    that module, the same trade-off any sequential numbering makes. See
+    reference/writing-rules.md."""
+    return f"{member_name}:BR-{n:03d}"
+
+
 def _cite(name: str, line: int | None, end: int | None = None) -> str:
     if line is None:
         return f"[[{name}]]"
@@ -218,8 +233,14 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
     ).fetchall()
     if rules:
         add("## Candidate business rules (exact conditions — paraphrase, never invent)")
-        for r in rules:
-            bits = [f"{_cite(name, r['line_no'])} depth {r['depth']} `{r['construct']}`"]
+        add(
+            "Each carries a stable `BR-nnn` ID -- carry it verbatim into the "
+            "generated document immediately after the rule's own citation. It "
+            "is derived from source position, not written by you, so it stays "
+            "the same across a re-run of unchanged source."
+        )
+        for n, r in enumerate(rules, start=1):
+            bits = [f"**{_rule_id(name, n)}** {_cite(name, r['line_no'])} depth {r['depth']} `{r['construct']}`"]
             if r["condition"]:
                 bits.append(f"condition: `{redact(r['condition'])}`")
             if r["literals"]:
@@ -234,8 +255,12 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
     # can look complete and still miss a validation rule it depends on.
     for cc_id, cc_name, cc_rules in _copycode_rule_candidates(conn, mid):
         add(f"## Business rules from included copycode `{cc_name}`")
-        for r in cc_rules:
-            bits = [f"{_cite(cc_name, r['line_no'])} depth {r['depth']} `{r['construct']}`"]
+        for n, r in enumerate(cc_rules, start=1):
+            # IDs are qualified with the copycode's own name and numbered
+            # from its own row order -- the same ID a direct brief of
+            # cc_name would show, since the rule "lives" there regardless
+            # of which including module's brief surfaces it.
+            bits = [f"**{_rule_id(cc_name, n)}** {_cite(cc_name, r['line_no'])} depth {r['depth']} `{r['construct']}`"]
             if r["condition"]:
                 bits.append(f"condition: `{redact(r['condition'])}`")
             if r["literals"]:
