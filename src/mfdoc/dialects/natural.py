@@ -154,6 +154,17 @@ NUMLIT = re.compile(r"(?<![A-Z0-9#\-])\d+(?:\.\d+)?")
 
 CONTINUATION_TAIL = re.compile(r"(\b(AND|OR|NOT|THRU|THROUGH|TO|WITH|BY)\s*$)|([=<>,+\-*/]\s*$)", re.I)
 
+# Real Natural wraps long clauses at whatever column runs out, not only after a
+# connective -- a `FIND ... WITH NAME = 'SMITH'` condition commonly breaks
+# *before* the `AND` on the next line, so the first physical line ends in a
+# closing quote or identifier with no trailing token at all. CONTINUATION_TAIL
+# alone misses that case and truncates the statement mid-condition -- a silent
+# partial rule, since the citation still looks complete. None of these leading
+# tokens are ever the first word of a genuine new Natural statement, so
+# checking the *next* line's lead is a safe second signal with no added
+# false-continuation risk.
+CONTINUATION_LEAD = re.compile(r"^\s*(AND|OR|NOT|THRU|THROUGH|TO|WITH|BY)\b", re.I)
+
 # Bounds how far the continuation-fold below will look ahead per line. Without
 # this, a source file where most lines end in a continuation token (adversarial
 # or just malformed input) makes every line rescan the rest of the file, which
@@ -262,15 +273,14 @@ def extract(conn, member_id: int, lines: list[tuple[int, str | None, str]], memb
         # Fold obvious continuations so key expressions survive intact.
         stmt = code
         look = idx
-        while (
-            CONTINUATION_TAIL.search(stmt.rstrip())
-            and look + 1 < len(lines)
-            and look - idx < MAX_CONTINUATION_LOOKAHEAD
-        ):
-            look += 1
-            nxt_code, nxt_comment = strip_comment(lines[look][2])
+        while look + 1 < len(lines) and look - idx < MAX_CONTINUATION_LOOKAHEAD:
+            nxt_code, nxt_comment = strip_comment(lines[look + 1][2])
             if nxt_comment:
+                look += 1
                 continue
+            if not (CONTINUATION_TAIL.search(stmt.rstrip()) or CONTINUATION_LEAD.match(nxt_code)):
+                break
+            look += 1
             stmt = stmt.rstrip() + " " + nxt_code.strip()
         masked, _ = mask_literals(stmt)
 

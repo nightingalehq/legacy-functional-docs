@@ -1,0 +1,18 @@
+** MMP9000 - CONTINUATION FOLD REGRESSION FIXTURE
+** Exercises a condition that wraps onto the next physical line *before* the
+** connective, i.e. the first line ends in a literal, not AND/OR/etc. See
+** issue 4.5 / plan doc Phase 4: this is the "worst failure mode" case --
+** the truncated version still looks like a complete, well-formed rule.
+DEFINE DATA LOCAL
+1 ORDER-VIEW VIEW OF MILL-ORDER
+  2 ORDER-NO
+  2 CUSTOMER-NO
+  2 ORDER-STATUS
+1 #FLAG (N1)
+END-DEFINE
+*
+IF ORDER-VIEW.ORDER-STATUS = 'CONF'
+  AND ORDER-VIEW.CUSTOMER-NO = 'C00123'
+  MOVE 1 TO #FLAG
+END-IF
+END

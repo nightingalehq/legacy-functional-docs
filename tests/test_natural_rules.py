@@ -64,6 +64,30 @@ def test_literal_bearing_moves_are_captured_as_rule_candidates(indexed_db):
     assert rows.get(35) == "10"
 
 
+def test_continuation_folds_a_condition_that_wraps_before_the_connective(indexed_db):
+    """`IF ORDER-VIEW.ORDER-STATUS = 'CONF'` wrapping onto `AND
+    ORDER-VIEW.CUSTOMER-NO = 'C00123'` on the next line -- with no AND/OR/etc
+    trailing the first line -- must still fold into one condition. The old
+    heuristic only continued when the *current* line ended in a connective;
+    real Natural just as often wraps before it, and the first line here ends
+    in a closing quote. Missing this silently truncates the rule while still
+    producing what looks like a complete, well-formed citation (MMP9000.nsp)."""
+    conn = indexed_db
+    row = conn.execute(
+        """
+        SELECT rc.condition FROM rule_candidate rc
+        JOIN member m ON m.id = rc.member_id
+        WHERE m.name='MMP9000' AND rc.construct='IF'
+        """
+    ).fetchone()
+    assert row is not None, "expected an IF rule candidate for MMP9000"
+    assert "CONF" in row["condition"], "first (pre-wrap) literal missing"
+    assert "C00123" in row["condition"], (
+        f"condition truncated at the wrap point, lost the AND clause: {row['condition']!r}"
+    )
+    assert "CUSTOMER-NO" in row["condition"]
+
+
 def test_pure_accumulation_without_a_literal_is_not_captured(indexed_db):
     """`ADD STOCK-VIEW.AVAIL-WEIGHT TO #AVAIL-TOTAL` has no literal operand --
     it's an accumulator, not a business threshold, and must not be captured
