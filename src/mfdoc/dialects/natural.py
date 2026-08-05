@@ -154,6 +154,22 @@ RE_REINPUT = re.compile(r"^\s*REINPUT\b(?P<rest>.*)$", re.I)
 RE_WRITE = re.compile(r"^\s*(WRITE|DISPLAY|PRINT)\b(?P<rest>.*)$", re.I)
 RE_USING_MAP = re.compile(r"USING\s+MAP\s+(?P<map>'[^']+'|[A-Z0-9#@$&\-_.]+)", re.I)
 
+# Natural map (.nsm) source body, after DEFINE DATA/END-DEFINE: a level, a T
+# (constant/text) or F (field) tag, the content, optional parenthesised
+# attributes (edit mask, colour/intensity, etc.), and a row/column position.
+# Documented Natural map-source convention; not verified against a real
+# client export -- see the map_body_unverified gap this raises. Restricted
+# to object_type='map' members so a guess this specific never fires against
+# an ordinary program's statements.
+RE_MAP_BODY = re.compile(
+    r"^\s*(?P<level>\d+)\s+(?P<kind>[TF])\s+"
+    # A quoted literal is entirely NULs by the time it reaches `masked` --
+    # mask_literals substitutes the quote characters too, not just the
+    # text between them -- so match the NUL run here and recover the
+    # original text with orig() rather than looking for a literal quote.
+    r"(?P<content>\x00+|\*[A-Z0-9\-]+|[A-Z0-9#@$&\-_.]+)"
+    r"\s*(?:\((?P<opts>[^)]*)\))?\s*(?P<pos>\d{1,3}/\d{1,3})?\s*$", re.I)
+
 RE_COMPUTE = re.compile(r"^\s*(?:COMPUTE|ADD|SUBTRACT|MULTIPLY|DIVIDE|MOVE|EXAMINE|COMPRESS|SEPARATE|ASSIGN)\b", re.I)
 RE_MSG_NUM = re.compile(r"\bMESSAGE\s+NUMBER\s+(?P<num>[0-9#A-Z\-]+)", re.I)
 
@@ -250,6 +266,19 @@ def extract(conn, member_id: int, lines: list[tuple[int, str | None, str]], memb
     """Populate fact tables for one Natural member."""
     mode = detect_mode(lines)
     conn.execute("UPDATE member SET mode=? WHERE id=?", (mode, member_id))
+
+    row = conn.execute("SELECT object_type FROM member WHERE id=?", (member_id,)).fetchone()
+    is_map = (row["object_type"] if row else None) == "map"
+    if is_map:
+        add_gap(
+            conn, "map_body_unverified",
+            "Map body field/text recognition is best-effort against documented Natural "
+            "map source conventions (T/F tagged lines with row/column position), not "
+            "verified against a real client export -- no public or shipped sample was "
+            "available to confirm the exact layout. Treat extracted field names, prompt "
+            "text and edit masks as needing SME/screen confirmation before relying on them.",
+            member_id=member_id, severity="medium",
+        )
     if mode == "reporting":
         add_gap(
             conn, "reporting_mode",
@@ -370,6 +399,10 @@ def extract(conn, member_id: int, lines: list[tuple[int, str | None, str]], memb
         # -------------------------------------------------------- interaction
         if not matched:
             matched = _match_interaction(conn, member_id, line_no, stmt, masked)
+
+        # ---------------------------------------------------------- map body
+        if not matched and is_map:
+            matched = _match_map_body(conn, member_id, line_no, stmt, masked)
 
         # ------------------------------------------------------ rule candidates
         if not matched:
@@ -639,6 +672,28 @@ def _match_interaction(conn, member_id, line_no, stmt, masked) -> bool:
                fields=(m.group("rest") or "").strip()[:300] or None)
         return True
     return False
+
+
+def _match_map_body(conn, member_id, line_no, stmt, masked) -> bool:
+    """Only called for object_type='map' members. A field (F) line records
+    which screen field lives here and its attributes (edit mask, etc); a
+    text (T) line records the literal prompt/label shown to the user --
+    both are genuinely user-visible behaviour, not decoration, so both are
+    worth citing even though this format is unverified (see the
+    map_body_unverified gap raised once per map member)."""
+    m = RE_MAP_BODY.match(masked)
+    if not m:
+        return False
+    kind = m.group("kind").upper()
+    content = (orig(stmt, m, "content") or "").strip("'\" ")
+    opts = orig(stmt, m, "opts")
+    if kind == "F":
+        insert(conn, "interaction", member_id=member_id, line_no=line_no, kind="MAP_FIELD",
+               target=content.upper() or None, fields=(opts or "").strip()[:300] or None)
+    else:
+        insert(conn, "interaction", member_id=member_id, line_no=line_no, kind="MAP_TEXT",
+               target=None, fields=content[:300] or None)
+    return True
 
 
 def _match_arithmetic(conn, member_id, line_no, stmt, masked, depth) -> bool:

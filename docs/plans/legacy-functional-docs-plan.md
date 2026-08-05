@@ -107,6 +107,22 @@ GitHub org.
   staying `unresolved`. Any other label naming (not the R/F/H convention,
   or a label nothing ever opened) still produces the honest gap rather than
   a guess. New `MMP9200.nsp` fixture exercises both cases.
+- 2026-08-05: done: 4.4 (Natural map parser, #3), with an honesty caveat
+  worth flagging explicitly. Looked for a real `.nsm` sample to verify the
+  format against — checked the shipped fixtures, `openmainframeproject/
+  cobol-programming-course`, and `SoftwareAG/adabas-natural-code-samples`
+  (the last of which has a "Map Natural Data Area" sample, but it's a
+  program that reads map metadata at runtime, not a map source export).
+  None exist. Rather than not building it or fabricating unverified
+  confidence, extended `natural.py` (maps are already `dialect=natural`,
+  `object_type='map'` — not a separate top-level dialect, since they share
+  Natural's `DEFINE DATA` syntax) to recognise the *documented* Natural
+  map-source convention (level, T/F tag, content, attributes, row/column),
+  gated strictly to `object_type='map'` so a wrong guess never reaches an
+  ordinary program's statements, and made every map member raise a new
+  `map_body_unverified` gap stating plainly that this is unverified against
+  a real export. New `MMM9000.nsm` fixture; `*.nsm` added to the natural
+  source glob in `project.yml`/`config/project.example.yml` (was missing).
 
 ## Purpose of this document
 

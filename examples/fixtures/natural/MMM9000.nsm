@@ -1,0 +1,14 @@
+** MMM9000 - NATURAL MAP REGRESSION FIXTURE (issue 4.4)
+** Map body recognition is best-effort against documented T/F tagged-line
+** conventions, unverified against a real client export -- see the
+** map_body_unverified gap this member raises on ingest.
+DEFINE DATA LOCAL
+1 #ORDER-NO (A10)
+1 #ORDER-STATUS (A4)
+END-DEFINE
+*
+1 T 'Order number:' 01/01
+1 F #ORDER-NO (AD=I) 01/16
+1 T 'Status:' 02/01
+1 F #ORDER-STATUS (EM=XXXX,AD=I) 02/16
+END
