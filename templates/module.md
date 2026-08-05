@@ -48,11 +48,14 @@ One row per store. Say what each access is *for*, not merely that it happens.
 
 ## Business rules
 
-Numbered, each with citation and confidence. Group by the decision they serve rather
-than by source order — source order reflects how the code was built, not how the
-business thinks about it.
+Numbered, each with citation, confidence, and the rule's `{MEMBER}:BR-nnn` ID from
+the brief. Group by the decision they serve rather than by source order — source
+order reflects how the code was built, not how the business thinks about it. The ID
+is a stable, system-wide-unique handle for referring back to this exact rule later
+(in a revision, or a gap-register conversation with an SME) — copy it from the
+brief verbatim, never invent or renumber one.
 
-1. **{Rule name}** — {statement in business terms}. {Citation}
+1. **{Rule name}** ({MEMBER}:BR-nnn) — {statement in business terms}. {Citation}
 2. …
 
 ## Processing sequence

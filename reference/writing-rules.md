@@ -6,6 +6,7 @@ enforces and the prose failures it cannot catch.
 ## Contents
 
 - [Citation format](#citation-format)
+- [Stable rule IDs](#stable-rule-ids)
 - [Confidence taxonomy](#confidence-taxonomy)
 - [Front matter](#front-matter)
 - [How to turn a rule candidate into a documented rule](#how-to-turn-a-rule-candidate-into-a-documented-rule)
@@ -33,6 +34,30 @@ Do not cite a line that does not support the claim. A citation that resolves but
 points at the wrong statement passes the validator and destroys trust the moment
 someone checks it — worse than an obvious missing citation, because it is
 invisible until it matters.
+
+## Stable rule IDs
+
+The brief assigns each candidate business rule an ID of the form `MEMBER:BR-nnn`
+(e.g. `MMP0100:BR-003`), listed right before its citation. Copy it into the
+"Business rules" section of the generated document, immediately after the rule's
+own citation — do not invent one, renumber it, drop the member qualifier, or drop
+the ID entirely.
+
+The ID exists so a rule can be referred to on its own, system-wide — in a later
+revision, in a gap-register conversation with an SME ("what does MMP0100:BR-003
+mean by partial release?") — without spelling out the full citation every time, and
+without the ambiguity a bare `BR-003` would have across a system with hundreds of
+modules each numbering from 1. It is derived from the rule's position in the fact
+store (member + source order), not written by the model, which is what makes it
+stable: re-running the pipeline against unchanged source reproduces the same IDs.
+Inserting a new rule earlier in the source will shift every later ID in that
+module — the same trade-off any purely positional numbering makes, and not a reason
+to invent a different scheme per document.
+
+There is not yet a single document that lists every `BR-nnn` across the whole
+system in one place — each module doc only shows its own. See
+`docs/plans/legacy-functional-docs-plan.md` for the tracked follow-up (a
+system-wide rules register) if that becomes a real need on an engagement.
 
 ## Confidence taxonomy
 
