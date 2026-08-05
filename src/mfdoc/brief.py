@@ -492,26 +492,78 @@ def rules_register(conn, redact: Redactor = NULL_REDACTOR) -> str:
     ), ""]
     out.append("| BR-ID | member | line | depth | construct | condition | literals |")
     out.append("|---|---|---|---|---|---|---|")
-    total = 0
-    members = select_batch_members(conn)
-    for member_name in members:
-        mid_row = conn.execute("SELECT id FROM member WHERE name=?", (member_name,)).fetchone()
-        if mid_row is None:
-            continue
-        rules = conn.execute(
-            "SELECT * FROM rule_candidate WHERE member_id=? ORDER BY line_no", (mid_row["id"],)
+
+    # `member.name` is only unique together with library+dialect (see the
+    # `UNIQUE(name, library, dialect)` constraint in db.py) -- two batchable
+    # members can share a bare name across libraries. select_batch_members
+    # can then hand back that name more than once, so de-dupe before
+    # resolving it, and treat a name that still maps to >1 row as ambiguous
+    # rather than silently picking one (the same refusal module_brief makes
+    # for the identical case) -- guessing would double-count one member's
+    # rules under a colliding BR-ID while dropping the other's entirely.
+    names = list(dict.fromkeys(select_batch_members(conn)))
+    placeholders = ",".join("?" * len(names))
+    member_rows = (
+        conn.execute(
+            f"SELECT id, name, library FROM member WHERE name IN ({placeholders})", names
         ).fetchall()
+        if names
+        else []
+    )
+    rows_by_name: dict[str, list] = {}
+    for row in member_rows:
+        rows_by_name.setdefault(row["name"], []).append(row)
+
+    # One batched fetch for every resolved (unambiguous) member's rule
+    # candidates instead of a query per member -- this function, unlike
+    # module_brief/entity_brief, iterates the whole batchable-member list,
+    # so a per-member round trip scales with system size.
+    resolved_ids = [
+        rows_by_name[name][0]["id"] for name in names if len(rows_by_name.get(name, [])) == 1
+    ]
+    id_placeholders = ",".join("?" * len(resolved_ids))
+    rule_rows = (
+        conn.execute(
+            f"SELECT * FROM rule_candidate WHERE member_id IN ({id_placeholders}) "
+            "ORDER BY member_id, line_no",
+            resolved_ids,
+        ).fetchall()
+        if resolved_ids
+        else []
+    )
+    rules_by_member_id: dict[int, list] = {}
+    for r in rule_rows:
+        rules_by_member_id.setdefault(r["member_id"], []).append(r)
+
+    total = 0
+    modules_included = 0
+    for member_name in names:
+        matches = rows_by_name.get(member_name, [])
+        if len(matches) != 1:
+            libs = ", ".join(sorted({m["library"] or "unknown" for m in matches})) or "none found"
+            out.append(
+                f"| — | `{member_name}` | — | — | ambiguous | name is ambiguous across "
+                f"libraries ({libs}) -- re-run `mfdoc brief --module {member_name}` "
+                "per library | — |"
+            )
+            continue
+        modules_included += 1
+        rules = rules_by_member_id.get(matches[0]["id"], [])
         for n, r in enumerate(rules, start=1):
             total += 1
-            cond = redact(r["condition"]) if r["condition"] else ""
-            lits = redact(r["literals"]) if r["literals"] else ""
+            # A literal `|` in source-derived condition/literal text would
+            # otherwise be read as an extra column delimiter and corrupt the
+            # row -- escape it the way module_brief's bullet-list rendering
+            # of the same fields never needed to.
+            cond = redact(r["condition"]).replace("|", "\\|") if r["condition"] else ""
+            lits = redact(r["literals"]).replace("|", "\\|") if r["literals"] else ""
             out.append(
                 f"| **{_rule_id(member_name, n)}** | `{member_name}` | "
                 f"{_cite(member_name, r['line_no'])} | {r['depth']} | `{r['construct']}` | "
                 f"`{cond}` | `{lits}` |"
             )
     out.append("")
-    out.append(f"Total: {total} rule candidate(s) across {len(members)} batchable module(s).")
+    out.append(f"Total: {total} rule candidate(s) across {modules_included} batchable module(s).")
     out.append("")
     return "\n".join(out) + "\n"
 

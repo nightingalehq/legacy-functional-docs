@@ -45,6 +45,20 @@ class ModelResponse:
 ModelCaller = Callable[[str], ModelResponse]
 
 
+def model_response_from_message(message) -> ModelResponse:
+    """Build a `ModelResponse` from an Anthropic SDK `Message` -- shared by
+    every ModelCaller backed by that SDK's `messages.create` response shape
+    (anthropic_caller.py's direct-API client and vertex_caller.py's
+    Claude-via-Vertex client both return this same shape), so a future change
+    to how text/usage is extracted only needs to land in one place."""
+    text = "".join(block.text for block in message.content if block.type == "text")
+    return ModelResponse(
+        text=text,
+        input_tokens=message.usage.input_tokens,
+        output_tokens=message.usage.output_tokens,
+    )
+
+
 def select_batch_members(conn) -> list[str]:
     placeholders_d = ",".join("?" * len(BATCHABLE_DIALECTS))
     placeholders_t = ",".join("?" * len(BATCHABLE_OBJECT_TYPES))

@@ -190,11 +190,16 @@ writing prose in a word processor.
   documents. It reads files handed to it; nothing here reaches back into a
   live mainframe.
 - It does not phone home, collect telemetry, or transmit anything to its
-  own maintainers. The only outbound network calls anywhere in this
-  codebase are the explicit, user-initiated calls `mfdoc batch` makes to
-  whichever provider `--provider` selects (the Anthropic API directly, or
-  the same Claude models via Google Cloud Vertex AI) — there is no other
-  network code in the repository to audit for this.
+  own maintainers. The tool itself (everything under `src/mfdoc/`) makes
+  only the explicit, user-initiated calls `mfdoc batch` makes to whichever
+  provider `--provider` selects (the Anthropic API directly, or the same
+  Claude models via Google Cloud Vertex AI) — there is no other network
+  code in the installed package to audit for this. The one exception in
+  the repository as a whole is `scripts/fetch_cobol_course_fixtures.py`, a
+  dev-only, opt-in script (not part of the installed package, never run in
+  CI or by any `mfdoc` command) that pulls public, appropriately-licensed
+  fixture files from GitHub — see
+  [Supplementary smoke fixtures from public corpora](extending.md#supplementary-smoke-fixtures-from-public-corpora).
 - It does not claim citation *accuracy*, only citation *resolution* —
   `mfdoc validate` proves every citation points at a real line; it does not
   prove that line actually supports the claim next to it. A citation

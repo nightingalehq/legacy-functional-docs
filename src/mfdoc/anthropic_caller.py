@@ -7,7 +7,7 @@ requires it installed.
 
 from __future__ import annotations
 
-from .batch import ModelResponse
+from .batch import ModelResponse, model_response_from_message
 
 DEFAULT_MODEL = "claude-sonnet-4-5"
 DEFAULT_MAX_TOKENS = 8192
@@ -32,9 +32,4 @@ class AnthropicCaller:
             max_tokens=self.max_tokens,
             messages=[{"role": "user", "content": prompt}],
         )
-        text = "".join(block.text for block in message.content if block.type == "text")
-        return ModelResponse(
-            text=text,
-            input_tokens=message.usage.input_tokens,
-            output_tokens=message.usage.output_tokens,
-        )
+        return model_response_from_message(message)

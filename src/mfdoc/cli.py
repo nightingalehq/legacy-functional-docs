@@ -154,6 +154,15 @@ def cmd_derive(args) -> int:
     return 0
 
 
+def _write_or_print(out: str, out_path: str | None) -> None:
+    if out_path:
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(out_path).write_text(out, encoding="utf-8")
+        print(f"wrote {out_path}")
+    else:
+        print(out)
+
+
 def cmd_brief(args) -> int:
     cfg = load_config(args.config)
     conn = connect(Path(args.config).parent / cfg["index_db"])
@@ -168,12 +177,7 @@ def cmd_brief(args) -> int:
     else:
         print("specify --module, --entity or --system", file=sys.stderr)
         return 2
-    if args.out:
-        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-        Path(args.out).write_text(out, encoding="utf-8")
-        print(f"wrote {args.out}")
-    else:
-        print(out)
+    _write_or_print(out, args.out)
     return 0
 
 
@@ -182,12 +186,7 @@ def cmd_rules_register(args) -> int:
     conn = connect(Path(args.config).parent / cfg["index_db"])
     redact = Redactor.from_options(cfg["options"])
     out = brief_mod.rules_register(conn, redact=redact)
-    if args.out:
-        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-        Path(args.out).write_text(out, encoding="utf-8")
-        print(f"wrote {args.out}")
-    else:
-        print(out)
+    _write_or_print(out, args.out)
     return 0
 
 
@@ -214,16 +213,30 @@ def cmd_batch(args) -> int:
     writing_rules = (base / "reference" / "writing-rules.md").read_text(encoding="utf-8")
     template = (base / "templates" / "module.md").read_text(encoding="utf-8")
 
+    # getattr, not args.provider: any pre-existing caller building a bare
+    # args object (a script, a notebook, an older test) without a
+    # `provider` attribute must keep working exactly as it did before this
+    # flag existed, not raise AttributeError.
+    provider = getattr(args, "provider", "anthropic")
+
     if args.caller == "fake-echo":
         # For dry runs / CI smoke tests: no network call, no API key needed.
         def caller(prompt: str) -> batch_mod.ModelResponse:
             return batch_mod.ModelResponse(text=prompt, input_tokens=0, output_tokens=0)
-    elif args.provider == "vertex":
+    elif provider == "vertex":
         from .vertex_caller import VertexCaller
+        if not args.model:
+            print(
+                "mfdoc batch --provider vertex requires --model with a Vertex-format "
+                "dated model id (e.g. claude-sonnet-4@20250514) -- the direct-Anthropic "
+                "model id is not valid on Vertex AI. See Vertex AI Model Garden for the "
+                "current id for this model."
+            )
+            return 1
         caller = VertexCaller(model=args.model, project=args.gcp_project, region=args.gcp_region)
     else:
         from .anthropic_caller import AnthropicCaller
-        caller = AnthropicCaller(model=args.model)
+        caller = AnthropicCaller(model=args.model or "claude-sonnet-4-5")
 
     narrative_opts = (cfg["options"] or {}).get("narrative") or {}
     pricing = narrative_opts.get("pricing") or {}
@@ -440,7 +453,12 @@ def main(argv=None) -> int:
     p.add_argument("--config", required=True)
     p.add_argument("--out", default="docs/functional/modules")
     p.add_argument("--members", help="comma-separated member names; default: all batchable members")
-    p.add_argument("--model", default="claude-sonnet-4-5")
+    p.add_argument("--model", default=None,
+                    help="defaults to claude-sonnet-4-5 for --provider anthropic; required "
+                         "(no default) for --provider vertex, since Vertex AI model ids are "
+                         "dated snapshots (e.g. claude-sonnet-4@20250514), not the bare id the "
+                         "direct Anthropic API uses -- see Vertex AI Model Garden for the "
+                         "current one")
     p.add_argument("--concurrency", type=int, default=4)
     p.add_argument("--state", default=".mfdoc/batch-state.json",
                     help="resume-state file path, relative to --config's directory; "
@@ -451,8 +469,9 @@ def main(argv=None) -> int:
                     help="which egress path serves the model call when --caller=anthropic: "
                          "the Anthropic API directly, or Claude via Google Cloud Vertex AI "
                          "(needs `pip install 'mfdoc[vertex]'`)")
-    p.add_argument("--gcp-project", help="Vertex only; default GOOGLE_CLOUD_PROJECT env var")
-    p.add_argument("--gcp-region", help="Vertex only; default ANTHROPIC_VERTEX_REGION env var "
+    p.add_argument("--gcp-project", help="Vertex only; default ANTHROPIC_VERTEX_PROJECT_ID or "
+                                          "GOOGLE_CLOUD_PROJECT env var")
+    p.add_argument("--gcp-region", help="Vertex only; default CLOUD_ML_REGION env var, "
                                         "or us-east5")
     p.set_defaults(func=cmd_batch)
 
