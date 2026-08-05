@@ -30,9 +30,11 @@ def test_every_source_line_matches_the_file_on_disk(indexed_db):
             "SELECT path, seq_cols FROM source_file WHERE id=?", (m["source_file_id"],)
         ).fetchone()
         if sf is None or sf["seq_cols"]:
-            # Sequence-column stripping shifts content independently of line
-            # numbering; that transform is covered by normalise's own unit
-            # behaviour, not by a byte-for-byte file comparison here.
+            # Sequence-column stripping (trailing "start:end" or leading
+            # "L<width>" -- see cli.py's cmd_ingest) shifts content
+            # independently of line numbering; that transform is covered by
+            # normalise's own unit behaviour, not by a byte-for-byte file
+            # comparison here.
             continue
         file_lines = _file_lines(sf["path"])
         rows = conn.execute(

@@ -207,6 +207,16 @@ schema, and worth documenting as one.
 **Sequence numbers in columns 73–80.** Detected and stripped automatically, but
 only when consistent across the file. Force with `sequence_columns: '73:80'`.
 
+**Leading sequence-number prefixes.** Some exports put the sequence number at
+the *start* of each line instead — `0010DEFINE DATA LOCAL`, with no
+guaranteed separator before the real content. `sequence_columns: auto`
+detects this too (only when the trailing 73–80 field above wasn't found) and
+strips a consistent leading digit run before dialect matching runs. There is
+no explicit-force syntax for this one, unlike the trailing field — it is
+auto-only, on the reasoning that a real SYSOBJH export is documented to use
+the trailing convention, so a client codebase actually needing this is rare
+enough not to warrant a config knob yet.
+
 **EBCDIC.** cp037 and cp500 are the common ones. Auto-detected; force with
 `encoding:` when the sniffer gets it wrong. A file that decodes to plausible text
 in the wrong code page corrupts only the accented and special characters, which is

@@ -123,6 +123,20 @@ GitHub org.
   `map_body_unverified` gap stating plainly that this is unverified against
   a real export. New `MMM9000.nsm` fixture; `*.nsm` added to the natural
   source glob in `project.yml`/`config/project.example.yml` (was missing).
+- 2026-08-05: done: 4.11c (leading numeric sequence prefixes, #26). Some
+  real-world exports put the sequence number at the *start* of each line
+  (`0010DEFINE DATA LOCAL`, no guaranteed separator) rather than in the
+  trailing 73-80 field `detect_seq_columns` already handled. Added
+  `detect_leading_seq_prefix` (same 90%-of-candidate-lines majority
+  threshold, fires only when the trailing detector found nothing) and wired
+  it into `split_members`'s existing `strip_seq`. New `MMP9300.nsp` fixture
+  exercising both shapes from the issue (no separator and space-padded);
+  new `tests/test_sequence_columns.py` for the detection/stripping logic in
+  isolation. `source_file.seq_cols` now also records `"L<width>"` for the
+  leading case (distinct from the trailing `"start:end"` format) so
+  `test_citation_alignment.py`'s existing skip-if-stripped logic covers it
+  without changes. `reference/natural-adabas.md` updated with the new
+  "Traps" entry.
 
 ## Purpose of this document
 
