@@ -64,7 +64,15 @@ GitHub org.
   human to reference later without needing the full citation. Raised in
   review: there's nowhere yet to look up a `BR-nnn` without knowing which
   module doc it's in — filed as its own follow-up (4.10, #16) rather than
-  built here, since it's a new doc type/report, not a brief change.
+  built here, since it's a new doc type/report, not a brief change. Also
+  done: 4.9 (glossary support, #11) — turned out `options.narrative.lexicon`
+  already existed in `project.yml` for exactly this purpose, but nothing in
+  the pipeline actually read it; only a human with `project.yml` open
+  during an interactive Claude Code session ever benefited from it, and
+  `mfdoc batch`'s headless prompts had zero access to it. Wired it into
+  `module_brief`/`entity_brief`, filtered to terms that actually appear in
+  that member's own facts (not the whole glossary dumped in regardless of
+  relevance). No new `reference/glossary.yml` file format was needed.
 
 ## Purpose of this document
 
@@ -245,7 +253,7 @@ Ordered by documentation value per unit of effort, with my honest read of each.
 | 4.6 | **Reporting-mode block inference** | Currently flagged and abandoned. Indentation plus `LOOP` gives a usable guess, marked `inferred`. Reporting-mode members are the oldest and most business-critical code, so leaving them unstructured concedes the most valuable ground | high |
 | 4.7 | **Adabas coupling** | `entity_link` supports `coupled` but nothing emits it. Physical relationships between Adabas files are currently invisible | low |
 | 4.8 | **Stable rule IDs in generated docs** | Citations (`[[MEMBER:LINE]]`) are precise but not a stable handle for referencing a rule across doc revisions or in a gap-register conversation with an SME. Assign a stable ID (e.g. `BR-001`) alongside each citation in `templates/module.md` — a writing-rules/template change, not an extraction change. *Idea from reviewing Azure-Samples/Legacy-Modernization-Agents, which does this* | low |
-| 4.9 | **Glossary support** | We cite raw field names verbatim (`WS-CUST-BAL`); a human-curated `reference/glossary.yml` mapping field names to business terms, consumed at brief-generation time, would raise readability without inventing facts — the mapping is human-supplied, not model-guessed, so it doesn't touch citation discipline. *Idea from reviewing Azure-Samples/Legacy-Modernization-Agents' `Data/glossary.json`* | low |
+| 4.9 | **Glossary support** — DONE | We cite raw field names verbatim (`WS-CUST-BAL`); a human-curated mapping to business terms, consumed at brief-generation time, raises readability without inventing facts. Turned out `options.narrative.lexicon` already existed for this in `project.yml` — the gap was that nothing read it programmatically, only a human with the config open during an interactive session. Wired into `module_brief`/`entity_brief`, filtered to terms actually present in that member's facts. *Idea from reviewing Azure-Samples/Legacy-Modernization-Agents' `Data/glossary.json`* | low |
 | 4.10 | **System-wide rules register** | 4.8 gave every rule a `MEMBER:BR-nnn` ID, but there's nowhere to look one up without already knowing which module doc it's in. A generated, regeneratable index of every `rule_candidate` across the whole system, with its ID, citation and a condition excerpt — a flat table straight from the fact store, not hand-maintained | low–medium |
 
 Deliberately *not* on this list: IDMS, IMS, ADSO, RPG. `reference/adding-a-dialect.md`

@@ -2,8 +2,36 @@
 
 from __future__ import annotations
 
-from mfdoc.brief import _rule_id, module_brief
+from mfdoc.brief import _rule_id, entity_brief, module_brief
 from mfdoc.redact import NULL_REDACTOR
+
+
+def test_module_brief_surfaces_only_lexicon_terms_actually_present(indexed_db, project_lexicon):
+    """options.narrative.lexicon has 7 entries; MMP0100's own facts only
+    mention some of them (CONF, GRADE-CODE, MILL-ORDER, PART, RLSD) -- the
+    brief must show exactly those, not the whole glossary dumped in
+    regardless of relevance (issue 4.9). HEAT-NO and CAST-DATE never appear
+    in MMP0100's source, so they must be absent."""
+    brief = module_brief(indexed_db, "MMP0100", redact=NULL_REDACTOR, lexicon=project_lexicon)
+    assert "## Business vocabulary" in brief
+    for present in ("CONF", "GRADE-CODE", "MILL-ORDER", "PART", "RLSD"):
+        assert f"`{present}` ->" in brief, f"expected lexicon entry for {present}"
+    for absent in ("HEAT-NO", "CAST-DATE"):
+        assert f"`{absent}` ->" not in brief, f"{absent} doesn't appear in MMP0100 and should be filtered out"
+
+
+def test_module_brief_omits_vocabulary_section_when_no_lexicon_given(indexed_db):
+    """Default behaviour (no lexicon passed) must be unchanged -- this is
+    additive, not a required section."""
+    brief = module_brief(indexed_db, "MMP0100", redact=NULL_REDACTOR)
+    assert "## Business vocabulary" not in brief
+
+
+def test_entity_brief_also_surfaces_relevant_lexicon_terms(indexed_db, project_lexicon):
+    """MILL-ORDER's own entity brief mentions GRADE-CODE among its fields --
+    the same filtering applies to entity briefs, not just module briefs."""
+    brief = entity_brief(indexed_db, "MILL-ORDER", redact=NULL_REDACTOR, lexicon=project_lexicon)
+    assert "`GRADE-CODE` -> steel grade" in brief
 
 
 def test_included_copycode_rules_surface_in_the_including_modules_brief(indexed_db):

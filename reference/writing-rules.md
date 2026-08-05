@@ -202,6 +202,13 @@ technical name alongside on first use in each document: "the mill order
 (`MILL-ORDER`)". This is what makes the documentation searchable by the people who
 will maintain it.
 
+The brief surfaces this for you: any lexicon entry whose technical term actually
+appears somewhere in a given member's own facts shows up under "## Business
+vocabulary" near the top of that member's brief, with the citation-free reasoning
+already done — you don't need to cross-reference `project.yml` by hand, and neither
+does `mfdoc batch`'s headless prompt, which has no other way to see it. Use the
+term shown there verbatim; do not invent a different phrasing for the same entry.
+
 When you find a term that ought to be in the lexicon, add it to the config rather
 than deciding case by case — inconsistent vocabulary across a document set makes
 it much harder to review, and reviewers notice.

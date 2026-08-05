@@ -93,12 +93,12 @@ class DocResult:
 
 def generate_module_doc(conn, member_name: str, out_path: Path, caller: ModelCaller,
                          writing_rules: str, template: str, redact: Redactor = NULL_REDACTOR,
-                         max_attempts: int = 2) -> DocResult:
+                         max_attempts: int = 2, lexicon: dict[str, str] | None = None) -> DocResult:
     """Single-member version of the harness: brief -> call -> validate ->
     retry once. Used directly for one-off generation and by run_batch's
     per-item work (with the model call itself dispatched to a thread pool
     by the caller)."""
-    brief = module_brief(conn, member_name, redact=redact)
+    brief = module_brief(conn, member_name, redact=redact, lexicon=lexicon)
     retry_note = None
     input_tokens = output_tokens = 0
     problems: list[str] = []
@@ -145,6 +145,7 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
               writing_rules: str, template: str, redact: Redactor = NULL_REDACTOR,
               concurrency: int = 4, state_path: Path | None = None,
               cost_per_mtok_in: float | None = None, cost_per_mtok_out: float | None = None,
+              lexicon: dict[str, str] | None = None,
               ) -> BatchSummary:
     """Run the harness over `members`, resumable via `state_path`.
 
@@ -161,7 +162,7 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
     to_run: list[tuple[str, str, Path]] = []
 
     for name in members:
-        brief = module_brief(conn, name, redact=redact)
+        brief = module_brief(conn, name, redact=redact, lexicon=lexicon)
         briefs[name] = brief
         brief_hash = hashlib.sha256(brief.encode("utf-8")).hexdigest()
         out_path = out_dir / f"{name}.md"
