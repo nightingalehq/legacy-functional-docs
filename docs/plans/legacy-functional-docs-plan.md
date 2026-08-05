@@ -44,7 +44,17 @@ GitHub org.
   the *current* line ended in a connective; real Natural just as often
   wraps *before* the connective, silently truncating the statement while
   the citation still looked complete. Fixed with a `CONTINUATION_LEAD`
-  peek at the next line.
+  peek at the next line. Also done: 5.1 (run the eval prompts, #7) — all
+  three evals pass every listed assertion; results recorded in
+  `evals/results/2026-08-05.md`, along with two new worked examples
+  (`ORDERMST`, `MMB0100`). Investigated fetching real JCL/SQL-DDL from
+  `openmainframeproject/cobol-programming-course` as more robust example
+  material per that issue's second ask — no public corpus exists for
+  Natural/Mantis/Adabas/Supra (proprietary 4GLs), but that repo's real JCL
+  is a fit for hardening the `jcl`/`sql_ddl` dialects specifically; spun
+  out as its own smaller follow-up (5.3, #13) rather than folded in here.
+  From here on, work is landing as one branch/PR per issue rather than
+  direct commits to `main`.
 
 ## Purpose of this document
 
@@ -326,6 +336,7 @@ Flagging these because they need answering once, up front, not per project:
 | Glossary support | 4.9 | — | half day | [#11](https://github.com/nightingalehq/legacy-functional-docs/issues/11) |
 | Run eval prompts, record results | 5.1 | confidence in workflow | 1 day | [#7](https://github.com/nightingalehq/legacy-functional-docs/issues/7) |
 | Citation-accuracy sampling | 5.2 | client assurance claims | 2 days | [#8](https://github.com/nightingalehq/legacy-functional-docs/issues/8) |
+| Fetch-on-demand JCL/SQL-DDL fixtures | 5.3 | — | half–1 day | [#13](https://github.com/nightingalehq/legacy-functional-docs/issues/13) |
 | Indexes + incremental ingest + scale fixture | 6 | large engagements | 2 days | [#9](https://github.com/nightingalehq/legacy-functional-docs/issues/9) |
 
 Critical path to "safe to point at a client codebase": **1.1 → 1.2 → 1.3 → 2.3**,
