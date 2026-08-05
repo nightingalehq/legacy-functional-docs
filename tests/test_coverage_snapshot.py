@@ -53,6 +53,18 @@ orphan_module gap; +1 member/code_member, +1 gaps_total (the
 map_body_unverified gap this fixture is meant to raise -- map body
 recognition is unverified against a real client export, flagged
 accordingly on every map member).
+
+2026-08-05: numbers moved again when MMP9300.nsp was added (issue 4.11c/#26
+regression fixture for leading numeric sequence-column prefixes). Every
+line in this fixture carries a 4-digit leading sequence number instead of
+the trailing 73-80 field `detect_seq_columns` already handled, with both
+shapes from the issue (no separator before the statement, and a
+space-padded one); `detect_leading_seq_prefix` finds and strips it before
+dialect content matching runs. +1 member/code_member, +16 source_lines,
++1 rule_candidate (its IF condition), +1 orphan_module gap/gaps_total
+(uncalled by design, as usual for these regression-only fixtures) --
+line_recognition_rate improves slightly since every line but one now
+parses.
 """
 
 from __future__ import annotations
@@ -60,17 +72,17 @@ from __future__ import annotations
 from mfdoc import graph
 
 EXPECTED_COVERAGE = {
-    "members": 16,
-    "code_members": 8,
-    "source_lines": 332,
+    "members": 17,
+    "code_members": 9,
+    "source_lines": 348,
     "unparsed_lines": 1,
-    "line_recognition_rate": 0.997,
+    "line_recognition_rate": 0.9971,
     "entities": 13,
     "entities_with_definition": 9,
     "entity_definition_rate": 0.6923,
     "entity_fields": 46,
     "data_accesses": 12,
-    "rule_candidates": 31,
+    "rule_candidates": 32,
     "invocation_edges": 12,
     "invocations_resolved": 2,
     "call_resolution_rate": 0.1667,
@@ -79,7 +91,7 @@ EXPECTED_COVERAGE = {
     "includes_resolved": 1,
     "include_resolution_rate": 0.1429,
     "gaps_high": 18,
-    "gaps_total": 27,
+    "gaps_total": 28,
 }
 
 
@@ -96,5 +108,5 @@ def test_run_all_summary_matches_snapshot(derive_result):
     assert derive_result["unresolved_calls"] == 12
     assert derive_result["undefined_entities"] == 3
     assert derive_result["adabas_entities_merged"] == 2
-    assert derive_result["orphans"] == 4
+    assert derive_result["orphans"] == 5
     assert derive_result["transaction_scopes"] == 3

@@ -70,6 +70,31 @@ def detect_seq_columns(lines: list[str], cols: tuple[int, int] = (72, 80)) -> tu
     return None
 
 
+def detect_leading_seq_prefix(lines: list[str], widths: tuple[int, ...] = (4, 6, 8)) -> int | None:
+    """Return a leading fixed-width sequence-number prefix length, if consistently present.
+
+    Some sites' exports put the sequence number at the *start* of each line
+    instead of in the trailing 73-80 field `detect_seq_columns` looks for, with
+    no guaranteed separator before the real content (e.g. `0010DEFINE DATA`
+    has none; `0080  2 #LEAVE (N2)` has padding spaces). Detection requires a
+    consistent all-digit run at a candidate width across a strong majority of
+    long-enough lines, the same threshold `detect_seq_columns` uses, so
+    free-format source that happens to start with a digit isn't mistaken for
+    a sequence-numbered export. Callers should only use this when
+    `detect_seq_columns` found nothing -- the two fields are mutually
+    exclusive in practice, and trailing detection is the better-attested
+    convention (mainframe listings, not just this heuristic's origin corpus).
+    """
+    for width in widths:
+        candidates = [ln for ln in lines if len(ln.rstrip()) > width]
+        if len(candidates) < 5:
+            continue
+        hits = sum(1 for ln in candidates if ln[:width].isdigit())
+        if hits / len(candidates) >= 0.9:
+            return width
+    return None
+
+
 DIALECT_SIGNATURES: list[tuple[str, re.Pattern]] = [
     ("jcl", re.compile(r"^//\S*\s+(JOB|EXEC|DD)\b", re.M)),
     ("cics_csd", re.compile(r"^\s*DEFINE\s+(PROGRAM|TRANSACTION|FILE|MAPSET)\s*\(", re.I | re.M)),
@@ -262,12 +287,23 @@ def split_members(
     seq_cols: tuple[int, int] | None,
     splitters: dict | None = None,
     library: str | None = None,
+    leading_seq_width: int | None = None,
 ) -> list[MemberChunk]:
     """Split a file into logical members, preserving per-member line numbering."""
     splitters = splitters or DEFAULT_SPLITTERS
     pats = [re.compile(p, re.I) for p in splitters.get(dialect, [])]
 
     def strip_seq(raw: str) -> tuple[str | None, str]:
+        # Leading and trailing sequence fields are mutually exclusive in
+        # practice -- callers only pass both unset or exactly one set (see
+        # detect_leading_seq_prefix's docstring) -- but strip whichever is
+        # configured before anything else touches the line, since splitter
+        # banner patterns and dialect content matching both assume the
+        # sequence number is already gone.
+        if leading_seq_width and len(raw) > leading_seq_width and raw[:leading_seq_width].isdigit():
+            seq = raw[:leading_seq_width]
+            raw = raw[leading_seq_width:]
+            return seq, raw.rstrip()
         if seq_cols and len(raw) > seq_cols[0]:
             seq = raw[seq_cols[0]:seq_cols[1]].strip() or None
             return seq, raw[: seq_cols[0]].rstrip()

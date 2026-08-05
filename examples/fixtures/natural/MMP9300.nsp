@@ -1,0 +1,15 @@
+0010** MMP9300 - LEADING SEQUENCE-PREFIX REGRESSION FIXTURE (ISSUE #26)
+0020** Every line here begins with a 4-digit sequence number with no
+0030** trailing-column analogue -- detect_leading_seq_prefix must find and
+0040** strip it before dialect content matching runs. Line 0070 has no
+0050** separator before the statement (like "0010DEFINE" in the issue);
+0060** line 0080 has a space-padded separator (like "0080  2 #LEAVE").
+0070DEFINE DATA LOCAL
+0080  1 #COUNT (N4)
+0090  1 #STATUS (A1) INIT <'A'>
+0100END-DEFINE
+0110*
+0120IF #STATUS = 'A'
+0130  ADD 1 TO #COUNT
+0140END-IF
+0150END

@@ -93,8 +93,15 @@ def cmd_ingest(args) -> int:
                 add_gap(conn, "source_too_large", str(exc), severity="high")
                 print(f"  ! skipped {path}: {exc}", file=sys.stderr)
                 continue
+            leading_seq_width = None
             if seq_cfg == "auto":
                 seq_cols = normalise.detect_seq_columns(lines)
+                # Only look for a leading sequence-number prefix when the
+                # (better-attested) trailing field wasn't found -- the two
+                # are mutually exclusive in practice, and trailing detection
+                # should win any tie.
+                if not seq_cols:
+                    leading_seq_width = normalise.detect_leading_seq_prefix(lines)
             elif seq_cfg in (None, False, "none"):
                 seq_cols = None
             else:
@@ -104,9 +111,20 @@ def cmd_ingest(args) -> int:
             text = "\n".join(lines)
             dialect = normalise.detect_dialect(text, hint)
             ranking = normalise.dialect_confidence(text)
+            if seq_cols:
+                seq_cols_record = f"{seq_cols[0] + 1}:{seq_cols[1]}"
+            elif leading_seq_width:
+                # "L<width>" -- distinct format from the trailing "start:end"
+                # form above, but any non-empty value here means the same
+                # thing to every consumer of this column: source_line.text
+                # is not a byte-for-byte match of the file on disk, it has
+                # had a sequence number stripped out of it.
+                seq_cols_record = f"L{leading_seq_width}"
+            else:
+                seq_cols_record = None
             sf_id = insert(conn, "source_file", path=str(path), origin_path=str(path),
                            sha256=sha, encoding_in=enc,
-                           seq_cols=f"{seq_cols[0] + 1}:{seq_cols[1]}" if seq_cols else None,
+                           seq_cols=seq_cols_record,
                            line_count=len(lines), ingest_run_id=run_id)
 
             if dialect == "unknown":
@@ -124,7 +142,7 @@ def cmd_ingest(args) -> int:
             member_name, ext_hint = normalise.derive_member_name(path)
             chunks = normalise.split_members(
                 lines, dialect, default_name=member_name, seq_cols=seq_cols,
-                splitters=splitters, library=library)
+                splitters=splitters, library=library, leading_seq_width=leading_seq_width)
             for ch in chunks:
                 otype = ch.object_type
                 if dialect == "natural" and not otype:
