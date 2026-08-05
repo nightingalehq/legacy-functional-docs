@@ -13,6 +13,13 @@ design, so +1 member/orphan_module gap is expected; +2 rule_candidates
 are the fixture doing its job -- see its own comment for why the
 "AND ..." continuation line is also visited (and not recognised) on its
 own once folded into the preceding IF.
+
+2026-08-05: numbers moved again when MMC0100.nsc + MMP9100.nsp were added
+(issue 4.2 regression fixture for transitive copycode). MMC0100 is a real
+copycode member (object_type='copycode') with its own rule_candidate;
+MMP9100 INCLUDEs it and is itself uncalled by design. +2 members, +2
+code_members, +1 resolved include edge, +2 rule_candidates (the copycode's
+own IF and MOVE), +1 orphan_module (MMP9100).
 """
 
 from __future__ import annotations
@@ -20,26 +27,26 @@ from __future__ import annotations
 from mfdoc import graph
 
 EXPECTED_COVERAGE = {
-    "members": 10,
-    "code_members": 4,
-    "source_lines": 260,
+    "members": 12,
+    "code_members": 6,
+    "source_lines": 278,
     "unparsed_lines": 2,
-    "line_recognition_rate": 0.9923,
+    "line_recognition_rate": 0.9928,
     "entities": 11,
     "entities_with_definition": 7,
     "entity_definition_rate": 0.6364,
     "entity_fields": 40,
     "data_accesses": 9,
-    "rule_candidates": 29,
+    "rule_candidates": 31,
     "invocation_edges": 12,
     "invocations_resolved": 2,
     "call_resolution_rate": 0.1667,
     "dynamic_call_edges": 1,
-    "include_edges": 6,
-    "includes_resolved": 0,
-    "include_resolution_rate": 0.0,
+    "include_edges": 7,
+    "includes_resolved": 1,
+    "include_resolution_rate": 0.1429,
     "gaps_high": 17,
-    "gaps_total": 22,
+    "gaps_total": 23,
 }
 
 
@@ -56,5 +63,5 @@ def test_run_all_summary_matches_snapshot(derive_result):
     assert derive_result["unresolved_calls"] == 12
     assert derive_result["undefined_entities"] == 3
     assert derive_result["adabas_entities_merged"] == 1
-    assert derive_result["orphans"] == 2
+    assert derive_result["orphans"] == 3
     assert derive_result["transaction_scopes"] == 3

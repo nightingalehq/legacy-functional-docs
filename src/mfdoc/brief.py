@@ -17,6 +17,38 @@ import json
 from .redact import NULL_REDACTOR, Redactor
 
 
+def _copycode_rule_candidates(conn, mid: int, _seen: set | None = None) -> list[tuple[int, str, list]]:
+    """Transitively collect rule_candidate rows from copycode this member
+    includes -- directly, or via copycode that itself includes further
+    copycode. Only follows resolved INCLUDE edges into members whose
+    object_type is 'copycode'; a DEFINE DATA USING an LDA/PDA, or an INCLUDE
+    of a map or screen, pulls in variables or interaction points, not
+    business rules attributed the same way, so those are left alone here."""
+    seen = _seen if _seen is not None else set()
+    out: list[tuple[int, str, list]] = []
+    targets = conn.execute(
+        """
+        SELECT DISTINCT m.id, m.name FROM call_edge ce
+          JOIN member m ON m.id = ce.callee_id
+         WHERE ce.caller_id=? AND ce.call_kind='INCLUDE' AND ce.resolved=1
+           AND m.object_type='copycode'
+         ORDER BY m.name
+        """,
+        (mid,),
+    ).fetchall()
+    for t in targets:
+        if t["id"] in seen:
+            continue
+        seen.add(t["id"])
+        rules = conn.execute(
+            "SELECT * FROM rule_candidate WHERE member_id=? ORDER BY line_no", (t["id"],)
+        ).fetchall()
+        if rules:
+            out.append((t["id"], t["name"], rules))
+        out.extend(_copycode_rule_candidates(conn, t["id"], seen))
+    return out
+
+
 def _cite(name: str, line: int | None, end: int | None = None) -> str:
     if line is None:
         return f"[[{name}]]"
@@ -188,6 +220,22 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
         add("## Candidate business rules (exact conditions — paraphrase, never invent)")
         for r in rules:
             bits = [f"{_cite(name, r['line_no'])} depth {r['depth']} `{r['construct']}`"]
+            if r["condition"]:
+                bits.append(f"condition: `{redact(r['condition'])}`")
+            if r["literals"]:
+                bits.append(f"literals: `{redact(r['literals'])}`")
+            add("- " + " — ".join(bits))
+        add("")
+
+    # --- rules inherited from included copycode, cited against the copycode
+    # itself. Without this, a rule defined only in a copycode member is
+    # attributed solely to that member's own brief, and never appears when
+    # briefing the module that actually includes and runs it -- a module doc
+    # can look complete and still miss a validation rule it depends on.
+    for cc_id, cc_name, cc_rules in _copycode_rule_candidates(conn, mid):
+        add(f"## Business rules from included copycode `{cc_name}`")
+        for r in cc_rules:
+            bits = [f"{_cite(cc_name, r['line_no'])} depth {r['depth']} `{r['construct']}`"]
             if r["condition"]:
                 bits.append(f"condition: `{redact(r['condition'])}`")
             if r["literals"]:
