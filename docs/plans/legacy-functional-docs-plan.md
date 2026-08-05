@@ -227,6 +227,26 @@ GitHub org.
   covers both paths plus an explicit regression check against MMP9200 (the
   4.3 fixture) to prove the ordering guarantee holds.
   `reference/natural-adabas.md`'s Traps section updated.
+- 2026-08-05: done: 4.11a (report-writer column-spec continuations, #24) --
+  split from #19, the last of that split. Natural's report-writer
+  column-position tokens (`5T` = tab to column 5, `2X` = skip 2 spaces) can
+  appear on their own continuation line within a `WRITE`/`DISPLAY`/`PRINT`
+  operand list, with no keyword for `CONTINUATION_LEAD` to key off. New
+  `CONTINUATION_LEAD_COLSPEC`, ORed into the fold condition but scoped to
+  when the statement being folded is itself `WRITE`/`DISPLAY`/`PRINT`
+  (checked via `RE_WRITE.match(stmt)` on the in-progress fold) -- a bare
+  `5T` on its own line in any other context is much more likely a genuine
+  unrecognised construct than a continuation. New `MMP9500.nsp` fixture:
+  its three-line `WRITE` folds into one `interaction` row carrying the
+  whole operand list. Confirmed (and left alone, matching existing
+  precedent) the same accepted quirk 4.5/MMP9000 already documents: a
+  physical line already folded into the preceding statement is still
+  visited on its own by the main loop afterwards, correctly doesn't stand
+  alone as a statement, and raises its own (harmless, expected)
+  `unparsed_line` gap -- not a defect this item needed to fix.
+  `tests/test_column_spec_continuations.py` covers the fold and that
+  quirk explicitly. `reference/natural-adabas.md` updated. **Issue #19's
+  full split (4.11a/#24, 4.11b/#25, 4.11c/#26) is now closed.**
 
 ## Purpose of this document
 

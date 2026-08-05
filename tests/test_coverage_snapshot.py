@@ -81,6 +81,22 @@ labelled MOVE and IF), +1 invocation_edge (the labelled CALLNAT, to a
 target -- PROGA -- nothing in this fixture set defines, so also +1
 unresolved_call/gaps_high), +1 orphan_module (uncalled by design, as usual
 for these regression-only fixtures) -- +3 gaps_total in total.
+
+2026-08-05: numbers moved again when MMP9500.nsp was added (issue 4.11a/#24
+regression fixture for report-writer column-spec continuations, e.g. "5T").
+Its WRITE statement wraps across three physical lines using Natural's
+"nT"/"nX" column-position tokens on their own continuation lines --
+CONTINUATION_LEAD_COLSPEC (scoped to WRITE/DISPLAY/PRINT via the fold
+loop's RE_WRITE check) folds them into one `interaction` row, the same way
+4.5/MMP9000 folds a multi-line IF condition. Per that same accepted
+behaviour, each folded continuation line is still independently visited by
+the main loop afterwards and correctly doesn't stand alone as a statement,
+so it raises its own unparsed_line gap too -- not a new defect, the
+identical quirk MMP9000's own comment already documents. +1
+member/code_member, +17 source_lines, +2 unparsed_lines (the two folded
+continuation lines, revisited), +1 orphan_module/gaps_total (uncalled by
+design, as usual) -- rule_candidates/invocation_edges unchanged, since a
+WRITE produces neither.
 """
 
 from __future__ import annotations
@@ -88,11 +104,11 @@ from __future__ import annotations
 from mfdoc import graph
 
 EXPECTED_COVERAGE = {
-    "members": 18,
-    "code_members": 10,
-    "source_lines": 363,
-    "unparsed_lines": 2,
-    "line_recognition_rate": 0.9945,
+    "members": 19,
+    "code_members": 11,
+    "source_lines": 380,
+    "unparsed_lines": 4,
+    "line_recognition_rate": 0.9895,
     "entities": 13,
     "entities_with_definition": 9,
     "entity_definition_rate": 0.6923,
@@ -107,7 +123,7 @@ EXPECTED_COVERAGE = {
     "includes_resolved": 1,
     "include_resolution_rate": 0.1429,
     "gaps_high": 19,
-    "gaps_total": 31,
+    "gaps_total": 34,
 }
 
 
@@ -124,5 +140,5 @@ def test_run_all_summary_matches_snapshot(derive_result):
     assert derive_result["unresolved_calls"] == 13
     assert derive_result["undefined_entities"] == 3
     assert derive_result["adabas_entities_merged"] == 2
-    assert derive_result["orphans"] == 6
+    assert derive_result["orphans"] == 7
     assert derive_result["transaction_scopes"] == 3

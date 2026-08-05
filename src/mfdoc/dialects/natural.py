@@ -228,6 +228,17 @@ CONTINUATION_TAIL = re.compile(r"(\b(AND|OR|NOT|THRU|THROUGH|TO|WITH|BY)\s*$)|([
 # false-continuation risk.
 CONTINUATION_LEAD = re.compile(r"^\s*(AND|OR|NOT|THRU|THROUGH|TO|WITH|BY)\b", re.I)
 
+# Natural report-writer column-position tokens ("5T" = tab to column 5, "2X"
+# = skip 2 spaces) commonly appear on their own continuation line within a
+# multi-line WRITE/DISPLAY/PRINT operand list -- CONTINUATION_LEAD doesn't
+# cover them (they aren't a keyword), so without this such a line falls
+# through as its own unparsed_line gap instead of folding into the
+# statement it's actually part of. Scoped to WRITE/DISPLAY/PRINT only (see
+# the fold loop's RE_WRITE check) -- a bare "5T" on its own line in any
+# other context is much more likely a genuine unrecognised construct than
+# a continuation, and this is specifically a report-writer convention.
+CONTINUATION_LEAD_COLSPEC = re.compile(r"^\s*\d+[TX]\b", re.I)
+
 # Bounds how far the continuation-fold below will look ahead per line. Without
 # this, a source file where most lines end in a continuation token (adversarial
 # or just malformed input) makes every line rescan the rest of the file, which
@@ -359,7 +370,9 @@ def extract(conn, member_id: int, lines: list[tuple[int, str | None, str]], memb
             if nxt_comment:
                 look += 1
                 continue
-            if not (CONTINUATION_TAIL.search(stmt.rstrip()) or CONTINUATION_LEAD.match(nxt_code)):
+            is_colspec_continuation = RE_WRITE.match(stmt) and CONTINUATION_LEAD_COLSPEC.match(nxt_code)
+            if not (CONTINUATION_TAIL.search(stmt.rstrip()) or CONTINUATION_LEAD.match(nxt_code)
+                    or is_colspec_continuation):
                 break
             look += 1
             stmt = stmt.rstrip() + " " + nxt_code.strip()

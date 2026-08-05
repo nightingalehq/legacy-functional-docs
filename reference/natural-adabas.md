@@ -105,7 +105,10 @@ logic in the system.
 
 **User interaction.** `INPUT`, `INPUT USING MAP`, `REINPUT` (redisplay with an
 error message — the message text is user-visible business validation and worth
-extracting), `WRITE`, `DISPLAY`, `PRINT`.
+extracting), `WRITE`, `DISPLAY`, `PRINT`. A `WRITE`/`DISPLAY`/`PRINT`'s operand
+list can wrap across lines using report-writer column-position tokens (`5T` =
+tab to column 5, `2X` = skip 2 spaces) with no keyword to key a continuation
+off of; the scanner folds these in specifically for this statement family.
 
 **Map body (`.nsm`).** After the map's own `DEFINE DATA`/`END-DEFINE` (parsed the
 same as any other member), the body is a sequence of tagged lines: a level, a `T`
