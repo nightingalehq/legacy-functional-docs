@@ -89,6 +89,11 @@ mfdoc brief --config project.yml --entity MILL-ORDER
 # one at a time (needs `pip install 'mfdoc[batch]'` and ANTHROPIC_API_KEY):
 mfdoc batch --config project.yml --out docs/functional/modules
 
+mfdoc rules-register --config project.yml --out docs/functional/rules-register.md
+# a flat, greppable index of every MEMBER:BR-nnn rule ID -- look one up here
+# without already knowing which module doc it lives in; regenerate any time,
+# byte-identical output against unchanged source
+
 mfdoc validate --config project.yml --docs docs/functional
 
 # smoke-test against the bundled fixtures and worked example:

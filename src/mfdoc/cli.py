@@ -6,6 +6,7 @@
     mfdoc gate     --config project.yml
     mfdoc calibrate --config project.yml --dialect mantis
     mfdoc brief    --config project.yml [--module NAME | --entity NAME | --system]
+    mfdoc rules-register --config project.yml --out docs/functional/rules-register.md
     mfdoc batch    --config project.yml --out docs/functional/modules
     mfdoc validate --config project.yml --docs docs/functional
     mfdoc export   --config project.yml --json out/index.json
@@ -167,6 +168,20 @@ def cmd_brief(args) -> int:
     else:
         print("specify --module, --entity or --system", file=sys.stderr)
         return 2
+    if args.out:
+        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.out).write_text(out, encoding="utf-8")
+        print(f"wrote {args.out}")
+    else:
+        print(out)
+    return 0
+
+
+def cmd_rules_register(args) -> int:
+    cfg = load_config(args.config)
+    conn = connect(Path(args.config).parent / cfg["index_db"])
+    redact = Redactor.from_options(cfg["options"])
+    out = brief_mod.rules_register(conn, redact=redact)
     if args.out:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
         Path(args.out).write_text(out, encoding="utf-8")
@@ -412,6 +427,11 @@ def main(argv=None) -> int:
     p.add_argument("--system", action="store_true")
     p.add_argument("--out")
     p.set_defaults(func=cmd_brief)
+
+    p = sub.add_parser("rules-register")
+    p.add_argument("--config", required=True)
+    p.add_argument("--out", help="write to this path instead of stdout")
+    p.set_defaults(func=cmd_rules_register)
 
     p = sub.add_parser("batch")
     p.add_argument("--config", required=True)
