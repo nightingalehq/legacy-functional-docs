@@ -27,6 +27,14 @@ against SoftwareAG/adabas-natural-code-samples) -- MMP0100:31's
 fixture set since before any of the above, just never named. -1
 unparsed_line, -1 gaps_total (the remaining unparsed_line is MMP9000's
 "AND ..." continuation artifact, described above).
+
+2026-08-05: numbers moved again when TEST-COUPLE.ddm + TEST-COUPLE.fdt were
+added (issue 4.7 regression fixture for Adabas coupling). Same DDM+FDT
+reconciliation shape as MILL-ORDER, so +1 adabas_entities_merged; +2
+members, +6 entity_fields, +2 entities_with_definition (TEST-COUPLE itself,
+plus its reconciled placeholder collapsing back to 0 net new distinct
+adabas_file names), +1 gaps_total (the deliberately-ambiguous
+AMBIGUOUS-NOTE field, which correctly produces a gap rather than a guess).
 """
 
 from __future__ import annotations
@@ -34,15 +42,15 @@ from __future__ import annotations
 from mfdoc import graph
 
 EXPECTED_COVERAGE = {
-    "members": 12,
+    "members": 14,
     "code_members": 6,
-    "source_lines": 281,
+    "source_lines": 299,
     "unparsed_lines": 1,
-    "line_recognition_rate": 0.9964,
-    "entities": 11,
-    "entities_with_definition": 7,
-    "entity_definition_rate": 0.6364,
-    "entity_fields": 40,
+    "line_recognition_rate": 0.9967,
+    "entities": 13,
+    "entities_with_definition": 9,
+    "entity_definition_rate": 0.6923,
+    "entity_fields": 46,
     "data_accesses": 9,
     "rule_candidates": 31,
     "invocation_edges": 12,
@@ -53,7 +61,7 @@ EXPECTED_COVERAGE = {
     "includes_resolved": 1,
     "include_resolution_rate": 0.1429,
     "gaps_high": 17,
-    "gaps_total": 22,
+    "gaps_total": 23,
 }
 
 
@@ -69,6 +77,6 @@ def test_coverage_matches_snapshot(indexed_db, derive_result):
 def test_run_all_summary_matches_snapshot(derive_result):
     assert derive_result["unresolved_calls"] == 12
     assert derive_result["undefined_entities"] == 3
-    assert derive_result["adabas_entities_merged"] == 1
+    assert derive_result["adabas_entities_merged"] == 2
     assert derive_result["orphans"] == 3
     assert derive_result["transaction_scopes"] == 3

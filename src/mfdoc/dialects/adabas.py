@@ -116,6 +116,16 @@ RE_DDM_FIELD = re.compile(
     r"(?P<tail>.*)$", re.I)
 RE_DDM_SUPER = re.compile(r"^\s*(?:S|SUPERDESCRIPTOR)\s+(?P<name>[A-Z0-9\-_]+)\s*[:=]\s*(?P<parts>.+)$", re.I)
 
+# A coupled (cross-file) field: the DDM's free-text Remark column names the
+# target file. No shipped fixture or public sample has shown this precisely
+# enough to anchor on a narrower, structured pattern, so this only fires on
+# an explicit "COUPL..." mention followed by a file/FNR number nearby in the
+# same remark -- narrow enough to avoid false positives on unrelated remark
+# text, but the resulting link is marked 'inferred' (not 'verified', unlike
+# the structural DBID/FNR-based 'implements' link below) precisely because
+# it comes from parsing free text, not a defined field.
+RE_DDM_COUPLING = re.compile(r"\bCOUPL\w*\b.{0,40}?\b(?:FILE|FNR|FI)\s*[:=]?\s*(?P<fnr>\d{1,5})", re.I)
+
 
 def extract_ddm(conn, member_id, lines, member_name="?") -> dict:
     header = "\n".join(t for _, _, t in lines[:25])
@@ -179,6 +189,19 @@ def extract_ddm(conn, member_id, lines, member_name="?") -> dict:
                options=supp, defined_line=line_no, remark=tail.strip()[:120] or None)
         count += 1
         in_fields = True
+
+        if (cp := RE_DDM_COUPLING.search(tail)):
+            target_fnr = cp.group("fnr")
+            target = upsert_entity(conn, f"FILE-{target_fnr}", "adabas_file", fnr=target_fnr)
+            insert(conn, "entity_link", from_entity=eid, to_entity=target, link_kind="coupled",
+                   link_name=f"{m.group('name').upper()} couples to FNR {target_fnr}",
+                   via_member=member_id, via_line=line_no, confidence="inferred")
+        elif re.search(r"\bCOUPL\w*\b", tail, re.I):
+            add_gap(conn, "dynamic_target",
+                    f"Field {m.group('name').upper()}'s remark mentions coupling but no target "
+                    f"file/FNR could be identified from the text -- confirm the coupled file "
+                    f"and the relationship it implies for the data model.",
+                    member_id=member_id, line_no=line_no, severity="medium", raw=tail.strip()[:200])
 
     if count == 0:
         add_gap(conn, "unparsed_line",

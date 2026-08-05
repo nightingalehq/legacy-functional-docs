@@ -92,6 +92,14 @@ GitHub org.
   column-position continuations, labelled statements, sequence-number
   stripping) needs proper fixture design, not a one-line regex, and stays
   open.
+- 2026-08-05: done: 4.7 (Adabas coupling, #6) — `entity_link` already
+  supported `link_kind='coupled'`; nothing emitted it. No shipped fixture or
+  public sample pins down a single standard listing format for coupling
+  (it's free text in a DDM's Remark column), so the extractor only fires on
+  an explicit `COUPL...` mention plus a nearby file/FNR number, marked
+  `inferred` rather than `verified` since it's parsed from free text, not a
+  structural field. An unresolvable `COUPL...` mention becomes a gap, not a
+  guess. New `TEST-COUPLE.ddm`/`.fdt` fixture pair.
 
 ## Purpose of this document
 

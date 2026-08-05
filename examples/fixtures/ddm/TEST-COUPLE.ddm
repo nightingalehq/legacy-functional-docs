@@ -1,0 +1,7 @@
+DDM NAME: TEST-COUPLE                     DEFAULT SEQUENCE: AA
+DB: 012  FILE: 090  - TEST-COUPLE
+T L DB Name                             F Leng  S D Remark
+- - -- -------------------------------- - ---- -- - --------------------
+  1 AA COUPLE-KEY                       A   10    D primary key
+  1 AB CROSS-REF                        A    8  N   coupled to file 045
+  1 AC AMBIGUOUS-NOTE                   A    8  N   coupling used here, no target given

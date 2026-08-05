@@ -154,6 +154,15 @@ one record, and a periodic group holds repeating groups. Both usually encode a
 one-to-many business relationship that a relational model would put in a child
 table, so they are exactly what a migration needs to know about.
 
+**Coupling.** Adabas coupling (a cross-file relationship) has no single
+standard listing format — it shows up as free text in the Remark column, e.g.
+`coupled to file 045`. The extractor looks for an explicit `COUPL...` mention
+followed by a file/FNR number nearby in the same remark and records an
+`entity_link` with `link_kind='coupled'`, marked `inferred` rather than
+`verified` — unlike the DBID/FNR-based `implements` link, this comes from
+parsing free text, not a structurally-defined field. A `COUPL...` mention with
+no identifiable target file becomes a gap instead of a guess.
+
 ## FDT report layout
 
 ADAREP output, pipe-delimited or whitespace-aligned:
