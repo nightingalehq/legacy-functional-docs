@@ -162,6 +162,31 @@ wholesale (not ours to redistribute, and upstream can change underneath us).
   corpus itself. See issue #19/#24-26 for the precedent this followed against
   `SoftwareAG/adabas-natural-code-samples`.
 
+## Measuring scale (issue #9)
+
+`examples/fixtures/` (9 members) says nothing about how the pipeline behaves
+at the size of a real engagement — a mill system might be 2,000–8,000
+Natural members. `scripts/generate_scale_fixture.py` synthesizes a
+parameterizable, reproducible corpus of plausible Natural programs (a mix
+of resolved, unresolved and dynamic `CALLNAT` targets) into
+`examples/external/scale_fixture/` — gitignored, opt-in, not run in CI, same
+posture as the cobol-course fetch script above.
+
+```bash
+python scripts/generate_scale_fixture.py --count 5000
+mfdoc ingest   --config examples/external/scale_fixture/project.yml
+mfdoc derive   --config examples/external/scale_fixture/project.yml
+mfdoc coverage --config examples/external/scale_fixture/project.yml
+```
+
+This is what caught the win from the `ix_*_upper_*` expression indexes added
+in #9a: at 5,000 members / 20,000 call edges, `mfdoc derive` went from
+~23.6s (unindexed `UPPER(...)` correlated subqueries in `graph.resolve()`
+and `graph.orphans()`, confirmed with `EXPLAIN QUERY PLAN` showing a full
+table scan per candidate row) to ~0.19s once the expression indexes existed
+— use it the same way for any future change to those code paths, rather
+than reasoning about complexity in the abstract.
+
 ## Style and dependency discipline
 
 - Python ≥ 3.10 syntax is used throughout (`X | Y` unions, walrus operator).

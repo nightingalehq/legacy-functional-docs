@@ -137,6 +137,20 @@ GitHub org.
   `test_citation_alignment.py`'s existing skip-if-stripped logic covers it
   without changes. `reference/natural-adabas.md` updated with the new
   "Traps" entry.
+- 2026-08-05: done: Phase 6 indexes sub-item (part of #9). Added expression
+  indexes (`ix_member_upper_name`, `ix_entity_upper_name`,
+  `ix_call_edge_upper_callee`, plus `ix_call_edge_callee_id` so SQLite's
+  multi-index OR optimisation can cover `orphans()`'s
+  `ce.callee_id = m.id OR UPPER(ce.callee_name) = UPPER(m.name)` clause) for
+  the `UPPER(...)` correlated-subquery paths in `graph.resolve()` and
+  `graph.orphans()` that the issue flagged as "quadratic-ish at scale". New
+  `scripts/generate_scale_fixture.py` (gitignored output, same posture as
+  the cobol-course fetch script) generates a reproducible synthetic corpus
+  to measure this kind of change against; confirmed with it at 5,000
+  members / 20,000 call edges: `mfdoc derive` went from ~23.6s unindexed to
+  ~0.19s indexed. `EXPLAIN QUERY PLAN` before/after documented in
+  `docs/guides/extending.md`'s new "Measuring scale" section. Incremental
+  ingest and EBCDIC fixtures (the rest of #9) are still open.
 
 ## Purpose of this document
 
