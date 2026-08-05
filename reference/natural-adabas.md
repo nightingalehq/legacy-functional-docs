@@ -79,8 +79,11 @@ ISN), `STORE`, `UPDATE`, `DELETE`, `END TRANSACTION`, `BACKOUT TRANSACTION`.
 and describing it as a read misleads.
 
 `UPDATE`/`DELETE` can take a processing-loop label instead of a view name, in
-which case the target file is whatever the labelled loop was reading. The scanner
-flags these as `unresolved` rather than guessing.
+which case the target file is whatever the labelled loop was reading. The
+scanner resolves this for the conventional `R#`/`F#`/`H#` label naming (a
+`READ`/`FIND`/`HISTOGRAM` labelled e.g. `F1.`), tracking which entity that
+loop opened; any other label naming stays flagged `unresolved` rather than
+guessed.
 
 **Control flow.** `IF`/`END-IF`, `IF NO RECORDS FOUND` (attached to the preceding
 database loop, and easy to miss — it is a business rule about absence),

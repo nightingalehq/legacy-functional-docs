@@ -35,6 +35,16 @@ members, +6 entity_fields, +2 entities_with_definition (TEST-COUPLE itself,
 plus its reconciled placeholder collapsing back to 0 net new distinct
 adabas_file names), +1 gaps_total (the deliberately-ambiguous
 AMBIGUOUS-NOTE field, which correctly produces a gap rather than a guess).
+
+2026-08-05: numbers moved again when MMP9200.nsp was added (issue 4.3
+regression fixture for loop-label resolution). +1 member/code_member; +3
+data_accesses (FIND, the resolved UPDATE (F1.), the unresolved DELETE
+(X9.)); +1 gaps_high (an sme_question this fixture legitimately triggers:
+2 write operations with no explicit END TRANSACTION -- not something this
+fixture was built to test, just a true side effect of not adding one) and
++2 gaps_total (that plus the DELETE (X9.) dynamic_target gap, which is the
+point of the fixture); +1 orphan_module (uncalled by design, as usual for
+these regression-only fixtures).
 """
 
 from __future__ import annotations
@@ -42,16 +52,16 @@ from __future__ import annotations
 from mfdoc import graph
 
 EXPECTED_COVERAGE = {
-    "members": 14,
-    "code_members": 6,
-    "source_lines": 299,
+    "members": 15,
+    "code_members": 7,
+    "source_lines": 317,
     "unparsed_lines": 1,
-    "line_recognition_rate": 0.9967,
+    "line_recognition_rate": 0.9968,
     "entities": 13,
     "entities_with_definition": 9,
     "entity_definition_rate": 0.6923,
     "entity_fields": 46,
-    "data_accesses": 9,
+    "data_accesses": 12,
     "rule_candidates": 31,
     "invocation_edges": 12,
     "invocations_resolved": 2,
@@ -60,8 +70,8 @@ EXPECTED_COVERAGE = {
     "include_edges": 7,
     "includes_resolved": 1,
     "include_resolution_rate": 0.1429,
-    "gaps_high": 17,
-    "gaps_total": 23,
+    "gaps_high": 18,
+    "gaps_total": 26,
 }
 
 
@@ -78,5 +88,5 @@ def test_run_all_summary_matches_snapshot(derive_result):
     assert derive_result["unresolved_calls"] == 12
     assert derive_result["undefined_entities"] == 3
     assert derive_result["adabas_entities_merged"] == 2
-    assert derive_result["orphans"] == 3
+    assert derive_result["orphans"] == 4
     assert derive_result["transaction_scopes"] == 3
