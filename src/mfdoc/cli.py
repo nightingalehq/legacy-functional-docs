@@ -218,6 +218,9 @@ def cmd_batch(args) -> int:
         # For dry runs / CI smoke tests: no network call, no API key needed.
         def caller(prompt: str) -> batch_mod.ModelResponse:
             return batch_mod.ModelResponse(text=prompt, input_tokens=0, output_tokens=0)
+    elif args.provider == "vertex":
+        from .vertex_caller import VertexCaller
+        caller = VertexCaller(model=args.model, project=args.gcp_project, region=args.gcp_region)
     else:
         from .anthropic_caller import AnthropicCaller
         caller = AnthropicCaller(model=args.model)
@@ -444,6 +447,13 @@ def main(argv=None) -> int:
                          "empty string disables resume tracking")
     p.add_argument("--caller", choices=["anthropic", "fake-echo"], default="anthropic",
                     help="fake-echo makes no network call -- for CI/dry-run smoke tests")
+    p.add_argument("--provider", choices=["anthropic", "vertex"], default="anthropic",
+                    help="which egress path serves the model call when --caller=anthropic: "
+                         "the Anthropic API directly, or Claude via Google Cloud Vertex AI "
+                         "(needs `pip install 'mfdoc[vertex]'`)")
+    p.add_argument("--gcp-project", help="Vertex only; default GOOGLE_CLOUD_PROJECT env var")
+    p.add_argument("--gcp-region", help="Vertex only; default ANTHROPIC_VERTEX_REGION env var "
+                                        "or us-east5")
     p.set_defaults(func=cmd_batch)
 
     p = sub.add_parser("validate")

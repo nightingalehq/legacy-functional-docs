@@ -20,6 +20,9 @@ dev = [
 batch = [
     "anthropic",
 ]
+vertex = [
+    "anthropic[vertex]",
+]
 
 [project.scripts]
 mfdoc = "mfdoc.cli:main"
