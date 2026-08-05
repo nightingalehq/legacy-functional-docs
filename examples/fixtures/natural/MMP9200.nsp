@@ -1,0 +1,17 @@
+** MMP9200 - LOOP-LABEL RESOLUTION REGRESSION FIXTURE
+** F1. opens a labelled FIND loop over ORDER-VIEW (MILL-ORDER); UPDATE (F1.)
+** inside it must resolve to the same store, not stay an unresolved gap
+** (issue 4.3). DELETE (X9.) uses a label nothing ever opened -- must stay
+** an honest unresolved gap rather than a guess.
+DEFINE DATA LOCAL
+1 ORDER-VIEW VIEW OF MILL-ORDER
+  2 ORDER-NO
+  2 ORDER-STATUS
+END-DEFINE
+*
+F1. FIND ORDER-VIEW WITH ORDER-STATUS = 'HELD'
+  UPDATE (F1.)
+END-FIND
+*
+DELETE (X9.)
+END

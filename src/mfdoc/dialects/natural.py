@@ -83,17 +83,24 @@ RE_INIT = re.compile(r"\bINIT\s*(?:<(?P<v1>[^>]*)>|\((?P<v2>[^)]*)\))", re.I)
 # Data access. `view` may be a view name defined in DEFINE DATA, which is then
 # mapped back to its DDM.
 RE_READ = re.compile(
-    r"^\s*(?:R\d+\.\s*)?READ\s+(?:\((?P<limit>[^)]*)\)\s+)?"
+    r"^\s*(?:(?P<label>R\d+)\.\s*)?READ\s+(?:\((?P<limit>[^)]*)\)\s+)?"
     r"(?P<rest>.*)$", re.I)
 RE_READ_WORK = re.compile(r"^\s*READ\s+WORK\s+(?:FILE\s+)?(?P<num>\d+)(?P<rest>.*)$", re.I)
 RE_WRITE_WORK = re.compile(r"^\s*WRITE\s+WORK\s+(?:FILE\s+)?(?P<num>\d+)(?P<rest>.*)$", re.I)
 RE_FIND = re.compile(
-    r"^\s*(?:F\d+\.\s*)?FIND\s+(?:\((?P<limit>[^)]*)\)\s+)?"
+    r"^\s*(?:(?P<label>F\d+)\.\s*)?FIND\s+(?:\((?P<limit>[^)]*)\)\s+)?"
     r"(?P<mods>(?:NUMBER|FIRST|UNIQUE|ALL)\s+)?"
     r"(?:RECORDS?\s+IN\s+(?:FILE\s+)?)?(?P<view>[A-Z0-9#@$&\-_.]+)(?P<rest>.*)$", re.I)
 RE_HISTOGRAM = re.compile(
-    r"^\s*(?:H\d+\.\s*)?HISTOGRAM\s+(?:\((?P<limit>[^)]*)\)\s+)?"
+    r"^\s*(?:(?P<label>H\d+)\.\s*)?HISTOGRAM\s+(?:\((?P<limit>[^)]*)\)\s+)?"
     r"(?:(?:ALL|VALUE\s+IN)\s+)?(?P<view>[A-Z0-9#@$&\-_.]+)(?P<rest>.*)$", re.I)
+
+# UPDATE (R1.) / DELETE (R1.) -- a database-loop label, not a named view.
+# The char classes RE_UPDATE/RE_DELETE's `view` group matches don't include
+# ")", so what actually lands in `view` for this input is "(R1." (the ")"
+# spills into `rest`) -- match against the stripped-down candidate, not an
+# assumed balanced "(...)" wrapper.
+RE_LOOP_LABEL_REF = re.compile(r"^[A-Z]\d+$", re.I)
 RE_GET = re.compile(r"^\s*GET\s+(?P<mods>SAME|TRANSACTION\s+DATA|)\s*(?P<view>[A-Z0-9#@$&\-_.]*)(?P<rest>.*)$", re.I)
 RE_STORE = re.compile(r"^\s*STORE\s+(?:RECORD\s+)?(?:IN\s+(?:FILE\s+)?)?(?P<view>[A-Z0-9#@$&\-_.]+)(?P<rest>.*)$", re.I)
 RE_UPDATE = re.compile(r"^\s*UPDATE\s+(?:RECORD\s+)?(?:IN\s+(?:FILE\s+)?)?(?P<view>[A-Z0-9#@$&\-_.(]*)(?P<rest>.*)$", re.I)
@@ -253,6 +260,11 @@ def extract(conn, member_id: int, lines: list[tuple[int, str | None, str]], memb
         )
 
     view_to_ddm: dict[str, str] = {}
+    # Maps a database-loop label (R1, F1, H1, ...) to the (entity, via_view)
+    # its FIND/READ/HISTOGRAM opened, so a later UPDATE (R1.) / DELETE (R1.)
+    # -- "act on the record this labelled loop is currently processing" --
+    # can resolve to the same store instead of staying an unresolved gap.
+    label_to_view: dict[str, tuple[str, str]] = {}
     # Pre-scan: a PERFORM can precede the DEFINE SUBROUTINE it targets, and an
     # internal subroutine wrongly reported as a missing external module puts a
     # spurious high-severity item in the gap register that an SME then has to
@@ -337,7 +349,7 @@ def extract(conn, member_id: int, lines: list[tuple[int, str | None, str]], memb
 
         # -------------------------------------------------------- data access
         if not matched:
-            matched = _match_data_access(conn, member_id, line_no, stmt, masked, view_to_ddm)
+            matched = _match_data_access(conn, member_id, line_no, stmt, masked, view_to_ddm, label_to_view)
 
         # ------------------------------------------------------------- calls
         if not matched:
@@ -410,7 +422,19 @@ def _resolve(view: str, view_to_ddm: dict) -> tuple[str, str]:
     return v, v
 
 
-def _match_data_access(conn, member_id, line_no, stmt, masked, view_to_ddm) -> bool:
+def _resolve_loop_label(view: str, label_to_view: dict) -> tuple[str, str] | None:
+    """UPDATE (R1.) / DELETE (R1.) act on the record the labelled loop R1 is
+    currently processing. Only resolves the R#/F#/H# convention that
+    RE_READ/RE_FIND/RE_HISTOGRAM already recognise as a label -- an
+    unrecognised label stays an honest gap rather than a guess."""
+    candidate = view.upper().strip("().# ")
+    if RE_LOOP_LABEL_REF.match(candidate):
+        return label_to_view.get(candidate)
+    return None
+
+
+def _match_data_access(conn, member_id, line_no, stmt, masked, view_to_ddm, label_to_view=None) -> bool:
+    label_to_view = label_to_view if label_to_view is not None else {}
     def rec(verb, crud, entity_name, via_view, key_expr, descriptor=None, confidence="verified"):
         eid = None
         if entity_name and not entity_name.startswith("#"):
@@ -440,13 +464,15 @@ def _match_data_access(conn, member_id, line_no, stmt, masked, view_to_ddm) -> b
                 rec(verb, crud, tbl, None, stmt)
         return True
 
-    if RE_READ.match(masked) and not RE_READ_WORK.match(masked):
-        rest = RE_READ.match(masked).group("rest") or ""
+    if (rm := RE_READ.match(masked)) and not RE_READ_WORK.match(masked):
+        rest = rm.group("rest") or ""
         # READ [MULTI-FETCH] [IN] [LOGICAL|PHYSICAL] [SEQUENCE] view ...
         rest_clean = re.sub(r"^\s*(?:MULTI-FETCH\s+\S+\s+)?(?:IN\s+)?(?:LOGICAL|PHYSICAL|BY\s+ISN)?\s*(?:SEQUENCE\s+)?", "", rest, flags=re.I)
         vm = re.match(r"(?P<view>[A-Z0-9#@$&\-_.]+)(?P<tail>.*)", rest_clean, re.I)
         if vm:
             ent, via = _resolve(vm.group("view"), view_to_ddm)
+            if rm.group("label"):
+                label_to_view[rm.group("label").upper()] = (ent, via)
             tail = vm.group("tail") or ""
             desc = None
             dm = re.search(r"\b(?:BY|WITH)\s+([A-Z0-9#@$&\-_.]+)", tail, re.I)
@@ -457,6 +483,8 @@ def _match_data_access(conn, member_id, line_no, stmt, masked, view_to_ddm) -> b
 
     if (m := RE_FIND.match(masked)):
         ent, via = _resolve(m.group("view"), view_to_ddm)
+        if m.group("label"):
+            label_to_view[m.group("label").upper()] = (ent, via)
         tail = m.group("rest") or ""
         desc = None
         dm = re.search(r"\bWITH\s+(?:LIMIT\s*\([^)]*\)\s*)?([A-Z0-9#@$&\-_.]+)", tail, re.I)
@@ -468,6 +496,8 @@ def _match_data_access(conn, member_id, line_no, stmt, masked, view_to_ddm) -> b
 
     if (m := RE_HISTOGRAM.match(masked)):
         ent, via = _resolve(m.group("view"), view_to_ddm)
+        if m.group("label"):
+            label_to_view[m.group("label").upper()] = (ent, via)
         tail = m.group("rest") or ""
         dm = re.search(r"\b(?:FOR|VALUE\s+FOR)\s+(?:FIELD\s+)?([A-Z0-9#@$&\-_.]+)", tail, re.I)
         rec("HISTOGRAM", "R", ent, via, tail, dm.group(1).upper() if dm else None)
@@ -493,14 +523,19 @@ def _match_data_access(conn, member_id, line_no, stmt, masked, view_to_ddm) -> b
     if (m := RE_UPDATE.match(masked)):
         view = (m.group("view") or "").strip()
         if not view or view.startswith("("):
-            # UPDATE (label) — target is the file of the referenced loop. Honest
-            # answer: unknown without loop-label resolution, so flag it.
-            rec("UPDATE", "U", None, None, m.group(0), confidence="unresolved")
-            add_gap(conn, "dynamic_target",
-                    "UPDATE refers to a processing-loop label rather than a named view; "
-                    "the target file must be confirmed from the enclosing loop.",
-                    member_id=member_id, line_no=line_no, severity="medium",
-                    raw=stmt.strip()[:300])
+            resolved = _resolve_loop_label(view, label_to_view)
+            if resolved:
+                rec("UPDATE", "U", resolved[0], resolved[1], m.group(0))
+            else:
+                # UPDATE (label) with a label this scan couldn't resolve --
+                # e.g. it isn't the recognised R#/F#/H# loop-label
+                # convention. Honest answer: unknown, so flag it.
+                rec("UPDATE", "U", None, None, m.group(0), confidence="unresolved")
+                add_gap(conn, "dynamic_target",
+                        "UPDATE refers to a processing-loop label rather than a named view; "
+                        "the target file must be confirmed from the enclosing loop.",
+                        member_id=member_id, line_no=line_no, severity="medium",
+                        raw=stmt.strip()[:300])
         else:
             ent, via = _resolve(view, view_to_ddm)
             rec("UPDATE", "U", ent, via, m.group("rest"))
@@ -509,12 +544,16 @@ def _match_data_access(conn, member_id, line_no, stmt, masked, view_to_ddm) -> b
     if (m := RE_DELETE.match(masked)):
         view = (m.group("view") or "").strip()
         if not view or view.startswith("("):
-            rec("DELETE", "D", None, None, m.group(0), confidence="unresolved")
-            add_gap(conn, "dynamic_target",
-                    "DELETE refers to a processing-loop label rather than a named view; "
-                    "the target file must be confirmed from the enclosing loop.",
-                    member_id=member_id, line_no=line_no, severity="medium",
-                    raw=stmt.strip()[:300])
+            resolved = _resolve_loop_label(view, label_to_view)
+            if resolved:
+                rec("DELETE", "D", resolved[0], resolved[1], m.group(0))
+            else:
+                rec("DELETE", "D", None, None, m.group(0), confidence="unresolved")
+                add_gap(conn, "dynamic_target",
+                        "DELETE refers to a processing-loop label rather than a named view; "
+                        "the target file must be confirmed from the enclosing loop.",
+                        member_id=member_id, line_no=line_no, severity="medium",
+                        raw=stmt.strip()[:300])
         else:
             ent, via = _resolve(view, view_to_ddm)
             rec("DELETE", "D", ent, via, m.group("rest"))

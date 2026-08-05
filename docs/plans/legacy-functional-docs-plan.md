@@ -100,6 +100,13 @@ GitHub org.
   `inferred` rather than `verified` since it's parsed from free text, not a
   structural field. An unresolvable `COUPL...` mention becomes a gap, not a
   guess. New `TEST-COUPLE.ddm`/`.fdt` fixture pair.
+- 2026-08-05: done: 4.3 (loop-label resolution, #2) — `RE_READ`/`RE_FIND`/
+  `RE_HISTOGRAM` now capture the conventional `R#`/`F#`/`H#` loop label they
+  already matched but discarded, recording which entity each labelled loop
+  opened. `UPDATE (F1.)`/`DELETE (F1.)` resolve to that entity instead of
+  staying `unresolved`. Any other label naming (not the R/F/H convention,
+  or a label nothing ever opened) still produces the honest gap rather than
+  a guess. New `MMP9200.nsp` fixture exercises both cases.
 
 ## Purpose of this document
 

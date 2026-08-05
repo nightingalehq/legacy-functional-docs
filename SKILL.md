@@ -206,8 +206,9 @@ State these to the user rather than letting them be discovered later:
   reported for reporting-mode members is unreliable and is flagged as such.
 - Dynamic dispatch (`CALLNAT #VAR`, `FETCH #PGM`, Mantis `CALL` on a variable)
   cannot be resolved from source. Those call graphs are incomplete by nature.
-- `UPDATE`/`DELETE` referencing a processing-loop label rather than a view need
-  loop-label resolution, which is not implemented; they are flagged `unresolved`.
+- `UPDATE`/`DELETE` referencing a processing-loop label rather than a view
+  resolve to that loop's target for the conventional `R#`/`F#`/`H#` label
+  naming; any other label naming is flagged `unresolved` rather than guessed.
 - The Mantis and Supra packs are a defensible starting point, not a validated
   grammar. Treat a first-run recognition rate below 85% as a calibration task.
 - Copybook `PIC` to format conversion handles common cases, not every
