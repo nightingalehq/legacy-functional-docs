@@ -320,7 +320,12 @@ def cmd_batch(args) -> int:
     conn = connect(base / cfg["index_db"])
     redact = Redactor.from_options(cfg["options"])
 
-    members = args.members.split(",") if args.members else batch_mod.select_batch_members(conn)
+    # Normalise the same way ingest does (normalise.derive_member_name /
+    # split_members both .upper() the stored name) -- an un-normalised
+    # --members value could otherwise collide with a reserved state-file key
+    # such as run_batch()'s "_corpus_sha256" sentinel.
+    members = ([m.strip().upper() for m in args.members.split(",")] if args.members
+               else batch_mod.select_batch_members(conn))
     if not members:
         print("no batchable (natural/mantis program-level) members in the index")
         return 0

@@ -37,5 +37,19 @@ class Redactor:
         redact_cfg = (options or {}).get("redact") or {}
         return cls(patterns=redact_cfg.get("patterns"), enabled=redact_cfg.get("enabled", False))
 
+    def signature(self) -> str:
+        """Deterministic fingerprint of the *effective* redaction policy.
+
+        Mirrors `__call__`'s own no-op condition: disabled, or enabled with
+        no patterns, are behaviourally identical (nothing is ever
+        substituted), so both collapse to the same value -- letting a
+        cache-invalidation check (e.g. batch.py's corpus signature) tell an
+        actual policy change from a no-op edit, without caring about
+        `Redactor`'s internals.
+        """
+        if not self.enabled or not self._compiled:
+            return "disabled"
+        return "\x00".join(p.pattern for p in self._compiled)
+
 
 NULL_REDACTOR = Redactor(enabled=False)

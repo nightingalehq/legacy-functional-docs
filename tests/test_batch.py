@@ -12,8 +12,26 @@ deliberately routes to the CLI path instead, not module docs.
 
 from __future__ import annotations
 
+import json
+
 from mfdoc import batch as batch_mod
-from mfdoc.redact import NULL_REDACTOR
+from mfdoc.redact import NULL_REDACTOR, Redactor
+
+
+def _track_module_brief_calls(monkeypatch) -> list[str]:
+    """Wrap batch_mod.module_brief to record every member name it's called
+    with, while still delegating to the real implementation -- shared by
+    tests that assert module_brief() was (or wasn't) called for particular
+    members."""
+    calls: list[str] = []
+    real_module_brief = batch_mod.module_brief
+
+    def counting_module_brief(*args, **kwargs):
+        calls.append(args[1] if len(args) > 1 else kwargs.get("member_name"))
+        return real_module_brief(*args, **kwargs)
+
+    monkeypatch.setattr(batch_mod, "module_brief", counting_module_brief)
+    return calls
 
 GOOD_FRONTMATTER = """---
 title: "{member} — test doc"
@@ -149,14 +167,7 @@ def test_batch_skips_module_brief_entirely_when_corpus_unchanged(indexed_db, tmp
     )
     assert first.ok == 2 and first.skipped == 0
 
-    calls = []
-    real_module_brief = batch_mod.module_brief
-
-    def counting_module_brief(*args, **kwargs):
-        calls.append(args[1] if len(args) > 1 else kwargs.get("member_name"))
-        return real_module_brief(*args, **kwargs)
-
-    monkeypatch.setattr(batch_mod, "module_brief", counting_module_brief)
+    calls = _track_module_brief_calls(monkeypatch)
 
     second = batch_mod.run_batch(
         indexed_db, members, tmp_path / "out", caller, "rules", "template",
@@ -196,14 +207,7 @@ def test_batch_recomputes_briefs_when_a_source_file_changes(indexed_db, tmp_path
         )
         indexed_db.commit()
 
-        calls = []
-        real_module_brief = batch_mod.module_brief
-
-        def counting_module_brief(*args, **kwargs):
-            calls.append(args[1] if len(args) > 1 else kwargs.get("member_name"))
-            return real_module_brief(*args, **kwargs)
-
-        monkeypatch.setattr(batch_mod, "module_brief", counting_module_brief)
+        calls = _track_module_brief_calls(monkeypatch)
 
         second = batch_mod.run_batch(
             indexed_db, members, tmp_path / "out", caller, "rules", "template",
@@ -221,3 +225,72 @@ def test_batch_recomputes_briefs_when_a_source_file_changes(indexed_db, tmp_path
             "UPDATE source_file SET sha256 = ? WHERE id = ?", (original_sha, file_id)
         )
         indexed_db.commit()
+
+
+def test_batch_recomputes_when_redact_policy_changes_with_no_source_edits(indexed_db, tmp_path, monkeypatch):
+    """redact is a project.yml config knob, not anything a source_file hash
+    can see -- the corpus-level skip must not mask a policy change with no
+    source edits behind it."""
+    members = ["MMP0100", "MMP0200"]
+    state_path = tmp_path / "state.json"
+    caller = FakeCaller()
+    first = batch_mod.run_batch(
+        indexed_db, members, tmp_path / "out", caller, "rules", "template",
+        state_path=state_path, redact=NULL_REDACTOR,
+    )
+    assert first.ok == 2 and first.skipped == 0
+
+    calls = _track_module_brief_calls(monkeypatch)
+    changed_redact = Redactor(patterns=[r"MILLPROD"], enabled=True)
+    second = batch_mod.run_batch(
+        indexed_db, members, tmp_path / "out", caller, "rules", "template",
+        state_path=state_path, redact=changed_redact,
+    )
+    assert set(calls) == {"MMP0100", "MMP0200"}, (
+        "a redact policy change with no source edits must still force module_brief() "
+        "to be recomputed, not be masked by the corpus-level skip"
+    )
+
+
+def test_batch_recomputes_when_lexicon_changes_with_no_source_edits(indexed_db, tmp_path, monkeypatch):
+    """lexicon is likewise project.yml config, not derived from source_file --
+    same soundness requirement as the redact-policy case above."""
+    members = ["MMP0100", "MMP0200"]
+    state_path = tmp_path / "state.json"
+    caller = FakeCaller()
+    first = batch_mod.run_batch(
+        indexed_db, members, tmp_path / "out", caller, "rules", "template",
+        state_path=state_path, lexicon={},
+    )
+    assert first.ok == 2 and first.skipped == 0
+
+    calls = _track_module_brief_calls(monkeypatch)
+    second = batch_mod.run_batch(
+        indexed_db, members, tmp_path / "out", caller, "rules", "template",
+        state_path=state_path, lexicon={"MOM": "Month-of-Month report"},
+    )
+    assert set(calls) == {"MMP0100", "MMP0200"}, (
+        "a lexicon change with no source edits must still force module_brief() "
+        "to be recomputed, not be masked by the corpus-level skip"
+    )
+
+
+def test_batch_tolerates_non_dict_state_entry_for_a_member(indexed_db, tmp_path):
+    """state[name] is expected to be a per-member dict (run_batch() writes
+    {"ok":..., "attempts":..., "brief_sha256":...}), but run_batch() also
+    writes a "_corpus_sha256" sentinel into the same flat namespace, whose
+    value is a plain hash string -- and an un-normalised --members value
+    could in principle collide with it (see cli.py's --members handling).
+    Whatever the cause, a non-dict prior for a member must not crash
+    run_batch() -- it should just be treated as "no usable prior result"."""
+    members = ["MMP0100"]
+    state_path = tmp_path / "state.json"
+    state_path.write_text(json.dumps({"MMP0100": "not-a-dict"}), encoding="utf-8")
+
+    caller = FakeCaller()
+    result = batch_mod.run_batch(
+        indexed_db, members, tmp_path / "out", caller, "rules", "template",
+        state_path=state_path,
+    )
+    assert result.ok == 1 and result.skipped == 0
+    assert caller.calls == 1

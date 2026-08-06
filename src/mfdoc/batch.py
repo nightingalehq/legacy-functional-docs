@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from . import __version__
 from .brief import module_brief
 from .redact import NULL_REDACTOR, Redactor
 from .validate import validate_doc
@@ -144,21 +145,43 @@ class BatchSummary:
     skipped: int
 
 
-def _corpus_signature(conn) -> str:
-    """Single hash over every source_file's (path, sha256), order-independent.
+def _corpus_signature(conn, redact: Redactor = NULL_REDACTOR,
+                       lexicon: dict[str, str] | None = None) -> str:
+    """Fingerprint of every input to module_brief() that isn't the derive
+    code itself: every source_file's (path, sha256) (order-independent),
+    the installed mfdoc version, and the effective redact/lexicon policy.
 
-    Unchanged across a run iff no source file changed at all since it was
-    last computed -- the only sound basis for skipping module_brief()
-    itself (not just the model call). A per-member file check isn't safe:
-    module_brief() also pulls in facts owned by other members (inbound
-    callers, copycode-inherited rules), so a member's brief can change even
-    when its own file didn't.
+    A per-source_file-only check isn't safe on its own even for the source
+    dimension: module_brief() also pulls in facts owned by other members
+    (inbound callers, copycode-inherited rules), so a member's brief can
+    change even when its own file didn't -- hashing the whole corpus at
+    once is what makes it safe. redact/lexicon matter too: both come from
+    project.yml, not from anything a source_file hash can see, so a policy
+    change with no source edits must still be able to invalidate this.
+
+    Folding in `__version__` catches a code upgrade (most commonly a
+    dialect-scanner or derive bugfix) picked up via a fresh `pip install`.
+    It does NOT catch derive/extraction code edited in place without a
+    version bump (e.g. mid-development, before a release) -- that residual
+    case still needs `--state` (or the affected member's entry in it)
+    cleared by hand after re-deriving.
     """
     rows = conn.execute("SELECT path, sha256 FROM source_file ORDER BY path").fetchall()
     digest = hashlib.sha256()
+    digest.update(__version__.encode("utf-8"))
+    digest.update(b"\x00")
     for r in rows:
         digest.update(r["path"].encode("utf-8"))
+        digest.update(b"\x00")
         digest.update(r["sha256"].encode("utf-8"))
+        digest.update(b"\x00")
+    digest.update(redact.signature().encode("utf-8"))
+    digest.update(b"\x00")
+    for key in sorted(lexicon or {}):
+        digest.update(key.encode("utf-8"))
+        digest.update(b"\x00")
+        digest.update(lexicon[key].encode("utf-8"))
+        digest.update(b"\x00")
     return digest.hexdigest()
 
 
@@ -173,6 +196,11 @@ def _save_state(state_path: Path, state: dict) -> None:
     state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
 
+def _skip_result(name: str, out_path: Path, prior: dict) -> DocResult:
+    """A prior successful run's result, reused as-is without regenerating anything."""
+    return DocResult(name, str(out_path), True, prior.get("attempts", 1), 0, 0, [], skipped=True)
+
+
 def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
               writing_rules: str, template: str, redact: Redactor = NULL_REDACTOR,
               concurrency: int = 4, state_path: Path | None = None,
@@ -183,14 +211,15 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
 
     Two tiers of skip, cheapest first:
 
-    1. Corpus-level: if no `source_file` changed anywhere since the last
-       successful run (`_corpus_signature` matches), every member's facts
-       are byte-identical to last time, so every brief is guaranteed
-       identical too -- module_brief() itself is skipped entirely for any
-       member with a prior successful run and an existing output file,
-       not just the model call.
-    2. Per-member: otherwise (corpus changed, or no prior state), brief is
-       computed and hashed as before; a member is skipped (not
+    1. Corpus-level: if nothing `_corpus_signature` covers changed since the
+       last successful run (source files, mfdoc version, redact/lexicon
+       policy -- see that function's docstring for what it does and doesn't
+       catch), every member's facts and brief inputs are identical to last
+       time -- module_brief() itself is skipped entirely for any member with
+       a prior successful run and an existing output file, not just the
+       model call.
+    2. Per-member: otherwise (corpus signature changed, or no prior state),
+       brief is computed and hashed as before; a member is skipped (not
        re-generated) only when its own brief hash is unchanged from the
        last successful run and the output file still exists -- a member
        whose brief changed, or whose prior attempt failed, is always
@@ -199,10 +228,14 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
     This is what makes a run over thousands of members interruptible and
     restartable without burning tokens -- or needless DB queries -- on
     work that's already done.
+
+    `_corpus_signature` itself is only computed when `state_path` is given
+    -- with no state file there is nothing to compare it against, and the
+    per-member tier below runs unconditionally anyway.
     """
     state = _load_state(state_path) if state_path else {}
-    corpus_sig = _corpus_signature(conn)
-    corpus_unchanged = state.get("_corpus_sha256") == corpus_sig
+    corpus_sig = _corpus_signature(conn, redact, lexicon) if state_path else None
+    corpus_unchanged = bool(state_path) and state.get("_corpus_sha256") == corpus_sig
     results: list[DocResult] = []
     briefs: dict[str, str] = {}
     to_run: list[tuple[str, str, Path]] = []
@@ -210,15 +243,21 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
     for name in members:
         out_path = out_dir / f"{name}.md"
         prior = state.get(name)
-        if corpus_unchanged and prior and prior.get("ok") and out_path.exists():
-            results.append(DocResult(name, str(out_path), True, prior.get("attempts", 1), 0, 0, [], skipped=True))
+        # `prior` is only ever meaningful as this member's own state entry;
+        # guard against the (currently reserved but unenforced) "_corpus_sha256"
+        # key ever being looked up as if it were one -- see cli.py's --members
+        # normalisation, which keeps ordinary member names from colliding with it.
+        prior_ok = isinstance(prior, dict) and prior.get("ok") and out_path.exists()
+
+        if corpus_unchanged and prior_ok:
+            results.append(_skip_result(name, out_path, prior))
             continue
 
         brief = module_brief(conn, name, redact=redact, lexicon=lexicon)
         briefs[name] = brief
         brief_hash = hashlib.sha256(brief.encode("utf-8")).hexdigest()
-        if prior and prior.get("brief_sha256") == brief_hash and prior.get("ok") and out_path.exists():
-            results.append(DocResult(name, str(out_path), True, prior.get("attempts", 1), 0, 0, [], skipped=True))
+        if prior_ok and prior.get("brief_sha256") == brief_hash:
+            results.append(_skip_result(name, out_path, prior))
             continue
         to_run.append((name, brief_hash, out_path))
 
