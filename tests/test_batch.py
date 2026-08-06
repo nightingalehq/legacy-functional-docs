@@ -137,3 +137,87 @@ def test_batch_skips_unchanged_members_on_resume(indexed_db, tmp_path):
     assert second.skipped == 1
     assert second.ok == 1
     assert caller.calls == 1, "resumed run must not re-call the model for an unchanged member"
+
+
+def test_batch_skips_module_brief_entirely_when_corpus_unchanged(indexed_db, tmp_path, monkeypatch):
+    members = ["MMP0100", "MMP0200"]
+    state_path = tmp_path / "state.json"
+    caller = FakeCaller()
+    first = batch_mod.run_batch(
+        indexed_db, members, tmp_path / "out", caller, "rules", "template",
+        state_path=state_path,
+    )
+    assert first.ok == 2 and first.skipped == 0
+
+    calls = []
+    real_module_brief = batch_mod.module_brief
+
+    def counting_module_brief(*args, **kwargs):
+        calls.append(args[1] if len(args) > 1 else kwargs.get("member_name"))
+        return real_module_brief(*args, **kwargs)
+
+    monkeypatch.setattr(batch_mod, "module_brief", counting_module_brief)
+
+    second = batch_mod.run_batch(
+        indexed_db, members, tmp_path / "out", caller, "rules", "template",
+        state_path=state_path,
+    )
+    assert second.skipped == 2 and second.ok == 2
+    assert calls == [], "unchanged corpus must skip module_brief() entirely, not just the model call"
+
+
+def test_batch_recomputes_briefs_when_a_source_file_changes(indexed_db, tmp_path, monkeypatch):
+    # indexed_db is session-scoped and shared with every other test module,
+    # so the sha256 mutation below must be reverted before this test exits.
+    row = indexed_db.execute(
+        "SELECT source_file_id AS id FROM member WHERE name = 'MMP0100'"
+    ).fetchone()
+    file_id = row["id"]
+    original_sha = indexed_db.execute(
+        "SELECT sha256 FROM source_file WHERE id = ?", (file_id,)
+    ).fetchone()["sha256"]
+
+    members = ["MMP0100", "MMP0200"]
+    state_path = tmp_path / "state.json"
+    caller = FakeCaller()
+    try:
+        first = batch_mod.run_batch(
+            indexed_db, members, tmp_path / "out", caller, "rules", "template",
+            state_path=state_path,
+        )
+        assert first.ok == 2
+
+        # Simulate a re-ingest that changed one file's content: bump its
+        # sha256 directly, as `mfdoc ingest` would after re-hashing changed
+        # source.
+        indexed_db.execute(
+            "UPDATE source_file SET sha256 = ? WHERE id = ?",
+            ("deadbeef" + original_sha, file_id),
+        )
+        indexed_db.commit()
+
+        calls = []
+        real_module_brief = batch_mod.module_brief
+
+        def counting_module_brief(*args, **kwargs):
+            calls.append(args[1] if len(args) > 1 else kwargs.get("member_name"))
+            return real_module_brief(*args, **kwargs)
+
+        monkeypatch.setattr(batch_mod, "module_brief", counting_module_brief)
+
+        second = batch_mod.run_batch(
+            indexed_db, members, tmp_path / "out", caller, "rules", "template",
+            state_path=state_path,
+        )
+        # Corpus signature changed, so the per-member fallback re-derives
+        # every brief -- but since neither member's actual brief text
+        # changed (the sha bump didn't touch any fact table), the model is
+        # still not re-called.
+        assert set(calls) == {"MMP0100", "MMP0200"}
+        assert second.skipped == 2 and second.ok == 2
+        assert caller.calls == 2, "model must not be re-called when a member's own brief hash is unchanged"
+    finally:
+        indexed_db.execute(
+            "UPDATE source_file SET sha256 = ? WHERE id = ?", (original_sha, file_id)
+        )
+        indexed_db.commit()

@@ -144,6 +144,24 @@ class BatchSummary:
     skipped: int
 
 
+def _corpus_signature(conn) -> str:
+    """Single hash over every source_file's (path, sha256), order-independent.
+
+    Unchanged across a run iff no source file changed at all since it was
+    last computed -- the only sound basis for skipping module_brief()
+    itself (not just the model call). A per-member file check isn't safe:
+    module_brief() also pulls in facts owned by other members (inbound
+    callers, copycode-inherited rules), so a member's brief can change even
+    when its own file didn't.
+    """
+    rows = conn.execute("SELECT path, sha256 FROM source_file ORDER BY path").fetchall()
+    digest = hashlib.sha256()
+    for r in rows:
+        digest.update(r["path"].encode("utf-8"))
+        digest.update(r["sha256"].encode("utf-8"))
+    return digest.hexdigest()
+
+
 def _load_state(state_path: Path) -> dict:
     if state_path.exists():
         return json.loads(state_path.read_text(encoding="utf-8"))
@@ -163,24 +181,42 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
               ) -> BatchSummary:
     """Run the harness over `members`, resumable via `state_path`.
 
-    A member is skipped (not re-generated) only when its brief hasn't
-    changed since the last successful run and the output file still
-    exists -- a member whose source changed, or whose prior attempt
-    failed, is always re-run. This is what makes a run over thousands of
-    members interruptible and restartable without burning tokens on work
-    that's already done.
+    Two tiers of skip, cheapest first:
+
+    1. Corpus-level: if no `source_file` changed anywhere since the last
+       successful run (`_corpus_signature` matches), every member's facts
+       are byte-identical to last time, so every brief is guaranteed
+       identical too -- module_brief() itself is skipped entirely for any
+       member with a prior successful run and an existing output file,
+       not just the model call.
+    2. Per-member: otherwise (corpus changed, or no prior state), brief is
+       computed and hashed as before; a member is skipped (not
+       re-generated) only when its own brief hash is unchanged from the
+       last successful run and the output file still exists -- a member
+       whose brief changed, or whose prior attempt failed, is always
+       re-run.
+
+    This is what makes a run over thousands of members interruptible and
+    restartable without burning tokens -- or needless DB queries -- on
+    work that's already done.
     """
     state = _load_state(state_path) if state_path else {}
+    corpus_sig = _corpus_signature(conn)
+    corpus_unchanged = state.get("_corpus_sha256") == corpus_sig
     results: list[DocResult] = []
     briefs: dict[str, str] = {}
     to_run: list[tuple[str, str, Path]] = []
 
     for name in members:
+        out_path = out_dir / f"{name}.md"
+        prior = state.get(name)
+        if corpus_unchanged and prior and prior.get("ok") and out_path.exists():
+            results.append(DocResult(name, str(out_path), True, prior.get("attempts", 1), 0, 0, [], skipped=True))
+            continue
+
         brief = module_brief(conn, name, redact=redact, lexicon=lexicon)
         briefs[name] = brief
         brief_hash = hashlib.sha256(brief.encode("utf-8")).hexdigest()
-        out_path = out_dir / f"{name}.md"
-        prior = state.get(name)
         if prior and prior.get("brief_sha256") == brief_hash and prior.get("ok") and out_path.exists():
             results.append(DocResult(name, str(out_path), True, prior.get("attempts", 1), 0, 0, [], skipped=True))
             continue
@@ -218,6 +254,7 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
             state[name] = {"ok": result.ok, "attempts": attempts, "brief_sha256": brief_hash}
 
     if state_path:
+        state["_corpus_sha256"] = corpus_sig
         _save_state(state_path, state)
 
     total_in = sum(r.input_tokens for r in results)

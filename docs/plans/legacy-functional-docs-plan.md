@@ -324,6 +324,26 @@ GitHub org.
 
   **All six issues taken up in this session's backlog sweep (#26, #9,
   #25, #24, #5, #8) are now closed.**
+- 2026-08-06: done: follow-up on #9 -- a 2026-08-05 comment on the
+  (still-open) issue asked to extend incremental ingest's file-level skip
+  to also skip regenerating unchanged briefs, cross-referencing
+  Azure-Samples' Legacy-Modernization-Agents `--reuse-re` flag. A
+  per-member skip keyed on that member's own `source_file.sha256` would be
+  unsound: `brief.module_brief()` also pulls in facts owned by *other*
+  members (inbound callers, copycode-inherited rules), so a member's brief
+  can change even when its own file didn't. The only correct cheap check
+  is corpus-wide: new `batch._corpus_signature()` hashes every
+  `(source_file.path, sha256)` pair; when it matches the prior successful
+  run's signature (persisted as `_corpus_sha256` in the state file
+  alongside the existing per-member entries), nothing in the whole corpus
+  changed, so `run_batch()` skips calling `module_brief()` entirely for
+  every member with a prior `ok` run and an existing output file -- not
+  just skipping the model call, as it already did. A changed corpus falls
+  back to exactly the pre-existing per-member brief-hash skip. New tests
+  in `tests/test_batch.py` cover both: `module_brief()` isn't called at
+  all when nothing changed, and it's still called (but the model isn't
+  re-invoked) when a source file's sha256 changes but no dependent brief
+  content actually did. Issue #9 is now closed for good.
 
 ## Purpose of this document
 
