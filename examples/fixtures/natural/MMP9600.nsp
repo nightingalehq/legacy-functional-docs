@@ -1,0 +1,13 @@
+** MMP9600 - REPORTING-MODE BLOCK INFERENCE FIXTURE (ISSUE #5)
+** No structured-mode terminators anywhere -- reporting mode is detected
+** purely from the LOOP tell, since detect_mode checks for structured
+** tells first. LOOP's body is consistently more indented than the LOOP
+** line itself, so reporting_loop_plan should find this unambiguous and
+** infer LOOP as a rule_candidate (confidence='inferred') rather than
+** leaving it unrecognised.
+FIND (10) MILL-ORDER WITH GRADE-CODE = 'X9'
+  LOOP
+    DISPLAY ORDER-NO
+    ADD 1 TO #COUNT
+  DOEND
+END

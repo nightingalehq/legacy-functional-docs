@@ -1,0 +1,11 @@
+** MMP9700 - AMBIGUOUS REPORTING-MODE NESTING FIXTURE (ISSUE #5)
+** LOOP's body (line below) is NOT more indented than the LOOP line itself
+** -- reporting_loop_plan must refuse to infer anything for this member
+** rather than guess a depth that looks confident but isn't backed by a
+** real indentation signal. Must fall back to the existing high-severity
+** reporting_mode gap unchanged, exactly as before this feature existed.
+FIND (10) MILL-ORDER WITH GRADE-CODE = 'X9'
+  LOOP
+  DISPLAY ORDER-NO
+DOEND
+END

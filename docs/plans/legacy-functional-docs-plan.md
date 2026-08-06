@@ -247,6 +247,38 @@ GitHub org.
   `tests/test_column_spec_continuations.py` covers the fold and that
   quirk explicitly. `reference/natural-adabas.md` updated. **Issue #19's
   full split (4.11a/#24, 4.11b/#25, 4.11c/#26) is now closed.**
+- 2026-08-06: done: 4.6 (reporting-mode block inference, #5) -- the largest
+  single item left in Phase 4. Reporting mode has no `END-LOOP`; scope was
+  previously always flagged unreliable rather than reported at all. New
+  `reporting_loop_plan()` maps every `LOOP` in a reporting-mode member to
+  its own indentation column, but only if every one of them passes a
+  strict check: the very next code line's indentation must be *strictly
+  greater* than the `LOOP` line's own. The moment any `LOOP` in the member
+  fails that check, inference is abandoned for the *whole* member -- not
+  per-`LOOP` -- since one ambiguous indentation convention casts doubt on
+  whether the rest of the member's indentation can be trusted either.
+  When it succeeds: `LOOP` is now recorded as a `rule_candidate`
+  (`confidence='inferred'`), and it participates in `depth` the same way
+  `IF`/`DECIDE`/`FOR`/`REPEAT` already do in structured mode, so anything
+  nested inside a `LOOP` body gets a correctly-elevated depth too, for free
+  -- no changes needed to `_match_rules` itself. Closing is indentation-
+  based (dedent to or past the `LOOP`'s own column), tracked in a small
+  stack decoupled from `open_blocks` (which stays exactly as it was, since
+  `LOOP` has no closing keyword for that mechanism to key off of). The
+  member's `reporting_mode` gap drops from high to medium severity when
+  inference succeeds ("inferred, confirm before trusting" rather than
+  "unreliable"); stays high, unchanged, when it doesn't. New schema column
+  `rule_candidate.confidence` (`verified` default, matching the existing
+  `entity_link`/`data_access`/`doc_claim` vocabulary -- no new terms
+  invented). New `MMP9600.nsp` (unambiguous -- gets the inference) and
+  `MMP9700.nsp` (deliberately ambiguous -- proves the conservative
+  fallback) fixtures; `tests/test_reporting_mode_inference.py` covers both
+  plus an explicit check that structured-mode members are untouched.
+  `tests/test_batch.py`/`tests/test_coverage_snapshot.py` updated for the
+  two new fixtures. `README.md`/`SKILL.md`'s "Known limitations" and
+  `reference/natural-adabas.md`'s reporting-mode section updated to
+  describe the new inferred/ambiguous split instead of a blanket
+  "unreliable" claim.
 
 ## Purpose of this document
 

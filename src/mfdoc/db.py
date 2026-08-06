@@ -197,12 +197,16 @@ CREATE TABLE IF NOT EXISTS rule_candidate (
     member_id     INTEGER NOT NULL REFERENCES member(id),
     line_no       INTEGER NOT NULL,
     end_line      INTEGER,
-    construct     TEXT NOT NULL,          -- IF | DECIDE ON | DECIDE FOR | CASE | WHILE | FOR | REPEAT | AT BREAK | ON ERROR | REINPUT | ESCAPE
+    construct     TEXT NOT NULL,          -- IF | DECIDE ON | DECIDE FOR | CASE | WHILE | FOR | REPEAT | AT BREAK | ON ERROR | REINPUT | ESCAPE | LOOP
     condition     TEXT,
     depth         INTEGER DEFAULT 0,
     fields_used   TEXT,                   -- comma separated field/variable names referenced
     literals      TEXT,                   -- literal values in the condition (magic numbers/codes)
-    raw           TEXT NOT NULL
+    raw           TEXT NOT NULL,
+    confidence    TEXT NOT NULL DEFAULT 'verified'  -- verified | inferred -- 'inferred' for
+                                          -- reporting-mode LOOP/depth inference (issue #5),
+                                          -- where nesting is read from indentation, not an
+                                          -- explicit END-* keyword
 );
 CREATE INDEX IF NOT EXISTS ix_rule_member ON rule_candidate(member_id);
 
