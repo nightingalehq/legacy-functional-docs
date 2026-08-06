@@ -279,6 +279,51 @@ GitHub org.
   `reference/natural-adabas.md`'s reporting-mode section updated to
   describe the new inferred/ambiguous split instead of a blanket
   "unreliable" claim.
+- 2026-08-06: done: 5.2 (citation-accuracy sampling, #8) -- the last open
+  item from this session's backlog sweep. `mfdoc validate` proves every
+  citation *resolves*; it never proved one was *right*. New `mfdoc
+  sample-citations` subcommand (new `src/mfdoc/sample.py`): samples up to
+  N claims per document (reusing `validate.py`'s own `_logical_units`
+  sentence-splitting, so a sampled claim is exactly what a reader sees as
+  one assertion), resolves each against its cited source line(s), and
+  records a verdict. `--judge human` is required first (interactive
+  terminal labelling, resumable via a JSON state file -- same pattern as
+  `batch.py`'s `_load_state`/`_save_state`) to calibrate what "the source
+  supports the claim" means for this document set; `--judge llm` refuses
+  to run standalone until at least one human verdict exists, then reports
+  its agreement with the human labels rather than being trusted on its
+  own. `--judge llm` reuses the exact same caller-construction path as
+  `mfdoc batch` (extracted the shared logic into `cli._build_model_caller`
+  to avoid duplicating the fake-echo/Anthropic/Vertex selection and the
+  Vertex-needs-`--model` guard) and applies the same redaction discipline
+  before anything reaches the prompt.
+
+  The resulting `citation_accuracy_rate` is persisted via the existing
+  `metric` table and surfaced in `graph.coverage()` -- but only once at
+  least one human verdict has been recorded; omitted otherwise, so every
+  existing coverage-snapshot test stays byte-for-byte unaffected until a
+  project actually runs the sampling command. New
+  `min_citation_accuracy_rate` entry in `cli.GATES`, following the
+  existing `(options_key, coverage_key, kind, blocks)` shape -- an
+  unsampled codebase evaluates against 0 and correctly fails the gate if
+  configured, rather than silently passing.
+
+  New `tests/test_sample_citations.py`: pure unit tests for the
+  claim/citation extraction and verdict arithmetic, plus full-command
+  tests against an isolated project (deliberately never the shared session
+  `indexed_db` fixture other tests use -- this command's `set_metric` call
+  would otherwise leak `citation_accuracy_rate` into
+  `test_coverage_snapshot.py`'s exact-dict-equality check for whichever
+  test file happens to run after it, a fragile order-dependency this repo
+  has already been bitten by twice this session). `docs/guides/
+  security-and-compliance.md` updated: replaced the "not yet built, Phase
+  5" framing with what the sampling command does and its explicit
+  limitation (still a sample, never a full-corpus check), and corrected
+  the "no other network code" claim now that `--judge llm` is a second
+  path that can reach a model provider.
+
+  **All six issues taken up in this session's backlog sweep (#26, #9,
+  #25, #24, #5, #8) are now closed.**
 
 ## Purpose of this document
 

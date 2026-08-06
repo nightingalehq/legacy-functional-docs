@@ -307,6 +307,17 @@ def coverage(conn) -> dict:
         "gaps_high": scalar("SELECT COUNT(*) FROM gap WHERE severity='high'"),
         "gaps_total": scalar("SELECT COUNT(*) FROM gap"),
     }
+    # Sampling-derived, not computed from facts -- only present once
+    # `mfdoc sample-citations --judge human` has recorded at least one
+    # verdict (that command persists it via set_metric under this exact
+    # name). Omitted rather than defaulted to 0/None when absent, so every
+    # existing coverage()-snapshot test stays byte-for-byte unaffected
+    # until a project actually runs the sampling command.
+    accuracy_row = conn.execute(
+        "SELECT value FROM metric WHERE scope='global' AND name='citation_accuracy_rate'"
+    ).fetchone()
+    if accuracy_row is not None:
+        cov["citation_accuracy_rate"] = float(accuracy_row["value"])
     for k, v in cov.items():
         set_metric(conn, "global", f"coverage.{k}", v)
     return cov
