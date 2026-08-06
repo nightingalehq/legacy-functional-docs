@@ -202,8 +202,12 @@ State these to the user rather than letting them be discovered later:
 
 - The scanners are heuristic line-and-clause matchers, not grammars. They are
   built to flag what they cannot parse; they are not built to be complete.
-- Natural reporting mode has implicit block scope. Loop and condition nesting
-  reported for reporting-mode members is unreliable and is flagged as such.
+- Natural reporting mode has implicit block scope. `LOOP` nesting is inferred
+  from indentation when every `LOOP`'s body in the member is unambiguously
+  more indented than the `LOOP` line itself (recorded as a rule with
+  `confidence='inferred'`, still worth SME confirmation); when it isn't,
+  nesting is left unresolved and flagged high-severity, as before this
+  inference existed.
 - Dynamic dispatch (`CALLNAT #VAR`, `FETCH #PGM`, Mantis `CALL` on a variable)
   cannot be resolved from source. Those call graphs are incomplete by nature.
 - `UPDATE`/`DELETE` referencing a processing-loop label rather than a view

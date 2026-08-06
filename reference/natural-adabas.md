@@ -63,11 +63,18 @@ Structured mode closes every block explicitly (`END-IF`, `END-READ`,
 `END-DEFINE`). Reporting mode does not: block scope is implicit, `LOOP` closes
 loops, and statement extent depends on context.
 
-The scanner detects the mode and records a high-severity gap for reporting-mode
-members, because nesting depth reported for them is unreliable. Reporting-mode
-members are usually the oldest code in the system, which unfortunately means they
-are usually also the most business-critical. Budget SME time for them
-specifically rather than trusting the extracted structure.
+The scanner detects the mode and, for reporting-mode members, tries to infer
+`LOOP` nesting from indentation: if every `LOOP`'s body in the member is
+unambiguously more indented than the `LOOP` line itself, `LOOP` is recorded as
+a rule with `confidence='inferred'` and the member's gap drops to
+medium-severity ("inferred, needs confirmation" rather than "unreliable").
+The moment indentation isn't unambiguous for even one `LOOP` in the member,
+inference is abandoned for the whole member — no depth is inferred for any of
+it, and the gap stays high-severity, exactly as it was before this inference
+existed. Reporting-mode members are usually the oldest code in the system,
+which unfortunately means they are usually also the most business-critical.
+Budget SME time for them specifically rather than trusting the extracted
+structure, inferred or not.
 
 ## Statement forms that matter
 

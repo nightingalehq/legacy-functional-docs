@@ -210,6 +210,12 @@ RE_LOOP_COUNTER = re.compile(r"^\s*(?:ADD\s+1\s+TO|SUBTRACT\s+1\s+FROM)\b", re.I
 # Reporting-mode tells
 RE_REPORTING = re.compile(r"^\s*(LOOP\b|DO\b\s*$|DOEND\b)", re.I)
 
+# LOOP specifically, as a block opener for the indentation-based depth
+# inference below (issue #5) -- DO/DOEND (RE_REPORTING's other two tells)
+# are left untouched as pure mode signals; scope here is deliberately just
+# LOOP, the construct the issue asks for.
+RE_LOOP_OPEN = re.compile(r"^\s*LOOP\b", re.I)
+
 _STRUCTURED_TELLS = re.compile(r"\bEND-(IF|DEFINE|DECIDE|REPEAT|FOR|SUBROUTINE|WORK|ALL)\b", re.I)
 
 IDENT = re.compile(r"[A-Z][A-Z0-9#@$&\-_.]*", re.I)
@@ -302,6 +308,44 @@ def detect_mode(lines) -> str:
     return "unknown"
 
 
+def _reporting_code_lines(lines):
+    """[(line_no, code, indent_col)] for a member's non-comment, non-blank lines."""
+    out = []
+    for line_no, _, raw in lines:
+        code, is_comment = strip_comment(raw)
+        if is_comment or not code.strip():
+            continue
+        out.append((line_no, code, len(raw) - len(raw.lstrip())))
+    return out
+
+
+def reporting_loop_plan(lines) -> dict[int, int] | None:
+    """Map each LOOP's line_no to its own indentation column, for reporting-mode
+    depth inference (issue #5) -- or None if inference isn't safe to trust.
+
+    Reporting mode has no END-LOOP keyword; scope is implicit and normally
+    unrecoverable from a line scan. Indentation is a usable proxy *only*
+    when it's unambiguous: every LOOP's body must be more indented than the
+    LOOP line itself, checked against the very next code line. The moment
+    any LOOP in the member fails that check -- inconsistent indentation, or
+    a LOOP with nothing after it -- inference is abandoned for the whole
+    member and the caller falls back to flagging the existing high-severity
+    gap rather than emitting a confident-looking wrong depth for any of it.
+    This is deliberately member-wide, not per-LOOP: a member with one
+    ambiguous LOOP casts doubt on whether its indentation convention can be
+    trusted at all.
+    """
+    code_lines = _reporting_code_lines(lines)
+    loop_indents: dict[int, int] = {}
+    for i, (line_no, code, indent) in enumerate(code_lines):
+        if not RE_LOOP_OPEN.match(code):
+            continue
+        if i + 1 >= len(code_lines) or code_lines[i + 1][2] <= indent:
+            return None
+        loop_indents[line_no] = indent
+    return loop_indents
+
+
 def extract(conn, member_id: int, lines: list[tuple[int, str | None, str]], member_name: str = "?") -> dict:
     """Populate fact tables for one Natural member."""
     mode = detect_mode(lines)
@@ -319,14 +363,27 @@ def extract(conn, member_id: int, lines: list[tuple[int, str | None, str]], memb
             "text and edit masks as needing SME/screen confirmation before relying on them.",
             member_id=member_id, severity="medium",
         )
+    loop_plan: dict[int, int] | None = None
     if mode == "reporting":
-        add_gap(
-            conn, "reporting_mode",
-            "Member appears to be written in Natural reporting mode; block scope is "
-            "implicit so loop and condition nesting reported here is unreliable and "
-            "needs SME confirmation.",
-            member_id=member_id, severity="high",
-        )
+        loop_plan = reporting_loop_plan(lines)
+        if loop_plan is not None:
+            add_gap(
+                conn, "reporting_mode",
+                "Member is written in Natural reporting mode. LOOP nesting was inferred "
+                "from indentation (recorded as rule_candidate rows with confidence="
+                "'inferred') because every LOOP's body was consistently more indented "
+                "than the LOOP line itself; confirm against a real listing before "
+                "treating it as verified structure.",
+                member_id=member_id, severity="medium",
+            )
+        else:
+            add_gap(
+                conn, "reporting_mode",
+                "Member appears to be written in Natural reporting mode; block scope is "
+                "implicit so loop and condition nesting reported here is unreliable and "
+                "needs SME confirmation.",
+                member_id=member_id, severity="high",
+            )
 
     view_to_ddm: dict[str, str] = {}
     # Maps a database-loop label (R1, F1, H1, ...) to the (entity, via_view)
@@ -349,6 +406,13 @@ def extract(conn, member_id: int, lines: list[tuple[int, str | None, str]], memb
     scope = None
     depth = 0
     open_blocks: list[tuple[str, int]] = []
+    # Reporting-mode LOOP nesting (issue #5) -- (line_no, indent_col) per
+    # open LOOP, decoupled from open_blocks/the END-* keyword closing
+    # mechanism above, since LOOP closes on dedent, not on a keyword. Stays
+    # empty (a no-op) whenever loop_plan is None -- ambiguous indentation
+    # or a non-reporting member -- so nothing below this point changes
+    # behaviour for structured-mode members at all.
+    loop_stack: list[tuple[int, int]] = []
 
     idx = 0
     while idx < len(lines):
@@ -379,6 +443,27 @@ def extract(conn, member_id: int, lines: list[tuple[int, str | None, str]], memb
         masked, _ = mask_literals(stmt)
 
         matched = False
+
+        # ------------------------------------------- reporting-mode LOOP nesting
+        # Only active when loop_plan is not None (mode == "reporting" and every
+        # LOOP's indentation was unambiguous -- see reporting_loop_plan). Must
+        # run before every other matcher below: closing a LOOP on dedent has to
+        # happen before this line's own statement is classified, and opening
+        # one has to bump `depth` before any IF/DECIDE/etc rule_candidate
+        # inside its body is recorded, or their depth would be wrong by one.
+        if loop_plan is not None:
+            cur_indent = len(raw) - len(raw.lstrip())
+            while loop_stack and cur_indent <= loop_stack[-1][1]:
+                loop_stack.pop()
+                depth = max(depth - 1, 0)
+            if line_no in loop_plan and RE_LOOP_OPEN.match(masked):
+                insert(conn, "rule_candidate", member_id=member_id, line_no=line_no,
+                       construct="LOOP", condition=None, depth=depth,
+                       fields_used=None, literals=None, raw=stmt.strip()[:500],
+                       confidence="inferred")
+                loop_stack.append((line_no, cur_indent))
+                depth += 1
+                matched = True
 
         # ---------------------------------------------------------- DEFINE DATA
         if RE_DEFINE_DATA.match(masked):

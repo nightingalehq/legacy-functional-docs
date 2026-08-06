@@ -97,6 +97,29 @@ member/code_member, +17 source_lines, +2 unparsed_lines (the two folded
 continuation lines, revisited), +1 orphan_module/gaps_total (uncalled by
 design, as usual) -- rule_candidates/invocation_edges unchanged, since a
 WRITE produces neither.
+
+2026-08-06: numbers moved again when MMP9600.nsp and MMP9700.nsp were added
+(issue 4.6/#5, reporting-mode LOOP/depth inference -- the largest item in
+Phase 4). MMP9600 has no structured-mode terminators anywhere (mode is
+detected purely from the LOOP tell) and its LOOP's body is consistently
+more indented than the LOOP line itself, so `reporting_loop_plan` finds it
+unambiguous: LOOP is now recorded as a `rule_candidate` (construct='LOOP',
+confidence='inferred') instead of falling through unrecognised, and the
+member's `reporting_mode` gap drops from high to medium severity to
+reflect that nesting was inferred, not left unstructured. MMP9700's LOOP
+body is *not* more indented than the LOOP line -- deliberately ambiguous,
+to prove the conservative fallback: no inferred rule_candidate, LOOP still
+falls through as `unparsed_line` exactly as before this feature existed,
+and the gap stays high-severity. Both members' `FIND (10) MILL-ORDER ...`
+resolves against the entity MMP9200 already defined (no DEFINE DATA in
+either fixture, deliberately, so `_STRUCTURED_TELLS`'s `END-DEFINE` can't
+misclassify them as structured). +2 members/code_members, +26
+source_lines, +1 rule_candidate (MMP9600's inferred LOOP), +2
+data_accesses (the two FINDs), +3 unparsed_lines (MMP9600's DOEND;
+MMP9700's LOOP -- unrecognised since ambiguous -- and DOEND), +1
+gaps_high (MMP9700's reporting_mode gap; MMP9600's is medium and doesn't
+count here), +7 gaps_total (2 reporting_mode + 3 unparsed_line + 2
+orphan_module, uncalled by design as usual).
 """
 
 from __future__ import annotations
@@ -104,17 +127,17 @@ from __future__ import annotations
 from mfdoc import graph
 
 EXPECTED_COVERAGE = {
-    "members": 19,
-    "code_members": 11,
-    "source_lines": 380,
-    "unparsed_lines": 4,
-    "line_recognition_rate": 0.9895,
+    "members": 21,
+    "code_members": 13,
+    "source_lines": 406,
+    "unparsed_lines": 7,
+    "line_recognition_rate": 0.9828,
     "entities": 13,
     "entities_with_definition": 9,
     "entity_definition_rate": 0.6923,
     "entity_fields": 46,
-    "data_accesses": 12,
-    "rule_candidates": 34,
+    "data_accesses": 14,
+    "rule_candidates": 35,
     "invocation_edges": 13,
     "invocations_resolved": 2,
     "call_resolution_rate": 0.1538,
@@ -122,8 +145,8 @@ EXPECTED_COVERAGE = {
     "include_edges": 7,
     "includes_resolved": 1,
     "include_resolution_rate": 0.1429,
-    "gaps_high": 19,
-    "gaps_total": 34,
+    "gaps_high": 20,
+    "gaps_total": 41,
 }
 
 
@@ -140,5 +163,5 @@ def test_run_all_summary_matches_snapshot(derive_result):
     assert derive_result["unresolved_calls"] == 13
     assert derive_result["undefined_entities"] == 3
     assert derive_result["adabas_entities_merged"] == 2
-    assert derive_result["orphans"] == 7
+    assert derive_result["orphans"] == 9
     assert derive_result["transaction_scopes"] == 3

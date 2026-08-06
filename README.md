@@ -194,8 +194,10 @@ Stated up front rather than discovered later:
 
 - The scanners are heuristic line-and-clause matchers, not grammars. They are built
   to flag what they cannot parse, not to be complete.
-- Natural reporting mode has implicit block scope; nesting reported for
-  reporting-mode members is unreliable and flagged as such.
+- Natural reporting mode has implicit block scope. `LOOP` nesting is inferred
+  from indentation when it's unambiguous (recorded with `confidence='inferred'`,
+  still flagged for SME confirmation); when indentation doesn't clearly support
+  it, nesting is left unresolved and flagged high-severity, same as before.
 - Dynamic dispatch cannot be resolved from source. Those call graphs are incomplete
   by nature, and that is reported rather than hidden.
 - The Mantis and Supra packs need calibration against the target codebase. See
