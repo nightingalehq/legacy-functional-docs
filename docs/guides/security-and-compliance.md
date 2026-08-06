@@ -191,22 +191,38 @@ writing prose in a word processor.
   live mainframe.
 - It does not phone home, collect telemetry, or transmit anything to its
   own maintainers. The tool itself (everything under `src/mfdoc/`) makes
-  only the explicit, user-initiated calls `mfdoc batch` makes to whichever
-  provider `--provider` selects (the Anthropic API directly, or the same
-  Claude models via Google Cloud Vertex AI) — there is no other network
-  code in the installed package to audit for this. The one exception in
+  only the explicit, user-initiated calls that `mfdoc batch` and `mfdoc
+  sample-citations --judge llm` make to whichever provider `--provider`
+  selects (the Anthropic API directly, or the same Claude models via Google
+  Cloud Vertex AI) — both commands share the same caller-construction code
+  path (`cli._build_model_caller`), and there is no other network code in
+  the installed package to audit for this. `--judge llm` sends the sampled
+  claim text and its cited source line(s) — a subset of the same brief
+  content `mfdoc batch` already sends, not additional exposure. The one
+  exception in
   the repository as a whole is `scripts/fetch_cobol_course_fixtures.py`, a
   dev-only, opt-in script (not part of the installed package, never run in
   CI or by any `mfdoc` command) that pulls public, appropriately-licensed
   fixture files from GitHub — see
   [Supplementary smoke fixtures from public corpora](extending.md#supplementary-smoke-fixtures-from-public-corpora).
-- It does not claim citation *accuracy*, only citation *resolution* —
-  `mfdoc validate` proves every citation points at a real line; it does not
-  prove that line actually supports the claim next to it. A citation
-  pointing at the wrong line currently passes validation. Sampling-based
-  accuracy checking is an open item, not yet built (tracked in the plan
-  doc's Phase 5) — don't represent citation validation as a stronger
-  guarantee than it is when describing this to a client.
+- `mfdoc validate` proves every citation *resolves* — it points at a real
+  member and a real line range. It does not by itself prove the citation is
+  *right*, i.e. that the cited line actually supports the claim next to it;
+  a citation pointing at the wrong line passes validation. `mfdoc
+  sample-citations` closes part of that gap: it samples N claims per
+  document, presents each alongside its cited source line(s), and records a
+  verdict — a human pass first (`--judge human`, to calibrate what "the
+  source supports the claim" means for this document set), then an optional
+  LLM-judge pass (`--judge llm`) reported against the human labels, never
+  trusted standalone. The resulting `citation_accuracy_rate` is surfaced in
+  `mfdoc coverage` (only once at least one human verdict has been recorded)
+  and can gate a build via `options.quality_gates.min_citation_accuracy_rate`
+  the same way `line_recognition_rate` does.
+  **This is still a sample, not a full-corpus check.** A high
+  `citation_accuracy_rate` says the sampled claims held up under human (and
+  optionally model) review — it is not a guarantee about every citation in
+  every document, and should be represented to a client as exactly that: a
+  spot-check result, not a proof.
 
 ## Known correctness limitations relevant to reliance decisions
 

@@ -9,6 +9,7 @@
     mfdoc rules-register --config project.yml --out docs/functional/rules-register.md
     mfdoc batch    --config project.yml --out docs/functional/modules
     mfdoc validate --config project.yml --docs docs/functional
+    mfdoc sample-citations --config project.yml --docs docs/functional --judge human
     mfdoc export   --config project.yml --json out/index.json
 """
 
@@ -24,7 +25,7 @@ import yaml
 
 from . import brief as brief_mod
 from . import graph, normalise
-from .db import add_gap, connect, insert, purge_member, purge_member_facts, upsert_member
+from .db import add_gap, connect, insert, purge_member, purge_member_facts, set_metric, upsert_member
 from .dialects import adabas, environment, mantis, natural, supra
 from .redact import Redactor
 
@@ -263,6 +264,47 @@ def cmd_rules_register(args) -> int:
     return 0
 
 
+def _build_model_caller(args):
+    """Construct a ModelCaller from --caller/--provider/--model/--gcp-* args.
+
+    Shared by cmd_batch and cmd_sample_citations's --judge llm mode, so the
+    fake-echo / Anthropic / Vertex selection logic (and the Vertex
+    --model-is-required guard) exists in exactly one place. Returns None
+    (having already printed the error) on a configuration problem the
+    caller should treat as an exit-1, rather than raising -- matches this
+    module's existing convention of printing a human-readable reason before
+    a non-zero exit, not a traceback.
+    """
+    from . import batch as batch_mod
+
+    # getattr, not args.provider: any pre-existing caller building a bare
+    # args object (a script, a notebook, an older test) without a
+    # `provider` attribute must keep working exactly as it did before this
+    # flag existed, not raise AttributeError.
+    provider = getattr(args, "provider", "anthropic")
+
+    if args.caller == "fake-echo":
+        # For dry runs / CI smoke tests: no network call, no API key needed.
+        def caller(prompt: str) -> batch_mod.ModelResponse:
+            return batch_mod.ModelResponse(text=prompt, input_tokens=0, output_tokens=0)
+        return caller
+    if provider == "vertex":
+        from .vertex_caller import VertexCaller
+        if not args.model:
+            print(
+                "--provider vertex requires --model. Current-generation Claude models "
+                "(e.g. claude-sonnet-4-5, claude-opus-4-1) use the same bare id on Vertex AI "
+                "as on the direct Anthropic API; only legacy models use a Vertex-specific "
+                "dated-snapshot id with an '@' separator (e.g. claude-3-5-sonnet-v2@20241022, "
+                "not claude-3-5-sonnet-v2-20241022). See Vertex AI Model Garden for the "
+                "current id for this model."
+            )
+            return None
+        return VertexCaller(model=args.model, project=args.gcp_project, region=args.gcp_region)
+    from .anthropic_caller import AnthropicCaller
+    return AnthropicCaller(model=args.model or "claude-sonnet-4-5")
+
+
 def cmd_batch(args) -> int:
     """Batch harness for the high-volume, formulaic module docs (option C).
 
@@ -286,32 +328,9 @@ def cmd_batch(args) -> int:
     writing_rules = (base / "reference" / "writing-rules.md").read_text(encoding="utf-8")
     template = (base / "templates" / "module.md").read_text(encoding="utf-8")
 
-    # getattr, not args.provider: any pre-existing caller building a bare
-    # args object (a script, a notebook, an older test) without a
-    # `provider` attribute must keep working exactly as it did before this
-    # flag existed, not raise AttributeError.
-    provider = getattr(args, "provider", "anthropic")
-
-    if args.caller == "fake-echo":
-        # For dry runs / CI smoke tests: no network call, no API key needed.
-        def caller(prompt: str) -> batch_mod.ModelResponse:
-            return batch_mod.ModelResponse(text=prompt, input_tokens=0, output_tokens=0)
-    elif provider == "vertex":
-        from .vertex_caller import VertexCaller
-        if not args.model:
-            print(
-                "mfdoc batch --provider vertex requires --model. Current-generation "
-                "Claude models (e.g. claude-sonnet-4-5, claude-opus-4-1) use the same "
-                "bare id on Vertex AI as on the direct Anthropic API; only legacy "
-                "models use a Vertex-specific dated-snapshot id with an '@' separator "
-                "(e.g. claude-3-5-sonnet-v2@20241022, not claude-3-5-sonnet-v2-20241022). "
-                "See Vertex AI Model Garden for the current id for this model."
-            )
-            return 1
-        caller = VertexCaller(model=args.model, project=args.gcp_project, region=args.gcp_region)
-    else:
-        from .anthropic_caller import AnthropicCaller
-        caller = AnthropicCaller(model=args.model or "claude-sonnet-4-5")
+    caller = _build_model_caller(args)
+    if caller is None:
+        return 1
 
     narrative_opts = (cfg["options"] or {}).get("narrative") or {}
     pricing = narrative_opts.get("pricing") or {}
@@ -432,6 +451,16 @@ GATES = [
     ("max_high_severity_gaps", "gaps_high", "max",
      "too many unresolved high-severity items to write reliable narrative "
      "from; resolve or triage them first"),
+    # Sampling-derived (mfdoc sample-citations --judge human), not computed
+    # from facts -- absent from coverage() until that command has recorded
+    # at least one verdict. cmd_gate's cov.get(cov_key, 0) then evaluates
+    # this gate against 0, i.e. fails it -- correct: a codebase where
+    # citation accuracy has never been sampled has no basis to claim any,
+    # and a configured gate should say so rather than silently pass.
+    ("min_citation_accuracy_rate", "citation_accuracy_rate", "min",
+     "citation accuracy has not been sampled (or sampled claims were found "
+     "inaccurate) -- run `mfdoc sample-citations --judge human` before "
+     "representing citations as more than resolution-checked"),
 ]
 
 
@@ -483,6 +512,90 @@ def cmd_validate(args) -> int:
     print(f"\n{res['documents_ok']}/{res['documents']} documents clean, "
           f"{res['invalid_citations']} invalid citations of {res['total_citations']}")
     return 0 if res["invalid_citations"] == 0 and res["documents_ok"] == res["documents"] else 1
+
+
+def cmd_sample_citations(args) -> int:
+    """Sample generated claims against their cited source line(s) and record
+    a verdict -- human first, to calibrate what "the source supports the
+    claim" means for this kind of prose; an optional LLM-judge pass second,
+    reported against the human labels rather than trusted standalone.
+
+    mfdoc validate proves every citation resolves; this is the closest this
+    project gets to proving a citation is right. See
+    docs/guides/security-and-compliance.md for what the resulting
+    citation_accuracy_rate figure does and does not guarantee -- it is
+    always a sample, never a full-corpus check.
+    """
+    from . import sample as sample_mod
+
+    cfg = load_config(args.config)
+    base = Path(args.config).parent
+    conn = connect(base / cfg["index_db"])
+    state_path = base / args.state
+    state = sample_mod.load_state(state_path)
+
+    if args.judge != "report":
+        doc_paths = sorted(Path(args.docs).rglob("*.md"))
+        if not doc_paths:
+            print(f"no documents found under {args.docs}")
+            return 1
+        samples = sample_mod.sample_claims(conn, doc_paths, args.n_per_doc, args.seed)
+        state = sample_mod.merge_samples(state, samples)
+        sample_mod.save_state(state_path, state)
+
+    if args.judge == "human":
+        pending = [sid for sid in state["samples"] if sid not in state["verdicts"]["human"]]
+        print(f"{len(pending)} claim(s) awaiting a human verdict "
+              f"({len(state['samples']) - len(pending)} already labelled)")
+        for sid in pending:
+            s = state["samples"][sid]
+            print("\n" + "=" * 70)
+            print(f"CLAIM  ({s['doc_path']}):\n  {s['claim']}")
+            print(f"\nCITED SOURCE ({s['citation']}):\n  " + s["source_text"].replace("\n", "\n  "))
+            answer = input("\nDoes the cited source support this claim? [y/n/skip]: ").strip().lower()
+            if answer in ("y", "yes"):
+                state["verdicts"]["human"][sid] = {"accurate": True, "note": ""}
+            elif answer in ("n", "no"):
+                note = input("one-line reason: ").strip()
+                state["verdicts"]["human"][sid] = {"accurate": False, "note": note}
+            else:
+                continue
+            sample_mod.save_state(state_path, state)  # resumable -- same reasoning as batch's state
+    elif args.judge == "llm":
+        if not state["verdicts"]["human"]:
+            print("no human verdicts recorded yet -- run --judge human first. This project's "
+                  "own writing-rules discipline applies here too: an LLM judge is not trusted "
+                  "standalone until its agreement with a human pass has been checked.")
+            return 1
+        caller = _build_model_caller(args)
+        if caller is None:
+            return 1
+        redact = Redactor.from_options(cfg["options"])
+        for sid, s in state["samples"].items():
+            if sid in state["verdicts"]["llm"]:
+                continue
+            verdict = sample_mod.judge_with_llm(caller, s, redact)
+            state["verdicts"]["llm"][sid] = {"accurate": verdict.accurate, "note": verdict.reason}
+            sample_mod.save_state(state_path, state)
+
+    human_rate = sample_mod.accuracy_rate(state, "human")
+    llm_rate = sample_mod.accuracy_rate(state, "llm")
+    agreement = sample_mod.agreement_rate(state)
+    print(f"\n{len(state['samples'])} claim(s) sampled")
+    if human_rate is not None:
+        print(f"human-judged accuracy: {human_rate:.2%} ({len(state['verdicts']['human'])} labelled)")
+        # Human verdicts are the calibration ground truth for this feature,
+        # so they're what backs the persisted metric coverage()/gate read --
+        # an LLM-only rate never overwrites it, and report-mode with no
+        # human verdicts yet correctly leaves the metric untouched.
+        set_metric(conn, "global", "citation_accuracy_rate", human_rate)
+        conn.commit()
+    if llm_rate is not None:
+        print(f"llm-judged accuracy:   {llm_rate:.2%} ({len(state['verdicts']['llm'])} labelled)")
+    if agreement is not None:
+        shared = len(set(state["verdicts"]["human"]) & set(state["verdicts"]["llm"]))
+        print(f"human/llm agreement:   {agreement:.2%} (over {shared} shared claim(s))")
+    return 0
 
 
 def cmd_export(args) -> int:
@@ -556,6 +669,33 @@ def main(argv=None) -> int:
     p.add_argument("--config", required=True)
     p.add_argument("--docs", required=True)
     p.set_defaults(func=cmd_validate)
+
+    p = sub.add_parser("sample-citations")
+    p.add_argument("--config", required=True)
+    p.add_argument("--docs", default="docs/functional",
+                   help="documents to sample from; ignored when --judge report")
+    p.add_argument("--judge", choices=["human", "llm", "report"], default="human",
+                   help="human: interactive terminal labelling (run this first, to calibrate); "
+                        "llm: judge unlabelled samples with a model, requires human verdicts "
+                        "already recorded; report: print the current rates without sampling "
+                        "or judging anything new")
+    p.add_argument("--n-per-doc", type=int, default=3,
+                   help="claims to sample per document (default: 3)")
+    p.add_argument("--seed", type=int, default=42,
+                   help="sampling RNG seed, for a reproducible sample across runs (default: 42)")
+    p.add_argument("--state", default=".mfdoc/citation-sample-state.json",
+                   help="resume-state file path, relative to --config's directory")
+    p.add_argument("--model", default=None,
+                   help="--judge llm only; defaults to claude-sonnet-4-5 for --provider "
+                        "anthropic, required for --provider vertex (see `mfdoc batch --help`)")
+    p.add_argument("--caller", choices=["anthropic", "fake-echo"], default="anthropic",
+                   help="--judge llm only; fake-echo makes no network call, for CI/dry-run "
+                        "smoke tests")
+    p.add_argument("--provider", choices=["anthropic", "vertex"], default="anthropic",
+                   help="--judge llm only; which egress path serves the model call")
+    p.add_argument("--gcp-project", help="--judge llm + --provider vertex only")
+    p.add_argument("--gcp-region", help="--judge llm + --provider vertex only")
+    p.set_defaults(func=cmd_sample_citations)
 
     p = sub.add_parser("export")
     p.add_argument("--config", required=True)
