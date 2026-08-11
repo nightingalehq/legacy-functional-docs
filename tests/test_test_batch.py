@@ -429,3 +429,64 @@ def test_generate_member_test_doc_round_trips_natural_and_mantis(tmp_path):
         sidecar_path = out_path.with_suffix(f".{ext}")
         assert sidecar_path.exists()
         assert sidecar_path.read_text(encoding="utf-8") == fence_body
+
+
+def test_silkcentral_and_uipath_templates_exist_and_load():
+    silkcentral_path = REPO_ROOT / "templates" / "tests" / "silkcentral_testcase.md"
+    uipath_path = REPO_ROOT / "templates" / "tests" / "uipath_testcase.md"
+    assert silkcentral_path.exists()
+    assert uipath_path.exists()
+
+    for path, language in ((silkcentral_path, "silkcentral"), (uipath_path, "uipath")):
+        text = path.read_text(encoding="utf-8")
+        assert f"language: {language}" in text
+        assert "framework: testcase" in text
+        assert "{MEMBER}" in text
+        assert "{MEMBER}:BR-nnn" in text
+        # No LANGUAGE_EXTENSIONS entry for these two -- the fence must not
+        # claim a language tag testlang.py would try to split on its own
+        # extension; it's still fenced, just under a neutral content tag.
+        assert f"```{language}" not in text
+
+
+def test_generate_member_test_doc_keeps_silkcentral_and_uipath_embedded(tmp_path):
+    """No LANGUAGE_EXTENSIONS entry for these two -- the fence must stay
+    embedded in the .md rather than being split to a fabricated sidecar
+    extension. write_test_doc_with_sidecar returning None must not be
+    mistaken for a validation failure -- generate_member_test_doc's
+    result.ok must still be True."""
+    from mfdoc import testbatch
+    import sqlite3
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
+    insert(
+        conn, "test_case", member_id=1, kind="unit", scenario_name="FAKEMOD:BR-001",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+        then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:1", confidence="verified",
+    )
+    conn.commit()
+
+    for language in ("silkcentral", "uipath"):
+        doc_text = _valid_test_doc_text(language, "testcase").replace(
+            "```python\ndef test_x():\n    # FAKEMOD:BR-001 [[FAKEMOD:1]]\n    pass\n```",
+            f"```{language}\n# FAKEMOD:BR-001 [[FAKEMOD:1]]\n- test_case_id: FAKEMOD-BR-001\n```",
+        )
+
+        def caller(prompt, _doc_text=doc_text):
+            return ModelResponse(text=_doc_text, input_tokens=1, output_tokens=2)
+
+        out_path = tmp_path / language / "FAKEMOD.md"
+        result = testbatch.generate_member_test_doc(
+            conn, "FAKEMOD", language, "testcase", out_path, caller,
+            "writing rules text", "template text",
+        )
+        assert result.ok is True, result.problems
+        assert "test_case_id: FAKEMOD-BR-001" in out_path.read_text(encoding="utf-8")
+        assert not any(out_path.parent.glob("FAKEMOD.*testcase*"))
