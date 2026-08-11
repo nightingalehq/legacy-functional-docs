@@ -160,6 +160,33 @@ blocks the most documentation, phrase each item as a question a domain expert ca
 answer without reading code, and never pad it with items the tooling could have
 resolved itself.
 
+### 7. Optional: draft tests from the same facts
+
+Once module docs exist (or even before, for the deterministic stages), the
+same fact store can draft first-draft tests for a migration team, in the
+legacy source's own dialect or a destination language — still docs-only,
+still cited, still nothing invented:
+
+```bash
+mfdoc test-plan     --config project.yml   # deterministic; branch/parameter/CRUD facts -> test_case rows
+mfdoc test-advisory --config project.yml   # deterministic; names what to mock, suggests refactor seams
+mfdoc test-overlay-draft --config project.yml --out test-overlay.yml   # model proposes bug-vs-spec splits, review_status: draft only
+mfdoc test-gen   --config project.yml --member NAME --language python --framework pytest
+mfdoc test-batch --config project.yml --language python --framework pytest --out tests_generated
+mfdoc test-validate --config project.yml --docs tests_generated
+```
+
+`test-plan`/`test-advisory` are model-free, same as `derive`. `test-gen`/
+`test-batch` are the narrate stage for tests (Option C: batch, formulaic,
+one member's worth of judgement at a time) and need `mfdoc[batch]`, same as
+`mfdoc batch`. A `test-overlay.yml` entry only changes a scenario's
+characterization/spec/bug status once a human moves its `review_status`
+past `draft` — an unreviewed model proposal never does. See
+`reference/test-writing-rules.md` and
+`docs/guides/testing-strategies-for-mainframes-and-4gl.md` for what these
+tests are for and how to explain the concept to a team that has never had
+an automated test suite for this code.
+
 ## Reference material
 
 Read the relevant file before working in that dialect — each contains the
@@ -171,6 +198,7 @@ statement forms, listing layouts and traps that the scanners rely on:
   directory structure, and **how to calibrate** these scanners
 - `reference/environment.md` — JCL, CICS CSD, copybooks, Natural batch stacks
 - `reference/writing-rules.md` — citation format, confidence taxonomy, prose rules
+- `reference/test-writing-rules.md` — the same contract, extended to generated tests
 - `reference/adding-a-dialect.md` — the extractor contract, for IDMS, IMS, ADSO,
   RPG or anything else that turns up
 
@@ -182,7 +210,11 @@ src/mfdoc/
   normalise.py        encoding, sequence columns, member splitting, dialect sniffing
   graph.py            derivation: resolution, CRUD matrix, orphans, transaction scopes
   brief.py            fact briefs (module / entity / system) and JSON export
-  validate.py         citation and front-matter validation
+  testplan.py         test-case derivation + test-plan register (model-free)
+  testadvisor.py       testability classification + refactor-seam advisory (model-free)
+  testoverlay.py       bug-vs-spec curation overlay (model-drafted, human-promoted)
+  testbatch.py         test render stage (batch.py's harness, for tests)
+  validate.py         citation and front-matter validation (validate_test_doc for tests)
   cli.py              command line
   dialects/
     natural.py        Natural scanner  (reference implementation)

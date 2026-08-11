@@ -57,6 +57,21 @@ network-free dry runs; or the interactive Claude Code path for documents
 that benefit from a session holding the whole system in mind (system
 overview, entity docs, process flows, gap register).
 
+### Test generation (optional)
+
+The same fact store can draft first-draft tests for a migration team — in
+the legacy dialect or a destination language — with the same discipline as
+the docs: `mfdoc test-plan` derives cited test scenarios (Given/When/Then)
+from branch/parameter/CRUD facts, model-free; `mfdoc test-advisory` names
+what each unit needs mocked and suggests refactor seams, model-free;
+`mfdoc test-overlay-draft` lets a model *propose* a bug-vs-spec split,
+which only takes effect once a human promotes it past `review_status:
+draft`; `mfdoc test-gen`/`mfdoc test-batch` render the scenarios into
+`language`/`framework`-specific test code (still Markdown + citations, so
+`mfdoc test-validate` can check them the same way `mfdoc validate` checks
+docs). See
+[`docs/guides/testing-strategies-for-mainframes-and-4gl.md`](docs/guides/testing-strategies-for-mainframes-and-4gl.md).
+
 ### Data handling
 
 Redaction (`mfdoc brief`, before anything is written or sent anywhere), a
@@ -95,6 +110,10 @@ resolve.
 - **Extending the tool** — [`docs/guides/extending.md`](docs/guides/extending.md)
   is the developer guide for adding a dialect, a document type, or a CLI
   command.
+- **Test generation** —
+  [`docs/guides/testing-strategies-for-mainframes-and-4gl.md`](docs/guides/testing-strategies-for-mainframes-and-4gl.md)
+  introduces modern testing concepts for a mainframe/4GL audience and
+  explains what the generated tests are for.
 
 ## Installing as a Claude Code skill
 
@@ -156,6 +175,18 @@ mfdoc validate --config project.yml --docs examples
 `mfdoc export --config project.yml --json out/index.json` dumps the whole
 fact store for downstream tooling.
 
+Optional: draft tests from the same fact store (see
+[`docs/guides/testing-strategies-for-mainframes-and-4gl.md`](docs/guides/testing-strategies-for-mainframes-and-4gl.md)).
+Set `options.testgen` in `project.yml` (`default_language`, `default_framework`,
+`overlay_path`, `out_dir`) once and the flags below become optional overrides:
+
+```bash
+mfdoc test-plan     --config project.yml
+mfdoc test-advisory --config project.yml
+mfdoc test-gen      --config project.yml --member MMP0100 --language python --framework pytest
+mfdoc test-validate --config project.yml --docs tests_generated
+```
+
 ## Requirements
 
 Python 3.10+ and PyYAML. No other dependencies, no network access, nothing leaves
@@ -170,12 +201,13 @@ SKILL.md              the agent definition and workflow
 pyproject.toml        packaging; installs the `mfdoc` console script
 config/               example project configuration
 reference/            dialect packs and writing rules — read before use
-templates/            the seven document types
-src/mfdoc/            the extraction pipeline
+templates/            the seven document types, plus templates/tests/ for generated tests
+src/mfdoc/            the extraction pipeline (+ testplan/testadvisor/testoverlay/testbatch)
 tests/                pytest suite (fixtures as golden tests)
 examples/             worked example + multi-dialect fixtures
 evals/                eval prompts (dev-time only; not installed)
-docs/guides/          getting-started, architecture, security/compliance, extending
+docs/guides/          getting-started, architecture, security/compliance, extending,
+                      testing-strategies-for-mainframes-and-4gl
 docs/plans/           working backlog and design-decision record
 ```
 

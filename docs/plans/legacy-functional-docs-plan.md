@@ -344,6 +344,40 @@ GitHub org.
   all when nothing changed, and it's still called (but the model isn't
   re-invoked) when a source file's sha256 changes but no dependent brief
   content actually did. Issue #9 is now closed for good.
+- 2026-08-11: new feature area, not previously scoped in this plan: test
+  generation. The same fact-vs-narrative split applied to tests instead of
+  prose -- `testplan.py` derives cited Given/When/Then `test_case` rows from
+  `rule_candidate`/`variable`/`data_access` facts (model-free), `testadvisor.py`
+  classifies each unit for mockability/integration-only scope and suggests
+  refactor seams (model-free, advisory prose only, never touches source),
+  `testoverlay.py` is the one place a model may *propose* a bug-vs-spec
+  status split (always `review_status: draft`; only a human promoting it
+  past `draft` makes it real), and `testbatch.py` reuses `batch.py`'s
+  `ModelCaller`/retry/resumable-corpus-signature harness verbatim to render
+  scenarios into `language`/`framework`-specific test files (still Markdown
+  + citations, so `validate_doc` already enforces trust on them --
+  `validate_test_doc` adds one check specific to tests: every bare
+  `MEMBER:BR-nnn` reference must name a real derived scenario). New CLI
+  commands: `test-plan`, `test-advisory`, `test-overlay-draft`, `test-gen`,
+  `test-batch`, `test-validate`. New doc:
+  `docs/guides/testing-strategies-for-mainframes-and-4gl.md` -- modern
+  testing vocabulary mapped to mainframe/4GL equivalents, and why a shared
+  vocabulary/artifact between legacy and migration engineers is the actual
+  organisational payoff, not the generated files themselves. Scoped to
+  Natural/Adabas first (clearest per-unit parameter contracts); Mantis/Supra
+  follow once calibrated, same as the docs side.
+- 2026-08-11: wired `options.testgen` into `project.yml`
+  (`default_language`/`default_framework`/`overlay_path`/`out_dir`) --
+  `test-plan`'s `--overlay`, `test-overlay-draft`'s `--out`, and
+  `test-gen`/`test-batch`'s `--language`/`--framework`/`--out` now fall
+  back to it, same pattern as `options.narrative`/`options.redact` for the
+  docs pipeline. CLI flags still override per-run. `--language`/
+  `--framework` stay unset by default -- no built-in guess at a migration
+  team's destination stack, same policy as dialect/redaction config.
+  `test-gen`/`test-batch` exit 2 with a clear message if neither the flag
+  nor the config key is present. `mfdoc test-plan --config project.yml`
+  (no flags) now works standalone once `options.testgen.overlay_path` is
+  set.
 
 ## Purpose of this document
 

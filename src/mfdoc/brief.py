@@ -74,17 +74,17 @@ def _cite(name: str, line: int | None, end: int | None = None) -> str:
 
 def module_brief(conn, member_name: str, excerpt_rules: bool = True,
                   redact: Redactor = NULL_REDACTOR, lexicon: dict[str, str] | None = None) -> str:
-    matches = conn.execute(
-        "SELECT * FROM member WHERE UPPER(name)=UPPER(?)", (member_name,)
-    ).fetchall()
-    if not matches:
-        return f"# {member_name}\n\nNo such member in the index.\n"
-    if len(matches) > 1:
-        libs = ", ".join(sorted({r["library"] or "?" for r in matches}))
+    from .db import resolve_member_by_name
+
+    matches, ambiguous_libs = resolve_member_by_name(conn, member_name)
+    if ambiguous_libs:
+        libs = ", ".join(ambiguous_libs)
         return (
             f"# {member_name}\n\nMember name is ambiguous across libraries ({libs}). "
             f"Re-run with a library-qualified name.\n"
         )
+    if not matches:
+        return f"# {member_name}\n\nNo such member in the index.\n"
     m = matches[0]
     mid, name = m["id"], m["name"]
     out: list[str] = []

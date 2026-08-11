@@ -116,3 +116,24 @@ options:
   redact:
     enabled: false
     patterns: []
+
+  # Optional test-generation pass (test-plan/test-advisory/test-overlay-draft/
+  # test-gen/test-batch/test-validate -- see
+  # docs/guides/testing-strategies-for-mainframes-and-4gl.md). Everything
+  # here is a default only: every key has an equivalent CLI flag
+  # (--language/--framework/--overlay/--out) that overrides it for a single
+  # run. Omit this whole block to keep passing --language/--framework on
+  # every test-gen/test-batch invocation -- there is no built-in default,
+  # same policy as the dialect/redaction config above.
+  testgen:
+    # No built-in default -- this is the destination stack a migration team
+    # actually wants, not a guess. Required (here or via --language/
+    # --framework) before test-gen/test-batch will run. Uncomment and set
+    # to your team's actual target, e.g.:
+    # default_language: python
+    # default_framework: pytest
+    # test-overlay.yml path, relative to this config file. test-plan reads
+    # promoted entries from it; test-overlay-draft writes proposals to it.
+    overlay_path: test-overlay.yml
+    # test-batch's output directory, relative to this config file.
+    out_dir: tests_generated

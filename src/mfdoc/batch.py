@@ -146,7 +146,8 @@ class BatchSummary:
 
 
 def _corpus_signature(conn, redact: Redactor = NULL_REDACTOR,
-                       lexicon: dict[str, str] | None = None) -> str:
+                       lexicon: dict[str, str] | None = None,
+                       extra: list[str] | None = None) -> str:
     """Fingerprint of every input to module_brief() that isn't the derive
     code itself: every source_file's (path, sha256) (order-independent),
     the installed mfdoc version, and the effective redact/lexicon policy.
@@ -165,6 +166,11 @@ def _corpus_signature(conn, redact: Redactor = NULL_REDACTOR,
     version bump (e.g. mid-development, before a release) -- that residual
     case still needs `--state` (or the affected member's entry in it)
     cleared by hand after re-deriving.
+
+    `extra` lets a caller with additional non-source inputs to its own
+    brief (testbatch.py's language/framework/test_case status) fold them
+    into the same signature rather than reimplementing this function --
+    order matters and is the caller's to keep stable across runs.
     """
     rows = conn.execute("SELECT path, sha256 FROM source_file ORDER BY path").fetchall()
     digest = hashlib.sha256()
@@ -181,6 +187,9 @@ def _corpus_signature(conn, redact: Redactor = NULL_REDACTOR,
         digest.update(key.encode("utf-8"))
         digest.update(b"\x00")
         digest.update(lexicon[key].encode("utf-8"))
+        digest.update(b"\x00")
+    for term in extra or []:
+        digest.update(term.encode("utf-8"))
         digest.update(b"\x00")
     return digest.hexdigest()
 

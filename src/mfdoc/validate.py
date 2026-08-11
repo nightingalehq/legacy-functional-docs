@@ -22,6 +22,28 @@ from .db import insert
 
 CITATION = re.compile(r"\[\[(?P<member>[A-Z0-9#@$&\-_.]+)(?::(?P<from>\d+)(?:-(?P<to>\d+))?)?\]\]", re.I)
 
+# A bare (not double-bracketed) `MEMBER:BR-nnn` reference, as generated test
+# files carry per testreference/test-writing-rules.md's "leading comment
+# carries the scenario's id" convention. Distinct from CITATION: this is a
+# scenario id, checked against test_case.scenario_name, not a source-line
+# citation checked against source_line.
+#
+# The leading boundary is a negative lookbehind against the member charset
+# itself, not `\b` -- `\b` only anchors between a word char and a non-word
+# char, and #/@/$/&/-/. (all valid leading characters in a Natural/Mantis
+# member name, per this same character class) are non-word, so `\b` would
+# silently swallow a leading one (e.g. matching "GS-WKAREA" instead of
+# "#GS-WKAREA") and look the reference up under the wrong, truncated name.
+#
+# The digit count is deliberately `\d+`, not `\d{3,}`: `_rule_id` always
+# zero-pads to 3+ digits, so a malformed id with fewer digits (e.g. a model
+# writing "BR-4") is never a real scenario_name -- but it still needs to be
+# *matched* here so the lookup below reports it as invalid, rather than
+# the id being invisible to validation entirely.
+BR_REF = re.compile(r"(?<![A-Z0-9#@$&.\-_])(?P<member>[A-Z0-9#@$&\-_.]+):BR-(?P<n>\d+)\b", re.I)
+
+REQUIRED_TEST_FRONTMATTER = ["language", "framework"]
+
 REQUIRED_FRONTMATTER = [
     "title", "doc_type", "system", "generated_by", "generated_at",
     "review_status", "confidence_summary", "sources",
@@ -172,6 +194,59 @@ def validate_doc(conn, path: Path) -> dict:
         "uncited_assertions": uncited,
         "problems": problems,
         "ok": not problems,
+        # Front matter/body this call already parsed, for a caller (e.g.
+        # validate_test_doc) that needs the same document's checks on top
+        # of these -- reusing this avoids a second disk read and YAML parse
+        # of a file this function just read and parsed itself.
+        "_fm": fm,
+        "_body": body,
+    }
+
+
+def validate_test_doc(conn, path: Path) -> dict:
+    """`validate_doc` plus the checks specific to a generated test file:
+    `language`/`framework` front matter, and that every bare `MEMBER:BR-nnn`
+    reference in the body names a scenario that actually exists in
+    test_case -- the generated-test equivalent of a citation pointing at a
+    real source line. A model renumbering or inventing a BR-id would
+    otherwise pass validate_doc's checks silently, since BR-nnn isn't a
+    `[[...]]` citation validate_doc already resolves.
+    """
+    result = validate_doc(conn, path)
+    fm, body = result.pop("_fm"), result.pop("_body")
+    problems = list(result["problems"])
+
+    if fm is not None:
+        for key in REQUIRED_TEST_FRONTMATTER:
+            if key not in fm:
+                problems.append(f"front matter missing required key: {key}")
+
+    bad_refs = 0
+    for m in BR_REF.finditer(body):
+        scenario = f"{m.group('member').upper()}:BR-{m.group('n')}"
+        row = conn.execute(
+            "SELECT 1 FROM test_case WHERE UPPER(scenario_name)=UPPER(?)", (scenario,)
+        ).fetchone()
+        if not row:
+            bad_refs += 1
+            problems.append(f"'{scenario}' is not a known test_case scenario -- run `mfdoc test-plan`, "
+                             f"or this id was invented/renumbered")
+
+    result["problems"] = problems
+    result["invalid_scenario_refs"] = bad_refs
+    result["ok"] = not problems
+    return result
+
+
+def validate_tests_tree(conn, root: Path) -> dict:
+    results = [validate_test_doc(conn, p) for p in sorted(root.rglob("*.md"))]
+    return {
+        "documents": len(results),
+        "documents_ok": sum(1 for r in results if r["ok"]),
+        "total_citations": sum(r["citations"] for r in results),
+        "invalid_citations": sum(r["invalid_citations"] for r in results),
+        "invalid_scenario_refs": sum(r.get("invalid_scenario_refs", 0) for r in results),
+        "results": results,
     }
 
 

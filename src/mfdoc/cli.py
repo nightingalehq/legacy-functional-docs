@@ -7,6 +7,12 @@
     mfdoc calibrate --config project.yml --dialect mantis
     mfdoc brief    --config project.yml [--module NAME | --entity NAME | --system]
     mfdoc rules-register --config project.yml --out docs/functional/rules-register.md
+    mfdoc test-plan --config project.yml --out docs/functional/test-plan-register.md --overlay test-overlay.yml
+    mfdoc test-overlay-draft --config project.yml --out test-overlay.yml
+    mfdoc test-advisory --config project.yml --out docs/functional/testability-report.md
+    mfdoc test-gen   --config project.yml --member NAME --language python --framework pytest
+    mfdoc test-batch --config project.yml --language python --framework pytest --out tests_generated
+    mfdoc test-validate --config project.yml --docs tests_generated
     mfdoc batch    --config project.yml --out docs/functional/modules
     mfdoc validate --config project.yml --docs docs/functional
     mfdoc sample-citations --config project.yml --docs docs/functional --judge human
@@ -25,6 +31,8 @@ import yaml
 
 from . import brief as brief_mod
 from . import graph, normalise
+from . import testadvisor as testadvisor_mod
+from . import testplan as testplan_mod
 from .db import add_gap, connect, insert, purge_member, purge_member_facts, set_metric, upsert_member
 from .dialects import adabas, environment, mantis, natural, supra
 from .redact import Redactor
@@ -264,6 +272,26 @@ def cmd_rules_register(args) -> int:
     return 0
 
 
+def _testgen_config(cfg: dict) -> dict:
+    return (cfg["options"] or {}).get("testgen") or {}
+
+
+def cmd_test_plan(args) -> int:
+    cfg = load_config(args.config)
+    base = Path(args.config).parent
+    conn = connect(base / cfg["index_db"])
+    redact = Redactor.from_options(cfg["options"])
+    overlay = args.overlay or _testgen_config(cfg).get("overlay_path")
+    overlay_path = (base / overlay) if overlay else None
+    res = testplan_mod.run_all(conn, member_name=args.member, overlay_path=overlay_path)
+    print(json.dumps(res, indent=2))
+    if args.out:
+        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.out).write_text(testplan_mod.test_plan_register(conn, redact=redact), encoding="utf-8")
+        print(f"wrote {args.out}")
+    return 0
+
+
 def _build_model_caller(args):
     """Construct a ModelCaller from --caller/--provider/--model/--gcp-* args.
 
@@ -303,6 +331,157 @@ def _build_model_caller(args):
         return VertexCaller(model=args.model, project=args.gcp_project, region=args.gcp_region)
     from .anthropic_caller import AnthropicCaller
     return AnthropicCaller(model=args.model or "claude-sonnet-4-5")
+
+
+def cmd_test_overlay_draft(args) -> int:
+    from . import testoverlay as testoverlay_mod
+    from . import testbatch as testbatch_mod
+
+    cfg = load_config(args.config)
+    base = Path(args.config).parent
+    conn = connect(base / cfg["index_db"])
+    redact = Redactor.from_options(cfg["options"])
+    out = args.out or _testgen_config(cfg).get("overlay_path") or "test-overlay.yml"
+
+    members = ([m.strip().upper() for m in args.members.split(",")] if args.members
+               else testbatch_mod.select_test_batch_members(conn))
+    if not members:
+        print("no test_case rows in the index -- run `mfdoc test-plan` first")
+        return 0
+
+    module_docs = {}
+    if args.docs:
+        docs_dir = base / args.docs
+        for name in members:
+            doc_path = docs_dir / f"{name}.md"
+            if doc_path.exists():
+                module_docs[name] = doc_path.read_text(encoding="utf-8")
+
+    caller = _build_model_caller(args)
+    if caller is None:
+        return 1
+
+    summary = testoverlay_mod.run_overlay_draft(conn, members, caller, base / out, module_docs, redact=redact)
+    print(f"drafted {summary['drafted']} entr{'y' if summary['drafted']==1 else 'ies'} "
+          f"across {summary['members']} member(s), {summary['skipped_promoted']} already "
+          f"human-promoted entr{'y' if summary['skipped_promoted']==1 else 'ies'} left untouched")
+    for p in summary["problems"]:
+        print(f"  - {p}")
+    print(f"wrote {out}")
+    return 0
+
+
+def cmd_test_advisory(args) -> int:
+    cfg = load_config(args.config)
+    conn = connect(Path(args.config).parent / cfg["index_db"])
+    out = testadvisor_mod.testability_report(conn)
+    _write_or_print(out, args.out)
+    return 0
+
+
+def _test_template_path(base: Path, language: str, framework: str, override: str | None) -> Path:
+    if override:
+        return base / override
+    return base / "templates" / "tests" / f"{language}_{framework}.md"
+
+
+def cmd_test_gen(args) -> int:
+    from . import testbatch as testbatch_mod
+
+    cfg = load_config(args.config)
+    base = Path(args.config).parent
+    conn = connect(base / cfg["index_db"])
+    redact = Redactor.from_options(cfg["options"])
+    testgen_cfg = _testgen_config(cfg)
+
+    language = args.language or testgen_cfg.get("default_language")
+    framework = args.framework or testgen_cfg.get("default_framework")
+    if not language or not framework:
+        print("no --language/--framework given, and no options.testgen.default_language/"
+              "default_framework in --config", file=sys.stderr)
+        return 2
+
+    template_path = _test_template_path(base, language, framework, args.template)
+    if not template_path.exists():
+        print(f"no template at {template_path} -- pass --template, or add one for "
+              f"--language {language} --framework {framework}", file=sys.stderr)
+        return 2
+    writing_rules = (base / "reference" / "test-writing-rules.md").read_text(encoding="utf-8")
+    template = template_path.read_text(encoding="utf-8")
+
+    caller = _build_model_caller(args)
+    if caller is None:
+        return 1
+
+    member = args.member.strip().upper()
+    out_dir = testgen_cfg.get("out_dir") or "tests_generated"
+    out_path = base / args.out if args.out else base / out_dir / language / framework / f"{member}.md"
+    result = testbatch_mod.generate_member_test_doc(
+        conn, member, language, framework, out_path, caller,
+        writing_rules, template, redact=redact,
+    )
+    status = "OK" if result.ok else "FAIL"
+    print(f"{status} {result.member} -> {result.path} attempts={result.attempts} "
+          f"in={result.input_tokens} out={result.output_tokens}")
+    for p in result.problems:
+        print(f"  - {p}")
+    return 0 if result.ok else 1
+
+
+def cmd_test_batch(args) -> int:
+    """Batch harness for generated tests -- the same option-C treatment
+    `mfdoc batch` gives module docs, applied to test_case rows instead of
+    module facts. Run `mfdoc test-plan` first; this never derives facts."""
+    from . import testbatch as testbatch_mod
+
+    cfg = load_config(args.config)
+    base = Path(args.config).parent
+    conn = connect(base / cfg["index_db"])
+    redact = Redactor.from_options(cfg["options"])
+    testgen_cfg = _testgen_config(cfg)
+
+    language = args.language or testgen_cfg.get("default_language")
+    framework = args.framework or testgen_cfg.get("default_framework")
+    if not language or not framework:
+        print("no --language/--framework given, and no options.testgen.default_language/"
+              "default_framework in --config", file=sys.stderr)
+        return 2
+    out_dir = args.out or testgen_cfg.get("out_dir") or "tests_generated"
+
+    members = ([m.strip().upper() for m in args.members.split(",")] if args.members
+               else testbatch_mod.select_test_batch_members(conn))
+    if not members:
+        print("no test_case rows in the index -- run `mfdoc test-plan` first")
+        return 0
+
+    template_path = _test_template_path(base, language, framework, args.template)
+    if not template_path.exists():
+        print(f"no template at {template_path} -- pass --template, or add one for "
+              f"--language {language} --framework {framework}", file=sys.stderr)
+        return 2
+    writing_rules = (base / "reference" / "test-writing-rules.md").read_text(encoding="utf-8")
+    template = template_path.read_text(encoding="utf-8")
+
+    caller = _build_model_caller(args)
+    if caller is None:
+        return 1
+
+    summary = testbatch_mod.run_test_batch(
+        conn, members, language, framework, base / out_dir, caller,
+        writing_rules, template, redact=redact, concurrency=args.concurrency,
+        state_path=(base / args.state) if args.state else None,
+    )
+
+    for r in summary.results:
+        status = "SKIP" if r.skipped else ("OK  " if r.ok else "FAIL")
+        print(f"{status} {r.member:<20} attempts={r.attempts} in={r.input_tokens} out={r.output_tokens}")
+        for p in r.problems:
+            print(f"       - {p}")
+
+    print(f"\n{summary.ok}/{len(summary.results)} ok, {summary.failed} failed, "
+          f"{summary.skipped} skipped (unchanged)")
+    print(f"tokens: {summary.total_input_tokens} in, {summary.total_output_tokens} out")
+    return 0 if summary.failed == 0 else 1
 
 
 def cmd_batch(args) -> int:
@@ -519,6 +698,24 @@ def cmd_validate(args) -> int:
     return 0 if res["invalid_citations"] == 0 and res["documents_ok"] == res["documents"] else 1
 
 
+def cmd_test_validate(args) -> int:
+    from .validate import validate_tests_tree
+    cfg = load_config(args.config)
+    conn = connect(Path(args.config).parent / cfg["index_db"])
+    res = validate_tests_tree(conn, Path(args.docs))
+    for r in res["results"]:
+        status = "OK " if r["ok"] else "FAIL"
+        print(f"{status} {r['path']}  citations={r['citations']} invalid={r['invalid_citations']} "
+              f"invalid_scenario_refs={r.get('invalid_scenario_refs', 0)}")
+        for p in r["problems"]:
+            print(f"       - {p}")
+    print(f"\n{res['documents_ok']}/{res['documents']} documents clean, "
+          f"{res['invalid_citations']} invalid citations of {res['total_citations']}, "
+          f"{res['invalid_scenario_refs']} invalid scenario refs")
+    return 0 if res["invalid_citations"] == 0 and res["invalid_scenario_refs"] == 0 \
+        and res["documents_ok"] == res["documents"] else 1
+
+
 def cmd_sample_citations(args) -> int:
     """Sample generated claims against their cited source line(s) and record
     a verdict -- human first, to calibrate what "the source supports the
@@ -642,6 +839,69 @@ def main(argv=None) -> int:
     p.add_argument("--out", help="write to this path instead of stdout")
     p.set_defaults(func=cmd_rules_register)
 
+    p = sub.add_parser("test-plan")
+    p.add_argument("--config", required=True)
+    p.add_argument("--member", help="rebuild the plan for one member; default: every batchable member")
+    p.add_argument("--out", help="also write the test-plan register to this path")
+    p.add_argument("--overlay", help="test-overlay.yml path, relative to --config's directory; "
+                                      "default: options.testgen.overlay_path from --config; omit "
+                                      "both to leave every scenario at its default "
+                                      "'characterization' status")
+    p.set_defaults(func=cmd_test_plan)
+
+    p = sub.add_parser("test-overlay-draft")
+    p.add_argument("--config", required=True)
+    p.add_argument("--out", default=None,
+                    help="merged into this file -- an existing entry a human already "
+                         "promoted past 'draft' is left untouched; default: "
+                         "options.testgen.overlay_path from --config, else test-overlay.yml")
+    p.add_argument("--members", help="comma-separated member names; default: every member "
+                                      "with test_case rows")
+    p.add_argument("--docs", help="directory of generated module docs (mfdoc batch's --out) to "
+                                   "compare intended behaviour against; omit to draft from the "
+                                   "test brief alone (divergence proposals will be rarer/absent)")
+    p.add_argument("--model", default=None)
+    p.add_argument("--caller", choices=["anthropic", "fake-echo"], default="anthropic",
+                    help="fake-echo makes no network call -- for CI/dry-run smoke tests")
+    p.add_argument("--provider", choices=["anthropic", "vertex"], default="anthropic")
+    p.add_argument("--gcp-project")
+    p.add_argument("--gcp-region")
+    p.set_defaults(func=cmd_test_overlay_draft)
+
+    p = sub.add_parser("test-advisory")
+    p.add_argument("--config", required=True)
+    p.add_argument("--out", help="write to this path instead of stdout")
+    p.set_defaults(func=cmd_test_advisory)
+
+    for name, fn in (("test-gen", cmd_test_gen), ("test-batch", cmd_test_batch)):
+        p = sub.add_parser(name)
+        p.add_argument("--config", required=True)
+        p.add_argument("--language", default=None,
+                        help="e.g. python, java; default: options.testgen.default_language "
+                             "from --config -- no built-in default either way")
+        p.add_argument("--framework", default=None,
+                        help="e.g. pytest, junit5; default: options.testgen.default_framework "
+                             "from --config -- no built-in default either way")
+        p.add_argument("--template", help="override the default templates/tests/{language}_{framework}.md")
+        p.add_argument("--model", default=None)
+        p.add_argument("--caller", choices=["anthropic", "fake-echo"], default="anthropic",
+                        help="fake-echo makes no network call -- for CI/dry-run smoke tests")
+        p.add_argument("--provider", choices=["anthropic", "vertex"], default="anthropic")
+        p.add_argument("--gcp-project")
+        p.add_argument("--gcp-region")
+        p.set_defaults(func=fn)
+    sub.choices["test-gen"].add_argument("--member", required=True)
+    sub.choices["test-gen"].add_argument("--out", help="default: tests_generated/<language>/<MEMBER>.md")
+    sub.choices["test-batch"].add_argument(
+        "--out", default=None,
+        help="default: options.testgen.out_dir from --config, else tests_generated")
+    sub.choices["test-batch"].add_argument(
+        "--members", help="comma-separated member names; default: every member with test_case rows")
+    sub.choices["test-batch"].add_argument("--concurrency", type=int, default=4)
+    sub.choices["test-batch"].add_argument(
+        "--state", default=".mfdoc/test-batch-state.json",
+        help="resume-state file path, relative to --config's directory; empty string disables resume tracking")
+
     p = sub.add_parser("batch")
     p.add_argument("--config", required=True)
     p.add_argument("--out", default="docs/functional/modules")
@@ -674,6 +934,11 @@ def main(argv=None) -> int:
     p.add_argument("--config", required=True)
     p.add_argument("--docs", required=True)
     p.set_defaults(func=cmd_validate)
+
+    p = sub.add_parser("test-validate")
+    p.add_argument("--config", required=True)
+    p.add_argument("--docs", required=True)
+    p.set_defaults(func=cmd_test_validate)
 
     p = sub.add_parser("sample-citations")
     p.add_argument("--config", required=True)

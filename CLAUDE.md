@@ -38,6 +38,18 @@ mfdoc batch     --config project.yml --out docs/functional/modules  # needs mfdo
 mfdoc rules-register --config project.yml --out docs/functional/rules-register.md
 mfdoc validate  --config project.yml --docs docs/functional
 mfdoc export    --config project.yml --json out/index.json
+
+# optional: draft tests from the same fact store, in the source dialect or a
+# destination language -- see docs/guides/testing-strategies-for-mainframes-and-4gl.md
+# --overlay/--language/--framework/--out below default to options.testgen in
+# project.yml (overlay_path/default_language/default_framework/out_dir) --
+# the flags shown here are overrides, not requirements, once that's set.
+mfdoc test-plan     --config project.yml --overlay test-overlay.yml
+mfdoc test-advisory --config project.yml
+mfdoc test-overlay-draft --config project.yml --out test-overlay.yml    # needs mfdoc[batch]
+mfdoc test-gen      --config project.yml --member NAME --language python --framework pytest
+mfdoc test-batch    --config project.yml --language python --framework pytest --out tests_generated  # needs mfdoc[batch]
+mfdoc test-validate --config project.yml --docs tests_generated
 ```
 
 Before pushing any change touching extraction or narrative, also run the
@@ -101,7 +113,20 @@ source ─▶ [0 Ingest: normalise.py] ─▶ [1 Extract: dialects/*.py] ─▶ 
 - **Validate** (`validate.py`): the only stage that reads generated
   documents back in. Resolves every `[[MEMBER:LINE]]` citation against the
   fact store and enforces that every assertive sentence is either cited or
-  explicitly hedged (`inferred`, `unresolved`, etc.).
+  explicitly hedged (`inferred`, `unresolved`, etc.). `validate_test_doc`
+  additionally checks a generated test file's `MEMBER:BR-nnn` references
+  against real `test_case` rows.
+- **Test generation** (optional, same pipeline discipline applied to tests
+  instead of prose — see `docs/guides/testing-strategies-for-mainframes-and-4gl.md`):
+  `testplan.py` derives `test_case` rows (Given/When/Then, cited, no
+  invented expected value) from `rule_candidate`/`variable`/`data_access`
+  facts, model-free; `testadvisor.py` classifies each unit for
+  mockability/integration-only and names refactor seams, model-free;
+  `testoverlay.py` is where an LLM may *propose* (never confirm) a
+  scenario's bug-vs-spec status via `test-overlay.yml`, gated on a human
+  moving `review_status` past `draft`; `testbatch.py` is the narrate stage
+  for tests, reusing `batch.py`'s `ModelCaller`/retry/resumable-state
+  machinery verbatim.
 
 Two rules that matter most when touching a dialect scanner (full contract in
 `reference/adding-a-dialect.md`):
@@ -141,5 +166,9 @@ real, previously-shipped defects, not accidental cruft.
 - `docs/guides/architecture.md` — full stage-by-stage architecture
 - `docs/guides/extending.md` — adding a dialect, document type, or CLI command
 - `docs/guides/security-and-compliance.md` — data handling, redaction, what leaves the machine
+- `docs/guides/testing-strategies-for-mainframes-and-4gl.md` — what the generated
+  tests are for, modern testing concepts explained for a 4GL/mainframe audience,
+  and how to introduce this to a team with no prior automated-test culture
 - `reference/adding-a-dialect.md`, `reference/writing-rules.md`, `reference/mantis-supra.md`
+- `reference/test-writing-rules.md` — the writing-rules contract extended to generated tests
 - `docs/plans/legacy-functional-docs-plan.md` — working backlog and design-decision record (its progress log is more current than the narrative below it)

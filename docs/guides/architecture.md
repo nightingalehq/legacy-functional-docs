@@ -192,7 +192,58 @@ Parses YAML front matter and body of each generated document and checks:
   specific source line."
 
 This is the only stage that reads generated documents back in; everything
-upstream only ever writes forward.
+upstream only ever writes forward. `validate_test_doc` (used by `mfdoc
+test-validate`) applies the same checks to a generated test file, plus one
+more: every bare `MEMBER:BR-nnn` reference in the body must name a real
+`test_case.scenario_name` row, not a renumbered or invented id.
+
+### 5 — Test generation (optional; `testplan.py`, `testadvisor.py`, `testoverlay.py`, `testbatch.py`)
+
+The same fact-vs-narrative split, applied to tests instead of prose. See
+[testing-strategies-for-mainframes-and-4gl.md](testing-strategies-for-mainframes-and-4gl.md)
+for what these are for and how to introduce the concept to a team.
+
+- **`mfdoc test-plan` (`testplan.py`)** — model-free derive step. For each
+  batchable member, turns `rule_candidate` branches into `test_case` rows:
+  a Given (parameters + named mock targets, from `variable`/`data_access`/
+  `call_edge`), a When (the branch construct/condition, cited), and a Then
+  (the exact source lines that execute inside that branch, reconstructed
+  from `rule_candidate.depth` and row order — Natural records one row per
+  statement with no explicit block-close token, so a branch's body is
+  "rows deeper than the header, or at the same depth and not themselves a
+  header" up to the next sibling branch). A branch with no reconstructable
+  consequence gets an honestly empty Then, never a guessed one.
+- **`mfdoc test-advisory` (`testadvisor.py`)** — model-free classifier.
+  Buckets each member as `pure` (nothing to mock), `needs-mock` (names the
+  exact entities/callees to stub, plus a templated refactor-seam
+  suggestion per target — advisory prose only, it never touches source),
+  `integration-only` (a `transaction_scopes()` unit spans more than one
+  entity — routed away from a unit test rather than mocking two entities
+  as if independent), or `untestable-gap` (a dynamic or unresolved call
+  blocks naming a fixed mock target at all).
+- **`mfdoc test-overlay-draft` (`testoverlay.py`)** — the one place a model
+  may *propose* that a scenario's cited behaviour diverges from documented
+  intent (`status: bug-current`/`bug-desired`/`spec`), always written with
+  `review_status: draft`. `test-plan` only ever applies an overlay entry's
+  status once a human has moved it past `draft` — an unreviewed proposal
+  changes nothing, the same "human must promote it" rule
+  `validate.py`'s `review_status` vocabulary enforces on narrative docs.
+- **`mfdoc test-gen`/`mfdoc test-batch` (`testbatch.py`)** — the narrate
+  stage for tests: `test_case_brief()` (brief.py's role, for test facts)
+  takes the place of `module_brief()`, and `batch.py`'s `ModelCaller`/
+  retry-on-validation-failure/resumable-corpus-signature harness is reused
+  directly. Output is still Markdown (front matter + one fenced code
+  block per file, `doc_type: generated_test`), so `validate_doc` already
+  enforces citations/front-matter on it unmodified.
+
+`--overlay` (test-plan), `--out` (test-overlay-draft), and `--language`/
+`--framework`/`--out` (test-gen/test-batch) all fall back to
+`options.testgen` in `project.yml` (`overlay_path`/`out_dir`/
+`default_language`/`default_framework`) when the flag is omitted, the same
+config-first pattern as `options.narrative`/`options.redact` for the docs
+pipeline — see `project.yml`. There's still no built-in default for
+`default_language`/`default_framework` themselves; that's a migration
+team's declared choice, not a guess the tool should make.
 
 ## Data store
 
@@ -213,12 +264,13 @@ map directly to it. It is:
 
 ## Where a model can and can't reach
 
-The only code paths that make a network call are `mfdoc batch` and
-`anthropic_caller.py`. Everything else — `ingest`, `derive`, `coverage`,
-`gate`, `calibrate`, `brief`, `validate`, `export` — is local Python with no
+The only code paths that make a network call are `mfdoc batch`,
+`mfdoc test-gen`/`mfdoc test-batch`, `mfdoc test-overlay-draft`, and
+`anthropic_caller.py` underneath all three. Everything else — `ingest`,
+`derive`, `coverage`, `gate`, `calibrate`, `brief`, `validate`, `export`,
+`test-plan`, `test-advisory`, `test-validate` — is local Python with no
 egress, which is why the README states "no network access, nothing leaves
-the machine" as the default posture with `mfdoc batch` as the one named
-exception.
+the machine" as the default posture with those named exceptions.
 
 The interactive path (writing docs from a brief inside a Claude Code chat
 session, per `SKILL.md`) also sends brief content to a model, just via

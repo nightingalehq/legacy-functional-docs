@@ -276,6 +276,30 @@ CREATE TABLE IF NOT EXISTS metric (
     value         TEXT NOT NULL
 );
 
+-- Test-plan derive: one row per test scenario, built only from facts already
+-- in the tables above (rule_candidate branches, parameter variables, data
+-- access / call edges for mocking). Wholly derived and rebuilt on every
+-- `mfdoc test-plan` run, the same way gap.DERIVED_GAP_KINDS rows are --
+-- never edited in place, never carried forward from a stale run.
+CREATE TABLE IF NOT EXISTS test_case (
+    id            INTEGER PRIMARY KEY,
+    member_id     INTEGER NOT NULL REFERENCES member(id),
+    kind          TEXT NOT NULL,          -- unit | integration
+    rule_candidate_id INTEGER REFERENCES rule_candidate(id),
+    scenario_name TEXT NOT NULL,          -- stable MEMBER:BR-nnn-derived handle
+    given_json    TEXT NOT NULL,          -- parameters + required mocks (entities/callees)
+    when_json     TEXT NOT NULL,          -- construct/condition exercised, with citation
+    then_json     TEXT NOT NULL,          -- cited source excerpt for the branch body --
+                                          -- never a guessed expected value
+    status        TEXT NOT NULL DEFAULT 'characterization',
+                                          -- characterization | spec | bug-current | bug-desired;
+                                          -- set from test-overlay.yml, defaults to
+                                          -- characterization when a rule has no overlay entry
+    citation      TEXT NOT NULL,          -- MEMBER:LINE or MEMBER:LINE-LINE
+    confidence    TEXT NOT NULL DEFAULT 'verified'
+);
+CREATE INDEX IF NOT EXISTS ix_testcase_member ON test_case(member_id);
+
 -- Written by the narrative pass so citations can be validated mechanically.
 CREATE TABLE IF NOT EXISTS doc_claim (
     id            INTEGER PRIMARY KEY,
@@ -369,7 +393,11 @@ def add_gap(conn, gap_kind, detail, member_id=None, line_no=None, severity="medi
 # site that needs to purge stale facts before re-extracting a changed file.
 _MEMBER_OWNED_TABLES = (
     "source_line", "variable", "data_access", "transaction_marker",
-    "interaction", "rule_candidate", "message_ref", "job_step", "job_dd",
+    "interaction",
+    # test_case.rule_candidate_id references rule_candidate(id) -- must be
+    # deleted before rule_candidate itself, or PRAGMA foreign_keys=ON makes
+    # the rule_candidate delete below fail outright.
+    "test_case", "rule_candidate", "message_ref", "job_step", "job_dd",
     "cics_resource",
 )
 
@@ -416,6 +444,67 @@ def purge_member(conn, member_id: int) -> None:
     conn.execute("UPDATE entity SET defined_in=NULL WHERE defined_in=?", (member_id,))
     conn.execute("UPDATE entity_link SET via_member=NULL WHERE via_member=?", (member_id,))
     conn.execute("DELETE FROM member WHERE id=?", (member_id,))
+
+
+def resolve_member_by_name(conn, name: str, columns: str = "*",
+                            dialect_in: tuple[str, ...] | None = None,
+                            object_type_in: tuple[str, ...] | None = None):
+    """Resolve a bare member name to exactly one row, the shared refusal
+    every narrate/derive stage that takes a `--member`/member_name argument
+    makes for the identical case (module_brief, test_case_brief,
+    draft_overlay_for_member, testplan.run_all): a bare name is only unique
+    together with library+dialect (see the `UNIQUE(name, library, dialect)`
+    constraint above), so two members can share a name across libraries.
+
+    Returns `(rows, ambiguous_libs)`. Exactly one match: `(rows, [])` with
+    one row. No match: `([], [])`. More than one match: `([], libs)` where
+    `libs` is the sorted set of libraries the name matched -- callers must
+    not guess which one applies, and must not treat this the same as "no
+    match" when deciding whether to delete/overwrite existing derived data
+    for the name.
+    """
+    clauses = ["UPPER(name)=UPPER(?)"]
+    params: list = [name]
+    if dialect_in:
+        clauses.append(f"dialect IN ({','.join('?' * len(dialect_in))})")
+        params.extend(dialect_in)
+    if object_type_in:
+        clauses.append(f"object_type IN ({','.join('?' * len(object_type_in))})")
+        params.extend(object_type_in)
+    where = " AND ".join(clauses)
+    # Ambiguity (and the libraries to report) is checked against `id,
+    # library` regardless of what the caller wants back, so a caller asking
+    # for a narrower `columns` (e.g. just `library`, or `1` for an
+    # existence check) still gets a correct ambiguity verdict rather than a
+    # KeyError or a false "unambiguous" reading of its own trimmed columns.
+    probe = conn.execute(f"SELECT id, library FROM member WHERE {where}", params).fetchall()
+    if len(probe) > 1:
+        return [], sorted({r["library"] or "?" for r in probe})
+    if not probe:
+        return [], []
+    rows = conn.execute(
+        f"SELECT {columns} FROM member WHERE {where}", params
+    ).fetchall()
+    return rows, []
+
+
+def group_members_by_name(rows) -> tuple[dict, list[str]]:
+    """Group already-fetched member rows (must include `name`) by name, for
+    callers that resolve a known list of bare names in one batched query
+    rather than one round trip per name (see rules_register's comment on
+    why batching beats per-name lookups at system scale).
+
+    Returns `(unambiguous, ambiguous)`: `unambiguous` maps name -> its one
+    row, for names with no cross-library duplicate; `ambiguous` is the
+    sorted list of names that matched more than one row and were skipped
+    rather than guessed at.
+    """
+    by_name: dict[str, list] = {}
+    for r in rows:
+        by_name.setdefault(r["name"], []).append(r)
+    unambiguous = {name: rs[0] for name, rs in by_name.items() if len(rs) == 1}
+    ambiguous = sorted(name for name, rs in by_name.items() if len(rs) > 1)
+    return unambiguous, ambiguous
 
 
 def set_metric(conn, scope, name, value):
