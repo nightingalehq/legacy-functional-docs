@@ -35,7 +35,7 @@ jobs:
           mfdoc coverage --config project.yml
 
       - name: Validate the worked examples
-        run: mfdoc validate --config project.yml --docs examples
+        run: mfdoc validate --config project.yml --docs examples/outputs
 
       - name: Derive test scenarios
         # test-validate resolves every bare MEMBER:BR-nnn reference in a
@@ -43,9 +43,58 @@ jobs:
         # only populated by test-plan, which nothing above this point runs.
         run: mfdoc test-plan --config project.yml
 
-      - name: Validate the generated-test worked example
+      - name: Validate the generated-test worked examples
         # test-validate enforces language/framework front matter on every
         # doc it scans, so point it at the generated-test subtree only, not
-        # all of examples/ (the module docs and registers there aren't
-        # generated_test docs).
-        run: mfdoc test-validate --config project.yml --docs examples/tests_generated
+        # all of examples/outputs (the module docs and registers there
+        # aren't generated_test docs).
+        run: mfdoc test-validate --config project.yml --docs examples/outputs/tests
+
+  update-examples:
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install package
+        run: pip install -e ".[dev]"
+
+      - name: Regenerate deterministic example artifacts
+        # No model call in any of these -- ingest/derive/coverage/test-plan/
+        # test-advisory/rules-register/export are all model-free per
+        # CLAUDE.md's extraction/narrative split, safe to run and commit
+        # unattended. Narrative docs and generated tests under
+        # examples/outputs/docs and examples/outputs/tests are hand/session
+        # -produced separately and are NOT touched here -- this job only
+        # ever refreshes the artifacts below.
+        run: |
+          mkdir -p examples/outputs
+          mfdoc ingest         --config project.yml
+          mfdoc derive         --config project.yml
+          mfdoc coverage       --config project.yml --json examples/outputs/coverage.json
+          mfdoc test-plan      --config project.yml --out examples/outputs/tests/test-plan-register.md
+          mfdoc test-advisory  --config project.yml --out examples/outputs/tests/testability-advisory.md
+          mfdoc rules-register --config project.yml --out examples/outputs/rules-register.md
+          mfdoc export         --config project.yml --json examples/outputs/index.json
+          cp .mfdoc/index.db examples/outputs/index.db
+
+      - name: Commit and push if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add examples/outputs
+          if git diff --cached --quiet; then
+            echo "no changes to examples/outputs; skipping commit"
+          else
+            git commit -m "chore: regenerate example artifacts [skip ci]"
+            git push origin HEAD:main
+          fi

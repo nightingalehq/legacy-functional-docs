@@ -624,6 +624,14 @@ def cmd_coverage(args) -> int:
     print("\ngaps by kind:")
     for g in gaps:
         print(f"  {g['severity']:>6}  {g['gap_kind']:<22} {g['n']}")
+    json_out = getattr(args, "json", None)
+    if json_out:
+        # Stdout above is JSON followed by human-readable gap text on the
+        # same stream -- not machine-parseable as-is. This writes just the
+        # coverage numbers, cleanly, for a caller (e.g. CI) that wants them
+        # as a standalone artifact.
+        Path(json_out).parent.mkdir(parents=True, exist_ok=True)
+        Path(json_out).write_text(json.dumps(cov, indent=2), encoding="utf-8")
     return 0
 
 
@@ -827,6 +835,9 @@ def main(argv=None) -> int:
         p = sub.add_parser(name)
         p.add_argument("--config", required=True)
         p.set_defaults(func=fn)
+    sub.choices["coverage"].add_argument(
+        "--json", help="also write the coverage numbers (only -- not the gap breakdown "
+                        "printed alongside them) as JSON to this path")
 
     p = sub.add_parser("calibrate")
     p.add_argument("--config", required=True)
