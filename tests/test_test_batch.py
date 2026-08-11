@@ -88,7 +88,7 @@ sources: ["FAKEMOD"]
 
 Covers the module as a whole [[FAKEMOD:1]].
 
-```{language}
+```python
 def test_x():
     # FAKEMOD:BR-001 [[FAKEMOD:1]]
     pass
@@ -354,3 +354,78 @@ def test_sidecar_manifest_drift_is_flagged(tmp_path):
     result = validate_test_doc(conn, md_path)
     assert not result["ok"]
     assert any("manifest" in p for p in result["problems"])
+
+
+def test_natural_and_mantis_templates_exist_and_load():
+    """Both new templates must exist at the path cli._test_template_path
+    computes, and must contain the front-matter/citation shape
+    test-writing-rules.md requires -- a template that doesn't parse as
+    valid front matter would make every render using it fail validation
+    silently confusingly (looks like a model problem, is actually a
+    template problem)."""
+    natural_path = REPO_ROOT / "templates" / "tests" / "natural_natunit.md"
+    mantis_path = REPO_ROOT / "templates" / "tests" / "mantis_native.md"
+    assert natural_path.exists()
+    assert mantis_path.exists()
+
+    natural_text = natural_path.read_text(encoding="utf-8")
+    mantis_text = mantis_path.read_text(encoding="utf-8")
+
+    for text, language, framework in (
+        (natural_text, "natural", "natunit"),
+        (mantis_text, "mantis", "native"),
+    ):
+        assert f"language: {language}" in text
+        assert f"framework: {framework}" in text
+        assert "{MEMBER}" in text
+        assert "{MEMBER}:BR-nnn" in text
+        assert f"```{language}" in text
+        assert "* " in text or "*\n" in text  # a `*`-prefixed comment line is present
+
+
+def test_generate_member_test_doc_round_trips_natural_and_mantis(tmp_path):
+    """A response shaped exactly like the natural/mantis templates must
+    validate and split into the right sidecar extension -- proves the
+    templates and testlang.py's new entries actually work together, not
+    just that each exists in isolation."""
+    from mfdoc import testbatch
+    import sqlite3
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
+    insert(
+        conn, "test_case", member_id=1, kind="unit", scenario_name="FAKEMOD:BR-001",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+        then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:1", confidence="verified",
+    )
+    conn.commit()
+
+    for language, framework, ext, fence_body in (
+        ("natural", "natunit", "nsp",
+         "* FAKEMOD:BR-001 [[FAKEMOD:1]]\nCALLNAT 'ASSERT-EQUAL' #EXPECTED #ACTUAL 'test_x'\n"),
+        ("mantis", "native", "mantis",
+         "* FAKEMOD:BR-001 [[FAKEMOD:1]]\nPERFORM FAKEMOD-UNDER-TEST\n"),
+    ):
+        doc_text = _valid_test_doc_text(language, framework).replace(
+            "```python\ndef test_x():\n    # FAKEMOD:BR-001 [[FAKEMOD:1]]\n    pass\n```",
+            f"```{language}\n{fence_body}```",
+        )
+
+        def caller(prompt, _doc_text=doc_text):
+            return ModelResponse(text=_doc_text, input_tokens=1, output_tokens=2)
+
+        out_path = tmp_path / language / "FAKEMOD.md"
+        result = testbatch.generate_member_test_doc(
+            conn, "FAKEMOD", language, framework, out_path, caller,
+            "writing rules text", "template text",
+        )
+        assert result.ok is True, result.problems
+        sidecar_path = out_path.with_suffix(f".{ext}")
+        assert sidecar_path.exists()
+        assert sidecar_path.read_text(encoding="utf-8") == fence_body
