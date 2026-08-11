@@ -90,6 +90,7 @@ Covers the module as a whole [[FAKEMOD:1]].
 
 ```{language}
 def test_x():
+    # FAKEMOD:BR-001 [[FAKEMOD:1]]
     pass
 ```
 """
@@ -143,8 +144,20 @@ def test_run_test_batch_does_not_reuse_state_or_file_across_frameworks(tmp_path)
 
     pytest_path = out_dir / "natural" / "python" / "pytest" / "FAKEMOD.md"
     unittest_path = out_dir / "natural" / "python" / "unittest" / "FAKEMOD.md"
-    assert "framework: pytest" in pytest_path.read_text(encoding="utf-8")
-    assert "framework: unittest" in unittest_path.read_text(encoding="utf-8")
+    pytest_text = pytest_path.read_text(encoding="utf-8")
+    unittest_text = unittest_path.read_text(encoding="utf-8")
+    assert "framework: pytest" in pytest_text
+    assert "framework: unittest" in unittest_text
+
+    # Each framework's .md is slimmed (fence extracted) with its own sidecar
+    # -- not sharing/clobbering the other framework's .py file.
+    pytest_sidecar = out_dir / "natural" / "python" / "pytest" / "FAKEMOD.py"
+    unittest_sidecar = out_dir / "natural" / "python" / "unittest" / "FAKEMOD.py"
+    assert "def test_x" not in pytest_text
+    assert "def test_x" not in unittest_text
+    assert pytest_sidecar.read_text(encoding="utf-8") == unittest_sidecar.read_text(encoding="utf-8")
+    assert "def test_x" in pytest_sidecar.read_text(encoding="utf-8")
+    assert "FAKEMOD:BR-001" in pytest_text  # manifest, not the embedded fence
 
 
 def test_generate_member_test_doc_retries_and_reports_failure_for_fake_echo():
@@ -181,3 +194,145 @@ def test_generate_member_test_doc_retries_and_reports_failure_for_fake_echo():
     assert result.ok is False
     assert result.attempts == 2
     assert result.problems
+    assert not out_path.with_suffix(".py").exists(), "a failed validation must never produce a sidecar"
+
+
+def test_extract_code_fence_rejects_zero_or_multiple_fences():
+    from mfdoc.testbatch import extract_code_fence
+
+    assert extract_code_fence("no fence here", "python") is None
+    assert extract_code_fence("```python\ncode\n```", "python") == "code\n"
+    two_fences = "```python\na\n```\n\n```python\nb\n```"
+    assert extract_code_fence(two_fences, "python") is None
+    # A fence tagged for a different language doesn't count as a match.
+    assert extract_code_fence("```java\ncode\n```", "python") is None
+
+
+def test_unknown_language_keeps_code_embedded(tmp_path):
+    """A language with no entry in testlang.LANGUAGE_EXTENSIONS must never
+    get a guessed extension -- the doc stays exactly as generated."""
+    from mfdoc.testbatch import write_test_doc_with_sidecar
+
+    doc_text = _valid_test_doc_text("cobol", "cobol-unit")
+    out_path = tmp_path / "FAKEMOD.md"
+    out_path.write_text(doc_text, encoding="utf-8")
+    sidecar = write_test_doc_with_sidecar(out_path, doc_text, "cobol")
+    assert sidecar is None
+    assert out_path.read_text(encoding="utf-8") == doc_text
+    assert not (tmp_path / "FAKEMOD.cobol").exists()
+
+
+def test_generate_member_test_doc_writes_sidecar_and_slims_md(tmp_path):
+    from mfdoc import testbatch
+    import sqlite3
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
+    insert(
+        conn, "test_case", member_id=1, kind="unit", scenario_name="FAKEMOD:BR-001",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+        then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:1", confidence="verified",
+    )
+    conn.commit()
+
+    doc_text = _valid_test_doc_text("python", "pytest")
+
+    def caller(prompt):
+        return ModelResponse(text=doc_text, input_tokens=1, output_tokens=2)
+
+    out_path = tmp_path / "FAKEMOD.md"
+    result = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, caller, "writing rules text", "template text",
+    )
+    assert result.ok is True
+
+    sidecar_path = out_path.with_suffix(".py")
+    assert sidecar_path.exists()
+    assert sidecar_path.read_text(encoding="utf-8") == "def test_x():\n    # FAKEMOD:BR-001 [[FAKEMOD:1]]\n    pass\n"
+
+    md_text = out_path.read_text(encoding="utf-8")
+    assert "def test_x" not in md_text
+    assert "FAKEMOD.py" in md_text
+    assert "## Scenarios covered" in md_text
+    assert "FAKEMOD:BR-001" in md_text
+
+    # Round-trip: the slimmed .md must still validate clean on its own.
+    from mfdoc.validate import validate_test_doc
+    revalidated = validate_test_doc(conn, out_path)
+    assert revalidated["ok"], revalidated["problems"]
+
+
+def test_sidecar_present_cross_checks_manifest_against_real_code(tmp_path):
+    from mfdoc.validate import validate_test_doc
+    import sqlite3
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
+    insert(
+        conn, "test_case", member_id=1, kind="unit", scenario_name="FAKEMOD:BR-001",
+        given_json="{}", when_json="{}", then_json="{}",
+        status="characterization", citation="FAKEMOD:1", confidence="verified",
+    )
+    conn.commit()
+
+    md_path = tmp_path / "FAKEMOD.md"
+    md_path.write_text(
+        _valid_test_doc_text("python", "pytest").replace(
+            "```python\ndef test_x():\n    # FAKEMOD:BR-001 [[FAKEMOD:1]]\n    pass\n```",
+            "See [`FAKEMOD.py`](./FAKEMOD.py) for the generated test source.\n\n"
+            "## Scenarios covered\n\n- FAKEMOD:BR-001\n",
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "FAKEMOD.py").write_text(
+        "def test_x():\n    # FAKEMOD:BR-001 [[FAKEMOD:1]]\n    pass\n", encoding="utf-8",
+    )
+    result = validate_test_doc(conn, md_path)
+    assert result["ok"], result["problems"]
+
+
+def test_sidecar_manifest_drift_is_flagged(tmp_path):
+    """The manifest and the sidecar's real content disagreeing must fail
+    validation -- otherwise a hand-edited or stale manifest could silently
+    claim coverage the actual code doesn't have."""
+    from mfdoc.validate import validate_test_doc
+    import sqlite3
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
+    insert(
+        conn, "test_case", member_id=1, kind="unit", scenario_name="FAKEMOD:BR-001",
+        given_json="{}", when_json="{}", then_json="{}",
+        status="characterization", citation="FAKEMOD:1", confidence="verified",
+    )
+    conn.commit()
+
+    md_path = tmp_path / "FAKEMOD.md"
+    md_path.write_text(
+        _valid_test_doc_text("python", "pytest").replace(
+            "```python\ndef test_x():\n    # FAKEMOD:BR-001 [[FAKEMOD:1]]\n    pass\n```",
+            "See [`FAKEMOD.py`](./FAKEMOD.py) for the generated test source.\n\n"
+            "## Scenarios covered\n\n- FAKEMOD:BR-001\n",
+        ),
+        encoding="utf-8",
+    )
+    # Sidecar's real content doesn't actually reference FAKEMOD:BR-001 --
+    # the manifest is claiming coverage the code doesn't have.
+    (tmp_path / "FAKEMOD.py").write_text("def test_x():\n    pass\n", encoding="utf-8")
+    result = validate_test_doc(conn, md_path)
+    assert not result["ok"]
+    assert any("manifest" in p for p in result["problems"])

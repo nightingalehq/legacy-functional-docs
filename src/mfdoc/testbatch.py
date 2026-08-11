@@ -15,6 +15,7 @@ happen, not only on a later, separate `mfdoc test-validate`.
 from __future__ import annotations
 
 import hashlib
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,8 +24,69 @@ from .batch import ModelCaller, DocResult
 from .batch import _corpus_signature as _base_corpus_signature
 from .batch import _load_state, _output_subdir, _save_state, _skip_result
 from .redact import NULL_REDACTOR, Redactor
+from .testlang import sidecar_path_for
 from .testplan import test_case_brief
-from .validate import validate_test_doc
+from .validate import BR_REF, validate_test_doc
+
+
+def extract_code_fence(body: str, language: str) -> str | None:
+    """The contents of the single ```<language> ... ``` fence in `body`, or
+    None if the count isn't exactly one. Deliberately conservative: more
+    than one fence means the document doesn't match
+    reference/test-writing-rules.md's single-fence contract, and this must
+    not guess which one is "the" test file. This is a genuinely different
+    job from validate.py's `_logical_units`/`SKIP_BLOCK` (which discard
+    fence content while checking prose outside it), not a refactor of it --
+    this one has to capture the content, not skip past it."""
+    pattern = re.compile(r"```" + re.escape(language) + r"\n(.*?)```", re.S)
+    matches = pattern.findall(body)
+    if len(matches) != 1:
+        return None
+    return matches[0]
+
+
+def write_test_doc_with_sidecar(out_path: Path, doc_text: str, language: str) -> Path | None:
+    """Given a response that has already validated ok, split its one code
+    fence out to a sibling source file (`{member}.py`/`{member}.java`, per
+    `language`) and rewrite `out_path` to reference it plus a `## Scenarios
+    covered` manifest instead of embedding the fence -- the manifest is
+    what lets `validate_test_doc` keep checking every MEMBER:BR-nnn
+    reference once the actual code has moved somewhere its body-only scan
+    would no longer see.
+
+    Returns the sidecar path written, or None if no split was performed
+    (unrecognised language, front matter missing, fence not exactly one,
+    or no scenario references found in it) -- `out_path` is left completely
+    untouched in every None case, so a doc that doesn't fit this shape just
+    keeps today's embedded-fence behaviour."""
+    sidecar_path = sidecar_path_for(out_path, language)
+    if sidecar_path is None or not doc_text.startswith("---"):
+        return None
+    parts = doc_text.split("---", 2)
+    if len(parts) < 3:
+        return None
+    front_matter_block, body = parts[1], parts[2]
+
+    code = extract_code_fence(body, language)
+    if code is None:
+        return None
+    scenario_ids = sorted({
+        f"{m.group('member').upper()}:BR-{m.group('n')}" for m in BR_REF.finditer(code)
+    })
+    if not scenario_ids:
+        return None
+
+    sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+    sidecar_path.write_text(code, encoding="utf-8")
+
+    fence_pattern = re.compile(r"```" + re.escape(language) + r"\n.*?```", re.S)
+    prose = fence_pattern.sub(
+        f"See [`{sidecar_path.name}`](./{sidecar_path.name}) for the generated test source.",
+        body, count=1,
+    ).rstrip()
+    manifest = "\n\n## Scenarios covered\n\n" + "\n".join(f"- {sid}" for sid in scenario_ids) + "\n"
+    out_path.write_text(f"---{front_matter_block}---{prose}{manifest}", encoding="utf-8")
+    return sidecar_path
 
 
 def select_test_batch_members(conn) -> list[str]:
@@ -81,6 +143,7 @@ def generate_member_test_doc(conn, member_name: str, language: str, framework: s
         out_path.write_text(response.text, encoding="utf-8")
         result = validate_test_doc(conn, out_path)
         if result["ok"]:
+            write_test_doc_with_sidecar(out_path, response.text, language)
             return DocResult(member_name, str(out_path), True, attempt, input_tokens, output_tokens, [])
         problems = result["problems"]
         retry_note = "\n".join(f"- {p}" for p in problems)
@@ -178,6 +241,7 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
 
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_text(response.text, encoding="utf-8")
+            final_text = response.text
             validation = validate_test_doc(conn, out_path)
             attempts = 1
             if not validation["ok"]:
@@ -189,8 +253,12 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
                 input_tokens += retry_response.input_tokens
                 output_tokens += retry_response.output_tokens
                 out_path.write_text(retry_response.text, encoding="utf-8")
+                final_text = retry_response.text
                 validation = validate_test_doc(conn, out_path)
                 attempts = 2
+
+            if validation["ok"]:
+                write_test_doc_with_sidecar(out_path, final_text, language)
 
             result = DocResult(
                 name, str(out_path), validation["ok"], attempts, input_tokens, output_tokens,

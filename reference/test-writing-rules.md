@@ -102,3 +102,19 @@ Same failures `writing-rules.md` calls out for narrative docs apply here:
 don't narrate confidence you don't have, don't paraphrase a condition when
 the exact text is available, don't drop the `unresolved` marker to make a
 test look more complete than the facts support.
+
+## Output artifacts after generation
+
+Your contract above is unchanged -- always produce one Markdown document,
+front matter + summary + a single fenced code block, exactly as described.
+What happens next is mechanical, not yours to do: once your response
+validates, `mfdoc test-gen`/`mfdoc test-batch` extract that one fence into a
+sibling source file (`{member}.py` for python, `{member}.java` for java --
+see `testlang.LANGUAGE_EXTENSIONS`) next to the `.md`, and rewrite the `.md`
+to keep the front matter and your summary paragraph but replace the fence
+with a short reference to the sidecar file plus a `## Scenarios covered`
+list of every `MEMBER:BR-nnn` id your code referenced. This is what lets
+`mfdoc test-validate` keep checking every scenario reference mechanically
+once the real code lives in its own file. A language with no entry in
+`LANGUAGE_EXTENSIONS` is left exactly as you wrote it -- no extension is
+ever guessed.

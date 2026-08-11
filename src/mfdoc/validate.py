@@ -19,6 +19,7 @@ from pathlib import Path
 import yaml
 
 from .db import insert
+from .testlang import sidecar_path_for
 
 CITATION = re.compile(r"\[\[(?P<member>[A-Z0-9#@$&\-_.]+)(?::(?P<from>\d+)(?:-(?P<to>\d+))?)?\]\]", re.I)
 
@@ -220,11 +221,22 @@ def validate_doc(conn, path: Path) -> dict:
 def validate_test_doc(conn, path: Path) -> dict:
     """`validate_doc` plus the checks specific to a generated test file:
     `language`/`framework` front matter, and that every bare `MEMBER:BR-nnn`
-    reference in the body names a scenario that actually exists in
-    test_case -- the generated-test equivalent of a citation pointing at a
-    real source line. A model renumbering or inventing a BR-id would
-    otherwise pass validate_doc's checks silently, since BR-nnn isn't a
-    `[[...]]` citation validate_doc already resolves.
+    reference names a scenario that actually exists in test_case -- the
+    generated-test equivalent of a citation pointing at a real source line.
+    A model renumbering or inventing a BR-id would otherwise pass
+    validate_doc's checks silently, since BR-nnn isn't a `[[...]]` citation
+    validate_doc already resolves.
+
+    `mfdoc test-gen`/`mfdoc test-batch` split a validated response's code
+    fence out to a sibling source file (`testbatch.write_test_doc_with_sidecar`),
+    replacing it in the `.md` with a `## Scenarios covered` manifest -- when
+    that sidecar exists on disk next to `path`, the BR-nnn references are
+    checked in the *sidecar's* actual content instead of `body` (which no
+    longer has the code), and cross-checked against the manifest so a
+    stale/hand-edited manifest can't silently drift from what the sidecar
+    really contains. No sidecar on disk (older embedded-fence documents, or
+    an unrecognised language) falls back to scanning `body` directly,
+    exactly as before this feature existed.
     """
     result = validate_doc(conn, path)
     fm, body = result.pop("_fm"), result.pop("_body")
@@ -235,9 +247,27 @@ def validate_test_doc(conn, path: Path) -> dict:
             if key not in fm:
                 problems.append(f"front matter missing required key: {key}")
 
+    sidecar = sidecar_path_for(path, fm.get("language")) if fm is not None else None
+    if sidecar is not None and sidecar.exists():
+        manifest_ids = {
+            f"{m.group('member').upper()}:BR-{m.group('n')}" for m in BR_REF.finditer(body)
+        }
+        code_ids = {
+            f"{m.group('member').upper()}:BR-{m.group('n')}"
+            for m in BR_REF.finditer(sidecar.read_text(encoding="utf-8"))
+        }
+        scan_ids = code_ids
+        for sid in sorted(manifest_ids - code_ids):
+            problems.append(f"'{sid}' is listed in {path.name}'s manifest but not found in "
+                             f"{sidecar.name}'s actual content")
+        for sid in sorted(code_ids - manifest_ids):
+            problems.append(f"'{sid}' is referenced in {sidecar.name} but missing from "
+                             f"{path.name}'s '## Scenarios covered' manifest")
+    else:
+        scan_ids = {f"{m.group('member').upper()}:BR-{m.group('n')}" for m in BR_REF.finditer(body)}
+
     bad_refs = 0
-    for m in BR_REF.finditer(body):
-        scenario = f"{m.group('member').upper()}:BR-{m.group('n')}"
+    for scenario in scan_ids:
         row = conn.execute(
             "SELECT 1 FROM test_case WHERE UPPER(scenario_name)=UPPER(?)", (scenario,)
         ).fetchone()
