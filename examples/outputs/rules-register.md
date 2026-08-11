@@ -1,0 +1,49 @@
+---
+title: "System-wide rules register"
+doc_type: register
+---
+
+# System-wide rules register
+
+Every candidate business rule found across the index, keyed by its stable `MEMBER:BR-nnn` ID. Look one up here when it's referenced in conversation or a review comment without already knowing which module doc it lives in. Regenerate with `mfdoc rules-register` after any source change; do not hand-edit.
+
+| BR-ID | member | line | depth | construct | condition | literals |
+|---|---|---|---|---|---|---|
+| **MMC0100:BR-001** | `MMC0100` | [[MMC0100:2]] | 0 | `IF` | `#GRADE-CODE = 'X9'` | `X9` |
+| **MMC0100:BR-002** | `MMC0100` | [[MMC0100:3]] | 1 | `MOVE` | `MOVE 99 TO #VALIDATION-RC` | `99` |
+| **MMP0100:BR-001** | `MMP0100` | [[MMP0100:34]] | 0 | `IF NO RECORDS FOUND` | `no records found for preceding database loop` | `` |
+| **MMP0100:BR-002** | `MMP0100` | [[MMP0100:35]] | 1 | `MOVE` | `MOVE 10 TO #RETURN-CODE` | `10` |
+| **MMP0100:BR-003** | `MMP0100` | [[MMP0100:36]] | 1 | `ESCAPE ROUTINE` | `` | `` |
+| **MMP0100:BR-004** | `MMP0100` | [[MMP0100:38]] | 0 | `IF` | `ORDER-VIEW.ORDER-STATUS NE 'CONF'` | `CONF` |
+| **MMP0100:BR-005** | `MMP0100` | [[MMP0100:39]] | 1 | `MOVE` | `MOVE 20 TO #RETURN-CODE` | `20` |
+| **MMP0100:BR-006** | `MMP0100` | [[MMP0100:40]] | 1 | `ESCAPE ROUTINE` | `` | `` |
+| **MMP0100:BR-007** | `MMP0100` | [[MMP0100:44]] | 0 | `IF` | `STOCK-VIEW.GRADE-CODE NE ORDER-VIEW.GRADE-CODE` | `` |
+| **MMP0100:BR-008** | `MMP0100` | [[MMP0100:45]] | 1 | `ESCAPE BOTTOM` | `` | `` |
+| **MMP0100:BR-009** | `MMP0100` | [[MMP0100:47]] | 0 | `IF` | `STOCK-VIEW.PLANT-CODE = #PLANT` | `` |
+| **MMP0100:BR-010** | `MMP0100` | [[MMP0100:52]] | 0 | `DECIDE FOR FIRST CONDITION` | `` | `` |
+| **MMP0100:BR-011** | `MMP0100` | [[MMP0100:53]] | 1 | `WHEN` | `#AVAIL-TOTAL >= ORDER-VIEW.ORDER-WEIGHT` | `` |
+| **MMP0100:BR-012** | `MMP0100` | [[MMP0100:54]] | 1 | `MOVE` | `MOVE 'RLSD' TO ORDER-VIEW.ORDER-STATUS` | `RLSD` |
+| **MMP0100:BR-013** | `MMP0100` | [[MMP0100:55]] | 1 | `WHEN` | `#AVAIL-TOTAL >= ORDER-VIEW.ORDER-WEIGHT * (1 - #TOLERANCE-PCT / 100)` | `1,100` |
+| **MMP0100:BR-014** | `MMP0100` | [[MMP0100:56]] | 1 | `MOVE` | `MOVE 'PART' TO ORDER-VIEW.ORDER-STATUS` | `PART` |
+| **MMP0100:BR-015** | `MMP0100` | [[MMP0100:58]] | 1 | `WHEN` | `NONE` | `` |
+| **MMP0100:BR-016** | `MMP0100` | [[MMP0100:59]] | 1 | `MOVE` | `MOVE 30 TO #RETURN-CODE` | `30` |
+| **MMP0100:BR-017** | `MMP0100` | [[MMP0100:60]] | 1 | `ESCAPE ROUTINE` | `` | `` |
+| **MMP0200:BR-001** | `MMP0200` | [[MMP0200:12]] | 0 | `IF` | `#CERT-NO = ' '` | ` ` |
+| **MMP0200:BR-002** | `MMP0200` | [[MMP0200:16]] | 0 | `IF NO RECORDS FOUND` | `no records found for preceding database loop` | `` |
+| **MMP0200:BR-003** | `MMP0200` | [[MMP0200:21]] | 0 | `MOVE` | `MOVE 'MMP0300' TO #PGM` | `MMP0300` |
+| **MMP0200:BR-004** | `MMP0200` | [[MMP0200:24]] | 0 | `ON ERROR` | `` | `` |
+| **MMP9000:BR-001** | `MMP9000` | [[MMP9000:14]] | 0 | `IF` | `ORDER-VIEW.ORDER-STATUS = 'CONF' AND ORDER-VIEW.CUSTOMER-NO = 'C00123'` | `CONF,C00123` |
+| **MMP9000:BR-002** | `MMP9000` | [[MMP9000:16]] | 1 | `MOVE` | `MOVE 1 TO #FLAG` | `1` |
+| **MMP9300:BR-001** | `MMP9300` | [[MMP9300:12]] | 0 | `IF` | `#STATUS = 'A'` | `A` |
+| **MMP9400:BR-001** | `MMP9400` | [[MMP9400:9]] | 0 | `MOVE` | `MOVE 'CONF' TO #STATUS` | `CONF` |
+| **MMP9400:BR-002** | `MMP9400` | [[MMP9400:11]] | 0 | `IF` | `#STATUS = 'CONF'` | `CONF` |
+| **MMP9600:BR-001** | `MMP9600` | [[MMP9600:9]] | 0 | `LOOP` | `` | `` |
+| **ORDENQ:BR-001** | `ORDENQ` | [[ORDENQ:11]] | 0 | `IF` | `ORDER_NO = " "` | ` ` |
+| **ORDENQ:BR-002** | `ORDENQ` | [[ORDENQ:16]] | 0 | `IF` | `STATUS <> 0` | `0` |
+| **ORDENQ:BR-003** | `ORDENQ` | [[ORDENQ:21]] | 0 | `WHILE` | `STATUS = 0` | `0` |
+| **ORDENQ:BR-004** | `ORDENQ` | [[ORDENQ:25]] | 0 | `CASE` | `ORDVIEW.STATUS` | `` |
+| **ORDENQ:BR-005** | `ORDENQ` | [[ORDENQ:26]] | 1 | `WHEN` | `"CONF"` | `CONF` |
+| **ORDENQ:BR-006** | `ORDENQ` | [[ORDENQ:28]] | 1 | `WHEN` | `"HELD"` | `HELD` |
+
+Total: 35 rule candidate(s) across 12 batchable module(s).
+

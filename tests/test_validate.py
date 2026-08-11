@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from mfdoc.validate import validate_doc
+from mfdoc.validate import validate_doc, validate_tree
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -126,9 +126,25 @@ def test_validator_still_rejects_a_register_doc_missing_doc_type_name(indexed_db
     assert any("title" in p for p in result["problems"])
 
 
+def test_validate_tree_skips_readme_files(indexed_db, tmp_path):
+    """A directory of pipeline output (e.g. examples/outputs/) may legitimately
+    have its own README.md alongside real generated docs -- that file has no
+    front matter and was never meant to satisfy this contract, so a tree walk
+    must skip it rather than reporting a false failure."""
+    (tmp_path / "README.md").write_text("# Not a pipeline document\n", encoding="utf-8")
+    (tmp_path / "doc.md").write_text(
+        GOOD_FRONTMATTER + "\nThe program resets the return code [[MMP0100:31]].\n"
+    )
+    res = validate_tree(indexed_db, tmp_path)
+    assert res["documents"] == 1
+    assert res["documents_ok"] == 1
+
+
 def test_validator_accepts_the_worked_example_unchanged(indexed_db):
     """A false positive here trains people to ignore the validator, which is
     worse than not having one."""
-    result = validate_doc(indexed_db, REPO_ROOT / "examples" / "MMP0100-worked-example.md")
+    result = validate_doc(
+        indexed_db, REPO_ROOT / "examples" / "outputs" / "docs" / "natural" / "MILLPROD" / "MMP0100.md"
+    )
     assert result["ok"], result["problems"]
     assert result["invalid_citations"] == 0

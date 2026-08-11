@@ -81,8 +81,8 @@ jobs:
           mfdoc ingest         --config project.yml
           mfdoc derive         --config project.yml
           mfdoc coverage       --config project.yml --json examples/outputs/coverage.json
-          mfdoc test-plan      --config project.yml --out examples/outputs/tests/test-plan-register.md
-          mfdoc test-advisory  --config project.yml --out examples/outputs/tests/testability-advisory.md
+          mfdoc test-plan      --config project.yml --out examples/outputs/test-plan-register.md
+          mfdoc test-advisory  --config project.yml --out examples/outputs/testability-advisory.md
           mfdoc rules-register --config project.yml --out examples/outputs/rules-register.md
           mfdoc export         --config project.yml --json examples/outputs/index.json
           cp .mfdoc/index.db examples/outputs/index.db

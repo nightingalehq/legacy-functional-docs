@@ -302,8 +302,16 @@ def validate_test_doc(conn, path: Path) -> dict:
     return result
 
 
+def _is_pipeline_doc(path: Path) -> bool:
+    """`README.md` is project documentation, not pipeline output -- it has
+    no front matter and was never meant to satisfy this contract, so a
+    tree walk must skip it rather than reporting a false failure on the
+    one file everyone browsing the directory expects to be different."""
+    return path.name.upper() != "README.MD"
+
+
 def validate_tests_tree(conn, root: Path) -> dict:
-    results = [validate_test_doc(conn, p) for p in sorted(root.rglob("*.md"))]
+    results = [validate_test_doc(conn, p) for p in sorted(root.rglob("*.md")) if _is_pipeline_doc(p)]
     return {
         "documents": len(results),
         "documents_ok": sum(1 for r in results if r["ok"]),
@@ -315,7 +323,7 @@ def validate_tests_tree(conn, root: Path) -> dict:
 
 
 def validate_tree(conn, root: Path) -> dict:
-    results = [validate_doc(conn, p) for p in sorted(root.rglob("*.md"))]
+    results = [validate_doc(conn, p) for p in sorted(root.rglob("*.md")) if _is_pipeline_doc(p)]
     return {
         "documents": len(results),
         "documents_ok": sum(1 for r in results if r["ok"]),

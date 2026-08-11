@@ -1,0 +1,22 @@
+{
+  "members": 21,
+  "code_members": 13,
+  "source_lines": 406,
+  "unparsed_lines": 7,
+  "line_recognition_rate": 0.9828,
+  "entities": 13,
+  "entities_with_definition": 9,
+  "entity_definition_rate": 0.6923,
+  "entity_fields": 46,
+  "data_accesses": 14,
+  "rule_candidates": 35,
+  "invocation_edges": 13,
+  "invocations_resolved": 2,
+  "call_resolution_rate": 0.1538,
+  "dynamic_call_edges": 1,
+  "include_edges": 7,
+  "includes_resolved": 1,
+  "include_resolution_rate": 0.1429,
+  "gaps_high": 20,
+  "gaps_total": 41
+}

@@ -29,4 +29,3 @@ Every scenario `mfdoc test-plan` derived from the fact store, keyed by the same 
 | `ORDENQ:BR-005` | `ORDENQ` | unit | characterization | `WHEN` | `"CONF"` | [[ORDENQ:26]] |
 | `ORDENQ:BR-006` | `ORDENQ` | unit | characterization | `WHEN` | `"HELD"` | [[ORDENQ:28]] |
 
-

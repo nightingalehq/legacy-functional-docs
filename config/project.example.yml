@@ -6,8 +6,8 @@
 # generated docs is what makes a documentation run reproducible six months
 # later when somebody disputes a business rule.
 #
-# For a fully worked example pointed at this repo's own sample fixtures, see
-# the root `project.yml` and `examples/MMP0100-worked-example.md`.
+# For a fully worked example pointed at this repo's own sample source, see
+# the root `project.yml` and `examples/outputs/`.
 
 project: <PROJECT NAME>          # e.g. Order Management
 system: <SYSTEM CODE>            # short code used to group generated docs, e.g. OM
