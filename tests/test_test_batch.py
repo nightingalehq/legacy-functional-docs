@@ -208,6 +208,24 @@ def test_extract_code_fence_rejects_zero_or_multiple_fences():
     assert extract_code_fence("```java\ncode\n```", "python") is None
 
 
+def test_natural_and_mantis_have_sidecar_extensions():
+    from mfdoc.testlang import LANGUAGE_EXTENSIONS, sidecar_path_for
+
+    assert LANGUAGE_EXTENSIONS["natural"] == "nsp"
+    assert LANGUAGE_EXTENSIONS["mantis"] == "mantis"
+    assert sidecar_path_for(Path("FAKEMOD.md"), "natural") == Path("FAKEMOD.nsp")
+    assert sidecar_path_for(Path("FAKEMOD.md"), "mantis") == Path("FAKEMOD.mantis")
+
+
+def test_silkcentral_and_uipath_have_no_sidecar_extension():
+    """Test-case-definition targets stay embedded in the .md -- no
+    invented extension for an import format that varies per deployment."""
+    from mfdoc.testlang import sidecar_path_for
+
+    assert sidecar_path_for(Path("FAKEMOD.md"), "silkcentral") is None
+    assert sidecar_path_for(Path("FAKEMOD.md"), "uipath") is None
+
+
 def test_unknown_language_keeps_code_embedded(tmp_path):
     """A language with no entry in testlang.LANGUAGE_EXTENSIONS must never
     get a guessed extension -- the doc stays exactly as generated."""

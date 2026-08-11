@@ -14,6 +14,8 @@ from pathlib import Path
 LANGUAGE_EXTENSIONS = {
     "python": "py",
     "java": "java",
+    "natural": "nsp",
+    "mantis": "mantis",
 }
 
 
