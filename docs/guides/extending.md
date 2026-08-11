@@ -116,6 +116,12 @@ one attempt, with the validator's failure text appended to the prompt —
 don't add unbounded retries; a module that fails twice should surface as a
 `FAIL` in `run_batch`'s summary for a human to look at, not loop silently.
 
+`claude_cli_caller.py` follows the same isolation pattern as
+`anthropic_caller.py`/`vertex_caller.py` but needs no optional *package*
+dependency at all — it shells out to the `claude` CLI (`mfdoc batch
+--provider claude-code`) for anyone with Claude Code installed and
+authenticated who'd rather not provision a separate `ANTHROPIC_API_KEY`.
+
 ## Testing conventions
 
 - Fixtures in `examples/inputs/` are golden — most tests run the real

@@ -17,7 +17,7 @@ for a specific engagement.
 |---|---|
 | Does this run on Anthropic's or any third party's infrastructure? | No. It runs entirely on whatever machine you invoke it from — your laptop, a client-supplied environment, a CI runner. |
 | Does source code leave the machine by default? | No. `mfdoc ingest`, `derive`, `coverage`, `gate`, `calibrate`, `brief`, `validate` and `export` are local-only; no network calls anywhere in that code path. |
-| What is the one exception? | `mfdoc batch`, an optional command that sends a **brief** (a derived fact summary, not raw source) to the Anthropic Claude API to draft module documentation unattended. It requires an explicit extra install (`pip install 'mfdoc[batch]'`) and an API key — nothing reaches it by accident. |
+| What is the one exception? | `mfdoc batch`, an optional command that sends a **brief** (a derived fact summary, not raw source) to a Claude model to draft module documentation unattended. Via the Anthropic API directly or Vertex AI (`--provider anthropic`/`vertex`), it requires an explicit extra install (`pip install 'mfdoc[batch]'`/`'mfdoc[vertex]'`) and an API key; via a local `claude` CLI (`--provider claude-code`) it needs no extra package or API key at all, only the CLI installed and authenticated — nothing reaches it by accident either way. |
 | Is there another path data can reach a model by? | Yes — writing documents interactively inside a Claude Code chat session (the `SKILL.md` workflow) also sends brief content to a model, via whatever is running Claude Code. This is the normal, intended way to use the tool for anything other than high-volume module docs; it is not something to avoid, but it does mean "no network access" describes the deterministic pipeline, not the documentation workflow as a whole. |
 | Can sensitive literals be scrubbed before anything is sent anywhere? | Yes, via `options.redact` in `project.yml` — see "Redaction" below. It is opt-in and does nothing by default. |
 | Is a run reproducible and auditable after the fact? | Yes — see "Audit trail" below. |
@@ -50,6 +50,14 @@ for a specific engagement.
      and a GCP project with Vertex's Claude models enabled; credentials come
      from the ambient environment (Application Default Credentials), never
      handled by this tool directly.
+   - `mfdoc batch --provider claude-code`, which shells out to a local
+     `claude` CLI process instead of calling either SDK directly. This is
+     the same data path and the same Anthropic account/auth as running an
+     interactive Claude Code session against the brief by hand — not a new
+     data-handling class, just a headless, unattended way to drive it. No
+     `ANTHROPIC_API_KEY` is handled by this tool in this path; whatever
+     authentication the local `claude` CLI already has (interactive login
+     or its own configured key) is what's used.
 5. **Validation.** Reads generated documents and the local database only.
    No network calls.
 

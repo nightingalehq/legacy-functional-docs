@@ -329,6 +329,9 @@ def _build_model_caller(args):
             )
             return None
         return VertexCaller(model=args.model, project=args.gcp_project, region=args.gcp_region)
+    if provider == "claude-code":
+        from .claude_cli_caller import ClaudeCLICaller
+        return ClaudeCLICaller(model=args.model)
     from .anthropic_caller import AnthropicCaller
     return AnthropicCaller(model=args.model or "claude-sonnet-4-5")
 
@@ -868,7 +871,7 @@ def main(argv=None) -> int:
     p.add_argument("--model", default=None)
     p.add_argument("--caller", choices=["anthropic", "fake-echo"], default="anthropic",
                     help="fake-echo makes no network call -- for CI/dry-run smoke tests")
-    p.add_argument("--provider", choices=["anthropic", "vertex"], default="anthropic")
+    p.add_argument("--provider", choices=["anthropic", "vertex", "claude-code"], default="anthropic")
     p.add_argument("--gcp-project")
     p.add_argument("--gcp-region")
     p.set_defaults(func=cmd_test_overlay_draft)
@@ -891,7 +894,7 @@ def main(argv=None) -> int:
         p.add_argument("--model", default=None)
         p.add_argument("--caller", choices=["anthropic", "fake-echo"], default="anthropic",
                         help="fake-echo makes no network call -- for CI/dry-run smoke tests")
-        p.add_argument("--provider", choices=["anthropic", "vertex"], default="anthropic")
+        p.add_argument("--provider", choices=["anthropic", "vertex", "claude-code"], default="anthropic")
         p.add_argument("--gcp-project")
         p.add_argument("--gcp-region")
         p.set_defaults(func=fn)
@@ -918,17 +921,20 @@ def main(argv=None) -> int:
                          "models use the same bare id on Vertex AI as on the direct Anthropic "
                          "API; only legacy models need a Vertex-specific dated-snapshot id "
                          "with an '@' separator (e.g. claude-3-5-sonnet-v2@20241022) -- see "
-                         "Vertex AI Model Garden for the current id for this model")
+                         "Vertex AI Model Garden for the current id for this model. For "
+                         "--provider claude-code this is optional -- omit it to use the "
+                         "local `claude` CLI's own default/configured model")
     p.add_argument("--concurrency", type=int, default=4)
     p.add_argument("--state", default=".mfdoc/batch-state.json",
                     help="resume-state file path, relative to --config's directory; "
                          "empty string disables resume tracking")
     p.add_argument("--caller", choices=["anthropic", "fake-echo"], default="anthropic",
                     help="fake-echo makes no network call -- for CI/dry-run smoke tests")
-    p.add_argument("--provider", choices=["anthropic", "vertex"], default="anthropic",
+    p.add_argument("--provider", choices=["anthropic", "vertex", "claude-code"], default="anthropic",
                     help="which egress path serves the model call when --caller=anthropic: "
-                         "the Anthropic API directly, or Claude via Google Cloud Vertex AI "
-                         "(needs `pip install 'mfdoc[vertex]'`)")
+                         "the Anthropic API directly, Claude via Google Cloud Vertex AI "
+                         "(needs `pip install 'mfdoc[vertex]'`), or the local `claude` CLI "
+                         "(needs it installed and authenticated -- no ANTHROPIC_API_KEY)")
     p.add_argument("--gcp-project", help="Vertex only; default ANTHROPIC_VERTEX_PROJECT_ID or "
                                           "GOOGLE_CLOUD_PROJECT env var")
     p.add_argument("--gcp-region", help="Vertex only; default CLOUD_ML_REGION env var, "
@@ -966,7 +972,7 @@ def main(argv=None) -> int:
     p.add_argument("--caller", choices=["anthropic", "fake-echo"], default="anthropic",
                    help="--judge llm only; fake-echo makes no network call, for CI/dry-run "
                         "smoke tests")
-    p.add_argument("--provider", choices=["anthropic", "vertex"], default="anthropic",
+    p.add_argument("--provider", choices=["anthropic", "vertex", "claude-code"], default="anthropic",
                    help="--judge llm only; which egress path serves the model call")
     p.add_argument("--gcp-project", help="--judge llm + --provider vertex only")
     p.add_argument("--gcp-region", help="--judge llm + --provider vertex only")
