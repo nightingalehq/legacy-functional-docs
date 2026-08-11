@@ -187,6 +187,53 @@ mfdoc test-gen      --config project.yml --member MMP0100 --language python --fr
 mfdoc test-validate --config project.yml --docs tests_generated
 ```
 
+## Worked examples
+
+`examples/` holds real output from running the whole pipeline against the
+bundled fixtures in `examples/fixtures/` — not hand-crafted mockups. Every
+citation in every file below resolves against the fact store you get by
+following the reproduction steps, which is also what CI checks
+(`mfdoc validate --docs examples`).
+
+| File | What it shows |
+|---|---|
+| [`MMP0100-worked-example.md`](examples/MMP0100-worked-example.md), [`MMB0100-worked-example.md`](examples/MMB0100-worked-example.md), [`ORDERMST-worked-example.md`](examples/ORDERMST-worked-example.md) | Full module docs (`mfdoc brief` + narrative pass), including how a missing callee or an ambiguous transaction boundary becomes a gap-register question instead of invented prose. |
+| [`test-plan-register-example.md`](examples/test-plan-register-example.md) | `mfdoc test-plan`'s system-wide register — every derived Given/When/Then scenario, keyed by the same `MEMBER:BR-nnn` id the module docs and rules register use. |
+| [`testability-advisory-example.md`](examples/testability-advisory-example.md) | `mfdoc test-advisory`'s output — every batchable member classified pure / needs-mocks / integration-only / blocked, with named seams and gaps, no model call involved. |
+| [`tests_generated/MMP0100-test-example.md`](examples/tests_generated/MMP0100-test-example.md) | A rendered test file (`mfdoc test-gen` shape) for MMP0100: one test per branch scenario, an `unresolved` scenario left as a skipped test rather than a guessed assertion, and two opaque call-stubs for callees with no supplied source. |
+
+Reproduce all of it from a clean checkout:
+
+```bash
+pip install -e .        # or: PYTHONPATH=src python3 -m mfdoc.cli ...
+
+mfdoc ingest    --config project.yml
+mfdoc derive    --config project.yml
+mfdoc coverage  --config project.yml
+mfdoc validate  --config project.yml --docs examples   # 0 invalid citations
+
+mfdoc test-plan     --config project.yml
+mfdoc test-advisory --config project.yml --out /tmp/testability-advisory.md
+# test-validate enforces language/framework front matter on every doc it
+# scans, so point it only at the generated-test subtree, not all of examples/:
+mfdoc test-validate --config project.yml --docs examples/tests_generated
+
+# system-wide test-plan register, same shape as test-plan-register-example.md
+python3 -c "
+import sqlite3
+from mfdoc import testplan
+conn = sqlite3.connect('.mfdoc/index.db')
+conn.row_factory = sqlite3.Row
+print(testplan.test_plan_register(conn))
+"
+```
+
+`MMP0100-test-example.md`'s code was hand-assembled from `mfdoc test-plan
+--member MMP0100`'s brief rather than rendered by `mfdoc test-batch`,
+because rendering needs `mfdoc[batch]` and a live model call — everything
+it asserts is still traceable to the same brief you get by running
+`mfdoc test-plan` yourself and reading its output for `MMP0100`.
+
 ## Requirements
 
 Python 3.10+ and PyYAML. No other dependencies, no network access, nothing leaves
@@ -204,7 +251,7 @@ reference/            dialect packs and writing rules — read before use
 templates/            the seven document types, plus templates/tests/ for generated tests
 src/mfdoc/            the extraction pipeline (+ testplan/testadvisor/testoverlay/testbatch)
 tests/                pytest suite (fixtures as golden tests)
-examples/             worked example + multi-dialect fixtures
+examples/             worked examples (docs + test generation) + multi-dialect fixtures
 evals/                eval prompts (dev-time only; not installed)
 docs/guides/          getting-started, architecture, security/compliance, extending,
                       testing-strategies-for-mainframes-and-4gl
