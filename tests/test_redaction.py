@@ -28,7 +28,7 @@ def _ingest_sensitive_fixture(tmp_path, repo_root):
     cfg = {
         "index_db": str(tmp_path / "index.db"),
         "sources": [{
-            "path": str(repo_root / "examples" / "fixtures" / "redaction"),
+            "path": str(repo_root / "examples" / "inputs" / "redaction"),
             "glob": ["*.nsp"],
             "dialect": "natural",
         }],

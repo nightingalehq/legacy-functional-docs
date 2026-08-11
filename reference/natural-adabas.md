@@ -233,7 +233,7 @@ in the wrong code page corrupts only the accented and special characters, which 
 subtle — check `£`, `@`, `#` and `!` if something looks off, since these move
 between EBCDIC code pages and `#` is a legal character in Natural variable names.
 `tests/test_ebcdic_fixtures.py` (fixtures under
-`examples/fixtures/natural/encoding/`) confirms this concretely: content
+`examples/inputs/natural/encoding/`) confirms this concretely: content
 without one of those differentiating characters auto-detects as cp037 even
 when it's actually cp500, since cp037 is tried first and also decodes it
 plausibly — pin `encoding:` explicitly rather than trusting auto-detection

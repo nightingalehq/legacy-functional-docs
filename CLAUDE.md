@@ -157,7 +157,7 @@ real, previously-shipped defects, not accidental cruft.
   what's unknown rather than inventing a plausible answer is the product's
   entire value proposition, and that applies to the tool's own config
   surface too.
-- Fixtures under `examples/fixtures/` are golden and exercise specific known
+- Fixtures under `examples/inputs/` are golden and exercise specific known
   defect classes — prefer extending an existing fixture over adding a new
   one.
 

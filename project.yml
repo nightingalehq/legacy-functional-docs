@@ -23,45 +23,45 @@ docs_root: docs/functional
 #   sequence_columns  'auto' (default), 'none', or '73:80' to force
 #
 sources:
-  - path: examples/fixtures/natural
+  - path: examples/inputs/natural
     glob: ["*.nsp", "*.nsn", "*.nss", "*.nsc", "*.nsm", "*.txt", "*.lst"]
     dialect: natural
     library: MILLPROD
     system: MOM
     sequence_columns: auto
 
-  - path: examples/fixtures/ddm
+  - path: examples/inputs/ddm
     glob: ["*.ddm", "*.txt", "*.lst"]
     dialect: ddm
     system: MOM
 
-  - path: examples/fixtures/fdt
+  - path: examples/inputs/fdt
     glob: ["*.fdt", "*.rep", "*.txt", "*.lst"]
     dialect: adabas_fdt
     system: MOM
 
-  - path: examples/fixtures/mantis
+  - path: examples/inputs/mantis
     glob: ["*.mantis", "*.mts", "*.txt"]
     dialect: mantis
     library: STEELLIB
     system: OE
 
-  - path: examples/fixtures/supra
+  - path: examples/inputs/supra
     glob: ["*.dir", "*.txt", "*.rep"]
     dialect: supra_dir
     system: OE
 
-  - path: examples/fixtures/ddl
+  - path: examples/inputs/ddl
     glob: ["*.sql", "*.ddl"]
     dialect: sql_ddl
     system: MOM
 
-  - path: examples/fixtures/jcl
+  - path: examples/inputs/jcl
     glob: ["*.jcl", "*.job", "*.txt"]
     dialect: jcl
     system: MOM
 
-  - path: examples/fixtures/csd
+  - path: examples/inputs/csd
     glob: ["*.csd", "*.txt"]
     dialect: cics_csd
     system: MOM

@@ -41,7 +41,7 @@ LICENSE_NOTE = (
 # A deliberately small, varied set: different EXEC/STEP/COND shapes, a
 # cataloged proc, and the DB2-related JCL that carries embedded SQL DDL
 # (CREATE TABLESPACE/TABLE/INDEX) and DB2 utility control statements --
-# the content this repo's own synthetic fixture (examples/fixtures/jcl/
+# the content this repo's own synthetic fixture (examples/inputs/jcl/
 # MMB0100.jcl) can't exercise on its own.
 FILES = [
     "COBOL Programming Course #2 - Learning COBOL/Labs/jcl/HELLO.jcl",

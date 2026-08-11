@@ -190,7 +190,7 @@ mfdoc test-validate --config project.yml --docs tests_generated
 ## Worked examples
 
 `examples/` holds real output from running the whole pipeline against the
-bundled fixtures in `examples/fixtures/` — not hand-crafted mockups. Every
+bundled fixtures in `examples/inputs/` — not hand-crafted mockups. Every
 citation in every file below resolves against the fact store you get by
 following the reproduction steps, which is also what CI checks
 (`mfdoc validate --docs examples`).

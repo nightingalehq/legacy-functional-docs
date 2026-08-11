@@ -22,7 +22,7 @@ jobs:
         run: pytest -v
 
       - name: Run pipeline against bundled fixtures
-        # project.yml (checked in at repo root) points at examples/fixtures/
+        # project.yml (checked in at repo root) points at examples/inputs/
         # and is the same config the worked example was generated from.
         # Its quality_gates are intentionally set to real-engagement
         # thresholds, and the fixtures deliberately omit some call targets to

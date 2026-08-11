@@ -25,7 +25,7 @@ pytest
 ```
 
 CI (`.github/workflows/ci.yml`) additionally runs the full pipeline against
-`examples/fixtures` and validates the output — a change that breaks
+`examples/inputs` and validates the output — a change that breaks
 citation alignment or introduces an unresolved citation goes red even if
 every unit test passes, so run that locally too before pushing anything
 touching extraction or narrative:
@@ -118,7 +118,7 @@ don't add unbounded retries; a module that fails twice should surface as a
 
 ## Testing conventions
 
-- Fixtures in `examples/fixtures/` are golden — most tests run the real
+- Fixtures in `examples/inputs/` are golden — most tests run the real
   pipeline against them and assert on specific facts (see
   `tests/test_call_graph_and_entities.py` for the density of what's
   checked: exact entity counts, specific resolved/unresolved calls,
@@ -140,7 +140,7 @@ don't add unbounded retries; a module that fails twice should surface as a
 
 ## Supplementary smoke fixtures from public corpora
 
-`examples/fixtures/` is small and golden-tested; it was written to exercise
+`examples/inputs/` is small and golden-tested; it was written to exercise
 specific known defect classes, not to be representative of real source's
 variety. Where a public, appropriately-licensed corpus exists, it's worth
 using as a supplementary robustness signal without ever committing it
@@ -164,7 +164,7 @@ wholesale (not ours to redistribute, and upstream can change underneath us).
 
 ## Measuring scale (issue #9)
 
-`examples/fixtures/` (9 members) says nothing about how the pipeline behaves
+`examples/inputs/` (9 members) says nothing about how the pipeline behaves
 at the size of a real engagement — a mill system might be 2,000–8,000
 Natural members. `scripts/generate_scale_fixture.py` synthesizes a
 parameterizable, reproducible corpus of plausible Natural programs (a mix

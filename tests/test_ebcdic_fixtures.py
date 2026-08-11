@@ -2,7 +2,7 @@
 
 `sniff_encoding`/`EBCDIC_CODEPAGES` had no fixture exercising a real EBCDIC
 byte stream at all before this -- only synthetic assumptions. The two
-fixtures here are examples/fixtures/natural/MMP0200.nsp re-encoded to
+fixtures here are examples/inputs/natural/MMP0200.nsp re-encoded to
 cp037 and cp500 with Python's own codecs; they are not part of the main
 project.yml source set (they live in a subdirectory the natural source
 spec's non-recursive `*.nsp` glob never reaches), so they don't touch
@@ -15,7 +15,7 @@ from pathlib import Path
 
 from mfdoc import normalise
 
-FIXTURE_DIR = Path(__file__).resolve().parent.parent / "examples" / "fixtures" / "natural"
+FIXTURE_DIR = Path(__file__).resolve().parent.parent / "examples" / "inputs" / "natural"
 ENCODING_DIR = FIXTURE_DIR / "encoding"
 ORIGINAL_TEXT = (FIXTURE_DIR / "MMP0200.nsp").read_text(encoding="utf-8")
 
