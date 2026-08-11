@@ -1,0 +1,20 @@
+* Generated characterization/spec tests for MMP9300.
+* Do not hand-edit -- regenerate with `mfdoc test-batch`. See the fact
+* brief this file was rendered from for the scenarios covered.
+*
+* MMP9300:BR-001 [[MMP9300:12]]
+* Branch: IF #STATUS = 'A'
+* Scenario: test_status_equals_a_unresolved
+*
+* Consequence of this branch is not reconstructable from source facts.
+* Fixture sets up the condition only; outcome assertion is unresolved.
+#STATUS := 'A'
+PERFORM MMP9300-UNDER-TEST
+* unresolved: expected consequence of #STATUS = 'A' not available in brief
+IF #STATUS = 'A'
+    DISPLAY 'PASS test_status_equals_a_unresolved (branch reached, consequence unresolved)'
+ELSE
+    DISPLAY 'FAIL test_status_equals_a_unresolved: expected #STATUS = A, got ' #STATUS
+END-IF
+*
+STOP RUN

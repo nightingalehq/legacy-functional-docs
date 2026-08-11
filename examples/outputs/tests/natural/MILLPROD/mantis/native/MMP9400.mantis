@@ -1,0 +1,19 @@
+* Generated characterization/spec tests for MMP9400.
+* Do not hand-edit -- regenerate with `mfdoc test-batch`. See the fact
+* brief this file was rendered from for the scenarios covered.
+*
+* MMP9400:BR-002 [[MMP9400:11]]
+* Branch: IF #STATUS = 'CONF'
+* Scenario: test_status_conf_branch_decision
+* Consequence unresolved -- no reconstructable outcome in source facts;
+* this test exercises the branch condition only.
+*
+#STATUS = 'CONF'
+PERFORM MMP9400-UNDER-TEST
+IF #STATUS = 'CONF'
+    DISPLAY 'PASS test_status_conf_branch_decision'
+ELSE
+    DISPLAY 'FAIL test_status_conf_branch_decision: expected #STATUS = CONF got ' #STATUS
+END-IF
+*
+STOP RUN

@@ -1,0 +1,23 @@
+* Generated characterization/spec tests for MMC0100.
+* Do not hand-edit -- regenerate with `mfdoc test-batch`. See the fact
+* brief this file was rendered from for the scenarios covered.
+*
+DEFINE DATA LOCAL
+1 #EXPECTED (A32)
+1 #ACTUAL   (A32)
+1 #GRADE-CODE (A2)
+1 #VALIDATION-RC (N2)
+END-DEFINE
+*
+* MMC0100:BR-001 [[MMC0100:2]]
+* Branch: IF #GRADE-CODE = 'X9'
+* Scenario: test_grade_code_x9_sets_validation_rc_99
+*
+MOVE 'X9' TO #GRADE-CODE
+CALLNAT 'MMC0100' #GRADE-CODE #VALIDATION-RC
+MOVE 99 TO #EXPECTED
+MOVE #VALIDATION-RC TO #ACTUAL
+*
+CALLNAT 'ASSERT-EQUAL' #EXPECTED #ACTUAL 'test_grade_code_x9_sets_validation_rc_99'
+*
+END

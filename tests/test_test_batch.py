@@ -33,7 +33,7 @@ def test_test_gen_prompt_carries_the_derived_scenarios(cli_args, indexed_db, tmp
         config=cli_args.config, out=str(tmp_path / "out" / "MMP0100.md"),
         member="MMP0100", language="python", framework="pytest", template=None,
         model=None, caller="fake-echo", provider="anthropic",
-        gcp_project=None, gcp_region=None,
+        gcp_project=None, gcp_region=None, matrix=False,
     )
     cli.cmd_test_gen(args)
     written = (tmp_path / "out" / "MMP0100.md").read_text(encoding="utf-8")
@@ -50,7 +50,7 @@ def test_test_batch_selects_only_members_with_test_case_rows(cli_args, indexed_d
         config=cli_args.config, out=str(tmp_path / "out"), members=None,
         language="python", framework="pytest", template=None, model=None,
         caller="fake-echo", provider="anthropic", gcp_project=None, gcp_region=None,
-        concurrency=1, state="",
+        concurrency=1, state="", matrix=False,
     )
     cli.cmd_test_batch(args)
     written = (tmp_path / "out" / "natural" / "MILLPROD" / "python" / "pytest" / "MMP0100.md").read_text(encoding="utf-8")
@@ -63,7 +63,7 @@ def test_missing_template_exits_cleanly_rather_than_crashing(cli_args, tmp_path)
         config=cli_args.config, out=str(tmp_path / "out" / "X.md"),
         member="MMP0100", language="cobol", framework="nonexistent", template=None,
         model=None, caller="fake-echo", provider="anthropic",
-        gcp_project=None, gcp_region=None,
+        gcp_project=None, gcp_region=None, matrix=False,
     )
     rc = cli.cmd_test_gen(args)
     assert rc == 2
@@ -88,7 +88,7 @@ sources: ["FAKEMOD"]
 
 Covers the module as a whole [[FAKEMOD:1]].
 
-```{language}
+```python
 def test_x():
     # FAKEMOD:BR-001 [[FAKEMOD:1]]
     pass
@@ -206,6 +206,24 @@ def test_extract_code_fence_rejects_zero_or_multiple_fences():
     assert extract_code_fence(two_fences, "python") is None
     # A fence tagged for a different language doesn't count as a match.
     assert extract_code_fence("```java\ncode\n```", "python") is None
+
+
+def test_natural_and_mantis_have_sidecar_extensions():
+    from mfdoc.testlang import LANGUAGE_EXTENSIONS, sidecar_path_for
+
+    assert LANGUAGE_EXTENSIONS["natural"] == "nsp"
+    assert LANGUAGE_EXTENSIONS["mantis"] == "mantis"
+    assert sidecar_path_for(Path("FAKEMOD.md"), "natural") == Path("FAKEMOD.nsp")
+    assert sidecar_path_for(Path("FAKEMOD.md"), "mantis") == Path("FAKEMOD.mantis")
+
+
+def test_silkcentral_and_uipath_have_no_sidecar_extension():
+    """Test-case-definition targets stay embedded in the .md -- no
+    invented extension for an import format that varies per deployment."""
+    from mfdoc.testlang import sidecar_path_for
+
+    assert sidecar_path_for(Path("FAKEMOD.md"), "silkcentral") is None
+    assert sidecar_path_for(Path("FAKEMOD.md"), "uipath") is None
 
 
 def test_unknown_language_keeps_code_embedded(tmp_path):
@@ -336,3 +354,450 @@ def test_sidecar_manifest_drift_is_flagged(tmp_path):
     result = validate_test_doc(conn, md_path)
     assert not result["ok"]
     assert any("manifest" in p for p in result["problems"])
+
+
+def test_natural_and_mantis_templates_exist_and_load():
+    """Both new templates must exist at the path cli._test_template_path
+    computes, and must contain the front-matter/citation shape
+    test-writing-rules.md requires -- a template that doesn't parse as
+    valid front matter would make every render using it fail validation
+    silently confusingly (looks like a model problem, is actually a
+    template problem)."""
+    natural_path = REPO_ROOT / "templates" / "tests" / "natural_natunit.md"
+    mantis_path = REPO_ROOT / "templates" / "tests" / "mantis_native.md"
+    assert natural_path.exists()
+    assert mantis_path.exists()
+
+    natural_text = natural_path.read_text(encoding="utf-8")
+    mantis_text = mantis_path.read_text(encoding="utf-8")
+
+    for text, language, framework in (
+        (natural_text, "natural", "natunit"),
+        (mantis_text, "mantis", "native"),
+    ):
+        assert f"language: {language}" in text
+        assert f"framework: {framework}" in text
+        assert "{MEMBER}" in text
+        assert "{MEMBER}:BR-nnn" in text
+        assert f"```{language}" in text
+        assert "* " in text or "*\n" in text  # a `*`-prefixed comment line is present
+
+
+def test_generate_member_test_doc_round_trips_natural_and_mantis(tmp_path):
+    """A response shaped exactly like the natural/mantis templates must
+    validate and split into the right sidecar extension -- proves the
+    templates and testlang.py's new entries actually work together, not
+    just that each exists in isolation."""
+    from mfdoc import testbatch
+    import sqlite3
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
+    insert(
+        conn, "test_case", member_id=1, kind="unit", scenario_name="FAKEMOD:BR-001",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+        then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:1", confidence="verified",
+    )
+    conn.commit()
+
+    for language, framework, ext, fence_body in (
+        ("natural", "natunit", "nsp",
+         "* FAKEMOD:BR-001 [[FAKEMOD:1]]\nCALLNAT 'ASSERT-EQUAL' #EXPECTED #ACTUAL 'test_x'\n"),
+        ("mantis", "native", "mantis",
+         "* FAKEMOD:BR-001 [[FAKEMOD:1]]\nPERFORM FAKEMOD-UNDER-TEST\n"),
+    ):
+        doc_text = _valid_test_doc_text(language, framework).replace(
+            "```python\ndef test_x():\n    # FAKEMOD:BR-001 [[FAKEMOD:1]]\n    pass\n```",
+            f"```{language}\n{fence_body}```",
+        )
+
+        def caller(prompt, _doc_text=doc_text):
+            return ModelResponse(text=_doc_text, input_tokens=1, output_tokens=2)
+
+        out_path = tmp_path / language / "FAKEMOD.md"
+        result = testbatch.generate_member_test_doc(
+            conn, "FAKEMOD", language, framework, out_path, caller,
+            "writing rules text", "template text",
+        )
+        assert result.ok is True, result.problems
+        sidecar_path = out_path.with_suffix(f".{ext}")
+        assert sidecar_path.exists()
+        assert sidecar_path.read_text(encoding="utf-8") == fence_body
+
+
+def test_silkcentral_and_uipath_templates_exist_and_load():
+    silkcentral_path = REPO_ROOT / "templates" / "tests" / "silkcentral_testcase.md"
+    uipath_path = REPO_ROOT / "templates" / "tests" / "uipath_testcase.md"
+    assert silkcentral_path.exists()
+    assert uipath_path.exists()
+
+    for path, language in ((silkcentral_path, "silkcentral"), (uipath_path, "uipath")):
+        text = path.read_text(encoding="utf-8")
+        assert f"language: {language}" in text
+        assert "framework: testcase" in text
+        assert "{MEMBER}" in text
+        assert "{MEMBER}:BR-nnn" in text
+        # No LANGUAGE_EXTENSIONS entry for these two -- the fence must not
+        # claim a language tag testlang.py would try to split on its own
+        # extension; it's still fenced, just under a neutral content tag.
+        assert f"```{language}" not in text
+
+
+def test_generate_member_test_doc_keeps_silkcentral_and_uipath_embedded(tmp_path):
+    """No LANGUAGE_EXTENSIONS entry for these two -- the fence must stay
+    embedded in the .md rather than being split to a fabricated sidecar
+    extension. write_test_doc_with_sidecar returning None must not be
+    mistaken for a validation failure -- generate_member_test_doc's
+    result.ok must still be True."""
+    from mfdoc import testbatch
+    import sqlite3
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
+    insert(
+        conn, "test_case", member_id=1, kind="unit", scenario_name="FAKEMOD:BR-001",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+        then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:1", confidence="verified",
+    )
+    conn.commit()
+
+    for language in ("silkcentral", "uipath"):
+        doc_text = _valid_test_doc_text(language, "testcase").replace(
+            "```python\ndef test_x():\n    # FAKEMOD:BR-001 [[FAKEMOD:1]]\n    pass\n```",
+            f"```{language}\n# FAKEMOD:BR-001 [[FAKEMOD:1]]\n- test_case_id: FAKEMOD-BR-001\n```",
+        )
+
+        def caller(prompt, _doc_text=doc_text):
+            return ModelResponse(text=_doc_text, input_tokens=1, output_tokens=2)
+
+        out_path = tmp_path / language / "FAKEMOD.md"
+        result = testbatch.generate_member_test_doc(
+            conn, "FAKEMOD", language, "testcase", out_path, caller,
+            "writing rules text", "template text",
+        )
+        assert result.ok is True, result.problems
+        assert "test_case_id: FAKEMOD-BR-001" in out_path.read_text(encoding="utf-8")
+        assert not any(out_path.parent.glob("FAKEMOD.*testcase*"))
+
+
+def test_testgen_matrix_reads_config_list():
+    from mfdoc.cli import _testgen_matrix
+
+    assert _testgen_matrix({}) == []
+    assert _testgen_matrix({"matrix": []}) == []
+    targets = _testgen_matrix({
+        "matrix": [
+            {"language": "python", "framework": "pytest"},
+            {"language": "natural", "framework": "natunit", "template": "custom.md"},
+        ]
+    })
+    assert targets == [
+        {"language": "python", "framework": "pytest"},
+        {"language": "natural", "framework": "natunit", "template": "custom.md"},
+    ]
+
+
+def test_test_batch_matrix_and_language_are_mutually_exclusive(cli_args, indexed_db, tmp_path):
+    from types import SimpleNamespace
+
+    args = SimpleNamespace(
+        config=cli_args.config, out=str(tmp_path / "out"), members=None,
+        language="python", framework="pytest", template=None, model=None,
+        caller="fake-echo", provider="anthropic", gcp_project=None, gcp_region=None,
+        concurrency=1, state="", matrix=True,
+    )
+    rc = cli.cmd_test_batch(args)
+    assert rc == 2
+
+
+def test_test_batch_matrix_requires_config_matrix_entries(tmp_path):
+    """--matrix with no options.testgen.matrix in config must fail cleanly,
+    the same way missing --language/--framework already does, not crash
+    on an empty target list."""
+    import shutil
+    from types import SimpleNamespace
+
+    project_dir = tmp_path / "proj"
+    shutil.copytree(REPO_ROOT / "examples", project_dir / "examples")
+    shutil.copytree(REPO_ROOT / "reference", project_dir / "reference")
+    shutil.copytree(REPO_ROOT / "templates", project_dir / "templates")
+    cfg_text = (REPO_ROOT / "project.yml").read_text(encoding="utf-8")
+    (project_dir / "project.yml").write_text(cfg_text, encoding="utf-8")
+
+    args = SimpleNamespace(
+        config=str(project_dir / "project.yml"), out=str(tmp_path / "out"), members=None,
+        language=None, framework=None, template=None, model=None,
+        caller="fake-echo", provider="anthropic", gcp_project=None, gcp_region=None,
+        concurrency=1, state="", matrix=True,
+    )
+    # This project's checked-in options.testgen has no `matrix` key (until
+    # Task 6 adds one) -- but even after Task 6 adds it, this test's
+    # point is the *shape* of the error path, not this specific config's
+    # absence of the key, so it stays valid either way as long as the
+    # fixture project used here doesn't define one. Assert on the error
+    # path directly instead of relying on that absence:
+    from mfdoc import cli as cli_mod
+    cfg = cli_mod.load_config(args.config)
+    testgen_cfg = dict(cli_mod._testgen_config(cfg))
+    testgen_cfg.pop("matrix", None)
+    import unittest.mock as mock
+    with mock.patch.object(cli_mod, "_testgen_config", return_value=testgen_cfg):
+        rc = cli.cmd_test_batch(args)
+    assert rc == 2
+
+
+def test_test_gen_matrix_renders_every_configured_target(cli_args, indexed_db, tmp_path):
+    from types import SimpleNamespace
+    import shutil
+
+    project_dir = Path(cli_args.config).parent
+    if not (project_dir / "reference").exists():
+        shutil.copytree(REPO_ROOT / "reference", project_dir / "reference")
+        shutil.copytree(REPO_ROOT / "templates", project_dir / "templates")
+    testplan.run_all(indexed_db, member_name="MMP0100")
+
+    cfg = cli.load_config(cli_args.config)
+    testgen_cfg = dict(cli._testgen_config(cfg))
+    testgen_cfg["matrix"] = [
+        {"language": "python", "framework": "pytest"},
+        {"language": "natural", "framework": "natunit"},
+    ]
+    # --out is a single full-document path in non-matrix cmd_test_gen and is
+    # mutually exclusive with --matrix (see
+    # test_test_gen_out_and_matrix_are_mutually_exclusive); to point matrix
+    # output at tmp_path without setting --out, override out_dir in config
+    # instead -- this is the per-target default path cmd_test_gen falls
+    # back to when --out is omitted.
+    testgen_cfg["out_dir"] = str(tmp_path / "out")
+    import unittest.mock as mock
+    args = SimpleNamespace(
+        config=cli_args.config, out=None,
+        member="MMP0100", language=None, framework=None, template=None,
+        model=None, caller="fake-echo", provider="anthropic",
+        gcp_project=None, gcp_region=None, matrix=True,
+    )
+    with mock.patch.object(cli, "_testgen_config", return_value=testgen_cfg):
+        cli.cmd_test_gen(args)
+    # Not asserting the return code here: fake-echo (like every other
+    # fake-echo-driven cmd_test_gen test in this file, e.g.
+    # test_test_gen_prompt_carries_the_derived_scenarios) echoes the raw
+    # prompt back as the "generated" document, which never passes
+    # validate_test_doc's front-matter check -- generate_member_test_doc
+    # still writes it to disk on every attempt, which is what's under test
+    # here: that --matrix iterates every configured target and writes each
+    # to its own per-target path.
+    python_out = (tmp_path / "out" / "natural" / "MILLPROD" / "python" / "pytest" / "MMP0100.md")
+    natural_out = (tmp_path / "out" / "natural" / "MILLPROD" / "natural" / "natunit" / "MMP0100.md")
+    assert python_out.exists()
+    assert natural_out.exists()
+    assert "python/pytest" in python_out.read_text(encoding="utf-8")
+    assert "natural/natunit" in natural_out.read_text(encoding="utf-8")
+
+
+def test_test_gen_out_and_matrix_are_mutually_exclusive(cli_args, tmp_path):
+    from types import SimpleNamespace
+
+    args = SimpleNamespace(
+        config=cli_args.config, out=str(tmp_path / "X.md"),
+        member="MMP0100", language=None, framework=None, template=None,
+        model=None, caller="fake-echo", provider="anthropic",
+        gcp_project=None, gcp_region=None, matrix=True,
+    )
+    rc = cli.cmd_test_gen(args)
+    assert rc == 2
+
+
+# --- Finding 1: malformed options.testgen.matrix entries must exit 2, not
+# crash with a raw traceback (KeyError/AttributeError) from the per-target
+# loop's unguarded target["language"], target["framework"] access. ---
+
+def _matrix_cfg_missing(testgen_cfg: dict, bad_entry) -> dict:
+    cfg = dict(testgen_cfg)
+    cfg["matrix"] = [bad_entry]
+    return cfg
+
+
+def test_test_batch_matrix_entry_missing_framework_exits_cleanly(cli_args, indexed_db, tmp_path):
+    import unittest.mock as mock
+    from types import SimpleNamespace
+
+    cfg = cli.load_config(cli_args.config)
+    testgen_cfg = _matrix_cfg_missing(cli._testgen_config(cfg), {"language": "python"})
+
+    args = SimpleNamespace(
+        config=cli_args.config, out=str(tmp_path / "out"), members=None,
+        language=None, framework=None, template=None, model=None,
+        caller="fake-echo", provider="anthropic", gcp_project=None, gcp_region=None,
+        concurrency=1, state="", matrix=True,
+    )
+    with mock.patch.object(cli, "_testgen_config", return_value=testgen_cfg):
+        rc = cli.cmd_test_batch(args)
+    assert rc == 2
+
+
+def test_test_batch_matrix_entry_missing_language_exits_cleanly(cli_args, indexed_db, tmp_path):
+    import unittest.mock as mock
+    from types import SimpleNamespace
+
+    cfg = cli.load_config(cli_args.config)
+    testgen_cfg = _matrix_cfg_missing(cli._testgen_config(cfg), {"framework": "pytest"})
+
+    args = SimpleNamespace(
+        config=cli_args.config, out=str(tmp_path / "out"), members=None,
+        language=None, framework=None, template=None, model=None,
+        caller="fake-echo", provider="anthropic", gcp_project=None, gcp_region=None,
+        concurrency=1, state="", matrix=True,
+    )
+    with mock.patch.object(cli, "_testgen_config", return_value=testgen_cfg):
+        rc = cli.cmd_test_batch(args)
+    assert rc == 2
+
+
+def test_test_batch_matrix_entry_not_a_mapping_exits_cleanly(cli_args, indexed_db, tmp_path):
+    """A scalar matrix entry (e.g. `matrix: [python]`, a plausible typo for
+    `matrix: [{language: python, framework: pytest}]`) must not crash with
+    AttributeError on `.get` -- same clean exit-2 treatment as the
+    dict-but-incomplete cases above."""
+    import unittest.mock as mock
+    from types import SimpleNamespace
+
+    cfg = cli.load_config(cli_args.config)
+    testgen_cfg = _matrix_cfg_missing(cli._testgen_config(cfg), "python")
+
+    args = SimpleNamespace(
+        config=cli_args.config, out=str(tmp_path / "out"), members=None,
+        language=None, framework=None, template=None, model=None,
+        caller="fake-echo", provider="anthropic", gcp_project=None, gcp_region=None,
+        concurrency=1, state="", matrix=True,
+    )
+    with mock.patch.object(cli, "_testgen_config", return_value=testgen_cfg):
+        rc = cli.cmd_test_batch(args)
+    assert rc == 2
+
+
+def test_test_gen_matrix_entry_missing_framework_exits_cleanly(cli_args, indexed_db, tmp_path):
+    import unittest.mock as mock
+    from types import SimpleNamespace
+
+    cfg = cli.load_config(cli_args.config)
+    testgen_cfg = _matrix_cfg_missing(cli._testgen_config(cfg), {"language": "python"})
+
+    args = SimpleNamespace(
+        config=cli_args.config, out=None,
+        member="MMP0100", language=None, framework=None, template=None,
+        model=None, caller="fake-echo", provider="anthropic",
+        gcp_project=None, gcp_region=None, matrix=True,
+    )
+    with mock.patch.object(cli, "_testgen_config", return_value=testgen_cfg):
+        rc = cli.cmd_test_gen(args)
+    assert rc == 2
+
+
+def test_test_gen_matrix_entry_missing_language_exits_cleanly(cli_args, indexed_db, tmp_path):
+    import unittest.mock as mock
+    from types import SimpleNamespace
+
+    cfg = cli.load_config(cli_args.config)
+    testgen_cfg = _matrix_cfg_missing(cli._testgen_config(cfg), {"framework": "pytest"})
+
+    args = SimpleNamespace(
+        config=cli_args.config, out=None,
+        member="MMP0100", language=None, framework=None, template=None,
+        model=None, caller="fake-echo", provider="anthropic",
+        gcp_project=None, gcp_region=None, matrix=True,
+    )
+    with mock.patch.object(cli, "_testgen_config", return_value=testgen_cfg):
+        rc = cli.cmd_test_gen(args)
+    assert rc == 2
+
+
+# --- Finding 2: spec-mandated test -- one --matrix invocation running the
+# same members through two different {language, framework} targets, sharing
+# one --state file, must produce two independent output subtrees and two
+# independent per-member state entries. ---
+
+def test_run_test_batch_matrix_targets_get_independent_output_and_state(tmp_path):
+    """Same members, same shared state_path, two different (language,
+    framework) targets in turn (as cmd_test_batch --matrix does) -- proves
+    the shared-state-file claim in the design spec's Matrix support section:
+    per-member state keys already include language/framework, so one
+    target's resume bookkeeping and rendered output tree can't collide
+    with another's."""
+    from mfdoc import testbatch
+    import json
+    import sqlite3
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute(
+        "INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')"
+    )
+    insert(
+        conn, "test_case", member_id=1, kind="unit", scenario_name="FAKEMOD:BR-001",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+        then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:1", confidence="verified",
+    )
+    conn.commit()
+
+    def caller_for(language, framework):
+        def _call(prompt):
+            return ModelResponse(
+                text=_valid_test_doc_text(language, framework), input_tokens=0, output_tokens=0
+            )
+        return _call
+
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+
+    pytest_summary = testbatch.run_test_batch(
+        conn, ["FAKEMOD"], "python", "pytest", out_dir, caller_for("python", "pytest"),
+        "writing rules text", "template text", state_path=state_path,
+    )
+    unittest_summary = testbatch.run_test_batch(
+        conn, ["FAKEMOD"], "python", "unittest", out_dir, caller_for("python", "unittest"),
+        "writing rules text", "template text", state_path=state_path,
+    )
+
+    assert pytest_summary.skipped == 0
+    assert unittest_summary.skipped == 0
+
+    # Two independent output subtrees.
+    pytest_path = out_dir / "natural" / "python" / "pytest" / "FAKEMOD.md"
+    unittest_path = out_dir / "natural" / "python" / "unittest" / "FAKEMOD.md"
+    assert pytest_path.exists()
+    assert unittest_path.exists()
+    assert "framework: pytest" in pytest_path.read_text(encoding="utf-8")
+    assert "framework: unittest" in unittest_path.read_text(encoding="utf-8")
+
+    # Two independent per-member state entries in the one shared state file.
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    pytest_key = "natural::FAKEMOD::python::pytest"
+    unittest_key = "natural::FAKEMOD::python::unittest"
+    assert pytest_key in state
+    assert unittest_key in state
+    assert pytest_key != unittest_key
+    assert state[pytest_key]["ok"] is True
+    assert state[unittest_key]["ok"] is True
+    assert "brief_sha256" in state[pytest_key]
+    assert "brief_sha256" in state[unittest_key]
+    assert state[pytest_key]["brief_sha256"] == state[unittest_key]["brief_sha256"], (
+        "same member/brief content across targets -- only language/framework differ, "
+        "which the state *key* encodes, not the brief hash"
+    )

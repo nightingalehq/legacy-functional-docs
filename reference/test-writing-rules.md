@@ -60,6 +60,25 @@ def test_order_release_rejects_unconfirmed_order():
     ...
 ```
 
+Natural/NatUnit and Mantis/native use `*`-prefixed comment lines instead
+of `#`, matching the comment syntax both dialects' own extractors already
+recognise:
+
+```natural
+* {MEMBER}:BR-nnn [[{MEMBER}:LINE]]
+* Branch: IF ORDER-VIEW.ORDER-STATUS NE 'CONF'
+CALLNAT 'ASSERT-EQUAL' #EXPECTED #ACTUAL 'test_order_release_rejects_unconfirmed_order'
+```
+
+Silk Central and UiPath test-case targets carry the same id/citation as a
+leading comment inside their YAML block, since there's no function/method
+to attach a docstring-style comment to:
+
+```yaml
+# {MEMBER}:BR-nnn [[{MEMBER}:LINE]]
+- test_case_id: "{MEMBER}-BR-nnn"
+```
+
 ## Characterization vs. spec framing
 
 A scenario's `status` (from `test-overlay.yml`, defaulting to
@@ -118,3 +137,10 @@ list of every `MEMBER:BR-nnn` id your code referenced. This is what lets
 once the real code lives in its own file. A language with no entry in
 `LANGUAGE_EXTENSIONS` is left exactly as you wrote it -- no extension is
 ever guessed.
+
+As of this writing that split happens for `python` (`.py`), `java`
+(`.java`), `natural` (`.nsp`), and `mantis` (`.mantis`). `silkcentral` and
+`uipath` targets are test-case *definitions*, not source code in a
+language with a stable file extension across every deployment — their
+fence stays embedded in the `.md`, front matter and all, exactly as
+written.

@@ -10,26 +10,15 @@ generated_at: "2026-08-11"
 review_status: draft
 reviewers: []
 confidence_summary:
-  verified: 2
+  verified: 1
   inferred: 0
-  unresolved: 3
+  unresolved: 4
 sources: ["ORDENQ"]
 ---
 
 # ORDENQ — generated tests (python / pytest)
 
-Covers 5 scenarios from the ORDENQ test brief. BR-002 [[ORDENQ:16]] and
-BR-004 [[ORDENQ:25]] have reconstructable consequences (the `WHILE STATUS =
-0` loop guard at [[ORDENQ:21]], and the `CALL "PRICECALC"` at
-[[ORDENQ:26-28]] respectively) and are asserted directly. BR-001
-[[ORDENQ:11]], BR-005 [[ORDENQ:26]], and BR-006 [[ORDENQ:28]] have no
-consequence reconstructable from source facts in the brief, so they are
-written up to the branch decision only and marked `unresolved` via
-`pytest.mark.skip` rather than inventing an expected outcome. `PRICECALC` is
-stubbed per the brief's "Dependencies to mock" section using only the
-parameter names the brief states (`ORDER_NO`, `ORDER_WT`); `ORDERMST` and
-`ORDLINE` are named as dependencies but no field shape for either is given
-in the brief, so no fixture is invented for them.
+Covers all five scenarios in the ORDENQ test brief. BR-004 has a reconstructable consequence (entering the `CASE` with `ORDVIEW.STATUS = "CONF"` calls `PRICECALC` with `ORDER_NO`/`ORDER_WT`) and is asserted directly. BR-001, BR-002, BR-005, and BR-006 have no reconstructable consequence in the cited source excerpt — each is written up to its branch decision only and marked `unresolved` rather than inventing an expected outcome. `ORDERMST` and `ORDLINE` are named as dependencies to mock in the brief but no field shapes or call sites for them appear in the cited excerpts, so they are stubbed as opaque mocks and not asserted against.
 
 See [`ORDENQ.py`](./ORDENQ.py) for the generated test source.
 

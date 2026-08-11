@@ -48,6 +48,8 @@ mfdoc test-plan     --config project.yml --overlay test-overlay.yml
 mfdoc test-advisory --config project.yml
 mfdoc test-overlay-draft --config project.yml --out test-overlay.yml    # needs mfdoc[batch]
 mfdoc test-gen      --config project.yml --member NAME --language python --framework pytest
+mfdoc test-gen      --config project.yml --member NAME --matrix   # every options.testgen.matrix target for one member
+mfdoc test-batch    --config project.yml --matrix                # every options.testgen.matrix target, every batchable member
 mfdoc test-batch    --config project.yml --language python --framework pytest --out tests_generated  # needs mfdoc[batch]
 mfdoc test-validate --config project.yml --docs tests_generated
 ```

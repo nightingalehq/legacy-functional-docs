@@ -1,0 +1,20 @@
+* Generated characterization/spec tests for MMC0100.
+* Do not hand-edit -- regenerate with `mfdoc test-batch`. See the fact
+* brief this file was rendered from for the scenarios covered.
+*
+* MMC0100:BR-001 [[MMC0100:2]]
+* Branch: IF #GRADE-CODE = 'X9'
+* Scenario: test_grade_code_x9_sets_validation_rc_99
+*
+* Set up fixture input per the brief: #GRADE-CODE = 'X9'
+MOVE 'X9' TO #GRADE-CODE
+MOVE 99 TO EXPECTED-RESULT
+PERFORM MMC0100-UNDER-TEST
+MOVE #VALIDATION-RC TO ACTUAL-RESULT
+IF ACTUAL-RESULT = EXPECTED-RESULT
+    DISPLAY 'PASS test_grade_code_x9_sets_validation_rc_99'
+ELSE
+    DISPLAY 'FAIL test_grade_code_x9_sets_validation_rc_99: expected ' EXPECTED-RESULT ' got ' ACTUAL-RESULT
+END-IF
+*
+STOP RUN

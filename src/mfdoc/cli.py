@@ -276,6 +276,41 @@ def _testgen_config(cfg: dict) -> dict:
     return (cfg["options"] or {}).get("testgen") or {}
 
 
+def _testgen_matrix(testgen_cfg: dict) -> list[dict]:
+    """options.testgen.matrix entries, or [] if absent -- each a
+    {"language": ..., "framework": ..., "template": optional} dict, read
+    verbatim from config. No built-in default matrix -- the set of
+    destination targets a team wants is theirs to declare, not ours to
+    guess (same posture CLAUDE.md already takes for redaction patterns
+    and dialect assumptions)."""
+    return list(testgen_cfg.get("matrix") or [])
+
+
+def _testgen_matrix_error(targets: list) -> str | None:
+    """First problem found in a resolved --matrix target list, or None.
+
+    Every other config-shape error `cmd_test_gen`/`cmd_test_batch` already
+    handle (missing --language/--framework, empty matrix, --matrix/
+    --language mutual exclusion) exits 2 with a readable message --
+    `options.testgen.matrix` is a brand-new, user-authored config key where
+    a typo (a missing `framework:`, a bare scalar entry) is likely, and an
+    unguarded `target["language"], target["framework"]` in the per-target
+    loop would otherwise surface as a raw KeyError/AttributeError traceback
+    instead of the same clean exit-2 treatment. Called once by each of
+    `cmd_test_gen`/`cmd_test_batch` right after resolving targets, before
+    their per-target loops start."""
+    for i, target in enumerate(targets):
+        if not isinstance(target, dict):
+            return f"options.testgen.matrix entry {i} is not a mapping with 'language'/'framework': {target!r}"
+        language = target.get("language")
+        framework = target.get("framework")
+        if not language or not isinstance(language, str):
+            return f"options.testgen.matrix entry {i} is missing 'language'/'framework': {target!r}"
+        if not framework or not isinstance(framework, str):
+            return f"options.testgen.matrix entry {i} is missing 'language'/'framework': {target!r}"
+    return None
+
+
 def cmd_test_plan(args) -> int:
     cfg = load_config(args.config)
     base = Path(args.config).parent
@@ -399,21 +434,35 @@ def cmd_test_gen(args) -> int:
     redact = Redactor.from_options(cfg["options"])
     testgen_cfg = _testgen_config(cfg)
 
-    language = args.language or testgen_cfg.get("default_language")
-    framework = args.framework or testgen_cfg.get("default_framework")
-    if not language or not framework:
-        print("no --language/--framework given, and no options.testgen.default_language/"
-              "default_framework in --config", file=sys.stderr)
+    if args.matrix and (args.language or args.framework):
+        print("--matrix and --language/--framework are mutually exclusive -- "
+              "pass one or the other", file=sys.stderr)
+        return 2
+    if args.matrix and args.out:
+        print("--matrix renders multiple targets -- --out (a single path) doesn't "
+              "apply; omit --out to use each target's default path", file=sys.stderr)
         return 2
 
-    template_path = _test_template_path(base, language, framework, args.template)
-    if not template_path.exists():
-        print(f"no template at {template_path} -- pass --template, or add one for "
-              f"--language {language} --framework {framework}", file=sys.stderr)
-        return 2
+    if args.matrix:
+        targets = _testgen_matrix(testgen_cfg)
+        if not targets:
+            print("--matrix given, but no options.testgen.matrix entries in --config",
+                  file=sys.stderr)
+            return 2
+        error = _testgen_matrix_error(targets)
+        if error:
+            print(error, file=sys.stderr)
+            return 2
+    else:
+        language = args.language or testgen_cfg.get("default_language")
+        framework = args.framework or testgen_cfg.get("default_framework")
+        if not language or not framework:
+            print("no --language/--framework given, and no options.testgen.default_language/"
+                  "default_framework in --config", file=sys.stderr)
+            return 2
+        targets = [{"language": language, "framework": framework}]
+
     writing_rules = (base / "reference" / "test-writing-rules.md").read_text(encoding="utf-8")
-    template = template_path.read_text(encoding="utf-8")
-
     caller = _build_model_caller(args)
     if caller is None:
         return 1
@@ -422,18 +471,37 @@ def cmd_test_gen(args) -> int:
 
     member = args.member.strip().upper()
     out_dir = testgen_cfg.get("out_dir") or "tests_generated"
-    out_path = (base / args.out if args.out
-                else base / out_dir / _output_subdir(conn, member) / language / framework / f"{member}.md")
-    result = testbatch_mod.generate_member_test_doc(
-        conn, member, language, framework, out_path, caller,
-        writing_rules, template, redact=redact,
-    )
-    status = "OK" if result.ok else "FAIL"
-    print(f"{status} {result.member} -> {result.path} attempts={result.attempts} "
-          f"in={result.input_tokens} out={result.output_tokens}")
-    for p in result.problems:
-        print(f"  - {p}")
-    return 0 if result.ok else 1
+    any_failed = False
+    for target in targets:
+        language, framework = target["language"], target["framework"]
+        template_override = target.get("template") or args.template
+        template_path = _test_template_path(base, language, framework, template_override)
+        if not template_path.exists():
+            print(f"no template at {template_path} -- pass --template, or add one for "
+                  f"--language {language} --framework {framework}", file=sys.stderr)
+            if not args.matrix:
+                # Single-target usage error -- exit 2 immediately, matching
+                # this command's pre-existing (pre-matrix) behavior, rather
+                # than falling through to the matrix path's "skip this
+                # target, keep going" treatment below.
+                return 2
+            any_failed = True
+            continue
+        template = template_path.read_text(encoding="utf-8")
+
+        out_path = (base / args.out if args.out
+                    else base / out_dir / _output_subdir(conn, member) / language / framework / f"{member}.md")
+        result = testbatch_mod.generate_member_test_doc(
+            conn, member, language, framework, out_path, caller,
+            writing_rules, template, redact=redact,
+        )
+        status = "OK" if result.ok else "FAIL"
+        print(f"{status} {result.member} [{language}/{framework}] -> {result.path} "
+              f"attempts={result.attempts} in={result.input_tokens} out={result.output_tokens}")
+        for p in result.problems:
+            print(f"  - {p}")
+        any_failed = any_failed or not result.ok
+    return 1 if any_failed else 0
 
 
 def cmd_test_batch(args) -> int:
@@ -448,12 +516,30 @@ def cmd_test_batch(args) -> int:
     redact = Redactor.from_options(cfg["options"])
     testgen_cfg = _testgen_config(cfg)
 
-    language = args.language or testgen_cfg.get("default_language")
-    framework = args.framework or testgen_cfg.get("default_framework")
-    if not language or not framework:
-        print("no --language/--framework given, and no options.testgen.default_language/"
-              "default_framework in --config", file=sys.stderr)
+    if args.matrix and (args.language or args.framework):
+        print("--matrix and --language/--framework are mutually exclusive -- "
+              "pass one or the other", file=sys.stderr)
         return 2
+
+    if args.matrix:
+        targets = _testgen_matrix(testgen_cfg)
+        if not targets:
+            print("--matrix given, but no options.testgen.matrix entries in --config",
+                  file=sys.stderr)
+            return 2
+        error = _testgen_matrix_error(targets)
+        if error:
+            print(error, file=sys.stderr)
+            return 2
+    else:
+        language = args.language or testgen_cfg.get("default_language")
+        framework = args.framework or testgen_cfg.get("default_framework")
+        if not language or not framework:
+            print("no --language/--framework given, and no options.testgen.default_language/"
+                  "default_framework in --config", file=sys.stderr)
+            return 2
+        targets = [{"language": language, "framework": framework}]
+
     out_dir = args.out or testgen_cfg.get("out_dir") or "tests_generated"
 
     members = ([m.strip().upper() for m in args.members.split(",")] if args.members
@@ -462,34 +548,54 @@ def cmd_test_batch(args) -> int:
         print("no test_case rows in the index -- run `mfdoc test-plan` first")
         return 0
 
-    template_path = _test_template_path(base, language, framework, args.template)
-    if not template_path.exists():
-        print(f"no template at {template_path} -- pass --template, or add one for "
-              f"--language {language} --framework {framework}", file=sys.stderr)
-        return 2
     writing_rules = (base / "reference" / "test-writing-rules.md").read_text(encoding="utf-8")
-    template = template_path.read_text(encoding="utf-8")
-
     caller = _build_model_caller(args)
     if caller is None:
         return 1
 
-    summary = testbatch_mod.run_test_batch(
-        conn, members, language, framework, base / out_dir, caller,
-        writing_rules, template, redact=redact, concurrency=args.concurrency,
-        state_path=(base / args.state) if args.state else None,
-    )
+    grand_ok = grand_failed = grand_skipped = 0
+    any_target_failed = False
+    for target in targets:
+        language, framework = target["language"], target["framework"]
+        template_override = target.get("template") or args.template
+        template_path = _test_template_path(base, language, framework, template_override)
+        if not template_path.exists():
+            print(f"no template at {template_path} -- pass --template, or add one for "
+                  f"--language {language} --framework {framework}; skipping this target",
+                  file=sys.stderr)
+            if not args.matrix:
+                # Single-target usage error -- exit 2 immediately, matching
+                # this command's pre-existing (pre-matrix) behavior.
+                return 2
+            any_target_failed = True
+            continue
+        template = template_path.read_text(encoding="utf-8")
 
-    for r in summary.results:
-        status = "SKIP" if r.skipped else ("OK  " if r.ok else "FAIL")
-        print(f"{status} {r.member:<20} attempts={r.attempts} in={r.input_tokens} out={r.output_tokens}")
-        for p in r.problems:
-            print(f"       - {p}")
+        if len(targets) > 1:
+            print(f"\n=== {language}/{framework} ===")
+        summary = testbatch_mod.run_test_batch(
+            conn, members, language, framework, base / out_dir, caller,
+            writing_rules, template, redact=redact, concurrency=args.concurrency,
+            state_path=(base / args.state) if args.state else None,
+        )
+        for r in summary.results:
+            status = "SKIP" if r.skipped else ("OK  " if r.ok else "FAIL")
+            print(f"{status} {r.member:<20} attempts={r.attempts} in={r.input_tokens} out={r.output_tokens}")
+            for p in r.problems:
+                print(f"       - {p}")
+        print(f"\n{summary.ok}/{len(summary.results)} ok, {summary.failed} failed, "
+              f"{summary.skipped} skipped (unchanged)")
+        print(f"tokens: {summary.total_input_tokens} in, {summary.total_output_tokens} out")
+        grand_ok += summary.ok
+        grand_failed += summary.failed
+        grand_skipped += summary.skipped
+        any_target_failed = any_target_failed or summary.failed > 0
 
-    print(f"\n{summary.ok}/{len(summary.results)} ok, {summary.failed} failed, "
-          f"{summary.skipped} skipped (unchanged)")
-    print(f"tokens: {summary.total_input_tokens} in, {summary.total_output_tokens} out")
-    return 0 if summary.failed == 0 else 1
+    if len(targets) > 1:
+        print(f"\n=== grand total across {len(targets)} targets ===")
+        print(f"{grand_ok} ok, {grand_failed} failed, {grand_skipped} skipped (unchanged)")
+
+    return 1 if any_target_failed else 0
 
 
 def cmd_batch(args) -> int:
@@ -901,6 +1007,11 @@ def main(argv=None) -> int:
         p.add_argument("--framework", default=None,
                         help="e.g. pytest, junit5; default: options.testgen.default_framework "
                              "from --config -- no built-in default either way")
+        p.add_argument("--matrix", action="store_true",
+                        help="render every {language, framework} pair in "
+                             "options.testgen.matrix from --config, instead of one "
+                             "--language/--framework target; mutually exclusive with "
+                             "--language/--framework")
         p.add_argument("--template", help="override the default templates/tests/{language}_{framework}.md")
         p.add_argument("--model", default=None)
         p.add_argument("--caller", choices=["anthropic", "fake-echo"], default="anthropic",

@@ -1,0 +1,28 @@
+* Generated characterization/spec tests for MMP9400.
+* Do not hand-edit -- regenerate with `mfdoc test-batch`. See the fact
+* brief this file was rendered from for the scenarios covered.
+*
+DEFINE DATA LOCAL
+1 #EXPECTED (A32)
+1 #ACTUAL   (A32)
+1 #STATUS   (A4)
+END-DEFINE
+*
+* MMP9400:BR-002 [[MMP9400:11]]
+* Branch: IF #STATUS = 'CONF'
+* Scenario: test_status_conf_branch_decision_unresolved
+*
+* No reconstructable consequence for this branch is available in the
+* fact brief -- the test below only exercises the branch condition
+* itself. The expected outcome of taking this branch is unresolved
+* and must not be invented.
+*
+#STATUS := 'CONF'
+*
+* unresolved: source facts do not reconstruct what happens when
+* #STATUS = 'CONF' is true at [[MMP9400:11]]; no assertion on
+* consequence is made.
+*
+CALLNAT 'ASSERT-TRUE' #STATUS 'test_status_conf_branch_decision_unresolved'
+*
+END
