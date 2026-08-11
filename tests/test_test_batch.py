@@ -33,7 +33,7 @@ def test_test_gen_prompt_carries_the_derived_scenarios(cli_args, indexed_db, tmp
         config=cli_args.config, out=str(tmp_path / "out" / "MMP0100.md"),
         member="MMP0100", language="python", framework="pytest", template=None,
         model=None, caller="fake-echo", provider="anthropic",
-        gcp_project=None, gcp_region=None,
+        gcp_project=None, gcp_region=None, matrix=False,
     )
     cli.cmd_test_gen(args)
     written = (tmp_path / "out" / "MMP0100.md").read_text(encoding="utf-8")
@@ -50,7 +50,7 @@ def test_test_batch_selects_only_members_with_test_case_rows(cli_args, indexed_d
         config=cli_args.config, out=str(tmp_path / "out"), members=None,
         language="python", framework="pytest", template=None, model=None,
         caller="fake-echo", provider="anthropic", gcp_project=None, gcp_region=None,
-        concurrency=1, state="",
+        concurrency=1, state="", matrix=False,
     )
     cli.cmd_test_batch(args)
     written = (tmp_path / "out" / "natural" / "MILLPROD" / "python" / "pytest" / "MMP0100.md").read_text(encoding="utf-8")
@@ -63,7 +63,7 @@ def test_missing_template_exits_cleanly_rather_than_crashing(cli_args, tmp_path)
         config=cli_args.config, out=str(tmp_path / "out" / "X.md"),
         member="MMP0100", language="cobol", framework="nonexistent", template=None,
         model=None, caller="fake-echo", provider="anthropic",
-        gcp_project=None, gcp_region=None,
+        gcp_project=None, gcp_region=None, matrix=False,
     )
     rc = cli.cmd_test_gen(args)
     assert rc == 2
@@ -490,3 +490,130 @@ def test_generate_member_test_doc_keeps_silkcentral_and_uipath_embedded(tmp_path
         assert result.ok is True, result.problems
         assert "test_case_id: FAKEMOD-BR-001" in out_path.read_text(encoding="utf-8")
         assert not any(out_path.parent.glob("FAKEMOD.*testcase*"))
+
+
+def test_testgen_matrix_reads_config_list():
+    from mfdoc.cli import _testgen_matrix
+
+    assert _testgen_matrix({}) == []
+    assert _testgen_matrix({"matrix": []}) == []
+    targets = _testgen_matrix({
+        "matrix": [
+            {"language": "python", "framework": "pytest"},
+            {"language": "natural", "framework": "natunit", "template": "custom.md"},
+        ]
+    })
+    assert targets == [
+        {"language": "python", "framework": "pytest"},
+        {"language": "natural", "framework": "natunit", "template": "custom.md"},
+    ]
+
+
+def test_test_batch_matrix_and_language_are_mutually_exclusive(cli_args, indexed_db, tmp_path):
+    from types import SimpleNamespace
+
+    args = SimpleNamespace(
+        config=cli_args.config, out=str(tmp_path / "out"), members=None,
+        language="python", framework="pytest", template=None, model=None,
+        caller="fake-echo", provider="anthropic", gcp_project=None, gcp_region=None,
+        concurrency=1, state="", matrix=True,
+    )
+    rc = cli.cmd_test_batch(args)
+    assert rc == 2
+
+
+def test_test_batch_matrix_requires_config_matrix_entries(tmp_path):
+    """--matrix with no options.testgen.matrix in config must fail cleanly,
+    the same way missing --language/--framework already does, not crash
+    on an empty target list."""
+    import shutil
+    from types import SimpleNamespace
+
+    project_dir = tmp_path / "proj"
+    shutil.copytree(REPO_ROOT / "examples", project_dir / "examples")
+    shutil.copytree(REPO_ROOT / "reference", project_dir / "reference")
+    shutil.copytree(REPO_ROOT / "templates", project_dir / "templates")
+    cfg_text = (REPO_ROOT / "project.yml").read_text(encoding="utf-8")
+    (project_dir / "project.yml").write_text(cfg_text, encoding="utf-8")
+
+    args = SimpleNamespace(
+        config=str(project_dir / "project.yml"), out=str(tmp_path / "out"), members=None,
+        language=None, framework=None, template=None, model=None,
+        caller="fake-echo", provider="anthropic", gcp_project=None, gcp_region=None,
+        concurrency=1, state="", matrix=True,
+    )
+    # This project's checked-in options.testgen has no `matrix` key (until
+    # Task 6 adds one) -- but even after Task 6 adds it, this test's
+    # point is the *shape* of the error path, not this specific config's
+    # absence of the key, so it stays valid either way as long as the
+    # fixture project used here doesn't define one. Assert on the error
+    # path directly instead of relying on that absence:
+    from mfdoc import cli as cli_mod
+    cfg = cli_mod.load_config(args.config)
+    testgen_cfg = dict(cli_mod._testgen_config(cfg))
+    testgen_cfg.pop("matrix", None)
+    import unittest.mock as mock
+    with mock.patch.object(cli_mod, "_testgen_config", return_value=testgen_cfg):
+        rc = cli.cmd_test_batch(args)
+    assert rc == 2
+
+
+def test_test_gen_matrix_renders_every_configured_target(cli_args, indexed_db, tmp_path):
+    from types import SimpleNamespace
+    import shutil
+
+    project_dir = Path(cli_args.config).parent
+    if not (project_dir / "reference").exists():
+        shutil.copytree(REPO_ROOT / "reference", project_dir / "reference")
+        shutil.copytree(REPO_ROOT / "templates", project_dir / "templates")
+    testplan.run_all(indexed_db, member_name="MMP0100")
+
+    cfg = cli.load_config(cli_args.config)
+    testgen_cfg = dict(cli._testgen_config(cfg))
+    testgen_cfg["matrix"] = [
+        {"language": "python", "framework": "pytest"},
+        {"language": "natural", "framework": "natunit"},
+    ]
+    # --out is a single full-document path in non-matrix cmd_test_gen and is
+    # mutually exclusive with --matrix (see
+    # test_test_gen_out_and_matrix_are_mutually_exclusive); to point matrix
+    # output at tmp_path without setting --out, override out_dir in config
+    # instead -- this is the per-target default path cmd_test_gen falls
+    # back to when --out is omitted.
+    testgen_cfg["out_dir"] = str(tmp_path / "out")
+    import unittest.mock as mock
+    args = SimpleNamespace(
+        config=cli_args.config, out=None,
+        member="MMP0100", language=None, framework=None, template=None,
+        model=None, caller="fake-echo", provider="anthropic",
+        gcp_project=None, gcp_region=None, matrix=True,
+    )
+    with mock.patch.object(cli, "_testgen_config", return_value=testgen_cfg):
+        cli.cmd_test_gen(args)
+    # Not asserting the return code here: fake-echo (like every other
+    # fake-echo-driven cmd_test_gen test in this file, e.g.
+    # test_test_gen_prompt_carries_the_derived_scenarios) echoes the raw
+    # prompt back as the "generated" document, which never passes
+    # validate_test_doc's front-matter check -- generate_member_test_doc
+    # still writes it to disk on every attempt, which is what's under test
+    # here: that --matrix iterates every configured target and writes each
+    # to its own per-target path.
+    python_out = (tmp_path / "out" / "natural" / "MILLPROD" / "python" / "pytest" / "MMP0100.md")
+    natural_out = (tmp_path / "out" / "natural" / "MILLPROD" / "natural" / "natunit" / "MMP0100.md")
+    assert python_out.exists()
+    assert natural_out.exists()
+    assert "python/pytest" in python_out.read_text(encoding="utf-8")
+    assert "natural/natunit" in natural_out.read_text(encoding="utf-8")
+
+
+def test_test_gen_out_and_matrix_are_mutually_exclusive(cli_args, tmp_path):
+    from types import SimpleNamespace
+
+    args = SimpleNamespace(
+        config=cli_args.config, out=str(tmp_path / "X.md"),
+        member="MMP0100", language=None, framework=None, template=None,
+        model=None, caller="fake-echo", provider="anthropic",
+        gcp_project=None, gcp_region=None, matrix=True,
+    )
+    rc = cli.cmd_test_gen(args)
+    assert rc == 2
