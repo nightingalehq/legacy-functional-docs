@@ -257,13 +257,14 @@ def test_case_brief(conn, member_name: str, redact=None) -> str:
     # name is only unique together with library+dialect, so a second member
     # sharing this name would otherwise get its scenarios silently merged
     # into this brief under colliding BR-nnn ids.
-    _matches, ambiguous_libs = resolve_member_by_name(conn, member_name, columns="library")
+    matches, ambiguous_libs = resolve_member_by_name(conn, member_name, columns="library, system")
     if ambiguous_libs:
         libs = ", ".join(ambiguous_libs)
         return (
             f"# Test brief: {member_name}\n\nMember name is ambiguous across libraries "
             f"({libs}). Re-run with a library-qualified name.\n"
         )
+    system = matches[0]["system"] if matches else None
 
     rows = conn.execute(
         """
@@ -275,7 +276,7 @@ def test_case_brief(conn, member_name: str, redact=None) -> str:
     if not rows:
         return f"# Test brief: {member_name}\n\nNo derived test_case rows for this member. Run `mfdoc test-plan` first.\n"
 
-    out = [f"# Test brief: {member_name}", ""]
+    out = [f"# Test brief: {member_name}", "", f"- system: {system or 'unknown'}", ""]
     given0 = json.loads(rows[0]["given_json"])
     if given0["parameters"]:
         out.append("## Parameters (this member's own interface)")

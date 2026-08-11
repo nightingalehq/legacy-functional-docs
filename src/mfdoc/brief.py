@@ -92,6 +92,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
 
     add(f"# Fact brief: {name}")
     add("")
+    add(f"- system: {m['system'] or 'unknown'}")
     add(f"- dialect: {m['dialect']}")
     add(f"- object_type: {m['object_type'] or 'unknown'}")
     add(f"- library: {m['library'] or 'unknown'}")
