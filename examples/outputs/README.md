@@ -31,8 +31,24 @@ outputs/
     mantis/STEELLIB/*.md       module docs, one per batchable Mantis member
   tests/
     natural/MILLPROD/python/pytest/{MEMBER}.md + {MEMBER}.py
+    natural/MILLPROD/natural/natunit/{MEMBER}.md + {MEMBER}.nsp
+    natural/MILLPROD/mantis/native/{MEMBER}.md + {MEMBER}.mantis
+    natural/MILLPROD/silkcentral/testcase/{MEMBER}.md
+    natural/MILLPROD/uipath/testcase/{MEMBER}.md
     mantis/STEELLIB/python/pytest/{MEMBER}.md + {MEMBER}.py
+    mantis/STEELLIB/natural/natunit/{MEMBER}.md + {MEMBER}.nsp
+    mantis/STEELLIB/mantis/native/{MEMBER}.md + {MEMBER}.mantis
+    mantis/STEELLIB/silkcentral/testcase/{MEMBER}.md
+    mantis/STEELLIB/uipath/testcase/{MEMBER}.md
 ```
+
+`--matrix` renders every configured `options.testgen.matrix` target for every
+selected member regardless of that member's own source dialect (the target
+language is the destination, not a filter on source) — so `tests/natural/`
+does contain a `mantis/native` rendering (a Mantis-syntax driver testing a
+Natural program) and `tests/mantis/` contains a `natural/natunit` rendering
+the same way; that's the intended behaviour of a destination matrix, not a
+bug in the tree above.
 
 `docs/entities/`, `docs/process-flows/`, `docs/system-overview.md` and
 `docs/gap-register.md` don't have a per-dialect home because they're
@@ -45,7 +61,7 @@ instead of being forced into a `<dialect>/` shape that doesn't fit them.
 | What | How it's produced | Kept current by |
 |---|---|---|
 | `index.db`, `index.json`, `coverage.json`, `rules-register.md`, `test-plan-register.md`, `testability-advisory.md` | Fully deterministic — no model call anywhere in `ingest`/`derive`/`coverage`/`test-plan`/`test-advisory`/`rules-register`/`export` | CI, automatically, on every push to `main` (see `.github/workflows/ci.yml`'s `update-examples` job) — committed back with `[skip ci]` so it doesn't retrigger itself |
-| `docs/natural/`, `docs/mantis/`, `tests/natural/`, `tests/mantis/` | `mfdoc batch`/`mfdoc test-batch`, run for real via `--provider claude-code` (the local Claude Code CLI, no `ANTHROPIC_API_KEY` needed) | Whoever re-runs the commands below — CI does not call any model, by design (see the root README's security/compliance guide) |
+| `docs/natural/`, `docs/mantis/`, `tests/natural/`, `tests/mantis/` | `mfdoc batch`/`mfdoc test-batch --matrix`, run for real via `--provider claude-code` (the local Claude Code CLI, no `ANTHROPIC_API_KEY` needed); `tests/` covers every configured `options.testgen.matrix` target, not just one language | Whoever re-runs the commands below — CI does not call any model, by design (see the root README's security/compliance guide) |
 | `docs/entities/`, `docs/process-flows/`, `docs/system-overview.md`, `docs/gap-register.md` | Written directly, from `mfdoc brief --entity`/`--system` output — the interactive Claude Code path these four doc types are designed for (no automated CLI path exists for them) | Same as above — hand/session-produced, CI only validates they haven't drifted |
 
 CI's `test` job runs `mfdoc validate`/`mfdoc test-validate` against this whole
@@ -74,8 +90,11 @@ mfdoc test-advisory  --config project.yml --out examples/outputs/testability-adv
 # authenticated; drop --provider claude-code and add --model/ANTHROPIC_API_KEY
 # to use the Anthropic API directly instead):
 mfdoc batch      --config project.yml --out examples/outputs/docs --provider claude-code
+# --matrix renders every options.testgen.matrix target (python/pytest,
+# natural/natunit, mantis/native, silkcentral/testcase, uipath/testcase)
+# for every batchable member in one pass:
 mfdoc test-batch --config project.yml --out examples/outputs/tests \
-                  --language python --framework pytest --provider claude-code
+                  --matrix --provider claude-code
 
 mfdoc validate       --config project.yml --docs examples/outputs
 mfdoc test-validate  --config project.yml --docs examples/outputs/tests

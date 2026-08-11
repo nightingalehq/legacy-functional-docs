@@ -29,8 +29,10 @@ That third one is exactly what this tool already reads to produce
 documentation. Test generation is the same fact store, pointed at a
 different, more precise question: not just "what does this program do,"
 but "what specific input/branch/output combinations would prove it,"
-expressed in a form (`pytest`, `JUnit`, or the source dialect itself) that
-a migration team already knows how to run, read, and extend.
+expressed in a form (`pytest`, `JUnit`, the source dialect
+itself via `natural`/`natunit` or `mantis`/`native`, or a test-case
+definition for `silkcentral`/`uipath` to import) that a migration team
+already knows how to run, read, or track.
 
 ## Vocabulary, mapped to what you already have
 
@@ -131,7 +133,7 @@ do above whatever this generates.
 | `mfdoc test-plan` | Turns cited facts into Given/When/Then scenarios — the raw material every test type below is rendered from. Model-free: nothing here is a judgement call. |
 | `mfdoc test-advisory` | Names seams and picks unit vs. integration scope — the "can/should this be a unit test" judgement, made from facts (CRUD, call graph, transaction scope), not guessed. |
 | `mfdoc test-overlay-draft` | The *only* place a model may propose a characterization/spec/bug distinction — and it can only propose; a human moving `review_status` past `draft` is what makes it real, the same promotion ladder `validate.py` already enforces on narrative docs (`draft` → `in_review` → `sme_approved` → `signed_off`). |
-| `mfdoc test-gen` / `mfdoc test-batch` | Renders scenarios into a real test file in the target language/framework, one test per scenario, still cited back to source — a characterization test, a spec test, or an `xfail`-marked bug-desired test, depending on that scenario's (human-confirmed) status. |
+| `mfdoc test-gen` / `mfdoc test-batch` | Renders scenarios into a real test file in the target language/framework, one test per scenario, still cited back to source — a characterization test, a spec test, or an `xfail`-marked bug-desired test, depending on that scenario's (human-confirmed) status. `silkcentral`/`uipath` targets render a test-case *definition* for import instead of executable code -- this tool still has no way to drive a 3270 screen end-to-end (see the test pyramid section above); those two targets operationalize test-case tracking, not UI automation. |
 | `mfdoc test-validate` | Checks the render didn't drift: every citation resolves, every `MEMBER:BR-nnn` reference names a real derived scenario, front matter is complete — the same trust mechanism `mfdoc validate` gives narrative docs, applied to code instead of prose. |
 
 ## Why this is worth explaining to the team, not just running

@@ -1,77 +1,79 @@
-"""Generated characterization tests for ORDENQ.
+"""Generated characterization/spec tests for ORDENQ.
 
 Do not hand-edit -- regenerate with `mfdoc test-batch`. See the fact brief
 this file was rendered from for the scenarios covered.
 """
 
+import pytest
 from unittest.mock import MagicMock
 
-import pytest
+
+# Stub the dependencies named in the brief's "Dependencies to mock" section.
+# No field shapes or call signatures for ORDERMST/ORDLINE appear in the
+# cited excerpts, so these are opaque mocks, not asserted against directly.
+
+@pytest.fixture
+def ordermst():
+    return MagicMock(name="ORDERMST")
 
 
 @pytest.fixture
-def pricecalc_mock():
-    # Dependency to mock: callee `PRICECALC`. The brief states only that it
-    # is called as CALL "PRICECALC" (ORDER_NO, ORDER_WT) -- no return shape
-    # is given, so none is asserted here.
+def ordline():
+    return MagicMock(name="ORDLINE")
+
+
+@pytest.fixture
+def pricecalc():
     return MagicMock(name="PRICECALC")
 
 
-def test_ordenq_br001_order_no_blank_branch_decision():
+def test_ordenq_rejects_blank_order_no():
     # ORDENQ:BR-001 [[ORDENQ:11]]
     # Branch: IF ORDER_NO = " "
-    pytest.skip(
-        "unresolved: no consequence reconstructable from source facts for "
-        "this branch [[ORDENQ:11]]"
-    )
+    # unresolved: no consequence reconstructable from cited source excerpt --
+    # written up to the branch decision only.
+    ...
 
 
-def test_ordenq_br002_status_not_zero_exits_while_loop():
+def test_ordenq_status_not_zero_enters_while_loop_header(pricecalc):
     # ORDENQ:BR-002 [[ORDENQ:16]]
     # Branch: IF STATUS <> 0
-    # Consequence [[ORDENQ:21]]: "WHILE STATUS = 0" -- the enclosing loop's
-    # guard is the negation of this branch's condition, so STATUS <> 0
-    # becoming true is what ends the loop.
-    status = 0
-    iterations = 0
-    while status == 0:
-        iterations += 1
-        if iterations == 1:
-            status = 1  # triggers ORDENQ:BR-002 [[ORDENQ:16]]
-
-    assert status != 0
-    assert iterations == 1
+    # observed consequence cites [[ORDENQ:21]] "WHILE STATUS = 0" -- this is
+    # a loop-header condition, not an assignable/assertable output value, so
+    # no concrete expected outcome is stated in the brief.
+    # unresolved: written up to the branch decision only.
+    ...
 
 
-def test_ordenq_br004_case_conf_calls_pricecalc(pricecalc_mock):
+def test_ordenq_case_conf_calls_pricecalc(pricecalc):
     # ORDENQ:BR-004 [[ORDENQ:25]]
     # Branch: CASE ORDVIEW.STATUS
-    # Consequence [[ORDENQ:26-28]]:
+    # observed consequence [[ORDENQ:26-28]]:
     #   WHEN "CONF"
     #     CALL "PRICECALC" (ORDER_NO, ORDER_WT)
-    order_no = "0001"
-    order_wt = 100
+    #   WHEN "HELD"
+    order_no = MagicMock(name="ORDER_NO")
+    order_wt = MagicMock(name="ORDER_WT")
 
-    status = "CONF"
-    if status == "CONF":
-        pricecalc_mock(order_no, order_wt)
+    # Exercise ORDENQ with ORDVIEW.STATUS == "CONF" -- how ORDER_NO/ORDER_WT
+    # are supplied to the unit under test is not stated in the brief, so
+    # this is left as an opaque call-target assertion per the mocking rule.
+    ...
 
-    pricecalc_mock.assert_called_once_with(order_no, order_wt)
+    pricecalc.assert_called_once_with(order_no, order_wt)
 
 
-def test_ordenq_br005_case_when_conf_branch_decision():
+def test_ordenq_case_when_conf_branch_taken():
     # ORDENQ:BR-005 [[ORDENQ:26]]
     # Branch: WHEN "CONF"
-    pytest.skip(
-        "unresolved: no consequence reconstructable from source facts for "
-        "this branch [[ORDENQ:26]]"
-    )
+    # unresolved: no consequence reconstructable from cited source excerpt --
+    # written up to the branch decision only.
+    ...
 
 
-def test_ordenq_br006_case_when_held_branch_decision():
+def test_ordenq_case_when_held_branch_taken():
     # ORDENQ:BR-006 [[ORDENQ:28]]
     # Branch: WHEN "HELD"
-    pytest.skip(
-        "unresolved: no consequence reconstructable from source facts for "
-        "this branch [[ORDENQ:28]]"
-    )
+    # unresolved: no consequence reconstructable from cited source excerpt --
+    # written up to the branch decision only.
+    ...

@@ -1,0 +1,46 @@
+* Generated characterization/spec tests for MMP0200.
+* Do not hand-edit -- regenerate with `mfdoc test-batch`. See the fact
+* brief this file was rendered from for the scenarios covered.
+*
+* MMP0200:BR-001 [[MMP0200:12]]
+* Branch: IF #CERT-NO = ' '
+* Scenario: test_cert_no_blank_branch_unresolved
+*
+* Consequence of this branch is not reconstructable from source facts;
+* this test only sets up the triggering condition and stops at the
+* branch decision. Do not assert an invented outcome here.
+MOVE ' ' TO #CERT-NO
+PERFORM MMP0200-UNDER-TEST
+* unresolved: expected consequence of #CERT-NO = ' ' branch not cited in brief
+DISPLAY 'UNRESOLVED test_cert_no_blank_branch_unresolved: branch consequence not reconstructable from source'
+*
+* MMP0200:BR-002 [[MMP0200:16]]
+* Branch: IF NO RECORDS FOUND (no records found for preceding database loop)
+* Scenario: test_no_records_found_sets_pgm_to_mmp0300
+*
+* Stub MILL-CERT so the preceding database loop finds no records.
+MOVE 'NONE' TO MILL-CERT-STUB-MODE
+PERFORM MMP0200-UNDER-TEST
+MOVE 'MMP0300' TO EXPECTED-RESULT
+MOVE #PGM TO ACTUAL-RESULT
+IF ACTUAL-RESULT = EXPECTED-RESULT
+    DISPLAY 'PASS test_no_records_found_sets_pgm_to_mmp0300'
+ELSE
+    DISPLAY 'FAIL test_no_records_found_sets_pgm_to_mmp0300: expected ' EXPECTED-RESULT ' got ' ACTUAL-RESULT
+END-IF
+*
+* MMP0200:BR-004 [[MMP0200:24]]
+* Branch: ON ERROR
+* Scenario: test_on_error_branch_unresolved
+*
+* Consequence of the ON ERROR branch is not reconstructable from source
+* facts; this test only triggers the error condition and stops at the
+* branch decision. Do not assert an invented outcome here.
+* PDFGEN stub invoked to trigger the error path named in the brief's
+* dependency list; no return shape beyond "was invoked" is asserted.
+MOVE 'FORCE-ERROR' TO PDFGEN-STUB-MODE
+PERFORM MMP0200-UNDER-TEST
+* unresolved: expected consequence of ON ERROR branch not cited in brief
+DISPLAY 'UNRESOLVED test_on_error_branch_unresolved: branch consequence not reconstructable from source'
+*
+STOP RUN

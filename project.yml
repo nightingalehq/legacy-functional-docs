@@ -137,3 +137,14 @@ options:
     overlay_path: test-overlay.yml
     # test-batch's output directory, relative to this config file.
     out_dir: tests_generated
+    # The full set of destination targets this project wants rendered by
+    # `mfdoc test-batch --matrix` / `mfdoc test-gen --matrix` in one pass.
+    # No built-in default matrix -- this is the same "declare it, don't
+    # guess it" posture options.testgen already takes for
+    # default_language/default_framework.
+    matrix:
+      - {language: python, framework: pytest}
+      - {language: natural, framework: natunit}
+      - {language: mantis, framework: native}
+      - {language: silkcentral, framework: testcase}
+      - {language: uipath, framework: testcase}

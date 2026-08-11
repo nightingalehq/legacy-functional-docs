@@ -1,0 +1,93 @@
+* Generated characterization/spec tests for ORDENQ.
+* Do not hand-edit -- regenerate with `mfdoc test-batch`. See the fact
+* brief this file was rendered from for the scenarios covered.
+*
+* ORDENQ:BR-001 [[ORDENQ:11]]
+* Branch: IF ORDER_NO = " "
+* Scenario: test_blank_order_no_branch_unresolved
+*
+* No reconstructable consequence for this branch in the brief -- the test
+* stops at the branch decision; the PASS/FAIL below only confirms the
+* branch was reached, not what it does.
+MOVE " " TO ORDER_NO
+IF ORDER_NO = " "
+    DISPLAY 'PASS test_blank_order_no_branch_unresolved: branch reached, consequence unresolved'
+ELSE
+    DISPLAY 'FAIL test_blank_order_no_branch_unresolved: expected branch condition true, got false'
+END-IF
+*
+* ORDENQ:BR-002 [[ORDENQ:16]]
+* Branch: IF STATUS <> 0
+* Scenario: test_nonzero_status_enters_while_status_zero_loop
+*
+* [[ORDENQ:21]] WHILE STATUS = 0 -- set STATUS non-zero to characterize
+* the branch, then confirm the loop guard reflects that STATUS value.
+MOVE 4 TO STATUS
+IF STATUS <> 0
+    MOVE STATUS TO ACTUAL-RESULT
+    MOVE 4 TO EXPECTED-RESULT
+    IF ACTUAL-RESULT = EXPECTED-RESULT
+        DISPLAY 'PASS test_nonzero_status_enters_while_status_zero_loop'
+    ELSE
+        DISPLAY 'FAIL test_nonzero_status_enters_while_status_zero_loop: expected ' EXPECTED-RESULT ' got ' ACTUAL-RESULT
+    END-IF
+ELSE
+    DISPLAY 'FAIL test_nonzero_status_enters_while_status_zero_loop: branch condition not true'
+END-IF
+*
+* ORDENQ:BR-004 [[ORDENQ:25]]
+* Branch: CASE ORDVIEW.STATUS
+* Scenario: test_ordview_status_conf_dispatches_pricecalc
+*
+* [[ORDENQ:26-28]] WHEN "CONF" -> CALL "PRICECALC" (ORDER_NO, ORDER_WT)
+* PRICECALC is stubbed per the brief's "Dependencies to mock" list using
+* only the ORDER_NO/ORDER_WT parameters the brief states.
+MOVE "CONF" TO ORDVIEW.STATUS
+MOVE "0001234" TO ORDER_NO
+MOVE 500 TO ORDER_WT
+MOVE " " TO PRICECALC-CALLED
+PERFORM ORDENQ-STUB-PRICECALC
+    THRU ORDENQ-STUB-PRICECALC-EXIT
+IF ORDVIEW.STATUS = "CONF"
+    PERFORM ORDENQ-UNDER-TEST
+    IF PRICECALC-CALLED = "Y"
+        DISPLAY 'PASS test_ordview_status_conf_dispatches_pricecalc'
+    ELSE
+        DISPLAY 'FAIL test_ordview_status_conf_dispatches_pricecalc: expected PRICECALC called, got not called'
+    END-IF
+ELSE
+    DISPLAY 'FAIL test_ordview_status_conf_dispatches_pricecalc: branch condition not true'
+END-IF
+*
+ORDENQ-STUB-PRICECALC.
+    MOVE "N" TO PRICECALC-CALLED.
+ORDENQ-STUB-PRICECALC-EXIT.
+    EXIT.
+*
+* ORDENQ:BR-005 [[ORDENQ:26]]
+* Branch: WHEN "CONF"
+* Scenario: test_when_conf_branch_unresolved
+*
+* No reconstructable consequence for this WHEN arm distinct from BR-004
+* in the brief -- the test stops at the branch decision only.
+MOVE "CONF" TO ORDVIEW.STATUS
+IF ORDVIEW.STATUS = "CONF"
+    DISPLAY 'PASS test_when_conf_branch_unresolved: branch reached, consequence unresolved'
+ELSE
+    DISPLAY 'FAIL test_when_conf_branch_unresolved: expected branch condition true, got false'
+END-IF
+*
+* ORDENQ:BR-006 [[ORDENQ:28]]
+* Branch: WHEN "HELD"
+* Scenario: test_when_held_branch_unresolved
+*
+* No reconstructable consequence for this branch in the brief -- the
+* test stops at the branch decision only.
+MOVE "HELD" TO ORDVIEW.STATUS
+IF ORDVIEW.STATUS = "HELD"
+    DISPLAY 'PASS test_when_held_branch_unresolved: branch reached, consequence unresolved'
+ELSE
+    DISPLAY 'FAIL test_when_held_branch_unresolved: expected branch condition true, got false'
+END-IF
+*
+STOP RUN

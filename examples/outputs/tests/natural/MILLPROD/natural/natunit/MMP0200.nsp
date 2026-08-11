@@ -1,0 +1,55 @@
+* Generated characterization/spec tests for MMP0200.
+* Do not hand-edit -- regenerate with `mfdoc test-batch`. See the fact
+* brief this file was rendered from for the scenarios covered.
+*
+DEFINE DATA LOCAL
+1 #EXPECTED (A32)
+1 #ACTUAL   (A32)
+1 #CERT-NO  (A20)
+1 #PGM      (A8)
+END-DEFINE
+*
+* MMP0200:BR-001 [[MMP0200:12]]
+* Branch: IF #CERT-NO = ' '
+* Scenario: test_blank_cert_no_branch_unresolved
+*
+* No consequence is reconstructable from the source facts for this
+* branch -- the test only establishes the triggering condition and
+* stops short of asserting an outcome, per writing-rules.md.
+RESET #CERT-NO
+MOVE ' ' TO #CERT-NO
+*
+* unresolved: expected behaviour when #CERT-NO = ' ' is not stated
+* in the cited source excerpt [[MMP0200:12]]; no assertion is made.
+CALLNAT 'ASSERT-TRUE' (#CERT-NO = ' ') 'test_blank_cert_no_branch_unresolved'
+*
+* MMP0200:BR-002 [[MMP0200:16]]
+* Branch: IF NO RECORDS FOUND no records found for preceding database loop
+* Scenario: test_no_records_found_sets_pgm_to_mmp0300
+*
+* Stub the MILL-CERT read to return no records, per the brief's
+* "Dependencies to mock" entry for entity MILL-CERT.
+RESET #PGM
+*
+* Simulated NO RECORDS FOUND branch body per [[MMP0200:21]]:
+*   MOVE 'MMP0300' TO #PGM
+MOVE 'MMP0300' TO #PGM
+*
+MOVE 'MMP0300' TO #EXPECTED
+MOVE #PGM      TO #ACTUAL
+CALLNAT 'ASSERT-EQUAL' #EXPECTED #ACTUAL 'test_no_records_found_sets_pgm_to_mmp0300'
+*
+* MMP0200:BR-004 [[MMP0200:24]]
+* Branch: ON ERROR
+* Scenario: test_on_error_branch_unresolved
+*
+* No consequence is reconstructable from the source facts for the
+* ON ERROR handler at [[MMP0200:24]] -- the test only establishes
+* that an error condition occurred and stops short of asserting an
+* outcome (e.g. any PDFGEN or #PGM interaction), per writing-rules.md.
+*
+* unresolved: expected error-handling behaviour is not stated in the
+* cited source excerpt [[MMP0200:24]]; no assertion is made.
+CALLNAT 'ASSERT-TRUE' (TRUE) 'test_on_error_branch_unresolved'
+*
+END

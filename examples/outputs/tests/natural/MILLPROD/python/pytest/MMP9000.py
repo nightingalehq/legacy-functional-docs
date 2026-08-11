@@ -14,8 +14,7 @@ def test_flag_set_when_order_confirmed_for_customer_c00123():
     customer_no = "C00123"
 
     if order_status == "CONF" and customer_no == "C00123":
+        # [[MMP9000:16]]
         flag = 1
-    else:
-        flag = None  # unresolved: no else-branch consequence cited in brief
 
     assert flag == 1

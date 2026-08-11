@@ -1,0 +1,110 @@
+* Generated characterization/spec tests for MMP0100.
+* Do not hand-edit -- regenerate with `mfdoc test-batch`. See the fact
+* brief this file was rendered from for the scenarios covered.
+*
+DEFINE DATA LOCAL
+1 #ORDER-NO      (A10)
+1 #PLANT         (A4)
+1 #RETURN-CODE   (N2)
+1 #AVAIL-TOTAL   (N9,2)
+1 #TOLERANCE-PCT (N3,2)
+1 #EXPECTED      (A32)
+1 #ACTUAL        (A32)
+1 ORDER-VIEW
+  2 ORDER-STATUS  (A4)
+  2 ORDER-WEIGHT  (N9,2)
+  2 GRADE-CODE    (A6)
+1 STOCK-VIEW
+  2 GRADE-CODE    (A6)
+  2 PLANT-CODE    (A4)
+END-DEFINE
+*
+* MMP0100:BR-001 [[MMP0100:34]]
+* Branch: IF NO RECORDS FOUND (no records found for preceding database loop)
+* Scenario: test_no_records_found_sets_return_code_10_and_escapes
+*
+* Stub the preceding database loop (over MILL-ORDER/STOCK-BALANCE per the
+* brief's dependency list) to return no records, then CALLNAT MMP0100 and
+* capture #RETURN-CODE into #ACTUAL.
+MOVE 10 TO #EXPECTED
+* ... CALLNAT 'MMP0100' #ORDER-NO #PLANT #RETURN-CODE with no matching
+* records set up in the stubbed loop source ...
+MOVE #RETURN-CODE TO #ACTUAL
+CALLNAT 'ASSERT-EQUAL' #EXPECTED #ACTUAL 'test_no_records_found_sets_return_code_10_and_escapes'
+*
+* MMP0100:BR-004 [[MMP0100:38]]
+* Branch: IF ORDER-VIEW.ORDER-STATUS NE 'CONF'
+* Scenario: test_unconfirmed_order_sets_return_code_20_and_escapes
+*
+MOVE 'PEND' TO ORDER-VIEW.ORDER-STATUS
+MOVE 20 TO #EXPECTED
+* ... CALLNAT 'MMP0100' #ORDER-NO #PLANT #RETURN-CODE with ORDER-VIEW
+* fixture as set up above ...
+MOVE #RETURN-CODE TO #ACTUAL
+CALLNAT 'ASSERT-EQUAL' #EXPECTED #ACTUAL 'test_unconfirmed_order_sets_return_code_20_and_escapes'
+*
+* MMP0100:BR-007 [[MMP0100:44]]
+* Branch: IF STOCK-VIEW.GRADE-CODE NE ORDER-VIEW.GRADE-CODE
+* Scenario: test_grade_code_mismatch_escapes_loop_without_setting_order_status
+*
+* No MOVE to ORDER-VIEW.ORDER-STATUS occurs on this branch per source
+* ([[MMP0100:45]] is ESCAPE BOTTOM only) -- characterize the absence of
+* the status assignment rather than inventing one.
+MOVE 'CONF' TO ORDER-VIEW.ORDER-STATUS
+MOVE '000010' TO ORDER-VIEW.GRADE-CODE
+MOVE '000020' TO STOCK-VIEW.GRADE-CODE
+MOVE 'CONF' TO #EXPECTED
+* ... CALLNAT 'MMP0100' #ORDER-NO #PLANT #RETURN-CODE with mismatched
+* grade codes on the stubbed STOCK-BALANCE record ...
+MOVE ORDER-VIEW.ORDER-STATUS TO #ACTUAL
+CALLNAT 'ASSERT-EQUAL' #EXPECTED #ACTUAL 'test_grade_code_mismatch_escapes_loop_without_setting_order_status'
+*
+* MMP0100:BR-009 [[MMP0100:47]]
+* Branch: IF STOCK-VIEW.PLANT-CODE = #PLANT
+* Scenario: test_plant_code_match_branch_unresolved
+* No consequence for this branch is reconstructable from the fact brief
+* -- do not assert an outcome. Written up to the branch decision only.
+*
+* ... set up STOCK-VIEW.PLANT-CODE = #PLANT and CALLNAT 'MMP0100'
+* #ORDER-NO #PLANT #RETURN-CODE; branch consequence unresolved, no
+* CALLNAT 'ASSERT-*' can be written for this scenario ...
+*
+* MMP0100:BR-011 [[MMP0100:53]]
+* Branch: WHEN #AVAIL-TOTAL >= ORDER-VIEW.ORDER-WEIGHT
+* Scenario: test_sufficient_stock_sets_order_status_rlsd
+*
+MOVE 1000.00 TO ORDER-VIEW.ORDER-WEIGHT
+MOVE 1000.00 TO #AVAIL-TOTAL
+MOVE 'RLSD' TO #EXPECTED
+* ... CALLNAT 'MMP0100' #ORDER-NO #PLANT #RETURN-CODE with #AVAIL-TOTAL
+* set from the stubbed STOCK-BALANCE aggregation ...
+MOVE ORDER-VIEW.ORDER-STATUS TO #ACTUAL
+CALLNAT 'ASSERT-EQUAL' #EXPECTED #ACTUAL 'test_sufficient_stock_sets_order_status_rlsd'
+*
+* MMP0100:BR-013 [[MMP0100:55]]
+* Branch: WHEN #AVAIL-TOTAL >= ORDER-VIEW.ORDER-WEIGHT * (1 - #TOLERANCE-PCT / 100)
+* Scenario: test_partial_within_tolerance_sets_order_status_part
+*
+MOVE 1000.00 TO ORDER-VIEW.ORDER-WEIGHT
+MOVE 10.00 TO #TOLERANCE-PCT
+MOVE 950.00 TO #AVAIL-TOTAL
+MOVE 'PART' TO #EXPECTED
+* ... CALLNAT 'MMP0100' #ORDER-NO #PLANT #RETURN-CODE with #AVAIL-TOTAL
+* below ORDER-WEIGHT but within #TOLERANCE-PCT of it ...
+MOVE ORDER-VIEW.ORDER-STATUS TO #ACTUAL
+CALLNAT 'ASSERT-EQUAL' #EXPECTED #ACTUAL 'test_partial_within_tolerance_sets_order_status_part'
+*
+* MMP0100:BR-015 [[MMP0100:58]]
+* Branch: WHEN NONE
+* Scenario: test_insufficient_stock_beyond_tolerance_sets_return_code_30
+*
+MOVE 1000.00 TO ORDER-VIEW.ORDER-WEIGHT
+MOVE 10.00 TO #TOLERANCE-PCT
+MOVE 100.00 TO #AVAIL-TOTAL
+MOVE 30 TO #EXPECTED
+* ... CALLNAT 'MMP0100' #ORDER-NO #PLANT #RETURN-CODE with #AVAIL-TOTAL
+* below both the WHEN thresholds above, falling through to WHEN NONE ...
+MOVE #RETURN-CODE TO #ACTUAL
+CALLNAT 'ASSERT-EQUAL' #EXPECTED #ACTUAL 'test_insufficient_stock_beyond_tolerance_sets_return_code_30'
+*
+END

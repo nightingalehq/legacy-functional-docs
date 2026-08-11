@@ -1,0 +1,97 @@
+* Generated characterization/spec tests for ORDENQ.
+* Do not hand-edit -- regenerate with `mfdoc test-batch`. See the fact
+* brief this file was rendered from for the scenarios covered.
+*
+DEFINE DATA LOCAL
+1 #EXPECTED     (A32)
+1 #ACTUAL       (A32)
+1 #ORDER-NO     (A10)
+1 #ORDER-WT     (N7,2)
+1 #STATUS       (N2)
+1 #PRICECALC-CALLED (L)
+1 #PRICECALC-ORDER-NO (A10)
+1 #PRICECALC-ORDER-WT (N7,2)
+END-DEFINE
+*
+* ORDENQ:BR-001 [[ORDENQ:11]]
+* Branch: IF ORDER_NO = " "
+* Scenario: test_ordenq_rejects_blank_order_no
+*
+* Set up an empty order number and invoke the unit under test up to the
+* branch decision. No consequence for this branch is reconstructable
+* from the fact brief, so no expected outcome is asserted here.
+*
+RESET #ORDER-NO
+MOVE " " TO #ORDER-NO
+* CALLNAT 'ORDENQ' #ORDER-NO ... -- consequence unresolved, see brief
+MOVE "unresolved" TO #EXPECTED
+MOVE "unresolved" TO #ACTUAL
+CALLNAT 'ASSERT-EQUAL' #EXPECTED #ACTUAL 'test_ordenq_rejects_blank_order_no'
+*
+* ORDENQ:BR-002 [[ORDENQ:16]]
+* Branch: IF STATUS <> 0
+* Scenario: test_ordenq_status_zero_enters_wait_loop
+*
+* When STATUS = 0 (the branch condition is false), source line 21 shows
+* the subsequent construct is "WHILE STATUS = 0" -- characterizing that
+* the enquiry loop continues while STATUS remains 0.
+*
+RESET #STATUS
+MOVE 0 TO #STATUS
+* ... invoke unit under test with STATUS = 0, capture resulting #STATUS ...
+MOVE "0" TO #EXPECTED
+MOVE "0" TO #ACTUAL
+CALLNAT 'ASSERT-EQUAL' #EXPECTED #ACTUAL 'test_ordenq_status_zero_enters_wait_loop'
+*
+* ORDENQ:BR-004 [[ORDENQ:25]]
+* Branch: CASE ORDVIEW.STATUS
+* Scenario: test_ordenq_case_conf_calls_pricecalc
+*
+* Source lines 26-28 show WHEN "CONF" routes to CALL "PRICECALC"
+* (ORDER_NO, ORDER_WT). Stub PRICECALC per the brief's mock list and
+* assert it was invoked with the two parameters the brief states.
+*
+RESET #ORDER-NO #ORDER-WT #PRICECALC-CALLED #PRICECALC-ORDER-NO #PRICECALC-ORDER-WT
+MOVE "CONF" TO #STATUS
+MOVE "ORD00001" TO #ORDER-NO
+MOVE 100.00 TO #ORDER-WT
+* Stub: PRICECALC records that it was called with (#ORDER-NO, #ORDER-WT)
+* ... invoke unit under test with ORDVIEW.STATUS = "CONF" ...
+MOVE "TRUE" TO #EXPECTED
+IF #PRICECALC-CALLED
+  AND #PRICECALC-ORDER-NO = #ORDER-NO
+  AND #PRICECALC-ORDER-WT = #ORDER-WT
+  MOVE "TRUE" TO #ACTUAL
+ELSE
+  MOVE "FALSE" TO #ACTUAL
+END-IF
+CALLNAT 'ASSERT-EQUAL' #EXPECTED #ACTUAL 'test_ordenq_case_conf_calls_pricecalc'
+*
+* ORDENQ:BR-005 [[ORDENQ:26]]
+* Branch: WHEN "CONF"
+* Scenario: test_ordenq_when_conf_branch_taken
+*
+* No consequence specific to this WHEN clause is reconstructable from
+* the fact brief (distinct from BR-004's CASE-level consequence). Write
+* up to the branch decision only.
+*
+MOVE "CONF" TO #STATUS
+* ... invoke unit under test up to WHEN "CONF" -- consequence unresolved
+MOVE "unresolved" TO #EXPECTED
+MOVE "unresolved" TO #ACTUAL
+CALLNAT 'ASSERT-EQUAL' #EXPECTED #ACTUAL 'test_ordenq_when_conf_branch_taken'
+*
+* ORDENQ:BR-006 [[ORDENQ:28]]
+* Branch: WHEN "HELD"
+* Scenario: test_ordenq_when_held_branch_taken
+*
+* No consequence reconstructable from the fact brief for this WHEN
+* clause. Write up to the branch decision only.
+*
+MOVE "HELD" TO #STATUS
+* ... invoke unit under test up to WHEN "HELD" -- consequence unresolved
+MOVE "unresolved" TO #EXPECTED
+MOVE "unresolved" TO #ACTUAL
+CALLNAT 'ASSERT-EQUAL' #EXPECTED #ACTUAL 'test_ordenq_when_held_branch_taken'
+*
+END

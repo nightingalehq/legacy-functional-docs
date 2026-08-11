@@ -7,15 +7,9 @@ this file was rendered from for the scenarios covered.
 import pytest
 
 
-# The brief names `PROGA` as a dependency to mock, but does not state the
-# call signature, parameters, or return shape for this scenario, so no
-# stub is defined here. See "Dependencies to mock" in the brief.
-
-
-@pytest.mark.skip(reason="unresolved: no reconstructable consequence for this branch in the fact brief")
-def test_status_conf_branch():
+def test_status_conf_branch_unresolved():
     # MMP9400:BR-002 [[MMP9400:11]]
     # Branch: IF #STATUS = 'CONF'
-    # Consequence when #STATUS = 'CONF' is not reconstructable from source
-    # facts; marked unresolved rather than invented.
-    ...
+    # unresolved: no reconstructable consequence in source facts for this
+    # branch -- do not invent an expected outcome here.
+    pytest.skip("unresolved: consequence of #STATUS = 'CONF' branch not reconstructable from source facts")
