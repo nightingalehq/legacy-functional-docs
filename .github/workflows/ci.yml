@@ -37,6 +37,12 @@ jobs:
       - name: Validate the worked examples
         run: mfdoc validate --config project.yml --docs examples
 
+      - name: Derive test scenarios
+        # test-validate resolves every bare MEMBER:BR-nnn reference in a
+        # generated test file against the test_case table -- that table is
+        # only populated by test-plan, which nothing above this point runs.
+        run: mfdoc test-plan --config project.yml
+
       - name: Validate the generated-test worked example
         # test-validate enforces language/framework front matter on every
         # doc it scans, so point it at the generated-test subtree only, not
