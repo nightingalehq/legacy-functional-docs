@@ -48,6 +48,16 @@ REQUIRED_FRONTMATTER = [
     "title", "doc_type", "system", "generated_by", "generated_at",
     "review_status", "confidence_summary", "sources",
 ]
+
+# `doc_type: register` is the flat, deterministic index documents
+# (`mfdoc rules-register`, `testplan.test_plan_register`,
+# `testadvisor.testability_report`) -- there is no narrative judgement call
+# in them, so the review/confidence workflow fields that apply to a
+# model-authored doc don't mean anything here. Their whole front-matter
+# contract is just enough to identify what they are; citations inside them
+# are still fully checked below like any other document.
+REQUIRED_REGISTER_FRONTMATTER = ["title", "doc_type"]
+
 VALID_CONFIDENCE = {"verified", "inferred", "unresolved"}
 VALID_REVIEW = {"draft", "in_review", "sme_approved", "signed_off"}
 
@@ -130,7 +140,11 @@ def validate_doc(conn, path: Path) -> dict:
     fm, body, fm_err = _split_frontmatter(text)
     if fm_err:
         problems.append(fm_err)
-    if fm is not None:
+    if fm is not None and fm.get("doc_type") == "register":
+        for key in REQUIRED_REGISTER_FRONTMATTER:
+            if key not in fm:
+                problems.append(f"front matter missing required key: {key}")
+    elif fm is not None:
         for key in REQUIRED_FRONTMATTER:
             if key not in fm:
                 problems.append(f"front matter missing required key: {key}")

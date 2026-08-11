@@ -84,6 +84,32 @@ def test_validator_accepts_a_well_formed_document(indexed_db, tmp_path):
     assert result["invalid_citations"] == 0
 
 
+def test_validator_accepts_a_register_doc_without_review_fields(indexed_db, tmp_path):
+    """`doc_type: register` docs (rules-register, test-plan-register,
+    testability-advisory) are deterministic index reports, not narrative
+    docs with a review workflow -- they must not be required to carry
+    review_status/confidence_summary/generated_at/sources, only enough
+    front matter to identify what they are."""
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        '---\ntitle: "System-wide rules register"\ndoc_type: register\n---\n'
+        "\n| BR-ID |\n|---|\n"
+        "\n[[MMP0100:1]] not part of a real sentence, just exercising citation checks.\n"
+    )
+    result = validate_doc(indexed_db, doc)
+    assert result["ok"], result["problems"]
+
+
+def test_validator_still_rejects_a_register_doc_missing_doc_type_name(indexed_db, tmp_path):
+    """The reduced register contract still requires `title` -- it's not a
+    blanket exemption for anything lacking full front matter."""
+    doc = tmp_path / "doc.md"
+    doc.write_text('---\ndoc_type: register\n---\n\nno title here.\n')
+    result = validate_doc(indexed_db, doc)
+    assert not result["ok"]
+    assert any("title" in p for p in result["problems"])
+
+
 def test_validator_accepts_the_worked_example_unchanged(indexed_db):
     """A false positive here trains people to ignore the validator, which is
     worse than not having one."""

@@ -480,10 +480,17 @@ def rules_register(conn, redact: Redactor = NULL_REDACTOR) -> str:
     timestamp is embedded, on purpose, since one would defeat that guarantee
     without adding any real information (the index's own `generated_at` on
     the `ingest_run` row already records when the source was last read).
+
+    Carries minimal `doc_type: register` front matter -- just enough for
+    `mfdoc validate` to recognise this as a deterministic index rather than
+    a narrative doc and skip the review/confidence fields that don't apply
+    to it, without requiring a `generated_at` that would break the
+    byte-identical guarantee above.
     """
     from .batch import select_batch_members  # local: avoids a circular import at load time
 
-    out = ["# System-wide rules register", "", (
+    out = ["---", 'title: "System-wide rules register"', "doc_type: register", "---", "",
+           "# System-wide rules register", "", (
         "Every candidate business rule found across the index, keyed by its "
         "stable `MEMBER:BR-nnn` ID. Look one up here when it's referenced in "
         "conversation or a review comment without already knowing which "

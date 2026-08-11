@@ -207,11 +207,14 @@ def build_member_test_cases(conn, mid: int, name: str, overlay: dict | None = No
 def test_plan_register(conn, redact=None) -> str:
     """A flat, system-wide index of every derived test_case, mirroring
     brief.rules_register's shape and its "regenerate, don't hand-edit"
-    contract -- this is a deterministic report, not a narrative document."""
+    contract -- this is a deterministic report, not a narrative document.
+    Carries the same minimal `doc_type: register` front matter for the same
+    reason (see brief.rules_register)."""
     from .redact import NULL_REDACTOR
     redact = redact or NULL_REDACTOR
 
-    out = ["# System-wide test-plan register", "", (
+    out = ["---", 'title: "System-wide test-plan register"', "doc_type: register", "---", "",
+           "# System-wide test-plan register", "", (
         "Every scenario `mfdoc test-plan` derived from the fact store, keyed "
         "by the same `MEMBER:BR-nnn` id its source rule carries in the "
         "module doc and rules register. Regenerate with `mfdoc test-plan` "

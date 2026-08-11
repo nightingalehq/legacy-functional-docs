@@ -34,5 +34,12 @@ jobs:
           mfdoc derive   --config project.yml
           mfdoc coverage --config project.yml
 
-      - name: Validate the worked example
+      - name: Validate the worked examples
         run: mfdoc validate --config project.yml --docs examples
+
+      - name: Validate the generated-test worked example
+        # test-validate enforces language/framework front matter on every
+        # doc it scans, so point it at the generated-test subtree only, not
+        # all of examples/ (the module docs and registers there aren't
+        # generated_test docs).
+        run: mfdoc test-validate --config project.yml --docs examples/tests_generated

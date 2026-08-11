@@ -1,3 +1,8 @@
+---
+title: "Testability advisory"
+doc_type: register
+---
+
 # Testability advisory
 
 Classification of every batchable member for test generation, derived from data_access/call_edge/transaction_scopes facts. Regenerate with `mfdoc test-advisory`; do not hand-edit. Seam suggestions are advisory prose only -- nothing here changes source.

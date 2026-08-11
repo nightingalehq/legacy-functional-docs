@@ -205,10 +205,12 @@ def run_all(conn) -> dict:
 
 def testability_report(conn) -> str:
     """A deterministic, reviewable report -- same "regenerate, don't
-    hand-edit" contract as rules_register/test_plan_register."""
+    hand-edit" contract as rules_register/test_plan_register, including the
+    same minimal `doc_type: register` front matter."""
     run = run_all(conn)
     results, ambiguous = run["results"], run["ambiguous"]
-    out = ["# Testability advisory", "", (
+    out = ["---", 'title: "Testability advisory"', "doc_type: register", "---", "",
+           "# Testability advisory", "", (
         "Classification of every batchable member for test generation, "
         "derived from data_access/call_edge/transaction_scopes facts. "
         "Regenerate with `mfdoc test-advisory`; do not hand-edit. Seam "

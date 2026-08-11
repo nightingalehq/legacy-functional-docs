@@ -1,3 +1,8 @@
+---
+title: "System-wide test-plan register"
+doc_type: register
+---
+
 # System-wide test-plan register
 
 Every scenario `mfdoc test-plan` derived from the fact store, keyed by the same `MEMBER:BR-nnn` id its source rule carries in the module doc and rules register. Regenerate with `mfdoc test-plan` after any source change; do not hand-edit. `status` defaults to `characterization` until a human promotes an entry via `test-overlay.yml`.
