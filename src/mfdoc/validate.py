@@ -179,10 +179,30 @@ def validate_doc(conn, path: Path) -> dict:
             # The citation format [[MEMBER:LINE]] carries no library, but
             # `member` allows the same name in different libraries. Picking
             # one arbitrarily can validate a citation against the wrong
-            # member's line range, so flag it instead of guessing.
-            libs = ", ".join(sorted({r["library"] or "?" for r in rows}))
-            valid, note = 0, f"member name '{member}' is ambiguous across libraries ({libs}); citation needs a library qualifier"
-        elif lf is not None:
+            # member's line range, so flag it instead of guessing -- unless
+            # this is the one structural case where the ambiguity is already
+            # resolved elsewhere in the fact store: a DDM and an FDT (or
+            # other definition source) for the same physical entity are
+            # ingested as two separate `member` rows sharing a name (neither
+            # has a library, so there is no qualifier to disambiguate with),
+            # but `derive` already picked one of them as that entity's
+            # canonical `defined_in` -- entity_brief cites through that
+            # member, so honour the same choice here rather than reporting
+            # a false ambiguity for the one citation shape brief.py itself
+            # produces for merged entities.
+            entity_row = conn.execute(
+                "SELECT defined_in FROM entity WHERE UPPER(name)=?", (member,)
+            ).fetchone()
+            preferred = next(
+                (r for r in rows if entity_row and r["id"] == entity_row["defined_in"]), None
+            ) if entity_row else None
+            if preferred is not None:
+                rows = [preferred]
+            else:
+                libs = ", ".join(sorted({r["library"] or "?" for r in rows}))
+                valid, note = 0, f"member name '{member}' is ambiguous across libraries ({libs}); citation needs a library qualifier"
+
+        if valid and lf is not None:
             row = rows[0]
             maxline = row["maxline"] or 0
             if lf < 1 or lf > maxline or (lt and lt > maxline):

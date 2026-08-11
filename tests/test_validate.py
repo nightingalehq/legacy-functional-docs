@@ -84,6 +84,22 @@ def test_validator_accepts_a_well_formed_document(indexed_db, tmp_path):
     assert result["invalid_citations"] == 0
 
 
+def test_citation_to_a_merged_ddm_fdt_entity_resolves_via_defined_in(indexed_db, tmp_path):
+    """MILL-ORDER is ingested as two `member` rows (a DDM and an FDT report,
+    dialects 'ddm'/'adabas_fdt', both with no library) that graph.py merges
+    into one `entity` row -- entity_brief cites the entity's own facts
+    through whichever member `entity.defined_in` names. A citation to that
+    same bare name must resolve the same way instead of reporting a false
+    'ambiguous across libraries' (there is no library on either row to
+    qualify by), or every entity_brief-derived citation for a merged
+    DDM/FDT entity would be unvalidatable."""
+    doc = tmp_path / "doc.md"
+    doc.write_text(GOOD_FRONTMATTER + "\nThe field is defined here [[MILL-ORDER:1]].\n")
+    result = validate_doc(indexed_db, doc)
+    assert result["ok"], result["problems"]
+    assert result["invalid_citations"] == 0
+
+
 def test_validator_accepts_a_register_doc_without_review_fields(indexed_db, tmp_path):
     """`doc_type: register` docs (rules-register, test-plan-register,
     testability-advisory) are deterministic index reports, not narrative
