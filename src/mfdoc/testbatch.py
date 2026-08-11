@@ -188,6 +188,21 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
                     redact: Redactor = NULL_REDACTOR, concurrency: int = 4,
                     state_path: Path | None = None) -> TestBatchSummary:
     """Resumable render over `members` for one language/framework target --
+    NOTE on `--matrix` + a shared `--state` file: per-member state keys
+    (`f"{subdir}::{member}::{language}::{framework}"`, see below) already
+    include language/framework, so per-member resume/skip is correct across
+    every target in a matrix invocation. `state["_corpus_sha256"]`, however,
+    is a single *global* key -- each target's `run_test_batch` call computes
+    its own per-target signature but overwrites the same shared key with it,
+    so on a resumed run only the last target run in a given matrix
+    invocation gets the fast corpus-level "nothing changed, skip everything"
+    check; earlier targets fall back to the slower (still correct)
+    per-member `brief_sha256` check instead. This is not a correctness bug --
+    no wrong output, no wrong skip -- only a redundant, cheap, local (no
+    model call) brief rebuild per non-last target on resume. Left as-is:
+    fixing it would touch this function's state-key shape, which the
+    2026-08-11 test-generation-matrix design spec's Non-goals section
+    explicitly puts out of scope for that feature.
     see batch.run_batch's docstring for the two-tier skip logic this
     mirrors. Output nests as `out_dir/<dialect>/<library>/<language>/<framework>/<member>.md`
     (library segment omitted when the member has none), via the same

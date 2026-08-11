@@ -617,3 +617,187 @@ def test_test_gen_out_and_matrix_are_mutually_exclusive(cli_args, tmp_path):
     )
     rc = cli.cmd_test_gen(args)
     assert rc == 2
+
+
+# --- Finding 1: malformed options.testgen.matrix entries must exit 2, not
+# crash with a raw traceback (KeyError/AttributeError) from the per-target
+# loop's unguarded target["language"], target["framework"] access. ---
+
+def _matrix_cfg_missing(testgen_cfg: dict, bad_entry) -> dict:
+    cfg = dict(testgen_cfg)
+    cfg["matrix"] = [bad_entry]
+    return cfg
+
+
+def test_test_batch_matrix_entry_missing_framework_exits_cleanly(cli_args, indexed_db, tmp_path):
+    import unittest.mock as mock
+    from types import SimpleNamespace
+
+    cfg = cli.load_config(cli_args.config)
+    testgen_cfg = _matrix_cfg_missing(cli._testgen_config(cfg), {"language": "python"})
+
+    args = SimpleNamespace(
+        config=cli_args.config, out=str(tmp_path / "out"), members=None,
+        language=None, framework=None, template=None, model=None,
+        caller="fake-echo", provider="anthropic", gcp_project=None, gcp_region=None,
+        concurrency=1, state="", matrix=True,
+    )
+    with mock.patch.object(cli, "_testgen_config", return_value=testgen_cfg):
+        rc = cli.cmd_test_batch(args)
+    assert rc == 2
+
+
+def test_test_batch_matrix_entry_missing_language_exits_cleanly(cli_args, indexed_db, tmp_path):
+    import unittest.mock as mock
+    from types import SimpleNamespace
+
+    cfg = cli.load_config(cli_args.config)
+    testgen_cfg = _matrix_cfg_missing(cli._testgen_config(cfg), {"framework": "pytest"})
+
+    args = SimpleNamespace(
+        config=cli_args.config, out=str(tmp_path / "out"), members=None,
+        language=None, framework=None, template=None, model=None,
+        caller="fake-echo", provider="anthropic", gcp_project=None, gcp_region=None,
+        concurrency=1, state="", matrix=True,
+    )
+    with mock.patch.object(cli, "_testgen_config", return_value=testgen_cfg):
+        rc = cli.cmd_test_batch(args)
+    assert rc == 2
+
+
+def test_test_batch_matrix_entry_not_a_mapping_exits_cleanly(cli_args, indexed_db, tmp_path):
+    """A scalar matrix entry (e.g. `matrix: [python]`, a plausible typo for
+    `matrix: [{language: python, framework: pytest}]`) must not crash with
+    AttributeError on `.get` -- same clean exit-2 treatment as the
+    dict-but-incomplete cases above."""
+    import unittest.mock as mock
+    from types import SimpleNamespace
+
+    cfg = cli.load_config(cli_args.config)
+    testgen_cfg = _matrix_cfg_missing(cli._testgen_config(cfg), "python")
+
+    args = SimpleNamespace(
+        config=cli_args.config, out=str(tmp_path / "out"), members=None,
+        language=None, framework=None, template=None, model=None,
+        caller="fake-echo", provider="anthropic", gcp_project=None, gcp_region=None,
+        concurrency=1, state="", matrix=True,
+    )
+    with mock.patch.object(cli, "_testgen_config", return_value=testgen_cfg):
+        rc = cli.cmd_test_batch(args)
+    assert rc == 2
+
+
+def test_test_gen_matrix_entry_missing_framework_exits_cleanly(cli_args, indexed_db, tmp_path):
+    import unittest.mock as mock
+    from types import SimpleNamespace
+
+    cfg = cli.load_config(cli_args.config)
+    testgen_cfg = _matrix_cfg_missing(cli._testgen_config(cfg), {"language": "python"})
+
+    args = SimpleNamespace(
+        config=cli_args.config, out=None,
+        member="MMP0100", language=None, framework=None, template=None,
+        model=None, caller="fake-echo", provider="anthropic",
+        gcp_project=None, gcp_region=None, matrix=True,
+    )
+    with mock.patch.object(cli, "_testgen_config", return_value=testgen_cfg):
+        rc = cli.cmd_test_gen(args)
+    assert rc == 2
+
+
+def test_test_gen_matrix_entry_missing_language_exits_cleanly(cli_args, indexed_db, tmp_path):
+    import unittest.mock as mock
+    from types import SimpleNamespace
+
+    cfg = cli.load_config(cli_args.config)
+    testgen_cfg = _matrix_cfg_missing(cli._testgen_config(cfg), {"framework": "pytest"})
+
+    args = SimpleNamespace(
+        config=cli_args.config, out=None,
+        member="MMP0100", language=None, framework=None, template=None,
+        model=None, caller="fake-echo", provider="anthropic",
+        gcp_project=None, gcp_region=None, matrix=True,
+    )
+    with mock.patch.object(cli, "_testgen_config", return_value=testgen_cfg):
+        rc = cli.cmd_test_gen(args)
+    assert rc == 2
+
+
+# --- Finding 2: spec-mandated test -- one --matrix invocation running the
+# same members through two different {language, framework} targets, sharing
+# one --state file, must produce two independent output subtrees and two
+# independent per-member state entries. ---
+
+def test_run_test_batch_matrix_targets_get_independent_output_and_state(tmp_path):
+    """Same members, same shared state_path, two different (language,
+    framework) targets in turn (as cmd_test_batch --matrix does) -- proves
+    the shared-state-file claim in the design spec's Matrix support section:
+    per-member state keys already include language/framework, so one
+    target's resume bookkeeping and rendered output tree can't collide
+    with another's."""
+    from mfdoc import testbatch
+    import json
+    import sqlite3
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute(
+        "INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')"
+    )
+    insert(
+        conn, "test_case", member_id=1, kind="unit", scenario_name="FAKEMOD:BR-001",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+        then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:1", confidence="verified",
+    )
+    conn.commit()
+
+    def caller_for(language, framework):
+        def _call(prompt):
+            return ModelResponse(
+                text=_valid_test_doc_text(language, framework), input_tokens=0, output_tokens=0
+            )
+        return _call
+
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+
+    pytest_summary = testbatch.run_test_batch(
+        conn, ["FAKEMOD"], "python", "pytest", out_dir, caller_for("python", "pytest"),
+        "writing rules text", "template text", state_path=state_path,
+    )
+    unittest_summary = testbatch.run_test_batch(
+        conn, ["FAKEMOD"], "python", "unittest", out_dir, caller_for("python", "unittest"),
+        "writing rules text", "template text", state_path=state_path,
+    )
+
+    assert pytest_summary.skipped == 0
+    assert unittest_summary.skipped == 0
+
+    # Two independent output subtrees.
+    pytest_path = out_dir / "natural" / "python" / "pytest" / "FAKEMOD.md"
+    unittest_path = out_dir / "natural" / "python" / "unittest" / "FAKEMOD.md"
+    assert pytest_path.exists()
+    assert unittest_path.exists()
+    assert "framework: pytest" in pytest_path.read_text(encoding="utf-8")
+    assert "framework: unittest" in unittest_path.read_text(encoding="utf-8")
+
+    # Two independent per-member state entries in the one shared state file.
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    pytest_key = "natural::FAKEMOD::python::pytest"
+    unittest_key = "natural::FAKEMOD::python::unittest"
+    assert pytest_key in state
+    assert unittest_key in state
+    assert pytest_key != unittest_key
+    assert state[pytest_key]["ok"] is True
+    assert state[unittest_key]["ok"] is True
+    assert "brief_sha256" in state[pytest_key]
+    assert "brief_sha256" in state[unittest_key]
+    assert state[pytest_key]["brief_sha256"] == state[unittest_key]["brief_sha256"], (
+        "same member/brief content across targets -- only language/framework differ, "
+        "which the state *key* encodes, not the brief hash"
+    )

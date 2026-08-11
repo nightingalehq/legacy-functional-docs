@@ -286,6 +286,31 @@ def _testgen_matrix(testgen_cfg: dict) -> list[dict]:
     return list(testgen_cfg.get("matrix") or [])
 
 
+def _testgen_matrix_error(targets: list) -> str | None:
+    """First problem found in a resolved --matrix target list, or None.
+
+    Every other config-shape error `cmd_test_gen`/`cmd_test_batch` already
+    handle (missing --language/--framework, empty matrix, --matrix/
+    --language mutual exclusion) exits 2 with a readable message --
+    `options.testgen.matrix` is a brand-new, user-authored config key where
+    a typo (a missing `framework:`, a bare scalar entry) is likely, and an
+    unguarded `target["language"], target["framework"]` in the per-target
+    loop would otherwise surface as a raw KeyError/AttributeError traceback
+    instead of the same clean exit-2 treatment. Called once by each of
+    `cmd_test_gen`/`cmd_test_batch` right after resolving targets, before
+    their per-target loops start."""
+    for i, target in enumerate(targets):
+        if not isinstance(target, dict):
+            return f"options.testgen.matrix entry {i} is not a mapping with 'language'/'framework': {target!r}"
+        language = target.get("language")
+        framework = target.get("framework")
+        if not language or not isinstance(language, str):
+            return f"options.testgen.matrix entry {i} is missing 'language'/'framework': {target!r}"
+        if not framework or not isinstance(framework, str):
+            return f"options.testgen.matrix entry {i} is missing 'language'/'framework': {target!r}"
+    return None
+
+
 def cmd_test_plan(args) -> int:
     cfg = load_config(args.config)
     base = Path(args.config).parent
@@ -424,6 +449,10 @@ def cmd_test_gen(args) -> int:
             print("--matrix given, but no options.testgen.matrix entries in --config",
                   file=sys.stderr)
             return 2
+        error = _testgen_matrix_error(targets)
+        if error:
+            print(error, file=sys.stderr)
+            return 2
     else:
         language = args.language or testgen_cfg.get("default_language")
         framework = args.framework or testgen_cfg.get("default_framework")
@@ -497,6 +526,10 @@ def cmd_test_batch(args) -> int:
         if not targets:
             print("--matrix given, but no options.testgen.matrix entries in --config",
                   file=sys.stderr)
+            return 2
+        error = _testgen_matrix_error(targets)
+        if error:
+            print(error, file=sys.stderr)
             return 2
     else:
         language = args.language or testgen_cfg.get("default_language")
