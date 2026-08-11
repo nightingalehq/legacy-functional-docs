@@ -160,6 +160,10 @@ mfdoc brief --config project.yml --entity MILL-ORDER
 # module docs are high-volume and formulaic; batch them instead of writing
 # one at a time (needs `pip install 'mfdoc[batch]'` and ANTHROPIC_API_KEY):
 mfdoc batch --config project.yml --out docs/functional/modules
+# output nests as <out>/<dialect>/<library>/<member>.md (library segment
+# omitted when the member has none), mirroring the only two source-grouping
+# facts actually on record for a member -- e.g.
+# docs/functional/modules/natural/MILLPROD/MMP0100.md
 
 mfdoc rules-register --config project.yml --out docs/functional/rules-register.md
 # a flat, greppable index of every MEMBER:BR-nnn rule ID -- look one up here
@@ -184,6 +188,9 @@ Set `options.testgen` in `project.yml` (`default_language`, `default_framework`,
 mfdoc test-plan     --config project.yml
 mfdoc test-advisory --config project.yml
 mfdoc test-gen      --config project.yml --member MMP0100 --language python --framework pytest
+# output nests as <out_dir>/<dialect>/<library>/<language>/<framework>/<member>.md,
+# same convention as `mfdoc batch` above -- e.g.
+# tests_generated/natural/MILLPROD/python/pytest/MMP0100.md
 mfdoc test-validate --config project.yml --docs tests_generated
 ```
 

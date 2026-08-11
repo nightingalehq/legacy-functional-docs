@@ -351,9 +351,11 @@ def cmd_test_overlay_draft(args) -> int:
 
     module_docs = {}
     if args.docs:
+        from .batch import _output_subdir
+
         docs_dir = base / args.docs
         for name in members:
-            doc_path = docs_dir / f"{name}.md"
+            doc_path = docs_dir / _output_subdir(conn, name) / f"{name}.md"
             if doc_path.exists():
                 module_docs[name] = doc_path.read_text(encoding="utf-8")
 
@@ -413,9 +415,12 @@ def cmd_test_gen(args) -> int:
     if caller is None:
         return 1
 
+    from .batch import _output_subdir
+
     member = args.member.strip().upper()
     out_dir = testgen_cfg.get("out_dir") or "tests_generated"
-    out_path = base / args.out if args.out else base / out_dir / language / framework / f"{member}.md"
+    out_path = (base / args.out if args.out
+                else base / out_dir / _output_subdir(conn, member) / language / framework / f"{member}.md")
     result = testbatch_mod.generate_member_test_doc(
         conn, member, language, framework, out_path, caller,
         writing_rules, template, redact=redact,

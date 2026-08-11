@@ -53,7 +53,7 @@ def test_test_batch_selects_only_members_with_test_case_rows(cli_args, indexed_d
         concurrency=1, state="",
     )
     cli.cmd_test_batch(args)
-    written = (tmp_path / "out" / "python" / "pytest" / "MMP0100.md").read_text(encoding="utf-8")
+    written = (tmp_path / "out" / "natural" / "MILLPROD" / "python" / "pytest" / "MMP0100.md").read_text(encoding="utf-8")
     assert "# Test brief: MMP0100" in written
 
 
@@ -141,8 +141,8 @@ def test_run_test_batch_does_not_reuse_state_or_file_across_frameworks(tmp_path)
     assert pytest_summary.skipped == 0
     assert unittest_summary.skipped == 0, "must not reuse the pytest run's state for a different framework"
 
-    pytest_path = out_dir / "python" / "pytest" / "FAKEMOD.md"
-    unittest_path = out_dir / "python" / "unittest" / "FAKEMOD.md"
+    pytest_path = out_dir / "natural" / "python" / "pytest" / "FAKEMOD.md"
+    unittest_path = out_dir / "natural" / "python" / "unittest" / "FAKEMOD.md"
     assert "framework: pytest" in pytest_path.read_text(encoding="utf-8")
     assert "framework: unittest" in unittest_path.read_text(encoding="utf-8")
 

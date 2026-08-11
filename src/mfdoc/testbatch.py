@@ -21,7 +21,7 @@ from pathlib import Path
 
 from .batch import ModelCaller, DocResult
 from .batch import _corpus_signature as _base_corpus_signature
-from .batch import _load_state, _save_state, _skip_result
+from .batch import _load_state, _output_subdir, _save_state, _skip_result
 from .redact import NULL_REDACTOR, Redactor
 from .testplan import test_case_brief
 from .validate import validate_test_doc
@@ -126,12 +126,16 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
                     state_path: Path | None = None) -> TestBatchSummary:
     """Resumable render over `members` for one language/framework target --
     see batch.run_batch's docstring for the two-tier skip logic this
-    mirrors. State is keyed by `f"{member}::{language}::{framework}"`, and
-    output is written under `out_dir/language/framework/`, so the same
-    state file/out_dir can track multiple destination languages *and*
-    frameworks for one project without one target's state or file
-    clobbering another's (e.g. pytest vs unittest output for the same
-    member/language)."""
+    mirrors. Output nests as `out_dir/<dialect>/<library>/<language>/<framework>/<member>.md`
+    (library segment omitted when the member has none), via the same
+    `_output_subdir` batch.py uses for module docs, with language/framework
+    beneath it so the same state file/out_dir can track multiple
+    destination languages *and* frameworks for one project without one
+    target's state or file clobbering another's (e.g. pytest vs unittest
+    output for the same member/language). State is keyed by
+    `f"{subdir}::{member}::{language}::{framework}"` for the same reason
+    batch.py's state key includes the subdir -- two batchable members can
+    share a bare name across libraries/dialects."""
     state = _load_state(state_path) if state_path else {}
     corpus_sig = _corpus_signature(conn, language, framework, redact) if state_path else None
     corpus_unchanged = bool(state_path) and state.get("_corpus_sha256") == corpus_sig
@@ -139,9 +143,12 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
     briefs: dict[str, str] = {}
     to_run: list[tuple[str, str, Path]] = []
 
+    state_keys: dict[str, str] = {}
     for name in members:
-        key = f"{name}::{language}::{framework}"
-        out_path = out_dir / language / framework / f"{name}.md"
+        subdir = _output_subdir(conn, name)
+        key = f"{subdir.as_posix()}::{name}::{language}::{framework}"
+        state_keys[name] = key
+        out_path = out_dir / subdir / language / framework / f"{name}.md"
         prior = state.get(key)
         prior_ok = isinstance(prior, dict) and prior.get("ok") and out_path.exists()
 
@@ -190,7 +197,7 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
                 validation.get("problems", []),
             )
             results.append(result)
-            state[f"{name}::{language}::{framework}"] = {
+            state[state_keys[name]] = {
                 "ok": result.ok, "attempts": attempts, "brief_sha256": brief_hash,
             }
 

@@ -102,7 +102,8 @@ def test_batch_generates_valid_docs_for_all_batchable_members(indexed_db, tmp_pa
     assert summary.total_input_tokens == 1200
     assert summary.total_output_tokens == 2400
     for member in members:
-        assert (tmp_path / "out" / f"{member}.md").exists()
+        subdir = batch_mod._output_subdir(indexed_db, member)
+        assert (tmp_path / "out" / subdir / f"{member}.md").exists()
 
 
 def test_batch_reports_cost_only_when_pricing_configured(indexed_db, tmp_path):

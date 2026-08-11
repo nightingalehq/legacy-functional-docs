@@ -74,6 +74,30 @@ def select_batch_members(conn) -> list[str]:
     return [r["name"] for r in rows]
 
 
+def _output_subdir(conn, name: str) -> Path:
+    """Where this member's output should nest, mirroring the only two
+    source-grouping facts actually stored on `member` -- dialect (always
+    present) and library (present for Natural/Mantis, null for e.g.
+    DDM/FDT/JCL) -- rather than inventing a directory from anything not in
+    the fact store. `resolve_member_by_name` already refuses to guess when
+    a bare name collides across libraries; this mirrors that refusal into
+    a distinct, clearly-labelled bucket instead of crashing or picking one
+    arbitrarily, and does the same for a name that doesn't resolve at all
+    (e.g. a typo in --members) so a single bad name can't abort the run."""
+    from .db import resolve_member_by_name
+
+    rows, ambiguous_libs = resolve_member_by_name(conn, name, columns="dialect, library")
+    if ambiguous_libs:
+        return Path("_ambiguous")
+    if not rows:
+        return Path("_unknown")
+    row = rows[0]
+    parts = [row["dialect"]]
+    if row["library"]:
+        parts.append(row["library"])
+    return Path(*parts)
+
+
 def build_prompt(brief: str, writing_rules: str, template: str, retry_note: str | None = None) -> str:
     parts = [
         "You are writing first-draft functional documentation for one legacy "
@@ -218,6 +242,11 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
               ) -> BatchSummary:
     """Run the harness over `members`, resumable via `state_path`.
 
+    Output nests as `out_dir/<dialect>/<library>/<member>.md` (the library
+    segment omitted when the member has none, e.g. DDM/FDT-only dialects) --
+    mirroring the only two source-grouping facts actually stored on
+    `member`, via `_output_subdir`, rather than a flat `out_dir/<member>.md`.
+
     Two tiers of skip, cheapest first:
 
     1. Corpus-level: if nothing `_corpus_signature` covers changed since the
@@ -249,9 +278,18 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
     briefs: dict[str, str] = {}
     to_run: list[tuple[str, str, Path]] = []
 
+    state_keys: dict[str, str] = {}
     for name in members:
-        out_path = out_dir / f"{name}.md"
-        prior = state.get(name)
+        subdir = _output_subdir(conn, name)
+        out_path = out_dir / subdir / f"{name}.md"
+        # Keyed by subdir+name, not bare name: two batchable members can
+        # share a name across libraries/dialects (member.name is only
+        # unique together with library+dialect), and each now gets its own
+        # output path -- state must track them separately too, or one's
+        # resume state would silently overwrite the other's.
+        state_key = f"{subdir.as_posix()}/{name}"
+        state_keys[name] = state_key
+        prior = state.get(state_key)
         # `prior` is only ever meaningful as this member's own state entry;
         # guard against the (currently reserved but unenforced) "_corpus_sha256"
         # key ever being looked up as if it were one -- see cli.py's --members
@@ -299,7 +337,7 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
                 validation.get("problems", []),
             )
             results.append(result)
-            state[name] = {"ok": result.ok, "attempts": attempts, "brief_sha256": brief_hash}
+            state[state_keys[name]] = {"ok": result.ok, "attempts": attempts, "brief_sha256": brief_hash}
 
     if state_path:
         state["_corpus_sha256"] = corpus_sig

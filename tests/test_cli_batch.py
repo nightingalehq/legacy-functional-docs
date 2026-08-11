@@ -39,6 +39,6 @@ def test_batch_command_wires_the_configured_lexicon_into_the_prompt(cli_args, tm
     # fine, exit code isn't the point here. What matters is what actually
     # went into the prompt mfdoc batch built.
     cli.cmd_batch(args)
-    written = (tmp_path / "out" / "MMP0100.md").read_text(encoding="utf-8")
+    written = (tmp_path / "out" / "natural" / "MILLPROD" / "MMP0100.md").read_text(encoding="utf-8")
     assert "## Business vocabulary" in written
     assert "`CONF` -> confirmed" in written
