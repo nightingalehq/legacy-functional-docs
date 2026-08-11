@@ -225,7 +225,14 @@ reference/            dialect packs and writing rules — read before use
 templates/            the seven document types, plus templates/tests/ for generated tests
 src/mfdoc/            the extraction pipeline (+ testplan/testadvisor/testoverlay/testbatch)
 tests/                pytest suite (fixtures as golden tests)
-examples/             examples/inputs (sample source) + examples/outputs (worked examples)
+examples/
+  inputs/              sample multi-dialect source the worked examples run against
+  outputs/             a full, real pipeline run against examples/inputs -- see its own README.md
+    docs/<dialect>/<library>/*.md    module docs, mirroring mfdoc batch's own output convention
+    docs/{entities,process-flows}/   cross-cutting doc types (no fixed dialect home)
+    docs/{system-overview,gap-register}.md
+    tests/<dialect>/<library>/<language>/<framework>/*.{md,py}   generated tests + sidecars
+    *.json, *.db, *-register.md, *-advisory.md   deterministic artifacts (CI-refreshed)
 evals/                eval prompts (dev-time only; not installed)
 docs/guides/          getting-started, architecture, security/compliance, extending,
                       testing-strategies-for-mainframes-and-4gl

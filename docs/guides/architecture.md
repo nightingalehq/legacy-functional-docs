@@ -170,13 +170,36 @@ judgement-heavy documents are deliberately routed differently:
   prompt. Resumable via a state file keyed on brief content, so an
   interrupted run over thousands of members picks up where it left off.
   `ModelCaller` is a plain callable protocol; `AnthropicCaller`
-  (`anthropic_caller.py`) is the real implementation, isolated in its own
-  module so the `anthropic` package stays an optional dependency. A
-  `fake-echo` caller exists for CI/dry-run smoke tests with no network call.
+  (`anthropic_caller.py`), `VertexCaller` (`vertex_caller.py`) and
+  `ClaudeCLICaller` (`claude_cli_caller.py`, shells out to a local `claude`
+  CLI instead of an API key) are the real implementations, each isolated in
+  its own module so its dependency (`anthropic` package, GCP credentials, or
+  the `claude` binary) stays optional. A `fake-echo` caller exists for
+  CI/dry-run smoke tests with no network call.
 - **Interactive, via Claude Code (`SKILL.md`)** — for system overview, data
   entity docs, process flows and the gap register, where grouping and
   narrative structure benefit from a human (or a chat session) holding the
   whole system in mind, which batching would not support well.
+
+#### Output layout
+
+`mfdoc batch`/`mfdoc test-batch`/`mfdoc test-gen` nest their output as
+`<out>/<dialect>/<library>/<member>.md` (module docs) or
+`<out>/<dialect>/<library>/<language>/<framework>/<member>.md` (generated
+tests) — the library segment is omitted when a member has none (DDM/FDT-only
+dialects, for instance). This mirrors the only two source-grouping facts
+actually stored on `member` (`batch._output_subdir`), never an invented
+directory. A generated test's rendered code is additionally split into a
+sibling `{member}.py`/`{member}.java` next to its `.md` once the response
+validates (`testbatch.write_test_doc_with_sidecar`) — the `.md` keeps front
+matter, the summary paragraph, and a `## Scenarios covered` manifest instead
+of the full fence, and `validate_test_doc` cross-checks that manifest against
+the sidecar's real content. Interactive-path documents (system overview,
+entity docs, process flows, the gap register) have no fixed CLI-driven
+output directory — see [`examples/outputs/README.md`](../../examples/outputs/README.md)
+for the convention this repo's own worked examples follow (cross-cutting doc
+types at `docs/` root, alongside the same `<dialect>/<library>/` module-doc
+tree).
 
 ### 4 — Validate (`mfdoc validate`, `validate.py`)
 
