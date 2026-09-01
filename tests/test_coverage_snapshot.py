@@ -120,6 +120,48 @@ MMP9700's LOOP -- unrecognised since ambiguous -- and DOEND), +1
 gaps_high (MMP9700's reporting_mode gap; MMP9600's is medium and doesn't
 count here), +7 gaps_total (2 reporting_mode + 3 unparsed_line + 2
 orphan_module, uncalled by design as usual).
+
+2026-09-01: mantis.py calibrated against a real client Mantis export
+(kept out of examples/ -- client source, not a fixture) that uses
+a leading-dot block-depth notation (`.IF`, `..GET`, `...END`) and a `|`
+remark marker instead of whitespace indentation and `*` comments; see
+`_split_depth_marker`. Plain assignment statements (`STATUS="HOLD"`,
+possibly `:`-chained) are now recognised as `rule_candidate` rows
+(construct='ASSIGN') instead of being silently counted unparsed-but-ungapped
+by a length/shape check that suppressed the gap without recording the fact.
+ORDENQ.mantis (the only checked-in mantis fixture) has 4 such assignment
+lines that were previously dropped entirely; they now produce real
+rule_candidate rows. line_recognition_rate/gaps are unchanged, since these
+lines never raised a gap either before or after -- only rule_candidates
+moves, from 35 to 39 for this change alone (later paragraphs below push
+the final EXPECTED_COVERAGE total further, to 41).
+
+2026-09-01: mantis.py also folds a run of `'`-marked continuation lines onto
+the statement they continue (the same real client export's style, same
+session as the depth-dot calibration above), instead of leaving a multi-line
+condition or call argument list truncated at the first physical line.
+ORDENQ.mantis gets a new `VALIDATE_CREDIT_LIMIT` entry appended after the
+file's original EXIT to exercise this (flat, no-dot style -- the fold
+doesn't require the depth-dot convention to also be present): `IF
+ORDER_WT > 500` wraps an
+`'OR CUST_NO = " "` continuation onto a second line. Appended rather than
+inserted into MAIN deliberately -- inserting mid-file renumbers every later
+line and silently stales the line citations already baked into the
+checked-in generated docs under examples/outputs/ (mfdoc validate's citation
+check only range-checks a line number against the member's line count, so
+a stale-but-in-range citation like that passes silently instead of erroring,
+which is exactly the "invisible until it matters" citation risk
+reference/writing-rules.md warns about -- discovered by making the mistake
+once and having to revert it). Per the same accepted double-visit convention
+as Natural's own continuation fold, the continuation line is still
+independently visited afterwards and correctly doesn't stand alone as a
+statement, so it raises its own unparsed_line gap same as before this
+feature existed. +8 source_lines (the new entry, its END and both EXITs
+becoming source_lines while blank-line/no-op edges add 0), +1
+unparsed_line/gaps_total (the continuation line, revisited), +2
+rule_candidates (the folded IF and its MSG= ASSIGN), +1 include_edges (the
+new SHOW ORDSCR1) -- include_resolution_rate drops to 0.125 since the
+denominator grew with no new resolved include.
 """
 
 from __future__ import annotations
@@ -129,24 +171,24 @@ from mfdoc import graph
 EXPECTED_COVERAGE = {
     "members": 21,
     "code_members": 13,
-    "source_lines": 406,
-    "unparsed_lines": 7,
-    "line_recognition_rate": 0.9828,
+    "source_lines": 414,
+    "unparsed_lines": 8,
+    "line_recognition_rate": 0.9807,
     "entities": 13,
     "entities_with_definition": 9,
     "entity_definition_rate": 0.6923,
     "entity_fields": 46,
     "data_accesses": 14,
-    "rule_candidates": 35,
+    "rule_candidates": 41,
     "invocation_edges": 13,
     "invocations_resolved": 2,
     "call_resolution_rate": 0.1538,
     "dynamic_call_edges": 1,
-    "include_edges": 7,
+    "include_edges": 8,
     "includes_resolved": 1,
-    "include_resolution_rate": 0.1429,
+    "include_resolution_rate": 0.125,
     "gaps_high": 20,
-    "gaps_total": 41,
+    "gaps_total": 42,
 }
 
 

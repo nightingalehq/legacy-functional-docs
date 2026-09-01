@@ -70,27 +70,56 @@ def detect_seq_columns(lines: list[str], cols: tuple[int, int] = (72, 80)) -> tu
     return None
 
 
-def detect_leading_seq_prefix(lines: list[str], widths: tuple[int, ...] = (4, 6, 8)) -> int | None:
+def detect_leading_seq_prefix(lines: list[str], widths: tuple[int, ...] = (4, 5, 6, 7, 8)) -> int | None:
     """Return a leading fixed-width sequence-number prefix length, if consistently present.
 
     Some sites' exports put the sequence number at the *start* of each line
     instead of in the trailing 73-80 field `detect_seq_columns` looks for, with
     no guaranteed separator before the real content (e.g. `0010DEFINE DATA`
-    has none; `0080  2 #LEAVE (N2)` has padding spaces). Detection requires a
-    consistent all-digit run at a candidate width across a strong majority of
-    long-enough lines, the same threshold `detect_seq_columns` uses, so
-    free-format source that happens to start with a digit isn't mistaken for
-    a sequence-numbered export. Callers should only use this when
-    `detect_seq_columns` found nothing -- the two fields are mutually
-    exclusive in practice, and trailing detection is the better-attested
-    convention (mainframe listings, not just this heuristic's origin corpus).
+    has none; `0080  2 #LEAVE (N2)` has padding spaces after the number). Other
+    sites right-justify the number *within* the field instead, so the padding
+    comes before it (e.g. `     10  ENTRY ...`, a 7-wide field). Both shapes
+    are accepted: a candidate field is either entirely blank, or ends in a
+    digit with every character in it, from that digit backward, also a digit
+    -- ruling out a line whose content merely happens to start with a short
+    numeral a few characters in (see the free-format guard test), since that
+    numeral won't reach the end of the candidate width still followed only by
+    digits. Detection requires this to hold across a strong majority of
+    long-enough lines, the same threshold `detect_seq_columns` uses, *and*
+    requires a majority of those lines to actually show a digit rather than
+    being blank -- otherwise consistently-indented free-format source (every
+    line starting with the same run of spaces) would satisfy the blank
+    alternative alone and be mistaken for an all-blank sequence field,
+    silently stripping real indentation from every line. Callers should only
+    use this when `detect_seq_columns` found nothing -- the two fields are
+    mutually exclusive in practice, and trailing detection is the
+    better-attested convention (mainframe listings, not just this heuristic's
+    origin corpus).
+
+    Widths are tried largest-first: at the true field width, a right-justified
+    number's padding is blank and its digits are a digit-ending run, so
+    nearly every candidate line hits (blank or digit) and most hit on an
+    actual digit, clearing both thresholds. One width beyond it lands on the
+    non-digit separator after the field and fails outright, so the first
+    (largest) width to pass is the field boundary -- there is no need to also
+    reason about whether every *narrower* width would pass, since largest-
+    first already stops at the true one before any narrower candidate is
+    tried, whether or not it happens to pass on its own too.
     """
-    for width in widths:
+    for width in sorted(set(widths), reverse=True):
         candidates = [ln for ln in lines if len(ln.rstrip()) > width]
         if len(candidates) < 5:
             continue
-        hits = sum(1 for ln in candidates if ln[:width].isdigit())
-        if hits / len(candidates) >= 0.9:
+        hits = 0
+        digit_hits = 0
+        for ln in candidates:
+            chunk = ln[:width]
+            if chunk.strip() == "":
+                hits += 1
+            elif chunk[-1].isdigit() and chunk.strip().isdigit():
+                hits += 1
+                digit_hits += 1
+        if hits / len(candidates) >= 0.9 and digit_hits / len(candidates) >= 0.5:
             return width
     return None
 
@@ -300,10 +329,12 @@ def split_members(
         # configured before anything else touches the line, since splitter
         # banner patterns and dialect content matching both assume the
         # sequence number is already gone.
-        if leading_seq_width and len(raw) > leading_seq_width and raw[:leading_seq_width].isdigit():
-            seq = raw[:leading_seq_width]
-            raw = raw[leading_seq_width:]
-            return seq, raw.rstrip()
+        if leading_seq_width and len(raw) > leading_seq_width:
+            chunk = raw[:leading_seq_width]
+            if chunk.strip() == "" or (chunk[-1].isdigit() and chunk.strip().isdigit()):
+                seq = chunk.strip() or None
+                raw = raw[leading_seq_width:]
+                return seq, raw.rstrip()
         if seq_cols and len(raw) > seq_cols[0]:
             seq = raw[seq_cols[0]:seq_cols[1]].strip() or None
             return seq, raw[: seq_cols[0]].rstrip()
