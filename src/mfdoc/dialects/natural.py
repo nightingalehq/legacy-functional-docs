@@ -155,6 +155,12 @@ RE_BT = re.compile(r"^\s*BACKOUT\s+TRANSACTION\b", re.I)
 RE_RESET = re.compile(r"^\s*RESET\b(?P<rest>.*)$", re.I)
 RE_IGNORE = re.compile(r"^\s*IGNORE\s*$", re.I)
 
+# SET CONTROL sends terminal/printer control codes (page eject, column
+# ruler, etc.) -- presentation, not a business decision, so it's recognised
+# the same way as RESET/IGNORE above: no rule_candidate, just enough to stop
+# it showing up as an unparsed_line gap.
+RE_SET_CONTROL = re.compile(r"^\s*SET\s+CONTROL\b", re.I)
+
 RE_CALLNAT = re.compile(r"^\s*CALLNAT\s+(?P<target>'[^']+'|\"[^\"]+\"|[A-Z0-9#@$&\-_.]+)(?P<args>.*)$", re.I)
 RE_FETCH = re.compile(r"^\s*FETCH\s+(?P<ret>RETURN\s+|REPEAT\s+)?(?P<target>'[^']+'|\"[^\"]+\"|[A-Z0-9#@$&\-_.]+)(?P<args>.*)$", re.I)
 RE_PERFORM = re.compile(r"^\s*PERFORM\s+(?!BREAK)(?P<target>'[^']+'|[A-Z0-9#@$&\-_.]+)(?P<args>.*)$", re.I)
@@ -202,6 +208,16 @@ RE_MAP_BODY = re.compile(
 RE_COMPUTE = re.compile(r"^\s*(?:COMPUTE|ADD|SUBTRACT|MULTIPLY|DIVIDE|MOVE|EXAMINE|COMPRESS|SEPARATE|ASSIGN)\b", re.I)
 RE_MSG_NUM = re.compile(r"\bMESSAGE\s+NUMBER\s+(?P<num>[0-9#A-Z\-]+)", re.I)
 
+# The ASSIGN keyword is optional in Natural -- `#FIELD := value` is a
+# complete, valid statement on its own, and real source uses the short form
+# far more often than the explicit `ASSIGN #FIELD := value`. RE_COMPUTE only
+# ever anchored on the keyword, so every bare short-form assignment fell
+# through as an unparsed_line gap. Anchored on a leading identifier (so it
+# can't accidentally swallow a mid-statement ":=" that already matched
+# something upstream) followed by ":=" -- the one operator Natural never
+# uses for anything but assignment.
+RE_BARE_ASSIGN = re.compile(r"^\s*[A-Z#@$][A-Z0-9#@$&\-_.]*(?:\([^()]*\))?\s*:=\s*.+$", re.I)
+
 # The classic loop-counter idiom: ADD 1 TO x / SUBTRACT 1 FROM x. Excluded
 # from arithmetic rule capture even though "1" is technically a literal,
 # because it is almost never a business decision.
@@ -231,19 +247,24 @@ CONTINUATION_TAIL = re.compile(r"(\b(AND|OR|NOT|THRU|THROUGH|TO|WITH|BY)\s*$)|([
 # partial rule, since the citation still looks complete. None of these leading
 # tokens are ever the first word of a genuine new Natural statement, so
 # checking the *next* line's lead is a safe second signal with no added
-# false-continuation risk.
-CONTINUATION_LEAD = re.compile(r"^\s*(AND|OR|NOT|THRU|THROUGH|TO|WITH|BY)\b", re.I)
+# false-continuation risk. INTO covers the equally common
+# `COMPRESS ... \n INTO target` and `SEPARATE ... \n INTO target` wrap --
+# INTO is never the first word of a genuine new statement either.
+CONTINUATION_LEAD = re.compile(r"^\s*(AND|OR|NOT|THRU|THROUGH|TO|WITH|BY|INTO)\b", re.I)
 
 # Natural report-writer column-position tokens ("5T" = tab to column 5, "2X"
 # = skip 2 spaces) commonly appear on their own continuation line within a
-# multi-line WRITE/DISPLAY/PRINT operand list -- CONTINUATION_LEAD doesn't
-# cover them (they aren't a keyword), so without this such a line falls
-# through as its own unparsed_line gap instead of folding into the
-# statement it's actually part of. Scoped to WRITE/DISPLAY/PRINT only (see
-# the fold loop's RE_WRITE check) -- a bare "5T" on its own line in any
-# other context is much more likely a genuine unrecognised construct than
-# a continuation, and this is specifically a report-writer convention.
-CONTINUATION_LEAD_COLSPEC = re.compile(r"^\s*\d+[TX]\b", re.I)
+# multi-line WRITE/DISPLAY/PRINT/INPUT/REINPUT operand list -- CONTINUATION_LEAD
+# doesn't cover them (they aren't a keyword), so without this such a line falls
+# through as its own unparsed_line gap instead of folding into the statement
+# it's actually part of. Scoped to WRITE/DISPLAY/PRINT/INPUT/REINPUT only (see
+# the fold loop's verb check) -- a bare "5T" on its own line in any other
+# context is much more likely a genuine unrecognised construct than a
+# continuation, and this is specifically a report-writer/screen-layout
+# convention. The optional leading "/" or "//" is Natural's own
+# next-line/skip-a-line marker, routinely paired with a column-position token
+# on the same continuation line (e.g. "// 1X #MESSAGE").
+CONTINUATION_LEAD_COLSPEC = re.compile(r"^\s*/{0,2}\s*\d+[TX]\b", re.I)
 
 # Bounds how far the continuation-fold below will look ahead per line. Without
 # this, a source file where most lines end in a continuation token (adversarial
@@ -434,7 +455,10 @@ def extract(conn, member_id: int, lines: list[tuple[int, str | None, str]], memb
             if nxt_comment:
                 look += 1
                 continue
-            is_colspec_continuation = RE_WRITE.match(stmt) and CONTINUATION_LEAD_COLSPEC.match(nxt_code)
+            is_colspec_continuation = (
+                (RE_WRITE.match(stmt) or RE_INPUT.match(stmt) or RE_REINPUT.match(stmt))
+                and CONTINUATION_LEAD_COLSPEC.match(nxt_code)
+            )
             if not (CONTINUATION_TAIL.search(stmt.rstrip()) or CONTINUATION_LEAD.match(nxt_code)
                     or is_colspec_continuation):
                 break
@@ -542,7 +566,8 @@ def extract(conn, member_id: int, lines: list[tuple[int, str | None, str]], memb
 
         if not matched:
             matched = RE_COMPUTE.match(masked) or RE_END_ANY.match(masked) \
-                or RE_RESET.match(masked) or RE_IGNORE.match(masked)
+                or RE_RESET.match(masked) or RE_IGNORE.match(masked) \
+                or RE_SET_CONTROL.match(masked) or RE_BARE_ASSIGN.match(masked)
 
         # ---------------------------------------------- labelled statements
         # Last resort: a generic statement label ("SETA. SETTIME") defeats
@@ -573,7 +598,8 @@ def extract(conn, member_id: int, lines: list[tuple[int, str | None, str]], memb
                 matched = _match_arithmetic(conn, member_id, line_no, stmt2, masked2, depth)
             if not matched:
                 matched = RE_COMPUTE.match(masked2) or RE_END_ANY.match(masked2) \
-                    or RE_RESET.match(masked2) or RE_IGNORE.match(masked2)
+                    or RE_RESET.match(masked2) or RE_IGNORE.match(masked2) \
+                    or RE_SET_CONTROL.match(masked2) or RE_BARE_ASSIGN.match(masked2)
 
         if not matched:
             stats["unparsed"] += 1
@@ -855,20 +881,24 @@ def _match_map_body(conn, member_id, line_no, stmt, masked) -> bool:
 
 
 def _match_arithmetic(conn, member_id, line_no, stmt, masked, depth) -> bool:
-    """Capture COMPUTE/MOVE/ADD/SUBTRACT/MULTIPLY/DIVIDE/EXAMINE as a rule
-    candidate when a literal is involved -- assigning a fixed value to a
-    field (a status code, a threshold, a return code) is a business
-    decision. Pure variable-to-variable movement or accumulation (no
-    literal operand) and the ADD/SUBTRACT-1 loop-counter idiom are left
-    alone; capturing every arithmetic statement would bury the ones that
-    actually carry a decision under running totals and index increments.
+    """Capture COMPUTE/MOVE/ADD/SUBTRACT/MULTIPLY/DIVIDE/EXAMINE/ASSIGN (with
+    or without the optional ASSIGN keyword -- `#FIELD := value` is a complete
+    statement on its own, see RE_BARE_ASSIGN) as a rule candidate when a
+    literal is involved -- assigning a fixed value to a field (a status
+    code, a threshold, a return code) is a business decision. Pure
+    variable-to-variable movement or accumulation (no literal operand) and
+    the ADD/SUBTRACT-1 loop-counter idiom are left alone; capturing every
+    arithmetic statement would bury the ones that actually carry a decision
+    under running totals and index increments.
     """
-    if not RE_COMPUTE.match(masked) or RE_LOOP_COUNTER.match(masked):
+    is_keyword_form = RE_COMPUTE.match(masked)
+    is_bare_assign = not is_keyword_form and RE_BARE_ASSIGN.match(masked)
+    if not (is_keyword_form or is_bare_assign) or RE_LOOP_COUNTER.match(masked):
         return False
     _, str_literals = mask_literals(stmt)
     if not str_literals and not NUMLIT.search(masked):
         return False
-    verb = masked.split()[0].upper()
+    verb = masked.split()[0].upper() if is_keyword_form else "ASSIGN"
     fields, lits = _condition_facts(stmt)
     insert(conn, "rule_candidate", member_id=member_id, line_no=line_no,
            construct=verb, condition=stmt.strip()[:500] or None,

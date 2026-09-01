@@ -1,0 +1,20 @@
+** MMP9800 - STATEMENT-RECOGNITION REGRESSION FIXTURE
+** Four constructs missed by the scanner, found calibrating against a real
+** client corpus: a bare short-form assignment (no ASSIGN keyword), SET
+** CONTROL, an INPUT WINDOW block whose column-spec continuation lines are
+** prefixed with "/"/"//" (previously only WRITE/DISPLAY/PRINT folded
+** column-spec continuations, and only unprefixed ones), and a COMPRESS
+** wrapping onto a continuation line via INTO.
+DEFINE DATA LOCAL
+1 #FLAG (N1)
+1 #MESSAGE (A60)
+END-DEFINE
+*
+#FLAG := 1
+SET CONTROL 'WA'
+INPUT WINDOW = 'W1'
+  /  1X 'HELLO' (CD=RE)
+  // 1X #MESSAGE (AD=O)
+COMPRESS 'A' 'B'
+  INTO #MESSAGE
+END

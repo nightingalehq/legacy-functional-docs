@@ -5,7 +5,7 @@ well-formed document for anything except a deliberately-broken first draft,
 so the retry-once-then-report path is exercised without depending on a real
 model. Acceptance per the plan is "9 fixtures produce N valid documents
 unattended, with a cost figure and a retry count reported" -- this repo's
-fixture set has 12 batchable (natural/mantis program-level) members; the
+fixture set has 13 batchable (natural/mantis program-level) members; the
 other fixtures are data definitions and environment sources that option C
 deliberately routes to the CLI path instead, not module docs.
 """
@@ -83,7 +83,7 @@ def test_select_batch_members_returns_only_natural_and_mantis_programs(indexed_d
     members = batch_mod.select_batch_members(indexed_db)
     assert set(members) == {
         "MMP0100", "MMP0200", "MMP9000", "MMP9100", "MMP9200", "MMP9300", "MMP9400", "MMP9500",
-        "MMP9600", "MMP9700", "MMC0100", "ORDENQ",
+        "MMP9600", "MMP9700", "MMP9800", "MMC0100", "ORDENQ",
     }
 
 
@@ -96,11 +96,11 @@ def test_batch_generates_valid_docs_for_all_batchable_members(indexed_db, tmp_pa
         indexed_db, members, tmp_path / "out", caller, writing_rules, template,
         redact=NULL_REDACTOR, concurrency=2, state_path=None,
     )
-    assert summary.ok == len(members) == 12
+    assert summary.ok == len(members) == 13
     assert summary.failed == 0
     assert summary.retried == 0
-    assert summary.total_input_tokens == 1200
-    assert summary.total_output_tokens == 2400
+    assert summary.total_input_tokens == 1300
+    assert summary.total_output_tokens == 2600
     for member in members:
         subdir = batch_mod._output_subdir(indexed_db, member)
         assert (tmp_path / "out" / subdir / f"{member}.md").exists()
@@ -119,7 +119,7 @@ def test_batch_reports_cost_only_when_pricing_configured(indexed_db, tmp_path):
         indexed_db, members, tmp_path / "out2", caller2, "rules", "template",
         cost_per_mtok_in=3.0, cost_per_mtok_out=15.0,
     )
-    expected = (1200 / 1_000_000) * 3.0 + (2400 / 1_000_000) * 15.0
+    expected = (1300 / 1_000_000) * 3.0 + (2600 / 1_000_000) * 15.0
     assert summary_priced.cost_usd == expected
 
 
