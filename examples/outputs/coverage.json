@@ -1,15 +1,15 @@
 {
-  "members": 21,
-  "code_members": 13,
-  "source_lines": 414,
-  "unparsed_lines": 8,
-  "line_recognition_rate": 0.9807,
+  "members": 22,
+  "code_members": 14,
+  "source_lines": 435,
+  "unparsed_lines": 11,
+  "line_recognition_rate": 0.9747,
   "entities": 13,
   "entities_with_definition": 9,
   "entity_definition_rate": 0.6923,
   "entity_fields": 46,
   "data_accesses": 14,
-  "rule_candidates": 41,
+  "rule_candidates": 43,
   "invocation_edges": 13,
   "invocations_resolved": 2,
   "call_resolution_rate": 0.1538,
@@ -18,5 +18,5 @@
   "includes_resolved": 1,
   "include_resolution_rate": 0.125,
   "gaps_high": 20,
-  "gaps_total": 42
+  "gaps_total": 46
 }

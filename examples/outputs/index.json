@@ -146,108 +146,120 @@
     },
     {
       "id": 13,
-      "name": "MILL-ORDER",
-      "dialect": "ddm",
-      "object_type": "ddm",
-      "library": null,
+      "name": "MMP9800",
+      "dialect": "natural",
+      "object_type": "program",
+      "library": "MILLPROD",
       "system": "MOM",
       "source_file_id": 13,
       "first_line": 1,
-      "last_line": 17,
-      "mode": null
+      "last_line": 21,
+      "mode": "structured"
     },
     {
       "id": 14,
-      "name": "TEST-COUPLE",
+      "name": "MILL-ORDER",
       "dialect": "ddm",
       "object_type": "ddm",
       "library": null,
       "system": "MOM",
       "source_file_id": 14,
       "first_line": 1,
-      "last_line": 8,
+      "last_line": 17,
       "mode": null
     },
     {
       "id": 15,
-      "name": "MILL-ORDER",
-      "dialect": "adabas_fdt",
-      "object_type": "fdt",
+      "name": "TEST-COUPLE",
+      "dialect": "ddm",
+      "object_type": "ddm",
       "library": null,
       "system": "MOM",
       "source_file_id": 15,
       "first_line": 1,
-      "last_line": 21,
+      "last_line": 8,
       "mode": null
     },
     {
       "id": 16,
-      "name": "TEST-COUPLE",
+      "name": "MILL-ORDER",
       "dialect": "adabas_fdt",
       "object_type": "fdt",
       "library": null,
       "system": "MOM",
       "source_file_id": 16,
       "first_line": 1,
-      "last_line": 10,
+      "last_line": 21,
       "mode": null
     },
     {
       "id": 17,
+      "name": "TEST-COUPLE",
+      "dialect": "adabas_fdt",
+      "object_type": "fdt",
+      "library": null,
+      "system": "MOM",
+      "source_file_id": 17,
+      "first_line": 1,
+      "last_line": 10,
+      "mode": null
+    },
+    {
+      "id": 18,
       "name": "ORDENQ",
       "dialect": "mantis",
       "object_type": "program",
       "library": "STEELLIB",
       "system": "OE",
-      "source_file_id": 17,
+      "source_file_id": 18,
       "first_line": 1,
       "last_line": 43,
       "mode": null
     },
     {
-      "id": 18,
+      "id": 19,
       "name": "STEELDB",
       "dialect": "supra_dir",
       "object_type": "directory",
       "library": null,
       "system": "OE",
-      "source_file_id": 18,
+      "source_file_id": 19,
       "first_line": 1,
       "last_line": 22,
       "mode": null
     },
     {
-      "id": 19,
+      "id": 20,
       "name": "CERTS",
       "dialect": "sql_ddl",
       "object_type": "ddl",
       "library": null,
       "system": "MOM",
-      "source_file_id": 19,
+      "source_file_id": 20,
       "first_line": 1,
       "last_line": 16,
       "mode": null
     },
     {
-      "id": 20,
+      "id": 21,
       "name": "MMB0100",
       "dialect": "jcl",
       "object_type": "job",
       "library": null,
       "system": "MOM",
-      "source_file_id": 20,
+      "source_file_id": 21,
       "first_line": 1,
       "last_line": 21,
       "mode": null
     },
     {
-      "id": 21,
+      "id": 22,
       "name": "STEEL",
       "dialect": "cics_csd",
       "object_type": "csd",
       "library": null,
       "system": "MOM",
-      "source_file_id": 21,
+      "source_file_id": 22,
       "first_line": 1,
       "last_line": 5,
       "mode": null
@@ -261,7 +273,7 @@
       "physical_ref": "DBID 012 FNR 045",
       "dbid": "012",
       "fnr": "045",
-      "defined_in": 13,
+      "defined_in": 14,
       "defined_line": 1,
       "notes": "default sequence: AA"
     },
@@ -305,7 +317,7 @@
       "physical_ref": "DBID 012 FNR 090",
       "dbid": "012",
       "fnr": "090",
-      "defined_in": 14,
+      "defined_in": 15,
       "defined_line": 1,
       "notes": "default sequence: AA"
     },
@@ -316,7 +328,7 @@
       "physical_ref": "DBID 012 FNR 045",
       "dbid": "012",
       "fnr": "045",
-      "defined_in": 15,
+      "defined_in": 16,
       "defined_line": 1,
       "notes": null
     },
@@ -327,7 +339,7 @@
       "physical_ref": "DBID 012 FNR 090",
       "dbid": "012",
       "fnr": "090",
-      "defined_in": 16,
+      "defined_in": 17,
       "defined_line": 1,
       "notes": null
     },
@@ -338,7 +350,7 @@
       "physical_ref": "schema STEELDB",
       "dbid": null,
       "fnr": null,
-      "defined_in": 18,
+      "defined_in": 19,
       "defined_line": 3,
       "notes": null
     },
@@ -349,7 +361,7 @@
       "physical_ref": "schema STEELDB",
       "dbid": null,
       "fnr": null,
-      "defined_in": 18,
+      "defined_in": 19,
       "defined_line": 11,
       "notes": null
     },
@@ -360,7 +372,7 @@
       "physical_ref": "MILL_CERT",
       "dbid": null,
       "fnr": null,
-      "defined_in": 19,
+      "defined_in": 20,
       "defined_line": 1,
       "notes": null
     },
@@ -371,7 +383,7 @@
       "physical_ref": "GRADE_MASTER",
       "dbid": null,
       "fnr": null,
-      "defined_in": 19,
+      "defined_in": 20,
       "defined_line": 11,
       "notes": null
     },
@@ -393,7 +405,7 @@
       "physical_ref": "STEEL.PROD.MILLORD",
       "dbid": null,
       "fnr": null,
-      "defined_in": 21,
+      "defined_in": 22,
       "defined_line": 4,
       "notes": "CICS FILE MILLORD"
     }
@@ -1143,7 +1155,7 @@
       "to_entity": 8,
       "link_kind": "implements",
       "link_name": "DDM MILL-ORDER over DBID 012 FNR 045",
-      "via_member": 13,
+      "via_member": 14,
       "via_line": 1,
       "confidence": "verified"
     },
@@ -1153,7 +1165,7 @@
       "to_entity": 9,
       "link_kind": "implements",
       "link_name": "DDM TEST-COUPLE over DBID 012 FNR 090",
-      "via_member": 14,
+      "via_member": 15,
       "via_line": 1,
       "confidence": "verified"
     },
@@ -1163,7 +1175,7 @@
       "to_entity": 8,
       "link_kind": "coupled",
       "link_name": "CROSS-REF couples to FNR 045",
-      "via_member": 14,
+      "via_member": 15,
       "via_line": 6,
       "confidence": "inferred"
     },
@@ -1173,7 +1185,7 @@
       "to_entity": 11,
       "link_kind": "linkpath",
       "link_name": "ORDLNK",
-      "via_member": 18,
+      "via_member": 19,
       "via_line": 19,
       "confidence": "verified"
     },
@@ -1183,7 +1195,7 @@
       "to_entity": 13,
       "link_kind": "foreign_key",
       "link_name": "GRADE_CODE",
-      "via_member": 19,
+      "via_member": 20,
       "via_line": 1,
       "confidence": "verified"
     }
@@ -1331,7 +1343,7 @@
     },
     {
       "id": 11,
-      "member_id": 17,
+      "member_id": 18,
       "line_no": 15,
       "verb": "READM",
       "crud": "R",
@@ -1345,7 +1357,7 @@
     },
     {
       "id": 12,
-      "member_id": 17,
+      "member_id": 18,
       "line_no": 20,
       "verb": "OBTAIN",
       "crud": "R",
@@ -1359,7 +1371,7 @@
     },
     {
       "id": 13,
-      "member_id": 17,
+      "member_id": 18,
       "line_no": 23,
       "verb": "RDNXT",
       "crud": "R",
@@ -1373,7 +1385,7 @@
     },
     {
       "id": 14,
-      "member_id": 17,
+      "member_id": 18,
       "line_no": 31,
       "verb": "WRITM",
       "crud": "U",
@@ -1488,7 +1500,7 @@
     },
     {
       "id": 10,
-      "caller_id": 17,
+      "caller_id": 18,
       "callee_name": "PRICECALC",
       "callee_id": null,
       "call_kind": "CALL",
@@ -1499,7 +1511,7 @@
     },
     {
       "id": 11,
-      "caller_id": 17,
+      "caller_id": 18,
       "callee_name": "ORDSCR1",
       "callee_id": null,
       "call_kind": "INCLUDE",
@@ -1510,7 +1522,7 @@
     },
     {
       "id": 12,
-      "caller_id": 17,
+      "caller_id": 18,
       "callee_name": "ORDSCR1",
       "callee_id": null,
       "call_kind": "INCLUDE",
@@ -1521,7 +1533,7 @@
     },
     {
       "id": 13,
-      "caller_id": 17,
+      "caller_id": 18,
       "callee_name": "ORDSCR1",
       "callee_id": null,
       "call_kind": "INCLUDE",
@@ -1532,7 +1544,7 @@
     },
     {
       "id": 14,
-      "caller_id": 17,
+      "caller_id": 18,
       "callee_name": "PRICECALC",
       "callee_id": null,
       "call_kind": "CALL",
@@ -1543,7 +1555,7 @@
     },
     {
       "id": 15,
-      "caller_id": 17,
+      "caller_id": 18,
       "callee_name": "ORDSCR2",
       "callee_id": null,
       "call_kind": "INCLUDE",
@@ -1554,7 +1566,7 @@
     },
     {
       "id": 16,
-      "caller_id": 17,
+      "caller_id": 18,
       "callee_name": "ORDSCR1",
       "callee_id": null,
       "call_kind": "INCLUDE",
@@ -1565,7 +1577,7 @@
     },
     {
       "id": 17,
-      "caller_id": 20,
+      "caller_id": 21,
       "callee_name": "NATBATCH",
       "callee_id": null,
       "call_kind": "EXEC_PGM",
@@ -1576,7 +1588,7 @@
     },
     {
       "id": 18,
-      "caller_id": 20,
+      "caller_id": 21,
       "callee_name": "MMP0100",
       "callee_id": 3,
       "call_kind": "EXEC_PGM",
@@ -1587,7 +1599,7 @@
     },
     {
       "id": 19,
-      "caller_id": 20,
+      "caller_id": 21,
       "callee_name": "IDCAMS",
       "callee_id": null,
       "call_kind": "EXEC_PGM",
@@ -1598,7 +1610,7 @@
     },
     {
       "id": 20,
-      "caller_id": 20,
+      "caller_id": 21,
       "callee_name": "MMU0300",
       "callee_id": null,
       "call_kind": "EXEC_PGM",
@@ -1609,7 +1621,7 @@
     },
     {
       "id": 21,
-      "caller_id": 21,
+      "caller_id": 22,
       "callee_name": "NATCICS",
       "callee_id": null,
       "call_kind": "EXEC_PGM",
@@ -1620,7 +1632,7 @@
     },
     {
       "id": 22,
-      "caller_id": 21,
+      "caller_id": 22,
       "callee_name": "MMP0200",
       "callee_id": 4,
       "call_kind": "EXEC_PGM",
@@ -1647,7 +1659,7 @@
     },
     {
       "id": 3,
-      "member_id": 17,
+      "member_id": 18,
       "line_no": 32,
       "marker": "ENDTR",
       "et_data": null
@@ -1752,39 +1764,47 @@
     },
     {
       "id": 13,
-      "member_id": 17,
+      "member_id": 13,
+      "line_no": 15,
+      "kind": "INPUT",
+      "target": null,
+      "fields": "WINDOW = \u0000\u0000\u0000\u0000 /  1X \u0000\u0000\u0000\u0000\u0000\u0000\u0000 (CD=RE) // 1X #MESSAGE (AD=O)"
+    },
+    {
+      "id": 14,
+      "member_id": 18,
       "line_no": 10,
       "kind": "CONVERSE",
       "target": "ORDSCR1",
       "fields": null
     },
     {
-      "id": 14,
-      "member_id": 17,
+      "id": 15,
+      "member_id": 18,
       "line_no": 13,
       "kind": "SHOW",
       "target": "ORDSCR1",
       "fields": null
     },
     {
-      "id": 15,
-      "member_id": 17,
+      "id": 16,
+      "member_id": 18,
       "line_no": 18,
       "kind": "SHOW",
       "target": "ORDSCR1",
       "fields": null
     },
     {
-      "id": 16,
-      "member_id": 17,
+      "id": 17,
+      "member_id": 18,
       "line_no": 33,
       "kind": "CONVERSE",
       "target": "ORDSCR2",
       "fields": null
     },
     {
-      "id": 17,
-      "member_id": 17,
+      "id": 18,
+      "member_id": 18,
       "line_no": 40,
       "kind": "SHOW",
       "target": "ORDSCR1",
@@ -2171,7 +2191,33 @@
     },
     {
       "id": 30,
-      "member_id": 17,
+      "member_id": 13,
+      "line_no": 13,
+      "end_line": null,
+      "construct": "ASSIGN",
+      "condition": "#FLAG := 1",
+      "depth": 0,
+      "fields_used": "FLAG",
+      "literals": "1",
+      "raw": "#FLAG := 1",
+      "confidence": "verified"
+    },
+    {
+      "id": 31,
+      "member_id": 13,
+      "line_no": 18,
+      "end_line": null,
+      "construct": "COMPRESS",
+      "condition": "COMPRESS 'A' 'B' INTO #MESSAGE",
+      "depth": 0,
+      "fields_used": "COMPRESS,INTO,MESSAGE",
+      "literals": "A,B",
+      "raw": "COMPRESS 'A' 'B' INTO #MESSAGE",
+      "confidence": "verified"
+    },
+    {
+      "id": 32,
+      "member_id": 18,
       "line_no": 11,
       "end_line": null,
       "construct": "IF",
@@ -2183,8 +2229,8 @@
       "confidence": "verified"
     },
     {
-      "id": 31,
-      "member_id": 17,
+      "id": 33,
+      "member_id": 18,
       "line_no": 12,
       "end_line": null,
       "construct": "ASSIGN",
@@ -2196,8 +2242,8 @@
       "confidence": "verified"
     },
     {
-      "id": 32,
-      "member_id": 17,
+      "id": 34,
+      "member_id": 18,
       "line_no": 16,
       "end_line": null,
       "construct": "IF",
@@ -2209,8 +2255,8 @@
       "confidence": "verified"
     },
     {
-      "id": 33,
-      "member_id": 17,
+      "id": 35,
+      "member_id": 18,
       "line_no": 17,
       "end_line": null,
       "construct": "ASSIGN",
@@ -2222,8 +2268,8 @@
       "confidence": "verified"
     },
     {
-      "id": 34,
-      "member_id": 17,
+      "id": 36,
+      "member_id": 18,
       "line_no": 21,
       "end_line": null,
       "construct": "WHILE",
@@ -2235,8 +2281,8 @@
       "confidence": "verified"
     },
     {
-      "id": 35,
-      "member_id": 17,
+      "id": 37,
+      "member_id": 18,
       "line_no": 22,
       "end_line": null,
       "construct": "ASSIGN",
@@ -2248,8 +2294,8 @@
       "confidence": "verified"
     },
     {
-      "id": 36,
-      "member_id": 17,
+      "id": 38,
+      "member_id": 18,
       "line_no": 25,
       "end_line": null,
       "construct": "CASE",
@@ -2261,8 +2307,8 @@
       "confidence": "verified"
     },
     {
-      "id": 37,
-      "member_id": 17,
+      "id": 39,
+      "member_id": 18,
       "line_no": 26,
       "end_line": null,
       "construct": "WHEN",
@@ -2274,8 +2320,8 @@
       "confidence": "verified"
     },
     {
-      "id": 38,
-      "member_id": 17,
+      "id": 40,
+      "member_id": 18,
       "line_no": 28,
       "end_line": null,
       "construct": "WHEN",
@@ -2287,8 +2333,8 @@
       "confidence": "verified"
     },
     {
-      "id": 39,
-      "member_id": 17,
+      "id": 41,
+      "member_id": 18,
       "line_no": 29,
       "end_line": null,
       "construct": "ASSIGN",
@@ -2300,8 +2346,8 @@
       "confidence": "verified"
     },
     {
-      "id": 40,
-      "member_id": 17,
+      "id": 42,
+      "member_id": 18,
       "line_no": 37,
       "end_line": null,
       "construct": "IF",
@@ -2313,8 +2359,8 @@
       "confidence": "verified"
     },
     {
-      "id": 41,
-      "member_id": 17,
+      "id": 43,
+      "member_id": 18,
       "line_no": 39,
       "end_line": null,
       "construct": "ASSIGN",
@@ -2355,7 +2401,7 @@
   "job_step": [
     {
       "id": 1,
-      "member_id": 20,
+      "member_id": 21,
       "line_no": 5,
       "step_name": "STEP010",
       "program": "NATBATCH",
@@ -2365,7 +2411,7 @@
     },
     {
       "id": 2,
-      "member_id": 20,
+      "member_id": 21,
       "line_no": 14,
       "step_name": "STEP020",
       "program": "IDCAMS",
@@ -2375,7 +2421,7 @@
     },
     {
       "id": 3,
-      "member_id": 20,
+      "member_id": 21,
       "line_no": 19,
       "step_name": "STEP030",
       "program": "MMU0300",
@@ -2387,7 +2433,7 @@
   "job_dd": [
     {
       "id": 1,
-      "member_id": 20,
+      "member_id": 21,
       "line_no": 6,
       "step_name": "STEP010",
       "dd_name": "STEPLIB",
@@ -2397,7 +2443,7 @@
     },
     {
       "id": 2,
-      "member_id": 20,
+      "member_id": 21,
       "line_no": 7,
       "step_name": "STEP010",
       "dd_name": "DDCARD",
@@ -2407,7 +2453,7 @@
     },
     {
       "id": 3,
-      "member_id": 20,
+      "member_id": 21,
       "line_no": 8,
       "step_name": "STEP010",
       "dd_name": "CMSYNIN",
@@ -2417,7 +2463,7 @@
     },
     {
       "id": 4,
-      "member_id": 20,
+      "member_id": 21,
       "line_no": 13,
       "step_name": "STEP010",
       "dd_name": "CMPRINT",
@@ -2427,7 +2473,7 @@
     },
     {
       "id": 5,
-      "member_id": 20,
+      "member_id": 21,
       "line_no": 15,
       "step_name": "STEP020",
       "dd_name": "SYSIN",
@@ -2437,7 +2483,7 @@
     },
     {
       "id": 6,
-      "member_id": 20,
+      "member_id": 21,
       "line_no": 20,
       "step_name": "STEP030",
       "dd_name": "ORDEXT",
@@ -2449,7 +2495,7 @@
   "cics_resource": [
     {
       "id": 1,
-      "member_id": 21,
+      "member_id": 22,
       "line_no": 1,
       "resource_type": "TRANSACTION",
       "resource_name": "MO01",
@@ -2457,7 +2503,7 @@
     },
     {
       "id": 2,
-      "member_id": 21,
+      "member_id": 22,
       "line_no": 2,
       "resource_type": "TRANSACTION",
       "resource_name": "MC02",
@@ -2465,7 +2511,7 @@
     },
     {
       "id": 3,
-      "member_id": 21,
+      "member_id": 22,
       "line_no": 3,
       "resource_type": "PROGRAM",
       "resource_name": "MMP0200",
@@ -2473,7 +2519,7 @@
     },
     {
       "id": 4,
-      "member_id": 21,
+      "member_id": 22,
       "line_no": 4,
       "resource_type": "FILE",
       "resource_name": "MILLORD",
@@ -2600,7 +2646,34 @@
     },
     {
       "id": 14,
-      "member_id": 14,
+      "member_id": 13,
+      "line_no": 16,
+      "gap_kind": "unparsed_line",
+      "severity": "low",
+      "detail": "Statement not recognised by the Natural scanner in MMP9800.",
+      "raw": "/  1X 'HELLO' (CD=RE)"
+    },
+    {
+      "id": 15,
+      "member_id": 13,
+      "line_no": 17,
+      "gap_kind": "unparsed_line",
+      "severity": "low",
+      "detail": "Statement not recognised by the Natural scanner in MMP9800.",
+      "raw": "// 1X #MESSAGE (AD=O)"
+    },
+    {
+      "id": 16,
+      "member_id": 13,
+      "line_no": 19,
+      "gap_kind": "unparsed_line",
+      "severity": "low",
+      "detail": "Statement not recognised by the Natural scanner in MMP9800.",
+      "raw": "INTO #MESSAGE"
+    },
+    {
+      "id": 17,
+      "member_id": 15,
       "line_no": 7,
       "gap_kind": "dynamic_target",
       "severity": "medium",
@@ -2608,8 +2681,8 @@
       "raw": "N   coupling used here, no target given"
     },
     {
-      "id": 15,
-      "member_id": 17,
+      "id": 18,
+      "member_id": 18,
       "line_no": 8,
       "gap_kind": "external_call",
       "severity": "medium",
@@ -2617,8 +2690,8 @@
       "raw": "EXTERNAL \"STEELLIB\",\"PRICECALC\""
     },
     {
-      "id": 16,
-      "member_id": 17,
+      "id": 19,
+      "member_id": 18,
       "line_no": 38,
       "gap_kind": "unparsed_line",
       "severity": "low",
@@ -2626,7 +2699,7 @@
       "raw": "'OR CUST_NO = \" \""
     },
     {
-      "id": 17,
+      "id": 20,
       "member_id": null,
       "line_no": null,
       "gap_kind": "no_ddl_for_entity",
@@ -2635,7 +2708,7 @@
       "raw": null
     },
     {
-      "id": 18,
+      "id": 21,
       "member_id": null,
       "line_no": null,
       "gap_kind": "no_ddl_for_entity",
@@ -2644,7 +2717,7 @@
       "raw": null
     },
     {
-      "id": 19,
+      "id": 22,
       "member_id": null,
       "line_no": null,
       "gap_kind": "no_ddl_for_entity",
@@ -2653,8 +2726,8 @@
       "raw": null
     },
     {
-      "id": 20,
-      "member_id": 20,
+      "id": 23,
+      "member_id": 21,
       "line_no": 14,
       "gap_kind": "unresolved_call",
       "severity": "high",
@@ -2662,7 +2735,7 @@
       "raw": null
     },
     {
-      "id": 21,
+      "id": 24,
       "member_id": 3,
       "line_no": 7,
       "gap_kind": "unresolved_call",
@@ -2671,7 +2744,7 @@
       "raw": null
     },
     {
-      "id": 22,
+      "id": 25,
       "member_id": 4,
       "line_no": 11,
       "gap_kind": "unresolved_call",
@@ -2680,7 +2753,7 @@
       "raw": null
     },
     {
-      "id": 23,
+      "id": 26,
       "member_id": 3,
       "line_no": 57,
       "gap_kind": "unresolved_call",
@@ -2689,7 +2762,7 @@
       "raw": null
     },
     {
-      "id": 24,
+      "id": 27,
       "member_id": 3,
       "line_no": 67,
       "gap_kind": "unresolved_call",
@@ -2698,8 +2771,8 @@
       "raw": null
     },
     {
-      "id": 25,
-      "member_id": 20,
+      "id": 28,
+      "member_id": 21,
       "line_no": 19,
       "gap_kind": "unresolved_call",
       "severity": "high",
@@ -2707,8 +2780,8 @@
       "raw": null
     },
     {
-      "id": 26,
-      "member_id": 20,
+      "id": 29,
+      "member_id": 21,
       "line_no": 5,
       "gap_kind": "unresolved_call",
       "severity": "high",
@@ -2716,8 +2789,8 @@
       "raw": null
     },
     {
-      "id": 27,
-      "member_id": 21,
+      "id": 30,
+      "member_id": 22,
       "line_no": 1,
       "gap_kind": "unresolved_call",
       "severity": "high",
@@ -2725,8 +2798,8 @@
       "raw": null
     },
     {
-      "id": 28,
-      "member_id": 17,
+      "id": 31,
+      "member_id": 18,
       "line_no": 10,
       "gap_kind": "unresolved_call",
       "severity": "high",
@@ -2734,8 +2807,8 @@
       "raw": null
     },
     {
-      "id": 29,
-      "member_id": 17,
+      "id": 32,
+      "member_id": 18,
       "line_no": 33,
       "gap_kind": "unresolved_call",
       "severity": "high",
@@ -2743,7 +2816,7 @@
       "raw": null
     },
     {
-      "id": 30,
+      "id": 33,
       "member_id": 4,
       "line_no": 23,
       "gap_kind": "unresolved_call",
@@ -2752,8 +2825,8 @@
       "raw": null
     },
     {
-      "id": 31,
-      "member_id": 17,
+      "id": 34,
+      "member_id": 18,
       "line_no": 8,
       "gap_kind": "unresolved_call",
       "severity": "high",
@@ -2761,7 +2834,7 @@
       "raw": null
     },
     {
-      "id": 32,
+      "id": 35,
       "member_id": 9,
       "line_no": 10,
       "gap_kind": "unresolved_call",
@@ -2770,8 +2843,8 @@
       "raw": null
     },
     {
-      "id": 33,
-      "member_id": 17,
+      "id": 36,
+      "member_id": 18,
       "line_no": null,
       "gap_kind": "orphan_module",
       "severity": "medium",
@@ -2779,7 +2852,7 @@
       "raw": null
     },
     {
-      "id": 34,
+      "id": 37,
       "member_id": 5,
       "line_no": null,
       "gap_kind": "orphan_module",
@@ -2788,7 +2861,7 @@
       "raw": null
     },
     {
-      "id": 35,
+      "id": 38,
       "member_id": 6,
       "line_no": null,
       "gap_kind": "orphan_module",
@@ -2797,7 +2870,7 @@
       "raw": null
     },
     {
-      "id": 36,
+      "id": 39,
       "member_id": 7,
       "line_no": null,
       "gap_kind": "orphan_module",
@@ -2806,7 +2879,7 @@
       "raw": null
     },
     {
-      "id": 37,
+      "id": 40,
       "member_id": 8,
       "line_no": null,
       "gap_kind": "orphan_module",
@@ -2815,7 +2888,7 @@
       "raw": null
     },
     {
-      "id": 38,
+      "id": 41,
       "member_id": 9,
       "line_no": null,
       "gap_kind": "orphan_module",
@@ -2824,7 +2897,7 @@
       "raw": null
     },
     {
-      "id": 39,
+      "id": 42,
       "member_id": 10,
       "line_no": null,
       "gap_kind": "orphan_module",
@@ -2833,7 +2906,7 @@
       "raw": null
     },
     {
-      "id": 40,
+      "id": 43,
       "member_id": 11,
       "line_no": null,
       "gap_kind": "orphan_module",
@@ -2842,7 +2915,7 @@
       "raw": null
     },
     {
-      "id": 41,
+      "id": 44,
       "member_id": 12,
       "line_no": null,
       "gap_kind": "orphan_module",
@@ -2851,7 +2924,16 @@
       "raw": null
     },
     {
-      "id": 42,
+      "id": 45,
+      "member_id": 13,
+      "line_no": null,
+      "gap_kind": "orphan_module",
+      "severity": "medium",
+      "detail": "No JCL step, CICS transaction or program call refers to MMP9800. It may be dead code, invoked dynamically, or started from a scheduler or menu definition that was not supplied. Confirm before documenting it as live functionality.",
+      "raw": null
+    },
+    {
+      "id": 46,
       "member_id": 7,
       "line_no": null,
       "gap_kind": "sme_question",
@@ -3223,219 +3305,249 @@
     },
     {
       "id": 61,
+      "scope": "MMP9800",
+      "name": "natural.lines",
+      "value": "21"
+    },
+    {
+      "id": 62,
+      "scope": "MMP9800",
+      "name": "natural.code_lines",
+      "value": "12"
+    },
+    {
+      "id": 63,
+      "scope": "MMP9800",
+      "name": "natural.comment_lines",
+      "value": "8"
+    },
+    {
+      "id": 64,
+      "scope": "MMP9800",
+      "name": "natural.unparsed",
+      "value": "4"
+    },
+    {
+      "id": 65,
+      "scope": "MMP9800",
+      "name": "natural.views",
+      "value": "[]"
+    },
+    {
+      "id": 66,
       "scope": "ORDENQ",
       "name": "mantis.lines",
       "value": "43"
     },
     {
-      "id": 62,
+      "id": 67,
       "scope": "ORDENQ",
       "name": "mantis.code_lines",
       "value": "40"
     },
     {
-      "id": 63,
+      "id": 68,
       "scope": "ORDENQ",
       "name": "mantis.comment_lines",
       "value": "1"
     },
     {
-      "id": 64,
+      "id": 69,
       "scope": "ORDENQ",
       "name": "mantis.unparsed",
       "value": "1"
     },
     {
-      "id": 65,
+      "id": 70,
       "scope": "ORDENQ",
       "name": "mantis.recognition_rate",
       "value": "0.975"
     },
     {
-      "id": 66,
+      "id": 71,
       "scope": "STEELDB",
       "name": "supra.datasets",
       "value": "2"
     },
     {
-      "id": 67,
+      "id": 72,
       "scope": "STEELDB",
       "name": "supra.elements",
       "value": "8"
     },
     {
-      "id": 68,
+      "id": 73,
       "scope": "STEELDB",
       "name": "supra.linkpaths",
       "value": "1"
     },
     {
-      "id": 69,
+      "id": 74,
       "scope": "STEELDB",
       "name": "supra.unmatched",
       "value": "3"
     },
     {
-      "id": 70,
+      "id": 75,
       "scope": "CERTS",
       "name": "sqlddl.tables",
       "value": "2"
     },
     {
-      "id": 71,
+      "id": 76,
       "scope": "CERTS",
       "name": "sqlddl.columns",
       "value": "7"
     },
     {
-      "id": 72,
+      "id": 77,
       "scope": "MMB0100",
       "name": "jcl.steps",
       "value": "3"
     },
     {
-      "id": 73,
+      "id": 78,
       "scope": "MMB0100",
       "name": "jcl.dds",
       "value": "4"
     },
     {
-      "id": 74,
+      "id": 79,
       "scope": "STEEL",
       "name": "cics.resources",
       "value": "4"
     },
     {
-      "id": 95,
+      "id": 100,
       "scope": "global",
       "name": "derived.orphan_modules",
-      "value": "[\"ORDENQ\", \"MMP9000\", \"MMP9100\", \"MMP9200\", \"MMP9300\", \"MMP9400\", \"MMP9500\", \"MMP9600\", \"MMP9700\"]"
+      "value": "[\"ORDENQ\", \"MMP9000\", \"MMP9100\", \"MMP9200\", \"MMP9300\", \"MMP9400\", \"MMP9500\", \"MMP9600\", \"MMP9700\", \"MMP9800\"]"
     },
     {
-      "id": 96,
+      "id": 101,
       "scope": "global",
       "name": "derived.transaction_scopes",
       "value": "3"
     },
     {
-      "id": 97,
+      "id": 102,
       "scope": "global",
       "name": "coverage.members",
-      "value": "21"
+      "value": "22"
     },
     {
-      "id": 98,
+      "id": 103,
       "scope": "global",
       "name": "coverage.code_members",
-      "value": "13"
+      "value": "14"
     },
     {
-      "id": 99,
+      "id": 104,
       "scope": "global",
       "name": "coverage.source_lines",
-      "value": "414"
+      "value": "435"
     },
     {
-      "id": 100,
+      "id": 105,
       "scope": "global",
       "name": "coverage.unparsed_lines",
-      "value": "8"
+      "value": "11"
     },
     {
-      "id": 101,
+      "id": 106,
       "scope": "global",
       "name": "coverage.line_recognition_rate",
-      "value": "0.9807"
+      "value": "0.9747"
     },
     {
-      "id": 102,
+      "id": 107,
       "scope": "global",
       "name": "coverage.entities",
       "value": "13"
     },
     {
-      "id": 103,
+      "id": 108,
       "scope": "global",
       "name": "coverage.entities_with_definition",
       "value": "9"
     },
     {
-      "id": 104,
+      "id": 109,
       "scope": "global",
       "name": "coverage.entity_definition_rate",
       "value": "0.6923"
     },
     {
-      "id": 105,
+      "id": 110,
       "scope": "global",
       "name": "coverage.entity_fields",
       "value": "46"
     },
     {
-      "id": 106,
+      "id": 111,
       "scope": "global",
       "name": "coverage.data_accesses",
       "value": "14"
     },
     {
-      "id": 107,
+      "id": 112,
       "scope": "global",
       "name": "coverage.rule_candidates",
-      "value": "41"
+      "value": "43"
     },
     {
-      "id": 108,
+      "id": 113,
       "scope": "global",
       "name": "coverage.invocation_edges",
       "value": "13"
     },
     {
-      "id": 109,
+      "id": 114,
       "scope": "global",
       "name": "coverage.invocations_resolved",
       "value": "2"
     },
     {
-      "id": 110,
+      "id": 115,
       "scope": "global",
       "name": "coverage.call_resolution_rate",
       "value": "0.1538"
     },
     {
-      "id": 111,
+      "id": 116,
       "scope": "global",
       "name": "coverage.dynamic_call_edges",
       "value": "1"
     },
     {
-      "id": 112,
+      "id": 117,
       "scope": "global",
       "name": "coverage.include_edges",
       "value": "8"
     },
     {
-      "id": 113,
+      "id": 118,
       "scope": "global",
       "name": "coverage.includes_resolved",
       "value": "1"
     },
     {
-      "id": 114,
+      "id": 119,
       "scope": "global",
       "name": "coverage.include_resolution_rate",
       "value": "0.125"
     },
     {
-      "id": 115,
+      "id": 120,
       "scope": "global",
       "name": "coverage.gaps_high",
       "value": "20"
     },
     {
-      "id": 116,
+      "id": 121,
       "scope": "global",
       "name": "coverage.gaps_total",
-      "value": "42"
+      "value": "46"
     }
   ]
 }

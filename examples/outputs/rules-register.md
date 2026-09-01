@@ -38,6 +38,8 @@ Every candidate business rule found across the index, keyed by its stable `MEMBE
 | **MMP9400:BR-001** | `MMP9400` | [[MMP9400:9]] | 0 | `MOVE` | `MOVE 'CONF' TO #STATUS` | `CONF` |
 | **MMP9400:BR-002** | `MMP9400` | [[MMP9400:11]] | 0 | `IF` | `#STATUS = 'CONF'` | `CONF` |
 | **MMP9600:BR-001** | `MMP9600` | [[MMP9600:9]] | 0 | `LOOP` | `` | `` |
+| **MMP9800:BR-001** | `MMP9800` | [[MMP9800:13]] | 0 | `ASSIGN` | `#FLAG := 1` | `1` |
+| **MMP9800:BR-002** | `MMP9800` | [[MMP9800:18]] | 0 | `COMPRESS` | `COMPRESS 'A' 'B' INTO #MESSAGE` | `A,B` |
 | **ORDENQ:BR-001** | `ORDENQ` | [[ORDENQ:11]] | 0 | `IF` | `ORDER_NO = " "` | ` ` |
 | **ORDENQ:BR-002** | `ORDENQ` | [[ORDENQ:12]] | 1 | `ASSIGN` | `MSG = "Order number required"` | `Order number required` |
 | **ORDENQ:BR-003** | `ORDENQ` | [[ORDENQ:16]] | 0 | `IF` | `STATUS <> 0` | `0` |
@@ -51,5 +53,5 @@ Every candidate business rule found across the index, keyed by its stable `MEMBE
 | **ORDENQ:BR-011** | `ORDENQ` | [[ORDENQ:37]] | 0 | `IF` | `ORDER_WT > 500 OR CUST_NO = " "` | ` ,500` |
 | **ORDENQ:BR-012** | `ORDENQ` | [[ORDENQ:39]] | 1 | `ASSIGN` | `MSG = "Credit check required"` | `Credit check required` |
 
-Total: 41 rule candidate(s) across 12 batchable module(s).
+Total: 43 rule candidate(s) across 13 batchable module(s).
 
