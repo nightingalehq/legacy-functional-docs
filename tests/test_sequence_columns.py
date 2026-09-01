@@ -38,6 +38,21 @@ def test_detects_leading_prefix_with_space_padding():
     assert normalise.detect_leading_seq_prefix(lines) == 4
 
 
+def test_detects_leading_prefix_right_justified_within_field():
+    # Some Mantis exports right-justify the number *inside* the fixed-width
+    # field instead of left-justifying it, so the padding is before the
+    # digits, not after (e.g. `     10  ENTRY ...`, a 7-wide field).
+    lines = [
+        "     10  ENTRY SAMPLE01(CH_UNIT,CH_CNTRL,CH_COMAREA)",
+        "     20  .TEXT CH_UNIT(3)",
+        "     30  .TEXT CH_CNTRL(8)",
+        "     40  .TEXT CH_COMAREA(50)",
+        "   1440  .SCREEN MAP(\"SAMPLE01S\")",
+        "   1450  .|",
+    ]
+    assert normalise.detect_leading_seq_prefix(lines) == 7
+
+
 def test_no_leading_prefix_detected_on_free_format_source():
     # Free-format source that merely happens to start with a digit on a few
     # lines must not be mistaken for a sequence-numbered export.
@@ -79,6 +94,22 @@ def test_split_members_strips_leading_prefix_before_dialect_matching():
     assert stripped[0] == "DEFINE DATA LOCAL"
     assert stripped[1] == "  1 #COUNT (N4)"
     assert stripped[2] == "END-DEFINE"
+
+
+def test_split_members_strips_right_justified_prefix():
+    lines = [
+        "     10  ENTRY SAMPLE01(CH_UNIT)",
+        "     20  .TEXT CH_UNIT(3)",
+        "   1440  .SCREEN MAP(\"SAMPLE01S\")",
+    ]
+    chunks = normalise.split_members(
+        lines, "mantis", default_name="TESTPGM", seq_cols=None, leading_seq_width=7,
+    )
+    assert len(chunks) == 1
+    stripped = [text for _, _, text in chunks[0].lines]
+    assert stripped[0] == "  ENTRY SAMPLE01(CH_UNIT)"
+    assert stripped[1] == "  .TEXT CH_UNIT(3)"
+    assert stripped[2] == '  .SCREEN MAP("SAMPLE01S")'
 
 
 def test_split_members_leaves_short_lines_unstripped():
