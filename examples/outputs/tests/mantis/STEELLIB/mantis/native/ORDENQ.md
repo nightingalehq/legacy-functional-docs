@@ -18,14 +18,14 @@ sources: ["ORDENQ"]
 
 # ORDENQ — generated tests (mantis / native)
 
-Covers ORDENQ:BR-002 and ORDENQ:BR-004 with reconstructable consequences (entry into the `WHILE STATUS = 0` loop, and dispatch to `PRICECALC` on the `"CONF"` case), plus ORDENQ:BR-001, BR-005, and BR-006 written up to their branch decisions only and marked `unresolved`, since no consequence is reconstructable from the source facts for those three. `PRICECALC` is stubbed per the brief's "Dependencies to mock" list using only the `ORDER_NO`/`ORDER_WT` parameters the brief states; `ORDERMST`/`ORDLINE` are named as dependencies but no field shape for either is given in the brief, so no fixture record is invented for them. No `bug-desired` tests are present.
+Covers ORDENQ:BR-003 and ORDENQ:BR-007 with reconstructable consequences (entry into the `WHILE STATUS = 0` loop, and dispatch to `PRICECALC` on the `"CONF"` case), plus ORDENQ:BR-001, BR-008, and BR-009 written up to their branch decisions only and marked `unresolved`, since no consequence is reconstructable from the source facts for those three. `PRICECALC` is stubbed per the brief's "Dependencies to mock" list using only the `ORDER_NO`/`ORDER_WT` parameters the brief states; `ORDERMST`/`ORDLINE` are named as dependencies but no field shape for either is given in the brief, so no fixture record is invented for them. No `bug-desired` tests are present.
 
 See [`ORDENQ.mantis`](./ORDENQ.mantis) for the generated test source.
 
 ## Scenarios covered
 
 - ORDENQ:BR-001
-- ORDENQ:BR-002
-- ORDENQ:BR-004
-- ORDENQ:BR-005
-- ORDENQ:BR-006
+- ORDENQ:BR-003
+- ORDENQ:BR-007
+- ORDENQ:BR-008
+- ORDENQ:BR-009

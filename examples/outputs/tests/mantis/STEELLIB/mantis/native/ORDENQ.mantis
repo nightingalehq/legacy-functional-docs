@@ -16,7 +16,7 @@ ELSE
     DISPLAY 'FAIL test_blank_order_no_branch_unresolved: expected branch condition true, got false'
 END-IF
 *
-* ORDENQ:BR-002 [[ORDENQ:16]]
+* ORDENQ:BR-003 [[ORDENQ:16]]
 * Branch: IF STATUS <> 0
 * Scenario: test_nonzero_status_enters_while_status_zero_loop
 *
@@ -35,7 +35,7 @@ ELSE
     DISPLAY 'FAIL test_nonzero_status_enters_while_status_zero_loop: branch condition not true'
 END-IF
 *
-* ORDENQ:BR-004 [[ORDENQ:25]]
+* ORDENQ:BR-007 [[ORDENQ:25]]
 * Branch: CASE ORDVIEW.STATUS
 * Scenario: test_ordview_status_conf_dispatches_pricecalc
 *
@@ -64,11 +64,11 @@ ORDENQ-STUB-PRICECALC.
 ORDENQ-STUB-PRICECALC-EXIT.
     EXIT.
 *
-* ORDENQ:BR-005 [[ORDENQ:26]]
+* ORDENQ:BR-008 [[ORDENQ:26]]
 * Branch: WHEN "CONF"
 * Scenario: test_when_conf_branch_unresolved
 *
-* No reconstructable consequence for this WHEN arm distinct from BR-004
+* No reconstructable consequence for this WHEN arm distinct from BR-007
 * in the brief -- the test stops at the branch decision only.
 MOVE "CONF" TO ORDVIEW.STATUS
 IF ORDVIEW.STATUS = "CONF"
@@ -77,7 +77,7 @@ ELSE
     DISPLAY 'FAIL test_when_conf_branch_unresolved: expected branch condition true, got false'
 END-IF
 *
-* ORDENQ:BR-006 [[ORDENQ:28]]
+* ORDENQ:BR-009 [[ORDENQ:28]]
 * Branch: WHEN "HELD"
 * Scenario: test_when_held_branch_unresolved
 *

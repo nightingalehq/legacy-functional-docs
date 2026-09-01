@@ -36,7 +36,7 @@ def test_ordenq_rejects_blank_order_no():
 
 
 def test_ordenq_status_not_zero_enters_while_loop_header(pricecalc):
-    # ORDENQ:BR-002 [[ORDENQ:16]]
+    # ORDENQ:BR-003 [[ORDENQ:16]]
     # Branch: IF STATUS <> 0
     # observed consequence cites [[ORDENQ:21]] "WHILE STATUS = 0" -- this is
     # a loop-header condition, not an assignable/assertable output value, so
@@ -46,7 +46,7 @@ def test_ordenq_status_not_zero_enters_while_loop_header(pricecalc):
 
 
 def test_ordenq_case_conf_calls_pricecalc(pricecalc):
-    # ORDENQ:BR-004 [[ORDENQ:25]]
+    # ORDENQ:BR-007 [[ORDENQ:25]]
     # Branch: CASE ORDVIEW.STATUS
     # observed consequence [[ORDENQ:26-28]]:
     #   WHEN "CONF"
@@ -64,7 +64,7 @@ def test_ordenq_case_conf_calls_pricecalc(pricecalc):
 
 
 def test_ordenq_case_when_conf_branch_taken():
-    # ORDENQ:BR-005 [[ORDENQ:26]]
+    # ORDENQ:BR-008 [[ORDENQ:26]]
     # Branch: WHEN "CONF"
     # unresolved: no consequence reconstructable from cited source excerpt --
     # written up to the branch decision only.
@@ -72,7 +72,7 @@ def test_ordenq_case_when_conf_branch_taken():
 
 
 def test_ordenq_case_when_held_branch_taken():
-    # ORDENQ:BR-006 [[ORDENQ:28]]
+    # ORDENQ:BR-009 [[ORDENQ:28]]
     # Branch: WHEN "HELD"
     # unresolved: no consequence reconstructable from cited source excerpt --
     # written up to the branch decision only.

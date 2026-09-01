@@ -18,10 +18,10 @@ sources: ["ORDENQ"]
 
 # ORDENQ — generated tests (natural / natunit)
 
-Covers all five scenarios in the ORDENQ test brief. `ORDENQ:BR-002` and
-`ORDENQ:BR-004` have reconstructable consequences and are characterized
-directly from the cited source lines. `ORDENQ:BR-001`, `ORDENQ:BR-005`, and
-`ORDENQ:BR-006` have no reconstructable consequence in the fact brief, so
+Covers all five scenarios in the ORDENQ test brief. `ORDENQ:BR-003` and
+`ORDENQ:BR-007` have reconstructable consequences and are characterized
+directly from the cited source lines. `ORDENQ:BR-001`, `ORDENQ:BR-008`, and
+`ORDENQ:BR-009` have no reconstructable consequence in the fact brief, so
 each is written up to its branch decision only and marked `unresolved` —
 no expected outcome is asserted for them. `PRICECALC` is stubbed per the
 brief's "Dependencies to mock" list; only the `ORDER_NO`/`ORDER_WT`
@@ -38,7 +38,7 @@ See [`ORDENQ.nsp`](./ORDENQ.nsp) for the generated test source.
 ## Scenarios covered
 
 - ORDENQ:BR-001
-- ORDENQ:BR-002
-- ORDENQ:BR-004
-- ORDENQ:BR-005
-- ORDENQ:BR-006
+- ORDENQ:BR-003
+- ORDENQ:BR-007
+- ORDENQ:BR-008
+- ORDENQ:BR-009
