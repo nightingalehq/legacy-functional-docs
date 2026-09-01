@@ -70,7 +70,7 @@ ASSERTIVE = re.compile(
     re.I)
 
 HEDGE = re.compile(r"\b(?:unresolved|not determined|could not be determined|needs confirmation|"
-                   r"SME|to be confirmed|unknown)\b", re.I)
+                   r"SME|to be confirmed|unknown|inferred)\b", re.I)
 
 
 # Sentence boundary: a terminator followed by whitespace and something that starts a

@@ -71,6 +71,23 @@ def test_validator_rejects_uncited_assertion(indexed_db, tmp_path):
     assert any("no citation" in p for p in result["problems"])
 
 
+def test_validator_accepts_inferred_as_a_hedge(indexed_db, tmp_path):
+    """`(inferred)` is a first-class confidence marker per
+    reference/writing-rules.md, on equal footing with `unresolved` -- an
+    assertive sentence hedged this way but with no citation of its own
+    (e.g. because the citation sits in the sentence before it) must not be
+    flagged, the same as it would not be for `unresolved`."""
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        GOOD_FRONTMATTER
+        + "\nThe module writes the field [[MMP0100:1]]. The program validates "
+          "the order status before release, *(inferred)* from how the result "
+          "is used downstream.\n"
+    )
+    result = validate_doc(indexed_db, doc)
+    assert result["ok"], result["problems"]
+
+
 def test_validator_accepts_a_well_formed_document(indexed_db, tmp_path):
     """Positive control: a document with valid front matter, a properly
     cited assertion, and no uncited claims must pass clean."""
