@@ -79,18 +79,22 @@ def detect_leading_seq_prefix(lines: list[str], widths: tuple[int, ...] = (4, 5,
     has none; `0080  2 #LEAVE (N2)` has padding spaces after the number). Other
     sites right-justify the number *within* the field instead, so the padding
     comes before it (e.g. `     10  ENTRY ...`, a 7-wide field). Both shapes
-    are accepted: the field must be either blank or, once stripped, all
-    digits, and its last character must be a digit -- ruling out a line whose
-    content merely happens to start with a short numeral a few characters in
-    (see the free-format guard test), since that numeral won't reach the end
-    of the candidate width still followed only by digits/blanks. Detection
-    requires this to hold across a strong majority of long-enough lines, the
-    same threshold `detect_seq_columns` uses, so free-format source that
-    happens to start with a digit isn't mistaken for a sequence-numbered
-    export. Callers should only use this when `detect_seq_columns` found
-    nothing -- the two fields are mutually exclusive in practice, and trailing
-    detection is the better-attested convention (mainframe listings, not just
-    this heuristic's origin corpus).
+    are accepted: a candidate field is either entirely blank, or ends in a
+    digit with every character in it, from that digit backward, also a digit
+    -- ruling out a line whose content merely happens to start with a short
+    numeral a few characters in (see the free-format guard test), since that
+    numeral won't reach the end of the candidate width still followed only by
+    digits. Detection requires this to hold across a strong majority of
+    long-enough lines, the same threshold `detect_seq_columns` uses, *and*
+    requires a majority of those lines to actually show a digit rather than
+    being blank -- otherwise consistently-indented free-format source (every
+    line starting with the same run of spaces) would satisfy the blank
+    alternative alone and be mistaken for an all-blank sequence field,
+    silently stripping real indentation from every line. Callers should only
+    use this when `detect_seq_columns` found nothing -- the two fields are
+    mutually exclusive in practice, and trailing detection is the
+    better-attested convention (mainframe listings, not just this heuristic's
+    origin corpus).
 
     Widths are tried largest-first: for a genuine fixed-width field, every
     width up to the true one also passes (a truncated prefix of a
@@ -103,11 +107,15 @@ def detect_leading_seq_prefix(lines: list[str], widths: tuple[int, ...] = (4, 5,
         if len(candidates) < 5:
             continue
         hits = 0
+        digit_hits = 0
         for ln in candidates:
             chunk = ln[:width]
-            if chunk.strip() == "" or (chunk[-1].isdigit() and chunk.strip().isdigit()):
+            if chunk.strip() == "":
                 hits += 1
-        if hits / len(candidates) >= 0.9:
+            elif chunk[-1].isdigit() and chunk.strip().isdigit():
+                hits += 1
+                digit_hits += 1
+        if hits / len(candidates) >= 0.9 and digit_hits / len(candidates) >= 0.5:
             return width
     return None
 

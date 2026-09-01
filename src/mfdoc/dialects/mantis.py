@@ -278,7 +278,13 @@ def extract(conn, member_id: int, lines, member_name: str = "?") -> dict:
                       "order, since some installations list the program first.",
                     member_id=member_id, line_no=line_no, severity="medium", raw=stmt[:300])
             matched = True
-        elif (m := RE_VIEW.match(masked)):
+        elif (m := RE_VIEW.match(stmt)):
+            # Matched against the unmasked stmt, not masked -- mask_literals
+            # replaces a quoted literal (the physical dataset name in the
+            # `VIEW name("physical")` form) including its quote characters,
+            # so the pof alternative's `\"` could never match a masked
+            # string and `pof` was always None. Same reason RE_EXTERNAL
+            # above and RE_EXT_DECL below both match unmasked too.
             vname = m.group("name").upper()
             of = (m.group("of") or m.group("pof") or vname).upper()
             views[vname] = of

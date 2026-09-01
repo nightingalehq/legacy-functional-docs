@@ -53,6 +53,24 @@ def test_detects_leading_prefix_right_justified_within_field():
     assert normalise.detect_leading_seq_prefix(lines) == 7
 
 
+def test_no_leading_prefix_detected_on_consistently_indented_free_format_source():
+    # A blank prefix chunk counts as a hit (needed for the right-justified
+    # case above: a short number leaves the field blank up to where its
+    # digits start), but that must not let consistently-indented free-format
+    # source -- every line starting with the same run of spaces, no digits
+    # anywhere in that field -- be mistaken for an all-blank sequence field
+    # and have its real indentation stripped.
+    lines = [
+        "       DEFINE DATA LOCAL",
+        "       1 #COUNT (N4)",
+        "       END-DEFINE",
+        "       IF #COUNT = 0",
+        "         #COUNT := 1",
+        "       END-IF",
+    ]
+    assert normalise.detect_leading_seq_prefix(lines) is None
+
+
 def test_no_leading_prefix_detected_on_free_format_source():
     # Free-format source that merely happens to start with a digit on a few
     # lines must not be mistaken for a sequence-numbered export.
