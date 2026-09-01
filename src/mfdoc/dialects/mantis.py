@@ -28,12 +28,11 @@ its own depth-dots), e.g. an unclosed `IF(...` followed by `'OR ...)`. Unlike
 Natural's implicit continuation (inferred from a trailing/leading connective,
 see `natural.CONTINUATION_TAIL`/`CONTINUATION_LEAD`), this is an explicit,
 unambiguous marker, so `extract` folds every run of `'`-marked lines onto the
-statement they continue -- concatenated with no inserted separator, since
-this dialect's own single-line style already runs tokens together with no
-space (`"PF24"OR MAP=...`) -- before any keyword pattern is matched against
-it. Each continuation line is still visited afterwards in its own right and
-correctly fails to stand alone as a statement (the same accepted double-visit
-`natural.py`'s own continuation fold relies on), so it still raises its own
+statement they continue -- joined with a single inserted space -- before any
+keyword pattern is matched against it. Each continuation line is still
+visited afterwards in its own right and correctly fails to stand alone as a
+statement (the same accepted double-visit `natural.py`'s own continuation
+fold relies on), so it still raises its own
 low-severity `unparsed_line` gap -- the fold only fixes the *content*
 recorded for the statement it belongs to.
 """
@@ -241,7 +240,17 @@ def extract(conn, member_id: int, lines, member_name: str = "?") -> dict:
             nxt_body, nxt_is_remark = _split_depth_marker(lines[look + 1][2].strip())
             if nxt_is_remark or not nxt_body.startswith("'"):
                 break
-            stmt = stmt.rstrip() + nxt_body[1:]
+            # A single inserted space, not a bare concatenation: real
+            # continuations are usually adjacent to a natural delimiter on
+            # the prior line (a closing quote or paren) where this dialect's
+            # own single-line style already omits the space, but not
+            # always -- a numeric or bare-identifier boundary (`500` +
+            # `'OR ...`, or the real `...-1` + `'OR ...` shape this was
+            # calibrated against) glues into an unrelated-looking token
+            # like `500OR` with no separator at all, which distorts the
+            # stored condition text. A single space is harmless either way:
+            # downstream matching here is already whitespace-tolerant.
+            stmt = stmt.rstrip() + " " + nxt_body[1:]
             look += 1
 
         stmt = _strip_trailing_remark(stmt)

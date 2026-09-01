@@ -133,7 +133,8 @@ ORDENQ.mantis (the only checked-in mantis fixture) has 4 such assignment
 lines that were previously dropped entirely; they now produce real
 rule_candidate rows. line_recognition_rate/gaps are unchanged, since these
 lines never raised a gap either before or after -- only rule_candidates
-moves, from 35 to 39.
+moves, from 35 to 39 for this change alone (later paragraphs below push
+the final EXPECTED_COVERAGE total further, to 41).
 
 2026-09-01: mantis.py also folds a run of `'`-marked continuation lines onto
 the statement they continue (the same real client export's style, same

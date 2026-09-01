@@ -96,11 +96,15 @@ def detect_leading_seq_prefix(lines: list[str], widths: tuple[int, ...] = (4, 5,
     better-attested convention (mainframe listings, not just this heuristic's
     origin corpus).
 
-    Widths are tried largest-first: for a genuine fixed-width field, every
-    width up to the true one also passes (a truncated prefix of a
-    right-justified number is still all-blank or all-digit), so the true
-    field boundary is the *largest* width that still passes -- the first
-    width beyond it lands on the non-digit separator and fails.
+    Widths are tried largest-first: at the true field width, a right-justified
+    number's padding is blank and its digits are a digit-ending run, so
+    nearly every candidate line hits (blank or digit) and most hit on an
+    actual digit, clearing both thresholds. One width beyond it lands on the
+    non-digit separator after the field and fails outright, so the first
+    (largest) width to pass is the field boundary -- there is no need to also
+    reason about whether every *narrower* width would pass, since largest-
+    first already stops at the true one before any narrower candidate is
+    tried, whether or not it happens to pass on its own too.
     """
     for width in sorted(set(widths), reverse=True):
         candidates = [ln for ln in lines if len(ln.rstrip()) > width]
@@ -328,7 +332,7 @@ def split_members(
         if leading_seq_width and len(raw) > leading_seq_width:
             chunk = raw[:leading_seq_width]
             if chunk.strip() == "" or (chunk[-1].isdigit() and chunk.strip().isdigit()):
-                seq = chunk if chunk.strip() else None
+                seq = chunk.strip() or None
                 raw = raw[leading_seq_width:]
                 return seq, raw.rstrip()
         if seq_cols and len(raw) > seq_cols[0]:

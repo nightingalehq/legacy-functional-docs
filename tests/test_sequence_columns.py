@@ -128,6 +128,11 @@ def test_split_members_strips_right_justified_prefix():
     assert stripped[0] == "  ENTRY SAMPLE01(CH_UNIT)"
     assert stripped[1] == "  .TEXT CH_UNIT(3)"
     assert stripped[2] == '  .SCREEN MAP("SAMPLE01S")'
+    # The stored seq itself must be stripped of the right-justifying
+    # padding, not the raw padded chunk -- consistent with the trailing
+    # seq_cols branch just below, which already does this.
+    seqs = [seq for _, seq, _ in chunks[0].lines]
+    assert seqs == ["10", "20", "1440"]
 
 
 def test_split_members_leaves_short_lines_unstripped():
