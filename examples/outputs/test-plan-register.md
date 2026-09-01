@@ -24,8 +24,9 @@ Every scenario `mfdoc test-plan` derived from the fact store, keyed by the same 
 | `MMP9300:BR-001` | `MMP9300` | unit | characterization | `IF` | `#STATUS = 'A'` | [[MMP9300:12]] |
 | `MMP9400:BR-002` | `MMP9400` | unit | characterization | `IF` | `#STATUS = 'CONF'` | [[MMP9400:11]] |
 | `ORDENQ:BR-001` | `ORDENQ` | unit | characterization | `IF` | `ORDER_NO = " "` | [[ORDENQ:11]] |
-| `ORDENQ:BR-002` | `ORDENQ` | unit | characterization | `IF` | `STATUS <> 0` | [[ORDENQ:16]] |
-| `ORDENQ:BR-004` | `ORDENQ` | unit | characterization | `CASE` | `ORDVIEW.STATUS` | [[ORDENQ:25]] |
-| `ORDENQ:BR-005` | `ORDENQ` | unit | characterization | `WHEN` | `"CONF"` | [[ORDENQ:26]] |
-| `ORDENQ:BR-006` | `ORDENQ` | unit | characterization | `WHEN` | `"HELD"` | [[ORDENQ:28]] |
+| `ORDENQ:BR-003` | `ORDENQ` | unit | characterization | `IF` | `STATUS <> 0` | [[ORDENQ:16]] |
+| `ORDENQ:BR-007` | `ORDENQ` | unit | characterization | `CASE` | `ORDVIEW.STATUS` | [[ORDENQ:25]] |
+| `ORDENQ:BR-008` | `ORDENQ` | unit | characterization | `WHEN` | `"CONF"` | [[ORDENQ:26]] |
+| `ORDENQ:BR-009` | `ORDENQ` | unit | characterization | `WHEN` | `"HELD"` | [[ORDENQ:28]] |
+| `ORDENQ:BR-011` | `ORDENQ` | unit | characterization | `IF` | `ORDER_WT > 500 OR CUST_NO = " "` | [[ORDENQ:37]] |
 

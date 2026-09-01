@@ -39,11 +39,17 @@ Every candidate business rule found across the index, keyed by its stable `MEMBE
 | **MMP9400:BR-002** | `MMP9400` | [[MMP9400:11]] | 0 | `IF` | `#STATUS = 'CONF'` | `CONF` |
 | **MMP9600:BR-001** | `MMP9600` | [[MMP9600:9]] | 0 | `LOOP` | `` | `` |
 | **ORDENQ:BR-001** | `ORDENQ` | [[ORDENQ:11]] | 0 | `IF` | `ORDER_NO = " "` | ` ` |
-| **ORDENQ:BR-002** | `ORDENQ` | [[ORDENQ:16]] | 0 | `IF` | `STATUS <> 0` | `0` |
-| **ORDENQ:BR-003** | `ORDENQ` | [[ORDENQ:21]] | 0 | `WHILE` | `STATUS = 0` | `0` |
-| **ORDENQ:BR-004** | `ORDENQ` | [[ORDENQ:25]] | 0 | `CASE` | `ORDVIEW.STATUS` | `` |
-| **ORDENQ:BR-005** | `ORDENQ` | [[ORDENQ:26]] | 1 | `WHEN` | `"CONF"` | `CONF` |
-| **ORDENQ:BR-006** | `ORDENQ` | [[ORDENQ:28]] | 1 | `WHEN` | `"HELD"` | `HELD` |
+| **ORDENQ:BR-002** | `ORDENQ` | [[ORDENQ:12]] | 1 | `ASSIGN` | `MSG = "Order number required"` | `Order number required` |
+| **ORDENQ:BR-003** | `ORDENQ` | [[ORDENQ:16]] | 0 | `IF` | `STATUS <> 0` | `0` |
+| **ORDENQ:BR-004** | `ORDENQ` | [[ORDENQ:17]] | 1 | `ASSIGN` | `MSG = "Order not found"` | `Order not found` |
+| **ORDENQ:BR-005** | `ORDENQ` | [[ORDENQ:21]] | 0 | `WHILE` | `STATUS = 0` | `0` |
+| **ORDENQ:BR-006** | `ORDENQ` | [[ORDENQ:22]] | 1 | `ASSIGN` | `ORDER_WT = ORDER_WT + ORDVIEW.LINE_WT` | `` |
+| **ORDENQ:BR-007** | `ORDENQ` | [[ORDENQ:25]] | 0 | `CASE` | `ORDVIEW.STATUS` | `` |
+| **ORDENQ:BR-008** | `ORDENQ` | [[ORDENQ:26]] | 1 | `WHEN` | `"CONF"` | `CONF` |
+| **ORDENQ:BR-009** | `ORDENQ` | [[ORDENQ:28]] | 1 | `WHEN` | `"HELD"` | `HELD` |
+| **ORDENQ:BR-010** | `ORDENQ` | [[ORDENQ:29]] | 1 | `ASSIGN` | `MSG = "Order is on credit hold"` | `Order is on credit hold` |
+| **ORDENQ:BR-011** | `ORDENQ` | [[ORDENQ:37]] | 0 | `IF` | `ORDER_WT > 500 OR CUST_NO = " "` | ` ,500` |
+| **ORDENQ:BR-012** | `ORDENQ` | [[ORDENQ:39]] | 1 | `ASSIGN` | `MSG = "Credit check required"` | `Credit check required` |
 
-Total: 35 rule candidate(s) across 12 batchable module(s).
+Total: 41 rule candidate(s) across 12 batchable module(s).
 

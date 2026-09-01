@@ -201,7 +201,7 @@
       "system": "OE",
       "source_file_id": 17,
       "first_line": 1,
-      "last_line": 35,
+      "last_line": 43,
       "mode": null
     },
     {
@@ -1554,6 +1554,17 @@
     },
     {
       "id": 16,
+      "caller_id": 17,
+      "callee_name": "ORDSCR1",
+      "callee_id": null,
+      "call_kind": "INCLUDE",
+      "dynamic": 0,
+      "args": "SHOW screen",
+      "line_no": 40,
+      "resolved": 0
+    },
+    {
+      "id": 17,
       "caller_id": 20,
       "callee_name": "NATBATCH",
       "callee_id": null,
@@ -1564,7 +1575,7 @@
       "resolved": 0
     },
     {
-      "id": 17,
+      "id": 18,
       "caller_id": 20,
       "callee_name": "MMP0100",
       "callee_id": 3,
@@ -1575,7 +1586,7 @@
       "resolved": 1
     },
     {
-      "id": 18,
+      "id": 19,
       "caller_id": 20,
       "callee_name": "IDCAMS",
       "callee_id": null,
@@ -1586,7 +1597,7 @@
       "resolved": 0
     },
     {
-      "id": 19,
+      "id": 20,
       "caller_id": 20,
       "callee_name": "MMU0300",
       "callee_id": null,
@@ -1597,7 +1608,7 @@
       "resolved": 0
     },
     {
-      "id": 20,
+      "id": 21,
       "caller_id": 21,
       "callee_name": "NATCICS",
       "callee_id": null,
@@ -1608,7 +1619,7 @@
       "resolved": 0
     },
     {
-      "id": 21,
+      "id": 22,
       "caller_id": 21,
       "callee_name": "MMP0200",
       "callee_id": 4,
@@ -1769,6 +1780,14 @@
       "line_no": 33,
       "kind": "CONVERSE",
       "target": "ORDSCR2",
+      "fields": null
+    },
+    {
+      "id": 17,
+      "member_id": 17,
+      "line_no": 40,
+      "kind": "SHOW",
+      "target": "ORDSCR1",
       "fields": null
     }
   ],
@@ -2166,6 +2185,19 @@
     {
       "id": 31,
       "member_id": 17,
+      "line_no": 12,
+      "end_line": null,
+      "construct": "ASSIGN",
+      "condition": "MSG = \"Order number required\"",
+      "depth": 1,
+      "fields_used": "MSG",
+      "literals": "Order number required",
+      "raw": "MSG = \"Order number required\"",
+      "confidence": "verified"
+    },
+    {
+      "id": 32,
+      "member_id": 17,
       "line_no": 16,
       "end_line": null,
       "construct": "IF",
@@ -2177,7 +2209,20 @@
       "confidence": "verified"
     },
     {
-      "id": 32,
+      "id": 33,
+      "member_id": 17,
+      "line_no": 17,
+      "end_line": null,
+      "construct": "ASSIGN",
+      "condition": "MSG = \"Order not found\"",
+      "depth": 1,
+      "fields_used": "MSG",
+      "literals": "Order not found",
+      "raw": "MSG = \"Order not found\"",
+      "confidence": "verified"
+    },
+    {
+      "id": 34,
       "member_id": 17,
       "line_no": 21,
       "end_line": null,
@@ -2190,7 +2235,20 @@
       "confidence": "verified"
     },
     {
-      "id": 33,
+      "id": 35,
+      "member_id": 17,
+      "line_no": 22,
+      "end_line": null,
+      "construct": "ASSIGN",
+      "condition": "ORDER_WT = ORDER_WT + ORDVIEW.LINE_WT",
+      "depth": 1,
+      "fields_used": "ORDER_WT,ORDVIEW,LINE_WT",
+      "literals": null,
+      "raw": "ORDER_WT = ORDER_WT + ORDVIEW.LINE_WT",
+      "confidence": "verified"
+    },
+    {
+      "id": 36,
       "member_id": 17,
       "line_no": 25,
       "end_line": null,
@@ -2203,7 +2261,7 @@
       "confidence": "verified"
     },
     {
-      "id": 34,
+      "id": 37,
       "member_id": 17,
       "line_no": 26,
       "end_line": null,
@@ -2216,7 +2274,7 @@
       "confidence": "verified"
     },
     {
-      "id": 35,
+      "id": 38,
       "member_id": 17,
       "line_no": 28,
       "end_line": null,
@@ -2226,6 +2284,45 @@
       "fields_used": null,
       "literals": "HELD",
       "raw": "WHEN \"HELD\"",
+      "confidence": "verified"
+    },
+    {
+      "id": 39,
+      "member_id": 17,
+      "line_no": 29,
+      "end_line": null,
+      "construct": "ASSIGN",
+      "condition": "MSG = \"Order is on credit hold\"",
+      "depth": 1,
+      "fields_used": "MSG",
+      "literals": "Order is on credit hold",
+      "raw": "MSG = \"Order is on credit hold\"",
+      "confidence": "verified"
+    },
+    {
+      "id": 40,
+      "member_id": 17,
+      "line_no": 37,
+      "end_line": null,
+      "construct": "IF",
+      "condition": "ORDER_WT > 500 OR CUST_NO = \" \"",
+      "depth": 0,
+      "fields_used": "ORDER_WT,CUST_NO",
+      "literals": " ,500",
+      "raw": "IF ORDER_WT > 500 OR CUST_NO = \" \"",
+      "confidence": "verified"
+    },
+    {
+      "id": 41,
+      "member_id": 17,
+      "line_no": 39,
+      "end_line": null,
+      "construct": "ASSIGN",
+      "condition": "MSG = \"Credit check required\"",
+      "depth": 1,
+      "fields_used": "MSG",
+      "literals": "Credit check required",
+      "raw": "MSG = \"Credit check required\"",
       "confidence": "verified"
     }
   ],
@@ -2521,6 +2618,15 @@
     },
     {
       "id": 16,
+      "member_id": 17,
+      "line_no": 38,
+      "gap_kind": "unparsed_line",
+      "severity": "low",
+      "detail": "Statement not recognised by the Mantis scanner in ORDENQ. Recurring shapes here indicate the keyword tables need calibration.",
+      "raw": "'OR CUST_NO = \" \""
+    },
+    {
+      "id": 17,
       "member_id": null,
       "line_no": null,
       "gap_kind": "no_ddl_for_entity",
@@ -2529,7 +2635,7 @@
       "raw": null
     },
     {
-      "id": 17,
+      "id": 18,
       "member_id": null,
       "line_no": null,
       "gap_kind": "no_ddl_for_entity",
@@ -2538,7 +2644,7 @@
       "raw": null
     },
     {
-      "id": 18,
+      "id": 19,
       "member_id": null,
       "line_no": null,
       "gap_kind": "no_ddl_for_entity",
@@ -2547,7 +2653,7 @@
       "raw": null
     },
     {
-      "id": 19,
+      "id": 20,
       "member_id": 20,
       "line_no": 14,
       "gap_kind": "unresolved_call",
@@ -2556,7 +2662,7 @@
       "raw": null
     },
     {
-      "id": 20,
+      "id": 21,
       "member_id": 3,
       "line_no": 7,
       "gap_kind": "unresolved_call",
@@ -2565,7 +2671,7 @@
       "raw": null
     },
     {
-      "id": 21,
+      "id": 22,
       "member_id": 4,
       "line_no": 11,
       "gap_kind": "unresolved_call",
@@ -2574,7 +2680,7 @@
       "raw": null
     },
     {
-      "id": 22,
+      "id": 23,
       "member_id": 3,
       "line_no": 57,
       "gap_kind": "unresolved_call",
@@ -2583,7 +2689,7 @@
       "raw": null
     },
     {
-      "id": 23,
+      "id": 24,
       "member_id": 3,
       "line_no": 67,
       "gap_kind": "unresolved_call",
@@ -2592,7 +2698,7 @@
       "raw": null
     },
     {
-      "id": 24,
+      "id": 25,
       "member_id": 20,
       "line_no": 19,
       "gap_kind": "unresolved_call",
@@ -2601,7 +2707,7 @@
       "raw": null
     },
     {
-      "id": 25,
+      "id": 26,
       "member_id": 20,
       "line_no": 5,
       "gap_kind": "unresolved_call",
@@ -2610,7 +2716,7 @@
       "raw": null
     },
     {
-      "id": 26,
+      "id": 27,
       "member_id": 21,
       "line_no": 1,
       "gap_kind": "unresolved_call",
@@ -2619,16 +2725,16 @@
       "raw": null
     },
     {
-      "id": 27,
+      "id": 28,
       "member_id": 17,
       "line_no": 10,
       "gap_kind": "unresolved_call",
       "severity": "high",
-      "detail": "INCLUDE target 'ORDSCR1' (3 call site(s)) has no source member in the ingested set. Either the source is missing or the target lives in another library.",
+      "detail": "INCLUDE target 'ORDSCR1' (4 call site(s)) has no source member in the ingested set. Either the source is missing or the target lives in another library.",
       "raw": null
     },
     {
-      "id": 28,
+      "id": 29,
       "member_id": 17,
       "line_no": 33,
       "gap_kind": "unresolved_call",
@@ -2637,7 +2743,7 @@
       "raw": null
     },
     {
-      "id": 29,
+      "id": 30,
       "member_id": 4,
       "line_no": 23,
       "gap_kind": "unresolved_call",
@@ -2646,7 +2752,7 @@
       "raw": null
     },
     {
-      "id": 30,
+      "id": 31,
       "member_id": 17,
       "line_no": 8,
       "gap_kind": "unresolved_call",
@@ -2655,7 +2761,7 @@
       "raw": null
     },
     {
-      "id": 31,
+      "id": 32,
       "member_id": 9,
       "line_no": 10,
       "gap_kind": "unresolved_call",
@@ -2664,7 +2770,7 @@
       "raw": null
     },
     {
-      "id": 32,
+      "id": 33,
       "member_id": 17,
       "line_no": null,
       "gap_kind": "orphan_module",
@@ -2673,7 +2779,7 @@
       "raw": null
     },
     {
-      "id": 33,
+      "id": 34,
       "member_id": 5,
       "line_no": null,
       "gap_kind": "orphan_module",
@@ -2682,7 +2788,7 @@
       "raw": null
     },
     {
-      "id": 34,
+      "id": 35,
       "member_id": 6,
       "line_no": null,
       "gap_kind": "orphan_module",
@@ -2691,7 +2797,7 @@
       "raw": null
     },
     {
-      "id": 35,
+      "id": 36,
       "member_id": 7,
       "line_no": null,
       "gap_kind": "orphan_module",
@@ -2700,7 +2806,7 @@
       "raw": null
     },
     {
-      "id": 36,
+      "id": 37,
       "member_id": 8,
       "line_no": null,
       "gap_kind": "orphan_module",
@@ -2709,7 +2815,7 @@
       "raw": null
     },
     {
-      "id": 37,
+      "id": 38,
       "member_id": 9,
       "line_no": null,
       "gap_kind": "orphan_module",
@@ -2718,7 +2824,7 @@
       "raw": null
     },
     {
-      "id": 38,
+      "id": 39,
       "member_id": 10,
       "line_no": null,
       "gap_kind": "orphan_module",
@@ -2727,7 +2833,7 @@
       "raw": null
     },
     {
-      "id": 39,
+      "id": 40,
       "member_id": 11,
       "line_no": null,
       "gap_kind": "orphan_module",
@@ -2736,7 +2842,7 @@
       "raw": null
     },
     {
-      "id": 40,
+      "id": 41,
       "member_id": 12,
       "line_no": null,
       "gap_kind": "orphan_module",
@@ -2745,7 +2851,7 @@
       "raw": null
     },
     {
-      "id": 41,
+      "id": 42,
       "member_id": 7,
       "line_no": null,
       "gap_kind": "sme_question",
@@ -3119,13 +3225,13 @@
       "id": 61,
       "scope": "ORDENQ",
       "name": "mantis.lines",
-      "value": "35"
+      "value": "43"
     },
     {
       "id": 62,
       "scope": "ORDENQ",
       "name": "mantis.code_lines",
-      "value": "33"
+      "value": "40"
     },
     {
       "id": 63,
@@ -3137,13 +3243,13 @@
       "id": 64,
       "scope": "ORDENQ",
       "name": "mantis.unparsed",
-      "value": "4"
+      "value": "1"
     },
     {
       "id": 65,
       "scope": "ORDENQ",
       "name": "mantis.recognition_rate",
-      "value": "0.879"
+      "value": "0.975"
     },
     {
       "id": 66,
@@ -3227,19 +3333,19 @@
       "id": 99,
       "scope": "global",
       "name": "coverage.source_lines",
-      "value": "406"
+      "value": "414"
     },
     {
       "id": 100,
       "scope": "global",
       "name": "coverage.unparsed_lines",
-      "value": "7"
+      "value": "8"
     },
     {
       "id": 101,
       "scope": "global",
       "name": "coverage.line_recognition_rate",
-      "value": "0.9828"
+      "value": "0.9807"
     },
     {
       "id": 102,
@@ -3275,7 +3381,7 @@
       "id": 107,
       "scope": "global",
       "name": "coverage.rule_candidates",
-      "value": "35"
+      "value": "41"
     },
     {
       "id": 108,
@@ -3305,7 +3411,7 @@
       "id": 112,
       "scope": "global",
       "name": "coverage.include_edges",
-      "value": "7"
+      "value": "8"
     },
     {
       "id": 113,
@@ -3317,7 +3423,7 @@
       "id": 114,
       "scope": "global",
       "name": "coverage.include_resolution_rate",
-      "value": "0.1429"
+      "value": "0.125"
     },
     {
       "id": 115,
@@ -3329,7 +3435,7 @@
       "id": 116,
       "scope": "global",
       "name": "coverage.gaps_total",
-      "value": "41"
+      "value": "42"
     }
   ]
 }
