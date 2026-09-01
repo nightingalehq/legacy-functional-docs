@@ -12,6 +12,30 @@ scanner records a `gap` for every statement it does not recognise so the first
 run on a new codebase produces a measurable, reviewable coverage figure. Treat a
 first-run recognition rate below roughly 85% as a signal to calibrate the tables
 against real source before trusting any narrative built on top of it.
+
+One site convention calibrated in here: some Mantis exports render block
+nesting as a literal run of leading dots (`.IF ...`, `..GET ...`, `...END`)
+instead of whitespace indentation, with a bare `|` right after the dots (or at
+column 0) marking a remark or commented-out statement (`.|`, `..|RFC-START`,
+`|C00306 START`). Both are stripped before keyword matching -- see
+`_split_depth_marker` -- and the existing IF/WHILE/DO block-depth tracking
+below is unaffected, since it derives depth from matched constructs rather
+than from the dot count itself.
+
+The same export style also wraps a long condition or string expression across
+physical lines by marking every continuation line with a leading `'` (after
+its own depth-dots), e.g. an unclosed `IF(...` followed by `'OR ...)`. Unlike
+Natural's implicit continuation (inferred from a trailing/leading connective,
+see `natural.CONTINUATION_TAIL`/`CONTINUATION_LEAD`), this is an explicit,
+unambiguous marker, so `extract` folds every run of `'`-marked lines onto the
+statement they continue -- concatenated with no inserted separator, since
+this dialect's own single-line style already runs tokens together with no
+space (`"PF24"OR MAP=...`) -- before any keyword pattern is matched against
+it. Each continuation line is still visited afterwards in its own right and
+correctly fails to stand alone as a statement (the same accepted double-visit
+`natural.py`'s own continuation fold relies on), so it still raises its own
+low-severity `unparsed_line` gap -- the fold only fixes the *content*
+recorded for the statement it belongs to.
 """
 
 from __future__ import annotations
@@ -27,7 +51,7 @@ COMMENT_PREFIXES = ("*", "%", "!", "/*", "//")
 
 DECL_TYPES = (
     "TEXT", "SMALLTEXT", "BIGTEXT", "NUMERIC", "BIGNUMERIC", "SMALLNUMERIC",
-    "ARRAY", "KANJI", "LEVEL", "PICTURE",
+    "ARRAY", "KANJI", "LEVEL", "PICTURE", "BIG", "SMALL",
 )
 
 # Supra / TOTAL DML function codes, mapped to CRUD intent.
@@ -53,7 +77,9 @@ RE_EXTERNAL = re.compile(r"^\s*EXTERNAL\s+(?P<args>.+)$", re.I)
 RE_DECL = re.compile(
     r"^\s*(?P<type>" + "|".join(DECL_TYPES) + r")\s+(?P<name>[A-Z0-9_#$\-]+)"
     r"\s*(?:\((?P<spec>[^)]*)\))?(?P<rest>.*)$", re.I)
-RE_VIEW = re.compile(r"^\s*VIEW\s+(?P<name>[A-Z0-9_#$\-]+)\s*(?:OF\s+(?P<of>[A-Z0-9_#$\-]+))?", re.I)
+RE_VIEW = re.compile(
+    r"^\s*VIEW\s+(?P<name>[A-Z0-9_#$\-]+)\s*"
+    r"(?:OF\s+(?P<of>[A-Z0-9_#$\-]+)|\(\s*\"(?P<pof>[^\"]+)\")?", re.I)
 RE_OBTAIN = re.compile(r"^\s*OBTAIN\s+(?P<rest>.+)$", re.I)
 RE_GET = re.compile(r"^\s*GET\s+(?P<rest>.+)$", re.I)
 RE_INSERT = re.compile(r"^\s*(?:INSERT|ADD)\s+(?P<rest>.+)$", re.I)
@@ -62,8 +88,38 @@ RE_DELETE = re.compile(r"^\s*(?:DELETE|REMOVE)\s+(?P<rest>.+)$", re.I)
 RE_CONVERSE = re.compile(r"^\s*CONVERSE\s+(?P<screen>[A-Z0-9_#$\-\"]+)(?P<rest>.*)$", re.I)
 RE_SHOW = re.compile(r"^\s*SHOW\s+(?P<screen>[A-Z0-9_#$\-\"]+)(?P<rest>.*)$", re.I)
 RE_CALL = re.compile(r"^\s*(?P<kind>CALL|CHAIN|LINK|TRANSFER)\s+(?P<target>\"[^\"]+\"|[A-Z0-9_#$\-]+)(?P<args>.*)$", re.I)
-RE_DO_ENTRY = re.compile(r"^\s*DO\s+(?P<target>[A-Z0-9_#$\-]+)\s*(?:\((?P<args>[^)]*)\))?\s*$", re.I)
-RE_IF = re.compile(r"^\s*IF\s+(?P<cond>.+?)(?:\s+THEN)?\s*$", re.I)
+RE_DO_ENTRY = re.compile(r"^\s*(?:DO|PERFORM)\s+(?P<target>[A-Z0-9_#$\-]+)\s*(?:\((?P<args>[^)]*)\))?\s*$", re.I)
+# Local screen-map binding: `SCREEN mapname("physical map")`, same shape as
+# VIEW's dataset binding but for a CONVERSE/SHOW target instead of a dataset.
+RE_SCREEN = re.compile(r"^\s*SCREEN\s+(?P<name>[A-Z0-9_#$\-]+)\s*\(\s*\"?(?P<target>[^\")]+?)\"?\s*\)", re.I)
+# `PROGRAM name(...)` / `INTERFACE name(...)` declare an external call target
+# by identifier+arg-list, as distinct from RE_PROGRAM's `PROGRAM "name"`
+# self-declaration (no parens) at the top of a program's own source.
+RE_EXT_DECL = re.compile(r"^\s*(?P<kind>PROGRAM|INTERFACE)\s+(?P<name>[A-Z0-9_#$\-]+)\s*\((?P<args>[^)]*)\)", re.I)
+RE_PAD = re.compile(r"^\s*(?:UN)?PAD\b", re.I)
+RE_RELEASE = re.compile(r"^\s*RELEASE\s+(?P<target>[A-Z0-9_#$\-]+)\s*$", re.I)
+RE_CLEAR = re.compile(r"^\s*CLEAR\s+(?P<rest>.+)$", re.I)
+# `PROMPT "text"` / `PERFORM "target"` -- verbs that take a quoted argument
+# directly, no space required (`PERFORM"/BACK,...;TTPLP211"`). PERFORM here
+# is a dynamic chain/transfer string (site convention), distinct from
+# RE_DO_ENTRY's `PERFORM name` internal-entry-point form above, which never
+# has a quote.
+RE_PROMPT = re.compile(r'^\s*PROMPT\s*"(?P<screen>[^"]+)"(?P<rest>.*)$', re.I)
+RE_PERFORM_STR = re.compile(r'^\s*PERFORM\s*"(?P<target>[^"]+)"', re.I)
+# Assignment target: an identifier, optionally subscripted (one level of
+# nested parens, e.g. `ATTRIBUTE(MAP,NEXT_SCHD(X))`), optionally followed by
+# a `ROUNDED` or `ROUNDED(n)` numeric-rounding qualifier.
+_ASSIGN_LHS = (
+    r"[A-Z][A-Z0-9_#$\-]*(?:\((?:[^()]*(?:\([^()]*\)[^()]*)*)\))?"
+    r"(?:\s*ROUNDED(?:\(\d+\))?)?"
+)
+_ASSIGN_SEG = rf"(?:{_ASSIGN_LHS}\s*=\s*[^:]+|RESET)"
+# Plain assignment(s), e.g. `STATUS="HOLD"`, `X=1:Y=2` chained on one line,
+# or a bare `RESET` (alone or chained, e.g. `RESET:X=OUTCT+1`). A trailing
+# `:|remark` (this export's inline-remark marker) is already stripped by
+# `_strip_trailing_remark` before this ever runs, so it isn't handled here.
+RE_ASSIGN = re.compile(rf"^{_ASSIGN_SEG}(?::{_ASSIGN_SEG})*$", re.I)
+RE_IF = re.compile(r"^\s*IF(?:\s+|(?=\())(?P<cond>.+?)(?:\s+THEN)?\s*$", re.I)
 RE_ELSE = re.compile(r"^\s*ELSE\b", re.I)
 RE_WHILE = re.compile(r"^\s*WHILE\s+(?P<cond>.+)$", re.I)
 RE_UNTIL = re.compile(r"^\s*UNTIL\s+(?P<cond>.+)$", re.I)
@@ -86,6 +142,37 @@ _NOISE = {"AND", "OR", "NOT", "IF", "THEN", "ELSE", "OF", "IN", "TO", "BY", "WHE
 def _is_comment(text: str) -> bool:
     s = text.lstrip()
     return any(s.startswith(p) for p in COMMENT_PREFIXES)
+
+
+def _strip_trailing_remark(stmt: str) -> str:
+    """Drop a trailing `:|remark` -- this export's inline-remark marker,
+    e.g. `DO DELETE_TTTL:|TEST HOUSE`, `PREV_PACK=...:|RFC-7943` -- from the
+    end of a statement, so it stops the verb/keyword patterns below from
+    seeing trailing junk after a colon that isn't part of the statement at
+    all. Checked against the masked form so a `:|` that happens to appear
+    inside a string literal can't trigger a false trim.
+    """
+    masked, _ = mask_literals(stmt)
+    m = re.search(r":\|.*$", masked)
+    return stmt[: m.start()].rstrip() if m else stmt
+
+
+def _split_depth_marker(stmt: str) -> tuple[str, bool]:
+    """Strip a leading run of '.' used as a block-depth marker in this export
+    style, and report whether what follows is a '|' remark line.
+
+    Returns (body_without_dots, is_remark). `body_without_dots` is safe to run
+    the ordinary keyword patterns against for source that has no dots at all
+    (zero stripped is a no-op).
+    """
+    body = stmt.lstrip(".")
+    return body, body.startswith("|")
+
+
+# Bounds how far the continuation-fold below will look ahead per statement,
+# mirroring natural.py's own guard against O(n^2) rescans on adversarial or
+# malformed input where most lines would otherwise look like continuations.
+MAX_CONTINUATION_LOOKAHEAD = 25
 
 
 def _facts(expr: str) -> tuple[str, str]:
@@ -124,17 +211,40 @@ def extract(conn, member_id: int, lines, member_name: str = "?") -> dict:
                key_expr=(key_expr or "").strip()[:500] or None, raw=raw.strip()[:500],
                confidence=confidence)
 
-    for line_no, seq, raw in lines:
-        comment = _is_comment(raw)
+    lines = list(lines)
+    idx = 0
+    while idx < len(lines):
+        line_no, seq, raw = lines[idx]
+        body, is_remark = _split_depth_marker(raw.strip())
+        comment = _is_comment(raw) or is_remark
         insert(conn, "source_line", member_id=member_id, line_no=line_no, seq=seq,
                text=raw, is_comment=1 if comment else 0)
         if comment:
             stats["comment_lines"] += 1
+            idx += 1
             continue
         if not raw.strip():
+            idx += 1
             continue
         stats["code_lines"] += 1
-        stmt = raw.strip()
+        stmt = body
+
+        # Fold a run of '-marked continuation lines onto this statement (see
+        # the module docstring) before any keyword pattern sees it. Each
+        # folded line is still visited on its own in a later iteration of
+        # this same loop -- idx only advances past the statement that
+        # started the run, not past the lines folded into it -- so it still
+        # gets its own source_line row and, correctly, its own unparsed_line
+        # gap for standing alone.
+        look = idx
+        while look + 1 < len(lines) and look - idx < MAX_CONTINUATION_LOOKAHEAD:
+            nxt_body, nxt_is_remark = _split_depth_marker(lines[look + 1][2].strip())
+            if nxt_is_remark or not nxt_body.startswith("'"):
+                break
+            stmt = stmt.rstrip() + nxt_body[1:]
+            look += 1
+
+        stmt = _strip_trailing_remark(stmt)
         masked, _ = mask_literals(stmt)
         matched = False
 
@@ -170,7 +280,7 @@ def extract(conn, member_id: int, lines, member_name: str = "?") -> dict:
             matched = True
         elif (m := RE_VIEW.match(masked)):
             vname = m.group("name").upper()
-            of = (m.group("of") or vname).upper()
+            of = (m.group("of") or m.group("pof") or vname).upper()
             views[vname] = of
             resolve_entity(conn, of, "supra", "supra_master")
             insert(conn, "variable", member_id=member_id, scope="view", name=vname,
@@ -181,6 +291,34 @@ def extract(conn, member_id: int, lines, member_name: str = "?") -> dict:
             insert(conn, "variable", member_id=member_id, scope="mantis_local",
                    name=m.group("name").upper(), format=m.group("type").upper(),
                    length=spec or None, line_no=line_no)
+            matched = True
+        elif (m := RE_SCREEN.match(masked)):
+            insert(conn, "variable", member_id=member_id, scope="screen",
+                   name=m.group("name").upper(), view_of=m.group("target").upper(),
+                   line_no=line_no)
+            matched = True
+        elif (m := RE_EXT_DECL.match(stmt)):
+            # `PROGRAM name(...)` / `INTERFACE name(...)` -- an external
+            # module reference by identifier+args, as opposed to RE_PROGRAM's
+            # `PROGRAM "name"` self-declaration. Mirrors EXTERNAL's callee
+            # recording, minus the per-line gap: these declarations are
+            # numerous and formulaic at the top of this site's exports, and
+            # flagging each one would drown the gap register in noise rather
+            # than surface a real question.
+            #
+            # Matched (and tokenised below) against the unmasked `stmt`, not
+            # `masked` -- the target name is inside the quoted first arg
+            # (`PROGRAM TTPC003P("TTPC003P",PASSWORD)`), and masking replaces
+            # the quotes themselves along with their contents, which left
+            # nothing for the quoted-token alternative below to match and
+            # silently fell through to the bare word after the comma
+            # (`PASSWORD`) as a fabricated callee.
+            toks = [(a or b).upper() for a, b in
+                    re.findall(r"\"([^\"]+)\"|([A-Z0-9_#$\-]+)", m.group("args"), re.I) if (a or b)]
+            target = toks[0] if toks else m.group("name").upper()
+            insert(conn, "call_edge", caller_id=member_id, callee_name=target,
+                   call_kind="CALL", line_no=line_no,
+                   args=f"{m.group('kind').upper()} declaration")
             matched = True
 
         if not matched and (m := RE_SUPRA_CALL.search(masked)):
@@ -216,7 +354,7 @@ def extract(conn, member_id: int, lines, member_name: str = "?") -> dict:
             matched = True
 
         if not matched:
-            for pat, kind in ((RE_CONVERSE, "CONVERSE"), (RE_SHOW, "SHOW")):
+            for pat, kind in ((RE_CONVERSE, "CONVERSE"), (RE_SHOW, "SHOW"), (RE_PROMPT, "PROMPT")):
                 if (m := pat.match(stmt)):
                     screen = m.group("screen").strip('"').upper()
                     insert(conn, "interaction", member_id=member_id, line_no=line_no,
@@ -241,6 +379,15 @@ def extract(conn, member_id: int, lines, member_name: str = "?") -> dict:
         elif not matched and (m := RE_DO_ENTRY.match(masked)):
             insert(conn, "call_edge", caller_id=member_id, callee_name=m.group("target").upper(),
                    call_kind="PERFORM", args=m.group("args"), line_no=line_no)
+            matched = True
+        elif not matched and (m := RE_PERFORM_STR.match(stmt)):
+            # Site convention: `PERFORM"/BACK,APPTT,APPTT,TTGP185P;TTPLP211"`
+            # navigates to the next transaction in a ';'-separated chain --
+            # the program to the right of the last ';' is the actual target;
+            # everything before it is chain/menu-path context, not a callee.
+            navtarget = m.group("target").rsplit(";", 1)[-1].strip().upper()
+            insert(conn, "call_edge", caller_id=member_id, callee_name=navtarget,
+                   call_kind="TRANSFER", args=m.group("target"), line_no=line_no)
             matched = True
 
         if not matched:
@@ -268,13 +415,38 @@ def extract(conn, member_id: int, lines, member_name: str = "?") -> dict:
                         rule("ELSE", None, line_no, stmt)
                         matched = True
 
+        if not matched and RE_PAD.match(masked):
+            # PAD/UNPAD are field-formatting statements (padding/trimming a
+            # value), not conditional logic -- recognised to keep the
+            # coverage figure honest, but not treated as a business rule.
+            matched = True
+
+        if not matched and RE_CLEAR.match(masked):
+            # CLEAR resets one or more screen fields -- a formatting
+            # statement, like PAD/UNPAD, not conditional business logic.
+            matched = True
+
+        if not matched and (m := RE_RELEASE.match(masked)):
+            # RELEASE ident releases either a Supra record lock or a called
+            # program's memory, depending on what was previously OBTAINed or
+            # PROGRAM-declared -- source alone doesn't disambiguate which, so
+            # this stays a bare recognised statement rather than a guessed
+            # CRUD access.
+            matched = True
+
+        if not matched and RE_ASSIGN.match(masked):
+            rule("ASSIGN", stmt, line_no, stmt)
+            matched = True
+
         if not matched:
             stats["unparsed"] += 1
-            if len(stmt) > 3 and not re.match(r"^[A-Z0-9_#$\-]+\s*=", stmt, re.I):
+            if len(stmt) > 3:
                 add_gap(conn, "unparsed_line",
                         f"Statement not recognised by the Mantis scanner in {member_name}. "
                         f"Recurring shapes here indicate the keyword tables need calibration.",
                         member_id=member_id, line_no=line_no, severity="low", raw=stmt[:400])
+
+        idx += 1
 
     for construct, ln in open_blocks:
         add_gap(conn, "unparsed_line",
