@@ -162,6 +162,28 @@ unparsed_line/gaps_total (the continuation line, revisited), +2
 rule_candidates (the folded IF and its MSG= ASSIGN), +1 include_edges (the
 new SHOW ORDSCR1) -- include_resolution_rate drops to 0.125 since the
 denominator grew with no new resolved include.
+
+2026-09-01: MMP9800.nsp added -- statement-recognition regression fixture
+covering four constructs found missing while calibrating against a real
+client corpus: a bare short-form assignment with no ASSIGN keyword (now
+RE_BARE_ASSIGN, wired into `_match_arithmetic` the same as any other
+literal-bearing assignment); SET CONTROL (recognised structurally, like
+RESET/IGNORE -- no rule_candidate); an INPUT WINDOW block whose column-spec
+continuation lines are prefixed with Natural's own "/"/"//" next-line
+marker (CONTINUATION_LEAD_COLSPEC now allows the prefix, and the fold
+loop's verb check now covers INPUT/REINPUT as well as WRITE/DISPLAY/PRINT,
+not just WRITE/DISPLAY/PRINT as issue #24 originally scoped it); and a
+COMPRESS wrapping its INTO clause onto a continuation line (INTO added to
+CONTINUATION_LEAD, alongside AND/OR/etc). +1 member/code_member, +21
+source_lines, +2 rule_candidates (the bare ASSIGN, the folded COMPRESS...
+INTO), +1 orphan_module (uncalled by design, as usual for these
+regression-only fixtures). Per the same accepted double-visit convention
+as every other continuation-fold fixture (see MMP9000/MMP9500 above): the
+three folded continuation lines (the two colspec lines, the INTO line) are
+each still independently visited afterwards and correctly don't stand
+alone as a statement, so +3 unparsed_lines/gaps_total on top of the
+orphan_module gap, +4 gaps_total in total; SET CONTROL and the bare
+assignment raise no gap at all, matching RESET/IGNORE.
 """
 
 from __future__ import annotations
@@ -169,17 +191,17 @@ from __future__ import annotations
 from mfdoc import graph
 
 EXPECTED_COVERAGE = {
-    "members": 21,
-    "code_members": 13,
-    "source_lines": 414,
-    "unparsed_lines": 8,
-    "line_recognition_rate": 0.9807,
+    "members": 22,
+    "code_members": 14,
+    "source_lines": 435,
+    "unparsed_lines": 11,
+    "line_recognition_rate": 0.9747,
     "entities": 13,
     "entities_with_definition": 9,
     "entity_definition_rate": 0.6923,
     "entity_fields": 46,
     "data_accesses": 14,
-    "rule_candidates": 41,
+    "rule_candidates": 43,
     "invocation_edges": 13,
     "invocations_resolved": 2,
     "call_resolution_rate": 0.1538,
@@ -188,7 +210,7 @@ EXPECTED_COVERAGE = {
     "includes_resolved": 1,
     "include_resolution_rate": 0.125,
     "gaps_high": 20,
-    "gaps_total": 42,
+    "gaps_total": 46,
 }
 
 
@@ -205,5 +227,5 @@ def test_run_all_summary_matches_snapshot(derive_result):
     assert derive_result["unresolved_calls"] == 13
     assert derive_result["undefined_entities"] == 3
     assert derive_result["adabas_entities_merged"] == 2
-    assert derive_result["orphans"] == 9
+    assert derive_result["orphans"] == 10
     assert derive_result["transaction_scopes"] == 3

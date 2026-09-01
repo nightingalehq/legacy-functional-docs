@@ -144,3 +144,87 @@ def test_ignore_is_recognised_and_not_an_unparsed_line(indexed_db):
         """
     ).fetchone()
     assert rule is None, "IGNORE is structural, not a business rule -- must not become a rule_candidate"
+
+
+def test_bare_assignment_without_assign_keyword_is_captured(indexed_db):
+    """`#FLAG := 1` (MMP9800:13) has no ASSIGN keyword -- valid, common
+    Natural short form. Previously RE_COMPUTE only anchored on the keyword,
+    so every bare assignment fell through as an unparsed_line gap instead of
+    being captured the same way a literal-bearing MOVE/COMPUTE already is."""
+    conn = indexed_db
+    row = conn.execute(
+        """
+        SELECT rc.construct, rc.literals FROM rule_candidate rc
+        JOIN member m ON m.id = rc.member_id
+        WHERE m.name='MMP9800' AND rc.line_no=13
+        """
+    ).fetchone()
+    assert row is not None, "expected #FLAG := 1 to be captured as a rule_candidate"
+    assert row["construct"] == "ASSIGN"
+    assert row["literals"] == "1"
+    gap = conn.execute(
+        """
+        SELECT 1 FROM gap g JOIN member m ON m.id = g.member_id
+        WHERE g.gap_kind='unparsed_line' AND m.name='MMP9800' AND g.line_no=13
+        """
+    ).fetchone()
+    assert gap is None, "bare assignment must no longer be an unparsed_line gap"
+
+
+def test_set_control_is_recognised_and_not_an_unparsed_line(indexed_db):
+    """SET CONTROL (MMP9800:14) sends terminal/printer control codes --
+    presentation, not a business decision -- so it's recognised the same way
+    as RESET/IGNORE: no rule_candidate, no unparsed_line gap."""
+    conn = indexed_db
+    gap = conn.execute(
+        """
+        SELECT 1 FROM gap g JOIN member m ON m.id = g.member_id
+        WHERE g.gap_kind='unparsed_line' AND m.name='MMP9800' AND g.line_no=14
+        """
+    ).fetchone()
+    assert gap is None, "SET CONTROL must no longer be an unparsed_line gap"
+    rule = conn.execute(
+        """
+        SELECT 1 FROM rule_candidate rc JOIN member m ON m.id = rc.member_id
+        WHERE m.name='MMP9800' AND rc.line_no=14
+        """
+    ).fetchone()
+    assert rule is None, "SET CONTROL is structural -- must not become a rule_candidate"
+
+
+def test_input_window_folds_slash_prefixed_colspec_continuations(indexed_db):
+    """An INPUT WINDOW block (MMP9800:15-17) whose column-spec continuation
+    lines are prefixed with "/"/"//" -- Natural's own next-line marker --
+    must fold into one INPUT interaction row, the same way WRITE/DISPLAY/
+    PRINT operand lists already do (issue #24). Previously the colspec fold
+    was scoped to WRITE/DISPLAY/PRINT only and didn't allow a leading slash,
+    so this fell through entirely -- three lines, three unparsed_line gaps,
+    and a truncated INPUT with no idea what the window actually asked for."""
+    conn = indexed_db
+    row = conn.execute(
+        """
+        SELECT i.kind, i.fields FROM interaction i JOIN member m ON m.id = i.member_id
+        WHERE m.name='MMP9800' AND i.kind='INPUT' AND i.line_no=15
+        """
+    ).fetchone()
+    assert row is not None, "expected one folded INPUT interaction row at line 15"
+    assert "1X" in row["fields"], f"column-spec continuation not folded in: {row['fields']!r}"
+
+
+def test_compress_folds_into_clause_on_its_own_continuation_line(indexed_db):
+    """`COMPRESS 'A' 'B' \\n INTO #MESSAGE` (MMP9800:18-19) -- the INTO
+    clause commonly wraps onto its own line and wasn't a recognised
+    continuation lead, so it fell through as its own unparsed_line gap and
+    the COMPRESS rule_candidate never recorded where the result went."""
+    conn = indexed_db
+    row = conn.execute(
+        """
+        SELECT rc.condition FROM rule_candidate rc
+        JOIN member m ON m.id = rc.member_id
+        WHERE m.name='MMP9800' AND rc.construct='COMPRESS' AND rc.line_no=18
+        """
+    ).fetchone()
+    assert row is not None, "expected one folded COMPRESS rule_candidate at line 18"
+    assert "INTO #MESSAGE" in row["condition"], (
+        f"INTO clause not folded into the COMPRESS condition: {row['condition']!r}"
+    )
