@@ -41,6 +41,22 @@ from .validate import BR_REF, _split_frontmatter, validate_test_doc
 DEFAULT_MAX_SCENARIOS_PER_CALL = 150
 
 
+def _resolve_max_scenarios_per_call(max_scenarios_per_call: int | None) -> int:
+    """`None` means "not configured" -- fall back to the default. Anything
+    else must be a positive int: `or DEFAULT_MAX_SCENARIOS_PER_CALL` would
+    treat an explicit `0` the same as "not configured" (0 is falsy) and
+    silently substitute the default instead of respecting it or rejecting
+    it, masking a real misconfiguration either way."""
+    if max_scenarios_per_call is None:
+        return DEFAULT_MAX_SCENARIOS_PER_CALL
+    if max_scenarios_per_call <= 0:
+        raise ValueError(
+            f"options.testgen.max_scenarios_per_call must be a positive integer, "
+            f"got {max_scenarios_per_call!r}"
+        )
+    return max_scenarios_per_call
+
+
 def extract_code_fence(body: str, language: str) -> str | None:
     """The contents of the single ```<language> ... ``` fence in `body`, or
     None if the count isn't exactly one. Deliberately conservative: more
@@ -293,6 +309,16 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(index_text, encoding="utf-8")
 
+    # The index is built deterministically, not model-generated, but that's
+    # not a reason to skip checking it -- validate_test_doc is the same
+    # ground truth every chunk (and every other generated doc in this
+    # tool) is judged against, and a bug in _render_chunk_index deserves
+    # the same loud, reported failure a bad model response gets, not a
+    # silent `ok=True` because no chunk happened to fail.
+    index_validation = validate_test_doc(conn, out_path)
+    if not index_validation["ok"]:
+        problems = problems + [f"index document: {p}" for p in index_validation["problems"]]
+
     return DocResult(member_name, str(out_path), not problems, chunk_count, input_tokens, output_tokens, problems)
 
 
@@ -313,7 +339,7 @@ def generate_member_test_doc(conn, member_name: str, language: str, framework: s
     into a valid document -- existing, unchanged behaviour, not something
     this change alters)."""
     system, rows, ambiguous_libs = fetch_test_case_rows(conn, member_name)
-    threshold = max_scenarios_per_call or DEFAULT_MAX_SCENARIOS_PER_CALL
+    threshold = _resolve_max_scenarios_per_call(max_scenarios_per_call)
     if not ambiguous_libs and rows and len(rows) > threshold:
         return _generate_member_test_doc_chunked(
             conn, member_name, system, rows, language, framework, out_path, caller,
@@ -399,7 +425,7 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
     `f"{subdir}::{member}::{language}::{framework}"` for the same reason
     batch.py's state key includes the subdir -- two batchable members can
     share a bare name across libraries/dialects."""
-    threshold = max_scenarios_per_call or DEFAULT_MAX_SCENARIOS_PER_CALL
+    threshold = _resolve_max_scenarios_per_call(max_scenarios_per_call)
     state = _load_state(state_path) if state_path else {}
     corpus_sig = _corpus_signature(conn, language, framework, threshold, redact) if state_path else None
     corpus_unchanged = bool(state_path) and state.get("_corpus_sha256") == corpus_sig

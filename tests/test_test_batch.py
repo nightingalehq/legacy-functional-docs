@@ -1048,6 +1048,50 @@ def test_run_test_batch_threshold_change_is_not_masked_by_resume_state(tmp_path)
     assert "chunked" in single_path.read_text(encoding="utf-8")
 
 
+def test_resolve_max_scenarios_per_call():
+    """`None` (not configured) falls back to the default; an explicit
+    positive int is respected as-is; 0 or negative must raise rather than
+    silently substituting the default -- `or DEFAULT` would have treated
+    an intentional 0 the same as "not configured", masking either a real
+    use case or a real misconfiguration."""
+    import pytest
+    from mfdoc.testbatch import DEFAULT_MAX_SCENARIOS_PER_CALL, _resolve_max_scenarios_per_call
+
+    assert _resolve_max_scenarios_per_call(None) == DEFAULT_MAX_SCENARIOS_PER_CALL
+    assert _resolve_max_scenarios_per_call(5) == 5
+    with pytest.raises(ValueError):
+        _resolve_max_scenarios_per_call(0)
+    with pytest.raises(ValueError):
+        _resolve_max_scenarios_per_call(-1)
+
+
+def test_generate_member_test_doc_chunked_validates_the_index_document(tmp_path, monkeypatch):
+    """The index document is built deterministically, not model-generated,
+    but that's not a reason to skip checking it -- a bug in
+    _render_chunk_index must surface as a reported failure, not a silent
+    ok=True just because every chunk happened to validate on its own.
+    Simulated here by monkeypatching _render_chunk_index to return content
+    that fails validate_test_doc outright."""
+    from mfdoc import testbatch
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_scenarios(conn, 4)
+
+    monkeypatch.setattr(testbatch, "_render_chunk_index", lambda *a, **k: "not a valid document")
+
+    out_path = tmp_path / "FAKEMOD.md"
+    result = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, _chunk_aware_caller("python", "pytest"),
+        "writing rules text", "template text", max_scenarios_per_call=2,
+    )
+    assert result.ok is False
+    assert any("index document" in p for p in result.problems)
+
+
 def test_run_test_batch_chunks_a_large_member_and_still_batches_small_ones(tmp_path):
     """End-to-end through run_test_batch (the `mfdoc test-batch` path, not
     just single-member test-gen): a large member routes to the serial
