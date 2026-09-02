@@ -261,6 +261,14 @@ def extract(conn, member_id: int, lines, member_name: str = "?") -> dict:
             conn.execute("UPDATE member SET object_type=COALESCE(object_type,'program') WHERE id=?", (member_id,))
             matched = True
         elif (m := RE_ENTRY.match(masked)):
+            # Some sites export an online/screen program with no `PROGRAM
+            # "name"` self-declaration at all -- its only self-identifying
+            # statement is the ENTRY point callers dial into (e.g. a CICS-style
+            # transaction program). That's still a callable unit by the same
+            # definition testplan.py's module docstring uses, so treat it the
+            # same as RE_PROGRAM for object_type -- COALESCE leaves an already
+            # PROGRAM-declared member's object_type untouched.
+            conn.execute("UPDATE member SET object_type=COALESCE(object_type,'program') WHERE id=?", (member_id,))
             insert(conn, "variable", member_id=member_id, scope="entry",
                    name=m.group("name").upper(), init_value=m.group("params"), line_no=line_no)
             matched = True

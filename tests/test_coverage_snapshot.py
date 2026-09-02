@@ -184,6 +184,22 @@ each still independently visited afterwards and correctly don't stand
 alone as a statement, so +3 unparsed_lines/gaps_total on top of the
 orphan_module gap, +4 gaps_total in total; SET CONTROL and the bare
 assignment raise no gap at all, matching RESET/IGNORE.
+
+2026-09-01: SCRNENT.mantis added -- a real client Mantis corpus
+included an online/screen program whose only self-identifying statement is
+`ENTRY SCRNENT(...)`, with no `PROGRAM "name"` self-declaration at all.
+mantis.py previously only set a member's object_type on RE_PROGRAM, so such
+a member never became "program"/"subprogram"/"subroutine"/"copycode" and
+silently fell out of every batchable-member query (module docs, test-plan,
+test-gen) with no error at all -- ENTRY now sets object_type the same way
+PROGRAM does (COALESCE leaves an already-declared member untouched). +1
+member/code_member, +11 source_lines (comment, ENTRY, 2 TEXT decls, SCREEN,
+CONVERSE, IF, SHOW, END, EXIT), +1 rule_candidate (the IF), +2 include_edges
+(SCREEN's map binding, SHOW's screen reference) -- include_resolution_rate
+drops to 0.1 since the denominator grew with no new resolved include; +1
+orphan_module/gaps_total (uncalled by design, as usual for these
+regression-only fixtures) and +1 unresolved_call/gaps_high/gaps_total (SHOW
+MAP's screen reference, unresolved same as any other screen-only target).
 """
 
 from __future__ import annotations
@@ -191,26 +207,26 @@ from __future__ import annotations
 from mfdoc import graph
 
 EXPECTED_COVERAGE = {
-    "members": 22,
-    "code_members": 14,
-    "source_lines": 435,
+    "members": 23,
+    "code_members": 15,
+    "source_lines": 446,
     "unparsed_lines": 11,
-    "line_recognition_rate": 0.9747,
+    "line_recognition_rate": 0.9753,
     "entities": 13,
     "entities_with_definition": 9,
     "entity_definition_rate": 0.6923,
     "entity_fields": 46,
     "data_accesses": 14,
-    "rule_candidates": 43,
+    "rule_candidates": 44,
     "invocation_edges": 13,
     "invocations_resolved": 2,
     "call_resolution_rate": 0.1538,
     "dynamic_call_edges": 1,
-    "include_edges": 8,
+    "include_edges": 10,
     "includes_resolved": 1,
-    "include_resolution_rate": 0.125,
-    "gaps_high": 20,
-    "gaps_total": 46,
+    "include_resolution_rate": 0.1,
+    "gaps_high": 21,
+    "gaps_total": 48,
 }
 
 
@@ -224,8 +240,8 @@ def test_coverage_matches_snapshot(indexed_db, derive_result):
 
 
 def test_run_all_summary_matches_snapshot(derive_result):
-    assert derive_result["unresolved_calls"] == 13
+    assert derive_result["unresolved_calls"] == 14
     assert derive_result["undefined_entities"] == 3
     assert derive_result["adabas_entities_merged"] == 2
-    assert derive_result["orphans"] == 10
+    assert derive_result["orphans"] == 11
     assert derive_result["transaction_scopes"] == 3
