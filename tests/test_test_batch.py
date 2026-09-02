@@ -942,6 +942,112 @@ def test_generate_member_test_doc_reports_failure_when_one_chunk_fails(tmp_path)
     assert "FAKEMOD:BR-003" not in index_text, "a failed chunk's scenarios must not be claimed as covered"
 
 
+def test_failed_chunk_confidence_is_not_counted_in_the_index(tmp_path):
+    """A chunk can fail validate_test_doc for a reason unrelated to its
+    front matter (here: an invented scenario id) while still returning a
+    perfectly parseable, confident-looking confidence_summary. The index's
+    aggregated confidence must come only from chunks whose scenarios it
+    actually claims as covered -- summing a failed chunk's numbers would
+    silently over-report confidence for coverage that doesn't exist."""
+    from mfdoc import testbatch
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_scenarios(conn, 4)
+
+    good_caller = _chunk_aware_caller("python", "pytest")
+
+    def flaky_caller(prompt: str) -> ModelResponse:
+        if "BR-003" in prompt:
+            # Valid, parseable front matter with a confident-looking
+            # summary -- but the fence references an invented scenario id,
+            # so it fails validate_test_doc's scenario-existence check, not
+            # a front-matter problem.
+            text = """---
+title: "FAKEMOD chunk"
+doc_type: generated_test
+system: "MOM"
+generated_by: mfdoc
+generated_at: "2026-09-02"
+review_status: draft
+confidence_summary:
+  verified: 99
+language: python
+framework: pytest
+sources: ["FAKEMOD"]
+---
+
+```python
+def test_invented():
+    # FAKEMOD:BR-999 [[FAKEMOD:1]]
+    pass
+```
+"""
+            return ModelResponse(text=text, input_tokens=1, output_tokens=1)
+        return good_caller(prompt)
+
+    out_path = tmp_path / "FAKEMOD.md"
+    result = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, flaky_caller,
+        "writing rules text", "template text", max_scenarios_per_call=2,
+    )
+    assert result.ok is False
+
+    index_text = out_path.read_text(encoding="utf-8")
+    assert "verified: 2" in index_text, (
+        "only the ok chunk's 2 scenarios should count -- the failed chunk's "
+        "fabricated 'verified: 99' must not leak into the index"
+    )
+    assert "verified: 99" not in index_text
+    assert "verified: 101" not in index_text
+
+
+def test_run_test_batch_threshold_change_is_not_masked_by_resume_state(tmp_path):
+    """Changing max_scenarios_per_call between runs must not be treated as
+    'nothing changed' by resumable skip -- the same test_case content can
+    need a different output shape (single doc vs. chunked) purely because
+    the threshold moved, and both the corpus-level signature and the
+    per-member brief hash need to reflect that."""
+    from mfdoc import testbatch
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_scenarios(conn, 4)
+
+    caller = _chunk_aware_caller("python", "pytest")
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+
+    # First run: threshold above the member's row count -- renders as one doc.
+    summary1 = testbatch.run_test_batch(
+        conn, ["FAKEMOD"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path,
+        max_scenarios_per_call=10,
+    )
+    assert summary1.skipped == 0 and summary1.ok == 1
+    single_path = out_dir / "natural" / "python" / "pytest" / "FAKEMOD.md"
+    assert single_path.exists()
+    assert not (out_dir / "natural" / "python" / "pytest" / "FAKEMOD.chunk1.md").exists()
+
+    # Second run: same test_case content, lower threshold -- must re-render
+    # as chunks, not get skipped as a no-op.
+    summary2 = testbatch.run_test_batch(
+        conn, ["FAKEMOD"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path,
+        max_scenarios_per_call=2,
+    )
+    assert summary2.skipped == 0, "a threshold change must not be treated as a no-op by resume/skip"
+    assert summary2.ok == 1
+    assert (out_dir / "natural" / "python" / "pytest" / "FAKEMOD.chunk1.md").exists()
+    assert "chunked" in single_path.read_text(encoding="utf-8")
+
+
 def test_run_test_batch_chunks_a_large_member_and_still_batches_small_ones(tmp_path):
     """End-to-end through run_test_batch (the `mfdoc test-batch` path, not
     just single-member test-gen): a large member routes to the serial

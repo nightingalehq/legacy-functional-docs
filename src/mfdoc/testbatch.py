@@ -168,11 +168,15 @@ def _chunk_rows(rows: list, size: int) -> list[list]:
 
 
 def _aggregate_chunk_confidence(chunk_paths: list[Path]) -> dict[str, int]:
-    """Sum each ok chunk's own (model-produced, already validated)
-    confidence_summary -- never re-guessed here. A chunk that doesn't exist
-    or doesn't parse (a failed chunk, most often) contributes nothing,
-    which is correct: its scenarios aren't covered by anything the index
-    can honestly claim confidence about."""
+    """Sum each given chunk's own (model-produced, already validated)
+    confidence_summary -- never re-guessed here. Callers must pass only ok
+    chunks' paths: a failed chunk's file still exists on disk (written on
+    every attempt, even the last failed one) and can carry a perfectly
+    parseable confidence_summary despite failing validation for an
+    unrelated reason (e.g. a bad citation) -- including it here would
+    over-report confidence for scenarios the index doesn't actually claim
+    as covered. A path that doesn't exist or doesn't parse contributes
+    nothing either way."""
     totals = {"verified": 0, "inferred": 0, "unresolved": 0}
     for path in chunk_paths:
         if not path.exists():
@@ -284,7 +288,7 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
         if not result.ok:
             problems.append(f"chunk {i}/{chunk_count} ({chunk_path.name}) failed: " + "; ".join(result.problems))
 
-    confidence = _aggregate_chunk_confidence([p for _, p, _ in chunk_entries])
+    confidence = _aggregate_chunk_confidence([p for _, p, r in chunk_entries if r.ok])
     index_text = _render_chunk_index(member_name, system, language, framework, chunk_entries, confidence)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(index_text, encoding="utf-8")
@@ -333,7 +337,8 @@ class TestBatchSummary:
     skipped: int
 
 
-def _corpus_signature(conn, language: str, framework: str, redact: Redactor = NULL_REDACTOR) -> str:
+def _corpus_signature(conn, language: str, framework: str, threshold: int,
+                       redact: Redactor = NULL_REDACTOR) -> str:
     """Fingerprint of every input to test_case_brief() that isn't the derive
     code itself, via batch._corpus_signature's `extra` hook, plus:
 
@@ -344,12 +349,18 @@ def _corpus_signature(conn, language: str, framework: str, redact: Redactor = NU
       test_case.status on the next `mfdoc test-plan`) changes what
       test_case_brief() renders for that scenario without touching any
       source_file -- the source-only signature above can't see that on its
-      own, and this run's corpus-level skip must not treat it as unchanged.
+      own, and this run's corpus-level skip must not treat it as unchanged;
+    - the effective max_scenarios_per_call threshold, since raising or
+      lowering it can flip a member between the single-doc and chunked
+      output shapes without any test_case row or status changing at all --
+      the two checks above wouldn't see that either, and a stale "nothing
+      changed" skip would leave the previous run's now-wrong-shaped output
+      (or count of chunk files) in place.
     """
     status_rows = conn.execute(
         "SELECT scenario_name, status FROM test_case ORDER BY scenario_name"
     ).fetchall()
-    extra = [language, framework]
+    extra = [language, framework, str(threshold)]
     for r in status_rows:
         extra.append(r["scenario_name"])
         extra.append(r["status"])
@@ -388,14 +399,14 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
     `f"{subdir}::{member}::{language}::{framework}"` for the same reason
     batch.py's state key includes the subdir -- two batchable members can
     share a bare name across libraries/dialects."""
+    threshold = max_scenarios_per_call or DEFAULT_MAX_SCENARIOS_PER_CALL
     state = _load_state(state_path) if state_path else {}
-    corpus_sig = _corpus_signature(conn, language, framework, redact) if state_path else None
+    corpus_sig = _corpus_signature(conn, language, framework, threshold, redact) if state_path else None
     corpus_unchanged = bool(state_path) and state.get("_corpus_sha256") == corpus_sig
     results: list[DocResult] = []
     briefs: dict[str, str] = {}
     to_run: list[tuple[str, str, Path]] = []
     to_run_chunked: list[tuple[str, str, Path]] = []
-    threshold = max_scenarios_per_call or DEFAULT_MAX_SCENARIOS_PER_CALL
 
     state_keys: dict[str, str] = {}
     for name in members:
@@ -412,9 +423,14 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
 
         # Always the member's *full* brief, even for a member that ends up
         # chunked below -- it's only ever used as a content fingerprint for
-        # resume/skip, never sent to the model as-is.
+        # resume/skip, never sent to the model as-is. `threshold` is folded
+        # into the hash too: unchanged brief content but a changed
+        # max_scenarios_per_call can still flip this member between the
+        # single-doc and chunked output shapes, and the per-member skip
+        # must not treat that as "nothing changed" (see _corpus_signature's
+        # docstring for the same reasoning at the corpus level).
         brief = test_case_brief(conn, name, redact=redact)
-        brief_hash = hashlib.sha256(brief.encode("utf-8")).hexdigest()
+        brief_hash = hashlib.sha256(f"{brief}\x00{threshold}".encode("utf-8")).hexdigest()
         if prior_ok and prior.get("brief_sha256") == brief_hash:
             results.append(_skip_result(name, out_path, prior))
             continue
