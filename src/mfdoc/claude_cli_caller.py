@@ -28,9 +28,9 @@ DEFAULT_TIMEOUT_S = 600
 
 
 class ClaudeCLICaller:
-    def __init__(self, model: str | None = None, timeout: int = DEFAULT_TIMEOUT_S):
+    def __init__(self, model: str | None = None, timeout: int | None = None):
         self.model = model
-        self.timeout = timeout
+        self.timeout = timeout if timeout is not None else DEFAULT_TIMEOUT_S
 
     def __call__(self, prompt: str) -> ModelResponse:
         cmd = ["claude", "-p", "--output-format", "json", "--tools", "", "--no-session-persistence"]
