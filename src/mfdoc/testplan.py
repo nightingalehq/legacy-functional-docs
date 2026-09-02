@@ -243,29 +243,22 @@ def test_plan_register(conn, redact=None) -> str:
     return "\n".join(out) + "\n"
 
 
-def test_case_brief(conn, member_name: str, redact=None) -> str:
-    """The only input the render stage (test-gen/test-batch) sees for one
-    member -- plain text, every scenario already cited, mirroring
-    brief.module_brief's role for narrative docs. Includes the member's own
-    parameter contract once (shared by every scenario) plus a section per
-    test_case row.
-    """
-    from .redact import NULL_REDACTOR
-    redact = redact or NULL_REDACTOR
+def fetch_test_case_rows(conn, member_name: str):
+    """(system, rows, ambiguous_libs) for member_name -- the same
+    resolve+query test_case_brief has always done, factored out so
+    testbatch.py's chunked render path (see DEFAULT_MAX_SCENARIOS_PER_CALL)
+    can decide whether to chunk *before* asking for a brief, using the exact
+    same row set/order test_case_brief itself would build one from.
 
-    # Same refusal brief.module_brief makes for the identical case: a bare
-    # name is only unique together with library+dialect, so a second member
-    # sharing this name would otherwise get its scenarios silently merged
-    # into this brief under colliding BR-nnn ids.
+    Same refusal brief.module_brief makes for the identical case: a bare
+    name is only unique together with library+dialect, so a second member
+    sharing this name would otherwise get its scenarios silently merged
+    into one brief under colliding BR-nnn ids -- `ambiguous_libs` is
+    non-empty (and `rows` empty) in that case, for the caller to report."""
     matches, ambiguous_libs = resolve_member_by_name(conn, member_name, columns="library, system")
     if ambiguous_libs:
-        libs = ", ".join(ambiguous_libs)
-        return (
-            f"# Test brief: {member_name}\n\nMember name is ambiguous across libraries "
-            f"({libs}). Re-run with a library-qualified name.\n"
-        )
+        return None, [], ambiguous_libs
     system = matches[0]["system"] if matches else None
-
     rows = conn.execute(
         """
         SELECT tc.* FROM test_case tc JOIN member m ON m.id = tc.member_id
@@ -273,10 +266,16 @@ def test_case_brief(conn, member_name: str, redact=None) -> str:
         """,
         (member_name,),
     ).fetchall()
-    if not rows:
-        return f"# Test brief: {member_name}\n\nNo derived test_case rows for this member. Run `mfdoc test-plan` first.\n"
+    return system, rows, []
 
-    out = [f"# Test brief: {member_name}", "", f"- system: {system or 'unknown'}", ""]
+
+def _brief_header(member_name: str, system: str | None, rows, title_suffix: str = "") -> list[str]:
+    """The Parameters/Dependencies section every brief for this member
+    shares, regardless of which (or how many) of its scenarios are being
+    rendered this call -- derived from any one row's `given_json`, since
+    that's the member's own interface, not something that varies per
+    scenario."""
+    out = [f"# Test brief: {member_name}{title_suffix}", "", f"- system: {system or 'unknown'}", ""]
     given0 = json.loads(rows[0]["given_json"])
     if given0["parameters"]:
         out.append("## Parameters (this member's own interface)")
@@ -291,9 +290,16 @@ def test_case_brief(conn, member_name: str, redact=None) -> str:
         for c in given0["mocks"]["callees"]:
             out.append(f"- callee: `{c}`")
         out.append("")
+    return out
 
-    out.append("## Scenarios")
-    out.append("")
+
+def _brief_scenarios(rows, redact) -> list[str]:
+    """The per-scenario `### {scenario_name} ...` sections -- the part of
+    a test brief that *does* vary between a full-member brief and one
+    chunk's brief, so both test_case_brief and test_case_brief_chunk render
+    it from whatever `rows` they're given rather than always the member's
+    full set."""
+    out = []
     for r in rows:
         when = json.loads(r["when_json"])
         then = json.loads(r["then_json"])
@@ -313,6 +319,54 @@ def test_case_brief(conn, member_name: str, redact=None) -> str:
                 "or mark it `unresolved`."
             )
         out.append("")
+    return out
+
+
+def test_case_brief(conn, member_name: str, redact=None) -> str:
+    """The only input the render stage (test-gen/test-batch) sees for one
+    member -- plain text, every scenario already cited, mirroring
+    brief.module_brief's role for narrative docs. Includes the member's own
+    parameter contract once (shared by every scenario) plus a section per
+    test_case row.
+    """
+    from .redact import NULL_REDACTOR
+    redact = redact or NULL_REDACTOR
+
+    system, rows, ambiguous_libs = fetch_test_case_rows(conn, member_name)
+    if ambiguous_libs:
+        libs = ", ".join(ambiguous_libs)
+        return (
+            f"# Test brief: {member_name}\n\nMember name is ambiguous across libraries "
+            f"({libs}). Re-run with a library-qualified name.\n"
+        )
+    if not rows:
+        return f"# Test brief: {member_name}\n\nNo derived test_case rows for this member. Run `mfdoc test-plan` first.\n"
+
+    out = _brief_header(member_name, system, rows)
+    out.append("## Scenarios")
+    out.append("")
+    out.extend(_brief_scenarios(rows, redact))
+    return "\n".join(out) + "\n"
+
+
+def test_case_brief_chunk(member_name: str, system: str | None, rows, chunk_index: int,
+                           chunk_count: int, redact=None) -> str:
+    """A test brief covering only `rows` -- one slice of this member's full
+    test_case set -- for testbatch.py's chunked render path. Same
+    Parameters/Dependencies header every chunk of this member shares (any
+    row's `given_json` gives it, they're all the same member) plus only
+    this chunk's `## Scenarios` section, so a chunk's prompt is
+    proportional to the chunk, not the whole member. `system`/`rows` are
+    passed in rather than looked up again, since the caller (testbatch.py's
+    chunk-or-not decision) already called fetch_test_case_rows once for
+    this member."""
+    from .redact import NULL_REDACTOR
+    redact = redact or NULL_REDACTOR
+
+    out = _brief_header(member_name, system, rows, title_suffix=f" (chunk {chunk_index}/{chunk_count})")
+    out.append(f"## Scenarios (this chunk only -- {len(rows)} of the member's full set)")
+    out.append("")
+    out.extend(_brief_scenarios(rows, redact))
     return "\n".join(out) + "\n"
 
 

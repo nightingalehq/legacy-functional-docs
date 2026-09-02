@@ -496,6 +496,7 @@ def cmd_test_gen(args) -> int:
         result = testbatch_mod.generate_member_test_doc(
             conn, member, language, framework, out_path, caller,
             writing_rules, template, redact=redact,
+            max_scenarios_per_call=testgen_cfg.get("max_scenarios_per_call"),
         )
         status = "OK" if result.ok else "FAIL"
         print(f"{status} {result.member} [{language}/{framework}] -> {result.path} "
@@ -579,6 +580,7 @@ def cmd_test_batch(args) -> int:
             conn, members, language, framework, base / out_dir, caller,
             writing_rules, template, redact=redact, concurrency=args.concurrency,
             state_path=(base / args.state) if args.state else None,
+            max_scenarios_per_call=testgen_cfg.get("max_scenarios_per_call"),
         )
         for r in summary.results:
             status = "SKIP" if r.skipped else ("OK  " if r.ok else "FAIL")

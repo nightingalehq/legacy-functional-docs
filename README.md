@@ -182,7 +182,13 @@ fact store for downstream tooling.
 Optional: draft tests from the same fact store (see
 [`docs/guides/testing-strategies-for-mainframes-and-4gl.md`](docs/guides/testing-strategies-for-mainframes-and-4gl.md)).
 Set `options.testgen` in `project.yml` (`default_language`, `default_framework`,
-`overlay_path`, `out_dir`) once and the flags below become optional overrides:
+`overlay_path`, `out_dir`, `max_scenarios_per_call`) once and the flags below
+become optional overrides. A member with more than `max_scenarios_per_call`
+test_case rows (default 150) renders as several independent chunk documents
+plus a deterministic index doc at the normal path, instead of one call --
+asking a single non-streaming completion for hundreds of scenarios risks a
+silently truncated response reported as success. See
+`src/mfdoc/testbatch.py`'s `DEFAULT_MAX_SCENARIOS_PER_CALL`.
 
 ```bash
 mfdoc test-plan     --config project.yml
