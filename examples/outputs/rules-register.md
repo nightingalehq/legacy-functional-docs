@@ -52,6 +52,7 @@ Every candidate business rule found across the index, keyed by its stable `MEMBE
 | **ORDENQ:BR-010** | `ORDENQ` | [[ORDENQ:29]] | 1 | `ASSIGN` | `MSG = "Order is on credit hold"` | `Order is on credit hold` |
 | **ORDENQ:BR-011** | `ORDENQ` | [[ORDENQ:37]] | 0 | `IF` | `ORDER_WT > 500 OR CUST_NO = " "` | ` ,500` |
 | **ORDENQ:BR-012** | `ORDENQ` | [[ORDENQ:39]] | 1 | `ASSIGN` | `MSG = "Credit check required"` | `Credit check required` |
+| **SCRNENT:BR-001** | `SCRNENT` | [[SCRNENT:7]] | 0 | `IF` | `CH_UNIT = " "` | ` ` |
 
-Total: 43 rule candidate(s) across 13 batchable module(s).
+Total: 44 rule candidate(s) across 14 batchable module(s).
 

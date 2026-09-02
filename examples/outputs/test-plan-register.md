@@ -29,4 +29,5 @@ Every scenario `mfdoc test-plan` derived from the fact store, keyed by the same 
 | `ORDENQ:BR-008` | `ORDENQ` | unit | characterization | `WHEN` | `"CONF"` | [[ORDENQ:26]] |
 | `ORDENQ:BR-009` | `ORDENQ` | unit | characterization | `WHEN` | `"HELD"` | [[ORDENQ:28]] |
 | `ORDENQ:BR-011` | `ORDENQ` | unit | characterization | `IF` | `ORDER_WT > 500 OR CUST_NO = " "` | [[ORDENQ:37]] |
+| `SCRNENT:BR-001` | `SCRNENT` | unit | characterization | `IF` | `CH_UNIT = " "` | [[SCRNENT:7]] |
 
