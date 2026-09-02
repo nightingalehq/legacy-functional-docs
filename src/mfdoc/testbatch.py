@@ -14,6 +14,7 @@ happen, not only on a later, separate `mfdoc test-validate`.
 
 from __future__ import annotations
 
+import datetime
 import hashlib
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -25,8 +26,35 @@ from .batch import _corpus_signature as _base_corpus_signature
 from .batch import _load_state, _output_subdir, _save_state, _skip_result
 from .redact import NULL_REDACTOR, Redactor
 from .testlang import sidecar_path_for
-from .testplan import test_case_brief
-from .validate import BR_REF, validate_test_doc
+from .testplan import fetch_test_case_rows, test_case_brief, test_case_brief_chunk
+from .validate import BR_REF, _split_frontmatter, validate_test_doc
+
+# A member whose test_case set exceeds this gets rendered as several
+# independent chunk documents instead of one (see
+# generate_member_test_doc/_generate_member_test_doc_chunked below) --
+# calibratable per-project via options.testgen.max_scenarios_per_call, same
+# pattern as --claude-code-timeout's DEFAULT_TIMEOUT_S. Motivated by a real
+# client member (hundreds of test_case rows): a single non-streaming
+# completion asked for that much structured output returned a "successful"
+# (exit 0, no error) response whose visible text was silently truncated
+# well before the closing fence.
+DEFAULT_MAX_SCENARIOS_PER_CALL = 150
+
+
+def _resolve_max_scenarios_per_call(max_scenarios_per_call: int | None) -> int:
+    """`None` means "not configured" -- fall back to the default. Anything
+    else must be a positive int: `or DEFAULT_MAX_SCENARIOS_PER_CALL` would
+    treat an explicit `0` the same as "not configured" (0 is falsy) and
+    silently substitute the default instead of respecting it or rejecting
+    it, masking a real misconfiguration either way."""
+    if max_scenarios_per_call is None:
+        return DEFAULT_MAX_SCENARIOS_PER_CALL
+    if max_scenarios_per_call <= 0:
+        raise ValueError(
+            f"options.testgen.max_scenarios_per_call must be a positive integer, "
+            f"got {max_scenarios_per_call!r}"
+        )
+    return max_scenarios_per_call
 
 
 def extract_code_fence(body: str, language: str) -> str | None:
@@ -123,13 +151,14 @@ def build_test_prompt(brief: str, writing_rules: str, template: str, language: s
     return "\n\n---\n\n".join(parts)
 
 
-def generate_member_test_doc(conn, member_name: str, language: str, framework: str,
-                              out_path: Path, caller: ModelCaller, writing_rules: str,
-                              template: str, redact: Redactor = NULL_REDACTOR,
-                              max_attempts: int = 2) -> DocResult:
-    """Single-member version: brief -> call -> validate -> retry once.
-    Used directly by `mfdoc test-gen` and by run_test_batch's per-item work."""
-    brief = test_case_brief(conn, member_name, redact=redact)
+def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: str, framework: str,
+                                   out_path: Path, caller: ModelCaller, writing_rules: str,
+                                   template: str, max_attempts: int = 2) -> DocResult:
+    """Call -> validate -> retry-once loop, given an already-built brief --
+    the part of generate_member_test_doc that doesn't care whether `brief`
+    covers a member's whole test_case set or just one chunk of it, shared
+    by the plain single-call path and _generate_member_test_doc_chunked's
+    per-chunk calls below."""
     retry_note = None
     input_tokens = output_tokens = 0
     problems: list[str] = []
@@ -150,6 +179,180 @@ def generate_member_test_doc(conn, member_name: str, language: str, framework: s
     return DocResult(member_name, str(out_path), False, attempt, input_tokens, output_tokens, problems)
 
 
+def _chunk_rows(rows: list, size: int) -> list[list]:
+    return [rows[i:i + size] for i in range(0, len(rows), size)]
+
+
+def _aggregate_chunk_confidence(chunk_paths: list[Path]) -> dict[str, int]:
+    """Sum each given chunk's own (model-produced, already validated)
+    confidence_summary -- never re-guessed here. Callers must pass only ok
+    chunks' paths: a failed chunk's file still exists on disk (written on
+    every attempt, even the last failed one) and can carry a perfectly
+    parseable confidence_summary despite failing validation for an
+    unrelated reason (e.g. a bad citation) -- including it here would
+    over-report confidence for scenarios the index doesn't actually claim
+    as covered. A path that doesn't exist or doesn't parse contributes
+    nothing either way."""
+    totals = {"verified": 0, "inferred": 0, "unresolved": 0}
+    for path in chunk_paths:
+        if not path.exists():
+            continue
+        fm, _, err = _split_frontmatter(path.read_text(encoding="utf-8"))
+        if err or not isinstance(fm, dict):
+            continue
+        cs = fm.get("confidence_summary")
+        if not isinstance(cs, dict):
+            continue
+        for key in totals:
+            value = cs.get(key)
+            if isinstance(value, int):
+                totals[key] += value
+    return totals
+
+
+def _render_chunk_index(member_name: str, system: str | None, language: str, framework: str,
+                         chunk_entries: list[tuple[int, Path, DocResult]],
+                         confidence: dict[str, int]) -> str:
+    """The index document at a chunked member's normal out_path -- built
+    here, deterministically, never model-generated, precisely because the
+    thing that broke for the client member that motivated this was a
+    model-authored front matter block getting silently dropped from an
+    oversized response. Every field here
+    is either a static convention (doc_type, generated_by) or aggregated
+    from already-validated chunk documents (confidence_summary, the
+    '## Scenarios covered' manifest) -- nothing here is invented."""
+    today = datetime.date.today().isoformat()
+    covered_ids: list[str] = []
+    lines_chunks = []
+    for index, path, result in chunk_entries:
+        status = "OK" if result.ok else "FAILED: " + "; ".join(result.problems)[:200]
+        lines_chunks.append(f"- [{path.name}](./{path.name}) -- {status}")
+        if result.ok:
+            body = path.read_text(encoding="utf-8")
+            covered_ids.extend(sorted({
+                f"{m.group('member').upper()}:BR-{m.group('n')}" for m in BR_REF.finditer(body)
+            }))
+
+    fm = "\n".join([
+        "---",
+        f'title: "{member_name} — generated tests ({language}), chunked"',
+        "doc_type: generated_test",
+        f'system: "{system or "unknown"}"',
+        f'module: "{member_name}"',
+        f"language: {language}",
+        f"framework: {framework}",
+        "generated_by: legacy-functional-docs 0.1.0",
+        f'generated_at: "{today}"',
+        "review_status: draft",
+        "reviewers: []",
+        "confidence_summary:",
+        f"  verified: {confidence['verified']}",
+        f"  inferred: {confidence['inferred']}",
+        f"  unresolved: {confidence['unresolved']}",
+        f'sources: ["{member_name}"]',
+        "---",
+    ])
+    body = "\n".join([
+        "",
+        f"# {member_name} — generated tests ({language}/{framework}), chunked",
+        "",
+        f"This member's test_case set was rendered as {len(chunk_entries)} separate "
+        "documents rather than one -- a single completion this large risks silently "
+        f"truncating before its closing fence. See [[{member_name}]] for the module as "
+        "a whole.",
+        "",
+        "## Chunks",
+        "",
+        *lines_chunks,
+        "",
+        "## Scenarios covered",
+        "",
+        *[f"- {sid}" for sid in sorted(set(covered_ids))],
+        "",
+    ])
+    return fm + body
+
+
+def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None, rows: list,
+                                       language: str, framework: str, out_path: Path,
+                                       caller: ModelCaller, writing_rules: str, template: str,
+                                       redact: Redactor, max_attempts: int, chunk_size: int) -> DocResult:
+    """Render one member as several independent chunk documents plus a
+    deterministic index doc at `out_path`, instead of asking one completion
+    to cover every scenario. Each chunk goes through the exact same
+    call/validate/retry path (_generate_test_doc_from_brief) a normal
+    single-call member does, scoped to `chunk_size` scenarios via
+    test_case_brief_chunk -- so one bad chunk retries and reports on its
+    own, rather than forcing a full-member re-generation, and no chunk's
+    prompt is any larger than a normal small member's."""
+    chunks = _chunk_rows(rows, chunk_size)
+    chunk_count = len(chunks)
+    input_tokens = output_tokens = 0
+    chunk_entries: list[tuple[int, Path, DocResult]] = []
+    problems: list[str] = []
+
+    for i, chunk_rows in enumerate(chunks, start=1):
+        chunk_path = out_path.with_name(f"{out_path.stem}.chunk{i}{out_path.suffix}")
+        brief = test_case_brief_chunk(member_name, system, chunk_rows, i, chunk_count, redact=redact)
+        result = _generate_test_doc_from_brief(
+            conn, member_name, brief, language, framework, chunk_path, caller,
+            writing_rules, template, max_attempts=max_attempts,
+        )
+        input_tokens += result.input_tokens
+        output_tokens += result.output_tokens
+        chunk_entries.append((i, chunk_path, result))
+        if not result.ok:
+            problems.append(f"chunk {i}/{chunk_count} ({chunk_path.name}) failed: " + "; ".join(result.problems))
+
+    confidence = _aggregate_chunk_confidence([p for _, p, r in chunk_entries if r.ok])
+    index_text = _render_chunk_index(member_name, system, language, framework, chunk_entries, confidence)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(index_text, encoding="utf-8")
+
+    # The index is built deterministically, not model-generated, but that's
+    # not a reason to skip checking it -- validate_test_doc is the same
+    # ground truth every chunk (and every other generated doc in this
+    # tool) is judged against, and a bug in _render_chunk_index deserves
+    # the same loud, reported failure a bad model response gets, not a
+    # silent `ok=True` because no chunk happened to fail.
+    index_validation = validate_test_doc(conn, out_path)
+    if not index_validation["ok"]:
+        problems = problems + [f"index document: {p}" for p in index_validation["problems"]]
+
+    return DocResult(member_name, str(out_path), not problems, chunk_count, input_tokens, output_tokens, problems)
+
+
+def generate_member_test_doc(conn, member_name: str, language: str, framework: str,
+                              out_path: Path, caller: ModelCaller, writing_rules: str,
+                              template: str, redact: Redactor = NULL_REDACTOR,
+                              max_attempts: int = 2,
+                              max_scenarios_per_call: int | None = None) -> DocResult:
+    """Single-member version: brief -> call -> validate -> retry once.
+    Used directly by `mfdoc test-gen` and by run_test_batch's per-item work.
+
+    A member whose test_case set exceeds `max_scenarios_per_call` (default
+    DEFAULT_MAX_SCENARIOS_PER_CALL) renders as several independent chunk
+    documents instead -- see _generate_member_test_doc_chunked. The
+    ambiguous-name and no-test_case-rows cases fall through to the
+    original single-call path unchanged (test_case_brief already reports
+    both as prose in the brief itself, which the model then fails to turn
+    into a valid document -- existing, unchanged behaviour, not something
+    this change alters)."""
+    system, rows, ambiguous_libs = fetch_test_case_rows(conn, member_name)
+    threshold = _resolve_max_scenarios_per_call(max_scenarios_per_call)
+    if not ambiguous_libs and rows and len(rows) > threshold:
+        return _generate_member_test_doc_chunked(
+            conn, member_name, system, rows, language, framework, out_path, caller,
+            writing_rules, template, redact, max_attempts, threshold,
+        )
+
+    brief = test_case_brief(conn, member_name, redact=redact)
+    return _generate_test_doc_from_brief(
+        conn, member_name, brief, language, framework, out_path, caller, writing_rules,
+        template, max_attempts=max_attempts,
+    )
+
+
 @dataclass
 class TestBatchSummary:
     results: list[DocResult]
@@ -160,7 +363,8 @@ class TestBatchSummary:
     skipped: int
 
 
-def _corpus_signature(conn, language: str, framework: str, redact: Redactor = NULL_REDACTOR) -> str:
+def _corpus_signature(conn, language: str, framework: str, threshold: int,
+                       redact: Redactor = NULL_REDACTOR) -> str:
     """Fingerprint of every input to test_case_brief() that isn't the derive
     code itself, via batch._corpus_signature's `extra` hook, plus:
 
@@ -171,12 +375,18 @@ def _corpus_signature(conn, language: str, framework: str, redact: Redactor = NU
       test_case.status on the next `mfdoc test-plan`) changes what
       test_case_brief() renders for that scenario without touching any
       source_file -- the source-only signature above can't see that on its
-      own, and this run's corpus-level skip must not treat it as unchanged.
+      own, and this run's corpus-level skip must not treat it as unchanged;
+    - the effective max_scenarios_per_call threshold, since raising or
+      lowering it can flip a member between the single-doc and chunked
+      output shapes without any test_case row or status changing at all --
+      the two checks above wouldn't see that either, and a stale "nothing
+      changed" skip would leave the previous run's now-wrong-shaped output
+      (or count of chunk files) in place.
     """
     status_rows = conn.execute(
         "SELECT scenario_name, status FROM test_case ORDER BY scenario_name"
     ).fetchall()
-    extra = [language, framework]
+    extra = [language, framework, str(threshold)]
     for r in status_rows:
         extra.append(r["scenario_name"])
         extra.append(r["status"])
@@ -186,7 +396,8 @@ def _corpus_signature(conn, language: str, framework: str, redact: Redactor = NU
 def run_test_batch(conn, members: list[str], language: str, framework: str, out_dir: Path,
                     caller: ModelCaller, writing_rules: str, template: str,
                     redact: Redactor = NULL_REDACTOR, concurrency: int = 4,
-                    state_path: Path | None = None) -> TestBatchSummary:
+                    state_path: Path | None = None,
+                    max_scenarios_per_call: int | None = None) -> TestBatchSummary:
     """Resumable render over `members` for one language/framework target --
     NOTE on `--matrix` + a shared `--state` file: per-member state keys
     (`f"{subdir}::{member}::{language}::{framework}"`, see below) already
@@ -214,12 +425,14 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
     `f"{subdir}::{member}::{language}::{framework}"` for the same reason
     batch.py's state key includes the subdir -- two batchable members can
     share a bare name across libraries/dialects."""
+    threshold = _resolve_max_scenarios_per_call(max_scenarios_per_call)
     state = _load_state(state_path) if state_path else {}
-    corpus_sig = _corpus_signature(conn, language, framework, redact) if state_path else None
+    corpus_sig = _corpus_signature(conn, language, framework, threshold, redact) if state_path else None
     corpus_unchanged = bool(state_path) and state.get("_corpus_sha256") == corpus_sig
     results: list[DocResult] = []
     briefs: dict[str, str] = {}
     to_run: list[tuple[str, str, Path]] = []
+    to_run_chunked: list[tuple[str, str, Path]] = []
 
     state_keys: dict[str, str] = {}
     for name in members:
@@ -234,13 +447,26 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
             results.append(_skip_result(name, out_path, prior))
             continue
 
+        # Always the member's *full* brief, even for a member that ends up
+        # chunked below -- it's only ever used as a content fingerprint for
+        # resume/skip, never sent to the model as-is. `threshold` is folded
+        # into the hash too: unchanged brief content but a changed
+        # max_scenarios_per_call can still flip this member between the
+        # single-doc and chunked output shapes, and the per-member skip
+        # must not treat that as "nothing changed" (see _corpus_signature's
+        # docstring for the same reasoning at the corpus level).
         brief = test_case_brief(conn, name, redact=redact)
-        briefs[name] = brief
-        brief_hash = hashlib.sha256(brief.encode("utf-8")).hexdigest()
+        brief_hash = hashlib.sha256(f"{brief}\x00{threshold}".encode("utf-8")).hexdigest()
         if prior_ok and prior.get("brief_sha256") == brief_hash:
             results.append(_skip_result(name, out_path, prior))
             continue
-        to_run.append((name, brief_hash, out_path))
+
+        _, rows, ambiguous_libs = fetch_test_case_rows(conn, name)
+        if not ambiguous_libs and rows and len(rows) > threshold:
+            to_run_chunked.append((name, brief_hash, out_path))
+        else:
+            briefs[name] = brief
+            to_run.append((name, brief_hash, out_path))
 
     with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
         futures = {
@@ -283,6 +509,24 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
             state[state_keys[name]] = {
                 "ok": result.ok, "attempts": attempts, "brief_sha256": brief_hash,
             }
+
+    # Large members (chunked) render serially, on this thread, after the
+    # pool above closes -- generate_member_test_doc touches `conn`
+    # throughout (validate_test_doc between/after each chunk's model call),
+    # and sqlite3 connections can't cross threads (the pool above only ever
+    # calls `caller` off-thread, never `conn`, for exactly this reason). A
+    # member large enough to need chunking is already the rare, expensive
+    # case; trading its concurrency with the other members for correctness
+    # here is the right call, not a regression worth chasing.
+    for name, brief_hash, out_path in to_run_chunked:
+        result = generate_member_test_doc(
+            conn, name, language, framework, out_path, caller, writing_rules, template,
+            redact=redact, max_scenarios_per_call=threshold,
+        )
+        results.append(result)
+        state[state_keys[name]] = {
+            "ok": result.ok, "attempts": result.attempts, "brief_sha256": brief_hash,
+        }
 
     if state_path:
         state["_corpus_sha256"] = corpus_sig

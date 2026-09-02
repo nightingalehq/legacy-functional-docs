@@ -801,3 +801,343 @@ def test_run_test_batch_matrix_targets_get_independent_output_and_state(tmp_path
         "same member/brief content across targets -- only language/framework differ, "
         "which the state *key* encodes, not the brief hash"
     )
+
+
+# --- Chunked rendering for oversized members (see DEFAULT_MAX_SCENARIOS_PER_CALL) ---
+
+def _seed_fakemod_scenarios(conn, count: int):
+    from mfdoc.db import insert
+
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
+    for n in range(1, count + 1):
+        insert(
+            conn, "test_case", member_id=1, kind="unit", scenario_name=f"FAKEMOD:BR-{n:03d}",
+            given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+            when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+            then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+            status="characterization", citation="FAKEMOD:1", confidence="verified",
+        )
+    conn.commit()
+
+
+def _chunk_aware_caller(language: str, framework: str):
+    """A fake caller that returns a fully valid single-chunk document citing
+    exactly the FAKEMOD:BR-nnn ids present in the prompt it was sent --
+    mirrors what a real model does for one chunk's brief, without a real
+    call. Reused across the chunking tests below."""
+    import re as _re
+
+    ids_re = _re.compile(r"FAKEMOD:BR-\d+")
+
+    def caller(prompt: str) -> ModelResponse:
+        ids = sorted(set(ids_re.findall(prompt)))
+        fence_lines = "\n".join(
+            f"def test_{i.split('-')[-1]}():\n    # {i} [[FAKEMOD:1]]\n    pass" for i in ids
+        )
+        text = f"""---
+title: "FAKEMOD — generated tests"
+doc_type: generated_test
+system: "MOM"
+generated_by: mfdoc
+generated_at: "2026-09-02"
+review_status: draft
+confidence_summary:
+  verified: {len(ids)}
+language: {language}
+framework: {framework}
+sources: ["FAKEMOD"]
+---
+
+# FAKEMOD tests
+
+Covers the module as a whole [[FAKEMOD:1]].
+
+```python
+{fence_lines}
+```
+"""
+        return ModelResponse(text=text, input_tokens=1, output_tokens=2)
+    return caller
+
+
+def test_generate_member_test_doc_chunks_an_oversized_member(tmp_path):
+    """A member whose test_case set exceeds max_scenarios_per_call renders
+    as several independent chunk documents plus a deterministic index doc
+    at the normal out_path -- proves the whole chunked path end to end:
+    every chunk validates and gets its own sidecar, the index aggregates
+    real (not invented) confidence numbers from the chunks, and every
+    scenario across all 5 rows ends up in the index's manifest."""
+    from mfdoc import testbatch
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_scenarios(conn, 5)
+
+    out_path = tmp_path / "FAKEMOD.md"
+    result = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, _chunk_aware_caller("python", "pytest"),
+        "writing rules text", "template text", max_scenarios_per_call=2,
+    )
+    assert result.ok is True, result.problems
+    assert result.attempts == 3  # ceil(5 / 2) chunks
+
+    for i in (1, 2, 3):
+        chunk_path = tmp_path / f"FAKEMOD.chunk{i}.md"
+        assert chunk_path.exists()
+        from mfdoc.validate import validate_test_doc
+        assert validate_test_doc(conn, chunk_path)["ok"]
+
+    index_text = out_path.read_text(encoding="utf-8")
+    assert "language: python" in index_text
+    assert "framework: pytest" in index_text
+    assert "doc_type: generated_test" in index_text
+    assert "verified: 5" in index_text, "confidence_summary must aggregate all 5 chunked scenarios"
+    for n in range(1, 6):
+        assert f"FAKEMOD:BR-{n:03d}" in index_text
+
+    from mfdoc.validate import validate_test_doc
+    revalidated = validate_test_doc(conn, out_path)
+    assert revalidated["ok"], revalidated["problems"]
+
+
+def test_generate_member_test_doc_reports_failure_when_one_chunk_fails(tmp_path):
+    """One bad chunk must fail the whole member (ok=False) with a problem
+    naming which chunk, but must not prevent the other chunks from
+    rendering and validating on their own -- proves chunks are judged
+    independently, not all-or-nothing on the first failure."""
+    from mfdoc import testbatch
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_scenarios(conn, 4)
+
+    good_caller = _chunk_aware_caller("python", "pytest")
+
+    def flaky_caller(prompt: str) -> ModelResponse:
+        if "BR-003" in prompt:
+            return ModelResponse(text="not a valid document", input_tokens=1, output_tokens=1)
+        return good_caller(prompt)
+
+    out_path = tmp_path / "FAKEMOD.md"
+    result = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, flaky_caller,
+        "writing rules text", "template text", max_scenarios_per_call=2,
+    )
+    assert result.ok is False
+    assert any("chunk 2" in p for p in result.problems)
+
+    assert (tmp_path / "FAKEMOD.chunk1.md").exists()
+    from mfdoc.validate import validate_test_doc
+    assert validate_test_doc(conn, tmp_path / "FAKEMOD.chunk1.md")["ok"]
+
+    index_text = out_path.read_text(encoding="utf-8")
+    assert "FAKEMOD:BR-001" in index_text and "FAKEMOD:BR-002" in index_text
+    assert "FAKEMOD:BR-003" not in index_text, "a failed chunk's scenarios must not be claimed as covered"
+
+
+def test_failed_chunk_confidence_is_not_counted_in_the_index(tmp_path):
+    """A chunk can fail validate_test_doc for a reason unrelated to its
+    front matter (here: an invented scenario id) while still returning a
+    perfectly parseable, confident-looking confidence_summary. The index's
+    aggregated confidence must come only from chunks whose scenarios it
+    actually claims as covered -- summing a failed chunk's numbers would
+    silently over-report confidence for coverage that doesn't exist."""
+    from mfdoc import testbatch
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_scenarios(conn, 4)
+
+    good_caller = _chunk_aware_caller("python", "pytest")
+
+    def flaky_caller(prompt: str) -> ModelResponse:
+        if "BR-003" in prompt:
+            # Valid, parseable front matter with a confident-looking
+            # summary -- but the fence references an invented scenario id,
+            # so it fails validate_test_doc's scenario-existence check, not
+            # a front-matter problem.
+            text = """---
+title: "FAKEMOD chunk"
+doc_type: generated_test
+system: "MOM"
+generated_by: mfdoc
+generated_at: "2026-09-02"
+review_status: draft
+confidence_summary:
+  verified: 99
+language: python
+framework: pytest
+sources: ["FAKEMOD"]
+---
+
+```python
+def test_invented():
+    # FAKEMOD:BR-999 [[FAKEMOD:1]]
+    pass
+```
+"""
+            return ModelResponse(text=text, input_tokens=1, output_tokens=1)
+        return good_caller(prompt)
+
+    out_path = tmp_path / "FAKEMOD.md"
+    result = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, flaky_caller,
+        "writing rules text", "template text", max_scenarios_per_call=2,
+    )
+    assert result.ok is False
+
+    index_text = out_path.read_text(encoding="utf-8")
+    assert "verified: 2" in index_text, (
+        "only the ok chunk's 2 scenarios should count -- the failed chunk's "
+        "fabricated 'verified: 99' must not leak into the index"
+    )
+    assert "verified: 99" not in index_text
+    assert "verified: 101" not in index_text
+
+
+def test_run_test_batch_threshold_change_is_not_masked_by_resume_state(tmp_path):
+    """Changing max_scenarios_per_call between runs must not be treated as
+    'nothing changed' by resumable skip -- the same test_case content can
+    need a different output shape (single doc vs. chunked) purely because
+    the threshold moved, and both the corpus-level signature and the
+    per-member brief hash need to reflect that."""
+    from mfdoc import testbatch
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_scenarios(conn, 4)
+
+    caller = _chunk_aware_caller("python", "pytest")
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+
+    # First run: threshold above the member's row count -- renders as one doc.
+    summary1 = testbatch.run_test_batch(
+        conn, ["FAKEMOD"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path,
+        max_scenarios_per_call=10,
+    )
+    assert summary1.skipped == 0 and summary1.ok == 1
+    single_path = out_dir / "natural" / "python" / "pytest" / "FAKEMOD.md"
+    assert single_path.exists()
+    assert not (out_dir / "natural" / "python" / "pytest" / "FAKEMOD.chunk1.md").exists()
+
+    # Second run: same test_case content, lower threshold -- must re-render
+    # as chunks, not get skipped as a no-op.
+    summary2 = testbatch.run_test_batch(
+        conn, ["FAKEMOD"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path,
+        max_scenarios_per_call=2,
+    )
+    assert summary2.skipped == 0, "a threshold change must not be treated as a no-op by resume/skip"
+    assert summary2.ok == 1
+    assert (out_dir / "natural" / "python" / "pytest" / "FAKEMOD.chunk1.md").exists()
+    assert "chunked" in single_path.read_text(encoding="utf-8")
+
+
+def test_resolve_max_scenarios_per_call():
+    """`None` (not configured) falls back to the default; an explicit
+    positive int is respected as-is; 0 or negative must raise rather than
+    silently substituting the default -- `or DEFAULT` would have treated
+    an intentional 0 the same as "not configured", masking either a real
+    use case or a real misconfiguration."""
+    import pytest
+    from mfdoc.testbatch import DEFAULT_MAX_SCENARIOS_PER_CALL, _resolve_max_scenarios_per_call
+
+    assert _resolve_max_scenarios_per_call(None) == DEFAULT_MAX_SCENARIOS_PER_CALL
+    assert _resolve_max_scenarios_per_call(5) == 5
+    with pytest.raises(ValueError):
+        _resolve_max_scenarios_per_call(0)
+    with pytest.raises(ValueError):
+        _resolve_max_scenarios_per_call(-1)
+
+
+def test_generate_member_test_doc_chunked_validates_the_index_document(tmp_path, monkeypatch):
+    """The index document is built deterministically, not model-generated,
+    but that's not a reason to skip checking it -- a bug in
+    _render_chunk_index must surface as a reported failure, not a silent
+    ok=True just because every chunk happened to validate on its own.
+    Simulated here by monkeypatching _render_chunk_index to return content
+    that fails validate_test_doc outright."""
+    from mfdoc import testbatch
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_scenarios(conn, 4)
+
+    monkeypatch.setattr(testbatch, "_render_chunk_index", lambda *a, **k: "not a valid document")
+
+    out_path = tmp_path / "FAKEMOD.md"
+    result = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, _chunk_aware_caller("python", "pytest"),
+        "writing rules text", "template text", max_scenarios_per_call=2,
+    )
+    assert result.ok is False
+    assert any("index document" in p for p in result.problems)
+
+
+def test_run_test_batch_chunks_a_large_member_and_still_batches_small_ones(tmp_path):
+    """End-to-end through run_test_batch (the `mfdoc test-batch` path, not
+    just single-member test-gen): a large member routes to the serial
+    chunked path while a normal-sized member in the same call still goes
+    through the concurrent thread-pool path -- and neither one breaks the
+    other (this is also the regression guard for the sqlite3
+    same-thread requirement: generate_member_test_doc touches `conn`, so a
+    large member must never run inside the thread pool)."""
+    from mfdoc import testbatch
+    import sqlite3
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_scenarios(conn, 5)
+
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (2, 'SMALLMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (2, 1, 'irrelevant')")
+    insert(
+        conn, "test_case", member_id=2, kind="unit", scenario_name="SMALLMOD:BR-001",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "X", "citation": "[[SMALLMOD:1]]"}',
+        then_json='{"citation": "[[SMALLMOD:1]]", "source_excerpt": []}',
+        status="characterization", citation="SMALLMOD:1", confidence="verified",
+    )
+    conn.commit()
+
+    def caller(prompt: str) -> ModelResponse:
+        if "SMALLMOD" in prompt:
+            text = _valid_test_doc_text("python", "pytest").replace("FAKEMOD", "SMALLMOD")
+            return ModelResponse(text=text, input_tokens=1, output_tokens=2)
+        return _chunk_aware_caller("python", "pytest")(prompt)
+
+    out_dir = tmp_path / "out"
+    summary = testbatch.run_test_batch(
+        conn, ["FAKEMOD", "SMALLMOD"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", max_scenarios_per_call=2,
+    )
+
+    assert summary.failed == 0, [r.problems for r in summary.results if not r.ok]
+    assert summary.ok == 2
+
+    fakemod_path = out_dir / "natural" / "python" / "pytest" / "FAKEMOD.md"
+    smallmod_path = out_dir / "natural" / "python" / "pytest" / "SMALLMOD.md"
+    assert "doc_type: generated_test" in fakemod_path.read_text(encoding="utf-8")
+    assert (out_dir / "natural" / "python" / "pytest" / "FAKEMOD.chunk3.md").exists()
+    assert smallmod_path.exists()
+    assert not (out_dir / "natural" / "python" / "pytest" / "SMALLMOD.chunk1.md").exists()

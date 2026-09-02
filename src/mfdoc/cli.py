@@ -366,7 +366,9 @@ def _build_model_caller(args):
         return VertexCaller(model=args.model, project=args.gcp_project, region=args.gcp_region)
     if provider == "claude-code":
         from .claude_cli_caller import ClaudeCLICaller
-        return ClaudeCLICaller(model=args.model)
+        # getattr, not args.claude_code_timeout: same bare-namespace
+        # backward-compat concern as `provider` above.
+        return ClaudeCLICaller(model=args.model, timeout=getattr(args, "claude_code_timeout", None))
     from .anthropic_caller import AnthropicCaller
     return AnthropicCaller(model=args.model or "claude-sonnet-4-5")
 
@@ -494,6 +496,7 @@ def cmd_test_gen(args) -> int:
         result = testbatch_mod.generate_member_test_doc(
             conn, member, language, framework, out_path, caller,
             writing_rules, template, redact=redact,
+            max_scenarios_per_call=testgen_cfg.get("max_scenarios_per_call"),
         )
         status = "OK" if result.ok else "FAIL"
         print(f"{status} {result.member} [{language}/{framework}] -> {result.path} "
@@ -577,6 +580,7 @@ def cmd_test_batch(args) -> int:
             conn, members, language, framework, base / out_dir, caller,
             writing_rules, template, redact=redact, concurrency=args.concurrency,
             state_path=(base / args.state) if args.state else None,
+            max_scenarios_per_call=testgen_cfg.get("max_scenarios_per_call"),
         )
         for r in summary.results:
             status = "SKIP" if r.skipped else ("OK  " if r.ok else "FAIL")
@@ -991,6 +995,10 @@ def main(argv=None) -> int:
     p.add_argument("--provider", choices=["anthropic", "vertex", "claude-code"], default="anthropic")
     p.add_argument("--gcp-project")
     p.add_argument("--gcp-region")
+    p.add_argument("--claude-code-timeout", type=int, default=None,
+                    help="--provider claude-code only; seconds before a `claude -p` call is "
+                         "killed as hung, default 600 (claude_cli_caller.DEFAULT_TIMEOUT_S) -- "
+                         "raise this for a member with an unusually large fact brief/test-case count")
     p.set_defaults(func=cmd_test_overlay_draft)
 
     p = sub.add_parser("test-advisory")
@@ -1019,6 +1027,10 @@ def main(argv=None) -> int:
         p.add_argument("--provider", choices=["anthropic", "vertex", "claude-code"], default="anthropic")
         p.add_argument("--gcp-project")
         p.add_argument("--gcp-region")
+        p.add_argument("--claude-code-timeout", type=int, default=None,
+                        help="--provider claude-code only; seconds before a `claude -p` call is "
+                             "killed as hung, default 600 (claude_cli_caller.DEFAULT_TIMEOUT_S) -- "
+                             "raise this for a member with an unusually large fact brief/test-case count")
         p.set_defaults(func=fn)
     sub.choices["test-gen"].add_argument("--member", required=True)
     sub.choices["test-gen"].add_argument("--out", help="default: tests_generated/<language>/<MEMBER>.md")
@@ -1061,6 +1073,10 @@ def main(argv=None) -> int:
                                           "GOOGLE_CLOUD_PROJECT env var")
     p.add_argument("--gcp-region", help="Vertex only; default CLOUD_ML_REGION env var, "
                                         "or us-east5")
+    p.add_argument("--claude-code-timeout", type=int, default=None,
+                    help="--provider claude-code only; seconds before a `claude -p` call is "
+                         "killed as hung, default 600 (claude_cli_caller.DEFAULT_TIMEOUT_S) -- "
+                         "raise this for a module with an unusually large fact brief")
     p.set_defaults(func=cmd_batch)
 
     p = sub.add_parser("validate")

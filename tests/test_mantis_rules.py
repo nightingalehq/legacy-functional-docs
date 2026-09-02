@@ -47,3 +47,18 @@ def test_continuation_line_is_still_visited_and_gapped_on_its_own(indexed_db):
         """
     ).fetchone()
     assert row is not None, "continuation line must still raise its own unparsed_line gap"
+
+
+def test_entry_only_program_still_gets_object_type_program(indexed_db):
+    """SCRNENT.mantis has no `PROGRAM "name"` self-declaration -- its only
+    self-identifying statement is `ENTRY SCRNENT(...)`, the same shape as a
+    real site's CICS-style online/screen program. Without this, such a
+    member never gets an object_type and silently falls out of every
+    batchable-member query (module docs, test-plan, test-gen) with no error
+    -- a real client codebase hit exactly this."""
+    conn = indexed_db
+    row = conn.execute(
+        "SELECT object_type FROM member WHERE name='SCRNENT'"
+    ).fetchone()
+    assert row is not None, "expected SCRNENT to be ingested"
+    assert row["object_type"] == "program"

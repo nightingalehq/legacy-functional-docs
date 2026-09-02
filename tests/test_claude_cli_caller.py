@@ -99,8 +99,8 @@ def test_cmd_batch_routes_to_claude_cli_caller_when_provider_is_claude_code(cli_
     constructed = {}
 
     class FakeClaudeCLICaller:
-        def __init__(self, model=None):
-            constructed.update(model=model)
+        def __init__(self, model=None, timeout=None):
+            constructed.update(model=model, timeout=timeout)
 
         def __call__(self, prompt):
             from mfdoc.batch import ModelResponse
@@ -111,6 +111,44 @@ def test_cmd_batch_routes_to_claude_cli_caller_when_provider_is_claude_code(cli_
     args = SimpleNamespace(
         config=cli_args.config, out=str(tmp_path / "out"), members="MMP0100",
         model=None, concurrency=1, state="", caller="anthropic", provider="claude-code",
+        claude_code_timeout=None,
     )
     cli.cmd_batch(args)
-    assert constructed == {"model": None}
+    assert constructed == {"model": None, "timeout": None}
+
+
+def test_claude_code_timeout_flag_passed_through(cli_args, tmp_path, monkeypatch):
+    project_dir = Path(cli_args.config).parent
+    if not (project_dir / "reference").exists():
+        shutil.copytree(REPO_ROOT / "reference", project_dir / "reference")
+        shutil.copytree(REPO_ROOT / "templates", project_dir / "templates")
+
+    constructed = {}
+
+    class FakeClaudeCLICaller:
+        def __init__(self, model=None, timeout=None):
+            constructed.update(model=model, timeout=timeout)
+
+        def __call__(self, prompt):
+            from mfdoc.batch import ModelResponse
+            return ModelResponse(text=prompt, input_tokens=1, output_tokens=1)
+
+    monkeypatch.setattr("mfdoc.claude_cli_caller.ClaudeCLICaller", FakeClaudeCLICaller)
+
+    args = SimpleNamespace(
+        config=cli_args.config, out=str(tmp_path / "out"), members="MMP0100",
+        model=None, concurrency=1, state="", caller="anthropic", provider="claude-code",
+        claude_code_timeout=1800,
+    )
+    cli.cmd_batch(args)
+    assert constructed == {"model": None, "timeout": 1800}
+
+
+def test_default_timeout_used_when_none_given():
+    """The CLI's --claude-code-timeout defaults to None (unset) so
+    `_build_model_caller` always passes a `timeout` kwarg; ClaudeCLICaller
+    itself must still fall back to DEFAULT_TIMEOUT_S in that case, not pass
+    `None` straight to subprocess.run's `timeout=` (which means "no timeout
+    at all", not "600s")."""
+    from mfdoc.claude_cli_caller import DEFAULT_TIMEOUT_S
+    assert ClaudeCLICaller(timeout=None).timeout == DEFAULT_TIMEOUT_S
