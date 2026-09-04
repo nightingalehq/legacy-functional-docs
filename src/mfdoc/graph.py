@@ -26,7 +26,7 @@ ENTRY_KINDS = {"EXEC_PGM"}
 # derive pass) would silently double every one of these gap rows.
 DERIVED_GAP_KINDS = (
     "ambiguous_adabas_file", "no_ddl_for_entity", "unresolved_call",
-    "orphan_module", "sme_question",
+    "orphan_module", "sme_question", "unused_field",
 )
 
 
@@ -160,6 +160,96 @@ def crud_matrix(conn) -> list[dict]:
         """
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def referenced_entities(conn, member_id: int) -> list[dict]:
+    """Every entity (Adabas file, Supra dataset, Mantis screen/map, ...)
+    this member is known to touch: read/written via data_access, declared
+    as a view over one, shown/converged as a screen, or otherwise INCLUDEd
+    -- one row per distinct entity. The set unused_entity_fields_for_member
+    checks each entity's own fields against."""
+    rows = conn.execute(
+        """
+        SELECT DISTINCT e.id, e.name, e.kind FROM entity e
+         WHERE e.id IN (
+             SELECT entity_id FROM data_access WHERE member_id=? AND entity_id IS NOT NULL
+             UNION
+             SELECT e2.id FROM variable v JOIN entity e2 ON UPPER(e2.name) = UPPER(v.view_of)
+              WHERE v.member_id = ? AND v.view_of IS NOT NULL
+             UNION
+             SELECT e3.id FROM interaction i JOIN entity e3 ON UPPER(e3.name) = UPPER(i.target)
+              WHERE i.member_id = ? AND i.target IS NOT NULL
+             UNION
+             SELECT e4.id FROM call_edge ce JOIN entity e4 ON UPPER(e4.name) = UPPER(ce.callee_name)
+              WHERE ce.caller_id = ? AND ce.call_kind = 'INCLUDE'
+         )
+        """,
+        (member_id, member_id, member_id, member_id),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def unused_entity_fields_for_member(conn, member_id: int) -> list[dict]:
+    """For every entity `member_id` is known to reference, that entity's
+    own data fields (a screen's HEADING rows are literal text, not a
+    referenceable field, and are excluded by format) which never appear --
+    as a whole word, case-insensitive -- anywhere in this member's own
+    source. A screen/table's field inventory is complete (it comes from
+    its own definition, not from this member's usage of it), so a field
+    that never turns up is evidence the member genuinely never touches it,
+    not a scanner miss -- worth a question to an SME (is it dead, or read
+    by different code than what was supplied?) rather than silence.
+
+    Deterministic: a whole-word text scan, nothing inferred about *why* a
+    field is unused. One dict per unused field: entity_id, entity_name,
+    entity_kind, field_name, field_format."""
+    import re
+
+    text = "\n".join(
+        r["text"] for r in conn.execute(
+            "SELECT text FROM source_line WHERE member_id=?", (member_id,)
+        ).fetchall()
+    )
+    out: list[dict] = []
+    for ent in referenced_entities(conn, member_id):
+        fields = conn.execute(
+            "SELECT name, format FROM entity_field WHERE entity_id=? "
+            "AND UPPER(IFNULL(format,'')) != 'HEADING' ORDER BY id",
+            (ent["id"],),
+        ).fetchall()
+        for f in fields:
+            if not re.search(rf"\b{re.escape(f['name'])}\b", text, re.I):
+                out.append({
+                    "entity_id": ent["id"], "entity_name": ent["name"], "entity_kind": ent["kind"],
+                    "field_name": f["name"], "field_format": f["format"],
+                })
+    return out
+
+
+def unused_entity_fields(conn) -> list[dict]:
+    """unused_entity_fields_for_member, across every Natural/Mantis member,
+    each result also recording which member it's unused *in* -- and adds
+    one `unused_field` gap per finding, member-scoped, so it shows up in
+    that module's own gap register section the same way any other
+    per-member gap does. Called from run_all(); see DERIVED_GAP_KINDS for
+    why prior findings are cleared before this reruns."""
+    out: list[dict] = []
+    members = conn.execute(
+        "SELECT id, name FROM member WHERE dialect IN ('natural','mantis')"
+    ).fetchall()
+    for m in members:
+        for f in unused_entity_fields_for_member(conn, m["id"]):
+            f = {**f, "member_id": m["id"], "member_name": m["name"]}
+            out.append(f)
+            add_gap(
+                conn, "unused_field",
+                f"Field {f['field_name']} of {f['entity_kind']} {f['entity_name']} is never "
+                f"referenced anywhere in {m['name']}'s own source. Confirm whether it is "
+                f"genuinely unused (a candidate for removal, or evidence the field's real "
+                f"consumer wasn't supplied) or the scanner missed an indirect reference.",
+                member_id=m["id"], severity="low",
+            )
+    return out
 
 
 def orphans(conn) -> list[dict]:
@@ -332,8 +422,13 @@ def run_all(conn) -> dict:
     res = resolve(conn)
     orph = orphans(conn)
     scopes = transaction_scopes(conn)
+    unused_fields = unused_entity_fields(conn)
     cov = coverage(conn)
     set_metric(conn, "global", "derived.orphan_modules", [o["name"] for o in orph])
     set_metric(conn, "global", "derived.transaction_scopes", len(scopes))
+    set_metric(conn, "global", "derived.unused_entity_fields", len(unused_fields))
     conn.commit()
-    return {**res, "orphans": len(orph), "transaction_scopes": len(scopes), "coverage": cov}
+    return {
+        **res, "orphans": len(orph), "transaction_scopes": len(scopes),
+        "unused_entity_fields": len(unused_fields), "coverage": cov,
+    }

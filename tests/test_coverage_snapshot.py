@@ -200,6 +200,18 @@ drops to 0.1 since the denominator grew with no new resolved include; +1
 orphan_module/gaps_total (uncalled by design, as usual for these
 regression-only fixtures) and +1 unresolved_call/gaps_high/gaps_total (SHOW
 MAP's screen reference, unresolved same as any other screen-only target).
+
+2026-09-04: graph.unused_entity_fields added -- for every Natural/Mantis
+member, the fields of every entity it's known to touch (data_access,
+a view, an INCLUDEd screen) that never turn up as a whole word anywhere
+in that member's own source. Deterministic, run every `mfdoc derive`, and
+low severity by design (a real finding worth an SME's confirmation, not a
+scanner defect) -- so it adds to gaps_total but not gaps_high. Against
+this fixture set: +89 unused_field/gaps_total, one row per (member,
+entity, field) combination where the fixtures' own Adabas/Supra entity
+definitions list more fields than any single program happens to
+reference -- no new source, no new entity, so nothing else in this
+table moves.
 """
 
 from __future__ import annotations
@@ -226,7 +238,7 @@ EXPECTED_COVERAGE = {
     "includes_resolved": 1,
     "include_resolution_rate": 0.1,
     "gaps_high": 21,
-    "gaps_total": 48,
+    "gaps_total": 137,
 }
 
 

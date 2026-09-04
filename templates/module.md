@@ -46,6 +46,11 @@ Parameters, and any data read to establish context before the main work begins.
 
 One row per store. Say what each access is *for*, not merely that it happens.
 
+When the brief lists "Unreferenced fields on entities this module touches", name
+them here too -- a field present on the screen/table but never read or written by
+this module is a completeness finding worth a sentence, not something to leave
+for a reader to notice is simply absent.
+
 ## Business rules
 
 Numbered, each with citation, confidence, and the rule's `{MEMBER}:BR-nnn` ID from

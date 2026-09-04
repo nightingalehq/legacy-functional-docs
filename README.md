@@ -18,9 +18,10 @@ anything.
 - **Natural/Adabas** — Natural source (programs, subprograms, subroutines,
   copycode, maps), Adabas DDM listings and FDT reports (ADAREP/ADACMP) for
   the same physical files.
-- **Mantis/Supra** — Mantis source and Supra directory reports/linkpaths.
-  Calibration against the target codebase is expected (`mfdoc calibrate`,
-  `reference/mantis-supra.md`).
+- **Mantis/Supra** — Mantis source, Supra directory reports/linkpaths, and
+  Mantis screen/map painter exports (field name, type, position — the
+  screen's complete field inventory). Calibration against the target
+  codebase is expected (`mfdoc calibrate`, `reference/mantis-supra.md`).
 - **Surrounding orchestration and data definitions** — DB2/SQL DDL, COBOL
   copybooks, JCL (including embedded SQL), and CICS CSD extracts.
 - Mainframe-specific input handling: EBCDIC code pages (`cp037`/`cp500` etc.),
@@ -32,7 +33,9 @@ anything.
 From the extracted facts, deterministically: a call graph with resolved and
 unresolved (missing-source or dynamic-target) targets, a CRUD matrix, Adabas
 coupling/Supra linkpaths as entity relationships, transaction scopes, orphan
-detection, and coverage metrics (`line_recognition_rate`,
+detection, fields on a referenced screen/table a module never touches
+(`graph.unused_entity_fields`, a `gap_kind='unused_field'` row per finding),
+and coverage metrics (`line_recognition_rate`,
 `call_resolution_rate`, `entity_definition_rate`, gap counts by severity).
 `mfdoc gate` checks these against configurable thresholds before anything is
 written.
