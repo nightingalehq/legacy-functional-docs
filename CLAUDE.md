@@ -33,7 +33,12 @@ This includes, but isn't limited to:
   (e.g. copied verbatim out of a real listing, review doc, or export)
 - Real business-rule text, system/error messages, or data values from a
   client's actual source or generated documentation
-- The client's name, or any detail that would let someone infer it
+- The client's name, or any detail that would let someone infer it —
+  including an internal project/system codename the client uses for their
+  own application (e.g. what they call the mainframe system under
+  documentation). A codename reads as innocuous shorthand while you're
+  writing it, but it's exactly as identifying as the company name once it's
+  paired with "legacy mainframe" and a commit date.
 - Real screen, map, or report export content (even trimmed) — these are
   exactly the kind of site-specific artefacts `docs/guides/security-and-
   compliance.md` already treats as sensitive; a *sample* of one belongs in a
@@ -53,6 +58,17 @@ and SQLite fixtures bake schema *comments* into the binary's
 `sqlite_master`, so a leak can hide in a place a text-only review would
 miss (regenerate `examples/outputs/index.db` if a scrub ever touches
 `SCHEMA` in `db.py`).
+
+**Before running `gh pr create` or `gh pr edit` (or pushing any commit
+message you haven't already screened), re-read the full title and body
+against this list as its own explicit step** — don't rely on having already
+made the code and tests generic. Code and tests get written slowly enough to
+self-censor; a PR description is usually drafted in one pass afterwards,
+summarising *how the bug was found*, which is precisely where a real
+system's codename slips back in even when the diff itself is already clean
+(see PR #48, 2026-09: an otherwise-clean fix named the client's system by
+its internal codename only in the PR body). Treat "what did I say about
+where this came from" as a separate check from "did I invent my examples."
 
 This applies to every branch and PR against this repo, not just `main`.
 

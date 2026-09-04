@@ -219,3 +219,25 @@ def test_entry_only_program_still_gets_object_type_program(indexed_db):
     ).fetchone()
     assert row is not None, "expected SCRNENT to be ingested"
     assert row["object_type"] == "program"
+
+
+def test_screen_binding_records_the_real_target_name():
+    """`.SCREEN alias("PHYSICAL")` must record the physical screen name in
+    `variable.view_of`, not a masked placeholder. mask_literals() replaces a
+    quoted literal with an equal-length run of NULs before keyword matching
+    (RE_VIEW above already documents why); RE_SCREEN matched against that
+    masked text, so `view_of` came back as NUL bytes instead of the screen
+    name -- silently breaking referenced_entities()'s join to the screen's
+    field inventory, and with it every unused_field gap for online members."""
+    conn = _extract(
+        'PROGRAM "TESTMOD"\n'
+        '.SCREEN MAP("REALSCRN")\n'
+        "ENTRY MAIN\n"
+        "  CONVERSE MAP\n"
+        "EXIT\n"
+    )
+    row = conn.execute(
+        "SELECT view_of FROM variable WHERE scope='screen' AND name='MAP'"
+    ).fetchone()
+    assert row is not None
+    assert row["view_of"] == "REALSCRN"

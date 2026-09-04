@@ -459,7 +459,11 @@ def extract(conn, member_id: int, lines, member_name: str = "?") -> dict:
                    name=m.group("name").upper(), format=m.group("type").upper(),
                    length=spec or None, line_no=line_no)
             matched = True
-        elif (m := RE_SCREEN.match(masked)):
+        elif (m := RE_SCREEN.match(stmt)):
+            # Matched against unmasked stmt, not masked -- same reason as
+            # RE_VIEW above: mask_literals replaces the quoted physical
+            # screen name with NULs, so a masked match's target group would
+            # recover only NUL bytes instead of the screen name.
             insert(conn, "variable", member_id=member_id, scope="screen",
                    name=m.group("name").upper(), view_of=m.group("target").upper(),
                    line_no=line_no)
