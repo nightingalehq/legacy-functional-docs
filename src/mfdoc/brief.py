@@ -49,6 +49,30 @@ def _copycode_rule_candidates(conn, mid: int, _seen: set | None = None) -> list[
     return out
 
 
+def fetch_rule_candidate_rows(conn, member_name: str):
+    """(rows, ambiguous_libs) for member_name's own rule_candidate rows, in
+    the exact order/selection module_brief() numbers them from -- factored
+    out so batch.py's chunked render path can decide whether (and how) to
+    chunk *before* building a brief, using the same row set module_brief
+    would number from. Deliberately excludes copycode-inherited rules
+    (`_copycode_rule_candidates`): those are rendered under their own
+    heading regardless of chunking, on the assumption that an included
+    copycode's own rule set is small relative to the member using it --
+    see module_brief's `rule_range` parameter."""
+    from .db import resolve_member_by_name
+
+    matches, ambiguous_libs = resolve_member_by_name(conn, member_name)
+    if ambiguous_libs:
+        return [], ambiguous_libs
+    if not matches:
+        return [], []
+    mid = matches[0]["id"]
+    rows = conn.execute(
+        "SELECT * FROM rule_candidate WHERE member_id=? ORDER BY line_no", (mid,)
+    ).fetchall()
+    return rows, []
+
+
 def _rule_id(member_name: str, n: int) -> str:
     """A stable handle for one rule candidate, e.g. `MMP0100:BR-003`.
 
@@ -73,7 +97,21 @@ def _cite(name: str, line: int | None, end: int | None = None) -> str:
 
 
 def module_brief(conn, member_name: str, excerpt_rules: bool = True,
-                  redact: Redactor = NULL_REDACTOR, lexicon: dict[str, str] | None = None) -> str:
+                  redact: Redactor = NULL_REDACTOR, lexicon: dict[str, str] | None = None,
+                  rule_range: tuple[int, int] | None = None,
+                  chunk_info: tuple[int, int] | None = None) -> str:
+    """`rule_range` (1-based, inclusive, over this member's own rule_candidate
+    rows in the same order they're numbered in) restricts the "Candidate
+    business rules" section to that slice -- everything else in the brief
+    (interface, data access, calls, copycode rules, gaps, ...) is unaffected,
+    since a chunk still needs the whole module's context to narrate its
+    slice of rules correctly. IDs keep their absolute position (`n` counts
+    from 1 over the *full* rule set, not the chunk), so a rule's `BR-nnn`
+    stays identical to what a single, unchunked brief would have assigned it.
+
+    `chunk_info` is `(this_chunk, chunk_count)` when `rule_range` is set, used
+    only to phrase the "this is a partial brief" note -- see batch.py's
+    chunked module-doc path for what calls this with both set."""
     from .db import resolve_member_by_name
 
     matches, ambiguous_libs = resolve_member_by_name(conn, member_name)
@@ -99,6 +137,18 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
     if m["dialect"] == "natural":
         add(f"- natural_mode: {m['mode'] or 'unknown'}")
     add(f"- line_count: {conn.execute('SELECT COUNT(*) FROM source_line WHERE member_id=?', (mid,)).fetchone()[0]}")
+    if rule_range:
+        start, end = rule_range
+        this_chunk, chunk_count = chunk_info or (1, 1)
+        add(
+            f"- **PARTIAL BRIEF -- chunk {this_chunk} of {chunk_count}**: the "
+            f"\"Candidate business rules\" section below covers only "
+            f"{name}:BR-{start:03d} through {name}:BR-{end:03d} of this "
+            "member's full rule set. Write the complete document template "
+            "(every section) for this chunk, but only for that rule range -- "
+            "do not invent, skip ahead to, or apologise for rules outside "
+            "it; the other chunks cover them independently."
+        )
     add("")
     vocab_insert_at = len(out)
 
@@ -241,7 +291,16 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
             "is derived from source position, not written by you, so it stays "
             "the same across a re-run of unchanged source."
         )
+        if rule_range:
+            start, end = rule_range
+            add(
+                f"Only rules {start}-{end} of {len(rules)} are listed here -- "
+                "this is intentional, not a truncated brief; see the "
+                "PARTIAL BRIEF note above."
+            )
         for n, r in enumerate(rules, start=1):
+            if rule_range and not (rule_range[0] <= n <= rule_range[1]):
+                continue
             bits = [f"**{_rule_id(name, n)}** {_cite(name, r['line_no'])} depth {r['depth']} `{r['construct']}`"]
             if r["condition"]:
                 bits.append(f"condition: `{redact(r['condition'])}`")
