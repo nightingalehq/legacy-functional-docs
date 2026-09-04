@@ -55,7 +55,13 @@ module docs unattended via a pluggable model caller — direct Anthropic API
 or Claude on Vertex AI (`--provider vertex`) — with a `fake-echo` caller for
 network-free dry runs; or the interactive Claude Code path for documents
 that benefit from a session holding the whole system in mind (system
-overview, entity docs, process flows, gap register).
+overview, entity docs, process flows, gap register). A member with more
+than `options.narrative.max_rules_per_call` business rules (default 40)
+renders as several independent chunk documents plus a deterministic index
+doc at the normal path, instead of one — a single non-streaming completion
+asked to narrate a large module's whole rule set in one pass risks running
+out of room partway through and silently covering only some of it. See
+`src/mfdoc/batch.py`'s `DEFAULT_MAX_RULES_PER_CALL`.
 
 ### Test generation (optional)
 

@@ -73,6 +73,12 @@ options:
     modules_per_doc: 1
     include_source_excerpts: true
     max_excerpt_lines: 12
+    # A member with more business rules than this renders as several
+    # independent chunk documents (plus a deterministic index doc at the
+    # normal path) instead of one -- asking a single completion to narrate
+    # hundreds of rules risks a response that runs out of room partway
+    # through and silently stops short of the whole rule set. Default: 40.
+    # max_rules_per_call: 40
     # Terms the business uses, so generated prose matches their vocabulary
     # rather than inventing synonyms. Extend as SMEs correct drafts.
     lexicon: {}

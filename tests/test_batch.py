@@ -276,6 +276,175 @@ def test_batch_recomputes_when_lexicon_changes_with_no_source_edits(indexed_db, 
     )
 
 
+# --- Chunked rendering for members with many business rules (see DEFAULT_MAX_RULES_PER_CALL) ---
+
+def _seed_fakemod_rules(conn, count: int):
+    from mfdoc.db import insert
+
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
+    for n in range(1, count + 1):
+        insert(
+            conn, "rule_candidate", member_id=1, line_no=n, construct="IF",
+            condition=f"COND-{n}", raw=f"IF COND-{n}",
+        )
+    conn.commit()
+
+
+def _chunk_aware_module_caller():
+    """A fake caller that returns a fully valid single-chunk module doc,
+    citing exactly the FAKEMOD:BR-nnn ids present in the prompt it was
+    sent -- mirrors what a real model does for one chunk's brief, without a
+    real call. Mirrors test_test_batch.py's _chunk_aware_caller."""
+    import re as _re
+
+    ids_re = _re.compile(r"FAKEMOD:BR-\d+")
+
+    def caller(prompt: str) -> batch_mod.ModelResponse:
+        ids = sorted(set(ids_re.findall(prompt)))
+        rule_lines = "\n".join(f"1. **{i}** [[FAKEMOD:1]] rule text." for i in ids)
+        text = f"""---
+title: "FAKEMOD — module documentation"
+doc_type: module
+system: MOM
+module: FAKEMOD
+dialect: natural
+library: MILLPROD
+generated_by: legacy-functional-docs 0.1.0
+generated_at: "2026-01-01"
+review_status: draft
+reviewers: []
+confidence_summary:
+  verified: {len(ids)}
+sources: ["FAKEMOD"]
+sme_questions: []
+---
+
+# FAKEMOD
+
+## Purpose
+
+Covers the module as a whole [[FAKEMOD:1]].
+
+## Business rules
+
+{rule_lines}
+"""
+        return batch_mod.ModelResponse(text=text, input_tokens=1, output_tokens=2)
+    return caller
+
+
+def test_generate_module_doc_chunks_a_member_with_many_rules(tmp_path):
+    """A member whose own rule_candidate count exceeds max_rules_per_call
+    renders as several independent chunk documents plus a deterministic
+    index doc at the normal out_path -- proves the whole chunked path end
+    to end: every chunk validates, the index aggregates real (not invented)
+    confidence numbers from the chunks, and every rule across all 5
+    candidates ends up in the index."""
+    import sqlite3
+    from mfdoc.db import SCHEMA
+    from mfdoc.validate import validate_doc
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_rules(conn, 5)
+
+    out_path = tmp_path / "FAKEMOD.md"
+    result = batch_mod.generate_module_doc(
+        conn, "FAKEMOD", out_path, _chunk_aware_module_caller(),
+        "writing rules text", "template text", max_rules_per_call=2,
+    )
+    assert result.ok is True, result.problems
+    assert result.attempts == 3  # ceil(5 / 2) chunks
+    assert result.chunked is True
+
+    for i in (1, 2, 3):
+        chunk_path = tmp_path / f"FAKEMOD.chunk{i}.md"
+        assert chunk_path.exists()
+        assert validate_doc(conn, chunk_path)["ok"]
+
+    index_text = out_path.read_text(encoding="utf-8")
+    assert "doc_type: module" in index_text
+    assert "verified: 5" in index_text, "confidence_summary must aggregate all 5 chunked rules"
+    for n in range(1, 6):
+        assert f"FAKEMOD:BR-{n:03d}" in index_text
+
+    revalidated = validate_doc(conn, out_path)
+    assert revalidated["ok"], revalidated["problems"]
+
+
+def test_generate_module_doc_reports_failure_when_one_chunk_fails(tmp_path):
+    """One bad chunk must fail the whole member (ok=False) with a problem
+    naming which chunk, but must not prevent the other chunks from
+    rendering and validating on their own."""
+    import sqlite3
+    from mfdoc.db import SCHEMA
+    from mfdoc.validate import validate_doc
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_rules(conn, 4)
+
+    good_caller = _chunk_aware_module_caller()
+
+    def flaky_caller(prompt: str) -> batch_mod.ModelResponse:
+        if "BR-003" in prompt:
+            return batch_mod.ModelResponse(text="not a valid document", input_tokens=1, output_tokens=1)
+        return good_caller(prompt)
+
+    out_path = tmp_path / "FAKEMOD.md"
+    result = batch_mod.generate_module_doc(
+        conn, "FAKEMOD", out_path, flaky_caller,
+        "writing rules text", "template text", max_rules_per_call=2,
+    )
+    assert result.ok is False
+    assert any("chunk 2" in p for p in result.problems)
+
+    assert (tmp_path / "FAKEMOD.chunk1.md").exists()
+    assert validate_doc(conn, tmp_path / "FAKEMOD.chunk1.md")["ok"]
+
+
+def test_run_batch_chunks_a_large_member_and_still_batches_small_ones(indexed_db, tmp_path):
+    """A member over the rule threshold takes the chunked path while a
+    normal-sized member in the same run still goes through the ordinary
+    pooled single-call path -- proves run_batch() routes per-member, not
+    all-or-nothing."""
+    members = batch_mod.select_batch_members(indexed_db)
+    assert "MMP0100" in members
+    caller = FakeCaller()
+    summary = batch_mod.run_batch(
+        indexed_db, members, tmp_path / "out", caller, "rules", "template",
+        max_rules_per_call=1,
+    )
+    subdir = batch_mod._output_subdir(indexed_db, "MMP0100")
+    chunk1 = tmp_path / "out" / subdir / "MMP0100.chunk1.md"
+    assert chunk1.exists(), "MMP0100 has more than one rule_candidate in the fixtures and must chunk"
+    # A member with zero (or exactly one) rule_candidate never chunks --
+    # it should have gone through the ordinary single-call path instead.
+    for member in members:
+        if member == "MMP0100":
+            continue
+        subdir = batch_mod._output_subdir(indexed_db, member)
+        out_path = tmp_path / "out" / subdir / f"{member}.md"
+        assert out_path.exists()
+    assert summary.failed == 0
+
+
+def test_resolve_max_rules_per_call():
+    from mfdoc.batch import DEFAULT_MAX_RULES_PER_CALL, _resolve_max_rules_per_call
+
+    assert _resolve_max_rules_per_call(None) == DEFAULT_MAX_RULES_PER_CALL
+    assert _resolve_max_rules_per_call(5) == 5
+    for bad in (0, -1):
+        try:
+            _resolve_max_rules_per_call(bad)
+            assert False, f"{bad} should have raised"
+        except ValueError:
+            pass
+
+
 def test_batch_tolerates_non_dict_state_entry_for_a_member(indexed_db, tmp_path):
     """state[name] is expected to be a per-member dict (run_batch() writes
     {"ok":..., "attempts":..., "brief_sha256":...}), but run_batch() also

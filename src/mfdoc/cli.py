@@ -644,6 +644,7 @@ def cmd_batch(args) -> int:
         cost_per_mtok_in=pricing.get("input_per_mtok"),
         cost_per_mtok_out=pricing.get("output_per_mtok"),
         lexicon=lexicon,
+        max_rules_per_call=narrative_opts.get("max_rules_per_call"),
     )
 
     for r in summary.results:
