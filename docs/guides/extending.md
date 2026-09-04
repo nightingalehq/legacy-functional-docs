@@ -47,7 +47,10 @@ lines, member_name) -> dict`, insert every line (including comments and
 blanks) into `source_line`, and record a `gap` for anything not understood
 rather than skipping it silently. Register the dialect in
 `normalise.DIALECT_SIGNATURES`, `cli.DIALECT_ROUTER` and
-`cli.DIALECT_DEFAULT_TYPE`, then add a fixture.
+`cli.DIALECT_DEFAULT_TYPE`, then add a fixture — **invented content only,
+never a real client export, even trimmed or genericised-in-place**. See
+`CLAUDE.md`'s "Never commit client-specific content" section before
+building a fixture from anything a real engagement produced.
 
 The two rules that matter most, repeated here because they're easy to
 violate accidentally while iterating:
@@ -131,6 +134,8 @@ authenticated who'd rather not provision a separate `ANTHROPIC_API_KEY`.
   specific literal values surviving masking). Prefer extending an existing
   fixture over adding a new one unless a change genuinely can't be tested
   against what's there — new fixtures are expensive to keep meaningful.
+  Golden or not, every fixture's content is invented, never a real
+  client's — see `CLAUDE.md`.
 - `tests/test_citation_alignment.py` is the most important test in the
   suite structurally: it asserts every `source_line` row matches the file
   on disk at the member's `first_line` offset, for every member. This is
