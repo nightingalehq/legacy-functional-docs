@@ -144,9 +144,9 @@ CREATE TABLE IF NOT EXISTS data_access (
     -- When key_expr is (or contains) a bare variable rather than a literal
     -- or inline expression, and that variable's most recent assignment in
     -- this member (before this line) was found, these two record where and
-    -- how it was actually built -- e.g. GET TTMTTR01(INST_KEY)FIRST with
-    -- INST_KEY="H"+NEXT_IDENT(1,1,5)+... assigned a few lines earlier.
-    -- Without this, "the key is INST_KEY" tells a reader nothing about what
+    -- how it was actually built -- e.g. GET WIDGETFILE01(LOOKUP_KEY)FIRST with
+    -- LOOKUP_KEY="H"+BUILD_PART(1,1,5)+... assigned a few lines earlier.
+    -- Without this, "the key is LOOKUP_KEY" tells a reader nothing about what
     -- value is really being looked up. NULL when no such assignment was
     -- found (or key_expr isn't a bare variable) -- never guessed.
     key_source_line INTEGER,
