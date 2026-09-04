@@ -45,12 +45,14 @@ fixture), invent the names and content from scratch. If you need to preserve a
 real export’s *shape* (structure/format quirks like a truncated-quote column
 layout or a specific statement shape), recreate that shape manually with
 invented content — don’t paste a client export and edit it down.
-is safe to include, treat it as unsafe and ask before committing rather
-than after: a scrub after the fact (see PR #44, 2026-09) is possible but
-costly — it leaves traces in git history, and SQLite fixtures bake schema
-*comments* into the binary's `sqlite_master`, so a leak can hide in a
-place a text-only review would miss (regenerate `examples/outputs/index.db`
-if a scrub ever touches `SCHEMA` in `db.py`).
+
+If you're not sure whether something is safe to include, treat it as unsafe
+and ask before committing rather than after: a scrub after the fact (see
+PR #44, 2026-09) is possible but costly — it leaves traces in git history,
+and SQLite fixtures bake schema *comments* into the binary's
+`sqlite_master`, so a leak can hide in a place a text-only review would
+miss (regenerate `examples/outputs/index.db` if a scrub ever touches
+`SCHEMA` in `db.py`).
 
 This applies to every branch and PR against this repo, not just `main`.
 
