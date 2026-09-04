@@ -279,7 +279,7 @@ def fetch_test_case_rows(conn, member_name: str):
         SELECT tc.*, rc.line_no AS rule_line_no
           FROM test_case tc
           JOIN member m ON m.id = tc.member_id
-          LEFT JOIN rule_candidate rc ON rc.id = tc.rule_candidate_id
+          LEFT JOIN rule_candidate rc ON rc.id = tc.rule_candidate_id AND rc.member_id = tc.member_id
          WHERE UPPER(m.name)=UPPER(?)
          ORDER BY rc.line_no IS NULL, rc.line_no, tc.id
         """,
