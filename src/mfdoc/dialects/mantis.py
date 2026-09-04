@@ -183,7 +183,7 @@ def _facts(expr: str) -> tuple[str, str]:
 
 def _assignment_pairs(stmt: str, masked: str) -> list[tuple[str, str]]:
     """(lhs_name, rhs_text) for each `LHS=RHS` segment in a (possibly
-    `:`-chained) assignment statement, e.g. `INST_KEY="H"+NEXT_IDENT(1,1,5)`
+    `:`-chained) assignment statement, e.g. `LOOKUP_KEY="H"+BUILD_PART(1,1,5)`
     or `X=1:Y=2`. Splits on `:` at paren-depth 0 in `masked` (so a `:`
     inside a literal or a subscript expression can't wrongly split the
     statement) then on the first `=` in each segment; offsets found in
@@ -223,11 +223,11 @@ def _key_var_candidates(text: str, entity: str | None) -> list[str]:
     token itself -- candidates for the backward key-construction trace
     against `last_assign`. Handles both shapes this dialect uses: a
     parenthesised argument list right after the entity name
-    (`TTMTTR01(INST_KEY)FIRST`) and a bare comma-separated argument list
+    (`WIDGETFILE01(LOOKUP_KEY)FIRST`) and a bare comma-separated argument list
     with the entity as one of the tokens (Supra DML's
     `READM(ORDERMST, ORDER_NO)`, already split from its own parens by
     RE_SUPRA_CALL). Only bare identifiers -- a literal or an inline
-    expression (`INST_KEY+1`) isn't a case backward-resolution handles
+    expression (`LOOKUP_KEY+1`) isn't a case backward-resolution handles
     usefully, so those are silently skipped, not guessed at."""
     masked, _ = mask_literals(text or "")
     args_masked, args_orig = masked, text
@@ -316,9 +316,9 @@ def extract(conn, member_id: int, lines, member_name: str = "?") -> dict:
     depth = 0
     open_blocks: list[tuple[str, int]] = []
     # Most recent assignment to each variable name, by line -- consulted by
-    # access() below to trace a bare key variable (e.g. `INST_KEY` in
-    # `GET TTMTTR01(INST_KEY)FIRST`) back to the expression that actually
-    # built it (`INST_KEY="H"+NEXT_IDENT(1,1,5)+...`), so the generated doc
+    # access() below to trace a bare key variable (e.g. `LOOKUP_KEY` in
+    # `GET WIDGETFILE01(LOOKUP_KEY)FIRST`) back to the expression that actually
+    # built it (`LOOKUP_KEY="H"+BUILD_PART(1,1,5)+...`), so the generated doc
     # doesn't have to describe an opaque token as if it were the real key.
     last_assign: dict[str, tuple[int, str]] = {}
     # IF/ELSE branch-extent tracking, mirroring natural.py's _match_rules:

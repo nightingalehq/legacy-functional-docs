@@ -171,11 +171,11 @@ def test_module_brief_surfaces_else_branch_data_access_next_to_the_rule():
     src = (
         'PROGRAM "TESTMOD"\n'
         "ENTRY MAIN\n"
-        "  IF NO_SCHEDULE_FOUND = 1\n"
-        '    MSG="no active schedules for this unit"\n'
+        "  IF RECORD_NOT_FOUND = 1\n"
+        '    MSG="no matching record found"\n'
         "  ELSE\n"
-        "    GET TTMTTR01(SCHED_KEY)FIRST\n"
-        "    DELETE TTMTTR02(SCHED_KEY)\n"
+        "    GET WIDGETFILE01(SCHED_KEY)FIRST\n"
+        "    DELETE WIDGETFILE02(SCHED_KEY)\n"
         "  END\n"
         "EXIT\n"
     )
@@ -187,5 +187,5 @@ def test_module_brief_surfaces_else_branch_data_access_next_to_the_rule():
     assert "document what happens on BOTH branches" in brief
     else_line = [l for l in brief.splitlines() if l.startswith("- **TESTMOD:BR-003**")][0]
     assert "pairs with the IF at [[TESTMOD:3]]" in else_line
-    assert "GET" in else_line and "TTMTTR01" in else_line and "[[TESTMOD:6]]" in else_line
-    assert "DELETE" in else_line and "TTMTTR02" in else_line and "[[TESTMOD:7]]" in else_line
+    assert "GET" in else_line and "WIDGETFILE01" in else_line and "[[TESTMOD:6]]" in else_line
+    assert "DELETE" in else_line and "WIDGETFILE02" in else_line and "[[TESTMOD:7]]" in else_line

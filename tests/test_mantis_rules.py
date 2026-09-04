@@ -53,26 +53,26 @@ def test_do_call_to_local_entry_point_resolves_as_internal():
 
 def test_key_built_from_prior_assignment_is_traced():
     """The exact shape a key gets built across lines before it's used --
-    `INST_KEY="H"+NEXT_IDENT(...)+...` then `GET TTMTTR01(INST_KEY)FIRST` --
+    `LOOKUP_KEY="H"+BUILD_PART(...)+...` then `GET WIDGETFILE01(LOOKUP_KEY)FIRST` --
     must resolve `data_access.key_source_line`/`key_source_expr` back to the
     assignment, not leave the key as an opaque variable name. Without this,
-    a narrator has no cue that INST_KEY is a composed value worth
+    a narrator has no cue that LOOKUP_KEY is a composed value worth
     explaining rather than a bare token."""
     conn = _extract(
         'PROGRAM "TESTMOD"\n'
         "ENTRY MAIN\n"
-        '  INST_KEY="H"+NEXT_IDENT(1,1,5)+NEXT_IDENT(1,7,8)+NEXT_IDENT(1,10,10)\n'
-        "  GET TTMTTR01(INST_KEY)FIRST\n"
+        '  LOOKUP_KEY="H"+BUILD_PART(1,1,5)+BUILD_PART(1,7,8)+BUILD_PART(1,10,10)\n'
+        "  GET WIDGETFILE01(LOOKUP_KEY)FIRST\n"
         "EXIT\n"
     )
     row = conn.execute(
         "SELECT entity_name, key_expr, key_source_line, key_source_expr FROM data_access WHERE verb='GET'"
     ).fetchone()
     assert row is not None
-    assert row["entity_name"] == "TTMTTR01"
-    assert row["key_expr"] == "TTMTTR01(INST_KEY)FIRST"
+    assert row["entity_name"] == "WIDGETFILE01"
+    assert row["key_expr"] == "WIDGETFILE01(LOOKUP_KEY)FIRST"
     assert row["key_source_line"] == 3
-    assert row["key_source_expr"] == '"H"+NEXT_IDENT(1,1,5)+NEXT_IDENT(1,7,8)+NEXT_IDENT(1,10,10)'
+    assert row["key_source_expr"] == '"H"+BUILD_PART(1,1,5)+BUILD_PART(1,7,8)+BUILD_PART(1,10,10)'
 
 
 def test_key_source_is_none_when_no_prior_assignment_found():
@@ -82,7 +82,7 @@ def test_key_source_is_none_when_no_prior_assignment_found():
     conn = _extract(
         'PROGRAM "TESTMOD"\n'
         "ENTRY MAIN\n"
-        "  GET TTMTTR01(SOME_KEY)FIRST\n"
+        "  GET WIDGETFILE01(SOME_KEY)FIRST\n"
         "EXIT\n"
     )
     row = conn.execute(
@@ -101,11 +101,11 @@ def test_if_else_branch_extent_and_pairing_is_recorded():
     conn = _extract(
         'PROGRAM "TESTMOD"\n'
         "ENTRY MAIN\n"
-        "  IF NO_SCHEDULE_FOUND = 1\n"
-        '    MSG="no active schedules for this unit"\n'
+        "  IF RECORD_NOT_FOUND = 1\n"
+        '    MSG="no matching record found"\n'
         "  ELSE\n"
-        "    GET TTMTTR01(SCHED_KEY)FIRST\n"
-        "    DELETE TTMTTR02(SCHED_KEY)\n"
+        "    GET WIDGETFILE01(SCHED_KEY)FIRST\n"
+        "    DELETE WIDGETFILE02(SCHED_KEY)\n"
         "  END\n"
         "EXIT\n"
     )
