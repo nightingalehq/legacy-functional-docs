@@ -181,6 +181,16 @@ enumerated in the module document.
 without any commit, the brief flags it. Say that commit handling was not found in
 this module and needs confirmation; do not write "changes are then committed".
 
+**Describing only one branch of an IF/ELSE.** When a rule candidate is `IF`
+and the brief marks it with a paired ELSE (`has a paired ELSE at [[...]]`),
+document what happens on *both* branches, not just the one that reads as
+interesting. It is easy to write up the error/validation branch in detail and
+let the other branch's effects go unmentioned; when the brief lists "data
+access on the true branch" / "data access on this branch" against the IF or
+ELSE bullet, every one of those accesses belongs in the generated document,
+attributed to the branch that performs it -- not merged into the surrounding
+narrative as if unconditional, and not dropped.
+
 ## Audience calibration
 
 The default audience is set in `options.narrative.audience`. For the common case —

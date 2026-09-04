@@ -2,6 +2,50 @@
 
 from __future__ import annotations
 
+import sqlite3
+
+from mfdoc.db import SCHEMA
+from mfdoc.dialects import natural
+
+
+def _extract(src: str, member_name: str = "TESTMOD"):
+    """Isolated in-memory index for a hand-written snippet -- same pattern
+    as test_mantis_rules.py's helper of the same name, used here for the
+    IF/ELSE branch-extent shape, which isn't present in the shared,
+    line-number-sensitive MMP0100.nsp fixture."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, ?, 'natural')", (member_name,))
+    lines = [(i + 1, None, t) for i, t in enumerate(src.splitlines())]
+    natural.extract(conn, 1, lines, member_name)
+    return conn
+
+
+def test_if_else_branch_extent_and_pairing_is_recorded():
+    """Same defect this exists to prevent as mantis.py's identical test:
+    an IF's error/hold branch reads as the interesting one, but the
+    ELSE's database operations must not silently disappear from the
+    generated document. end_line on the IF must stop at the ELSE, and
+    pair_line_no/end_line on the ELSE must resolve correctly."""
+    conn = _extract(
+        "IF NO-SCHEDULE-FOUND\n"
+        "  MOVE 'HOLD' TO STATUS\n"
+        "ELSE\n"
+        "  READ SCHED-VIEW BY SCHED-KEY\n"
+        "  DELETE\n"
+        "END-IF\n"
+    )
+    if_row = conn.execute("SELECT line_no, end_line FROM rule_candidate WHERE construct='IF'").fetchone()
+    else_row = conn.execute(
+        "SELECT line_no, pair_line_no, end_line FROM rule_candidate WHERE construct='ELSE'"
+    ).fetchone()
+    assert if_row["line_no"] == 1
+    assert if_row["end_line"] == 6
+    assert else_row["line_no"] == 3
+    assert else_row["pair_line_no"] == 1
+    assert else_row["end_line"] == 6
+
 
 def test_masked_literal_is_not_lost_from_the_condition(indexed_db):
     """`IF ORDER-VIEW.ORDER-STATUS NE 'CONF'` must keep CONF in the stored
@@ -42,6 +86,25 @@ def test_write_audit_is_internal_subroutine_not_missing_module(indexed_db):
         "SELECT COUNT(*) AS n FROM gap WHERE gap_kind='unresolved_call' AND detail LIKE '%WRITE-AUDIT%'"
     ).fetchone()
     assert gap["n"] == 0
+
+
+def test_write_audit_routine_boundary_is_recorded(indexed_db):
+    """WRITE-AUDIT's DEFINE SUBROUTINE/END-SUBROUTINE span must land in the
+    `routine` table with the right start/end lines -- this is what lets
+    module_brief group rules by routine and batch.py chunk by routine
+    rather than an arbitrary rule count."""
+    conn = indexed_db
+    row = conn.execute(
+        """
+        SELECT r.name, r.kind, r.start_line, r.end_line FROM routine r
+        JOIN member m ON m.id = r.member_id
+        WHERE m.name='MMP0100' AND r.name='WRITE-AUDIT'
+        """
+    ).fetchone()
+    assert row is not None
+    assert row["kind"] == "natural_subroutine"
+    assert row["end_line"] is not None, "END-SUBROUTINE exists in the fixture; boundary must resolve"
+    assert row["start_line"] < row["end_line"]
 
 
 def test_literal_bearing_moves_are_captured_as_rule_candidates(indexed_db):

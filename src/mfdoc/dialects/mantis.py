@@ -181,6 +181,70 @@ def _facts(expr: str) -> tuple[str, str]:
     return ",".join(dict.fromkeys(idents))[:500], ",".join(dict.fromkeys(vals))[:500]
 
 
+def _assignment_pairs(stmt: str, masked: str) -> list[tuple[str, str]]:
+    """(lhs_name, rhs_text) for each `LHS=RHS` segment in a (possibly
+    `:`-chained) assignment statement, e.g. `INST_KEY="H"+NEXT_IDENT(1,1,5)`
+    or `X=1:Y=2`. Splits on `:` at paren-depth 0 in `masked` (so a `:`
+    inside a literal or a subscript expression can't wrongly split the
+    statement) then on the first `=` in each segment; offsets found in
+    `masked` are sliced back out of `stmt` directly (mask_literals
+    preserves length/position -- see natural.orig) so the recorded RHS is
+    the real value, not the masked placeholder. A bare `RESET` segment (no
+    `=`) is skipped, same as everywhere else that treats RESET specially."""
+    pairs: list[tuple[str, str]] = []
+    depth = 0
+    seg_start = 0
+    bounds: list[tuple[int, int]] = []
+    for i, ch in enumerate(masked):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(depth - 1, 0)
+        elif ch == ":" and depth == 0:
+            bounds.append((seg_start, i))
+            seg_start = i + 1
+    bounds.append((seg_start, len(masked)))
+    for start, end in bounds:
+        eq = masked[start:end].find("=")
+        if eq < 0:
+            continue
+        lhs = stmt[start:start + eq].strip()
+        name_m = re.match(r"[A-Z][A-Z0-9_#$\-]*", lhs, re.I)
+        if not name_m:
+            continue
+        rhs = stmt[start + eq + 1:end].strip()
+        pairs.append((name_m.group(0).upper(), rhs))
+    return pairs
+
+
+def _key_var_candidates(text: str, entity: str | None) -> list[str]:
+    """Bare identifier(s) that look like the key value(s) passed to a
+    GET/OBTAIN/Supra-DML style database call, excluding the entity/view
+    token itself -- candidates for the backward key-construction trace
+    against `last_assign`. Handles both shapes this dialect uses: a
+    parenthesised argument list right after the entity name
+    (`TTMTTR01(INST_KEY)FIRST`) and a bare comma-separated argument list
+    with the entity as one of the tokens (Supra DML's
+    `READM(ORDERMST, ORDER_NO)`, already split from its own parens by
+    RE_SUPRA_CALL). Only bare identifiers -- a literal or an inline
+    expression (`INST_KEY+1`) isn't a case backward-resolution handles
+    usefully, so those are silently skipped, not guessed at."""
+    masked, _ = mask_literals(text or "")
+    args_masked, args_orig = masked, text
+    if entity:
+        m = re.search(rf"\b{re.escape(entity)}\s*\(([^)]*)\)", masked, re.I)
+        if m:
+            args_masked, args_orig = m.group(1), text[m.start(1):m.end(1)]
+    out = []
+    for tm in re.finditer(r"[^,]+", args_masked):
+        seg = args_orig[tm.start():tm.end()].strip()
+        if not seg or seg.upper() == (entity or "").upper():
+            continue
+        if re.fullmatch(r"[A-Z][A-Z0-9_#$\-]*", seg, re.I):
+            out.append(seg.upper())
+    return out
+
+
 def _view_target(rest: str) -> tuple[str | None, str]:
     """First identifier in the clause is normally the view or record name."""
     masked, _ = mask_literals(rest)
@@ -191,26 +255,106 @@ def _view_target(rest: str) -> tuple[str | None, str]:
     return (m.group(0).upper() if m else None), rest
 
 
+def _scan_routines(lines) -> list[dict]:
+    """`ENTRY name` / `EXIT` boundaries, as a standalone pre-scan over the
+    raw lines -- mirrors natural.py's _scan_routines for the same reason:
+    simpler and safer than threading "current open routine" state through
+    extract()'s already-intricate per-statement dispatch below. A Mantis
+    program commonly declares several ENTRY points (see e.g.
+    examples/inputs/mantis/ORDENQ.mantis's ENTRY MAIN / ENTRY
+    VALIDATE_CREDIT_LIMIT) -- each is a callable, independently
+    documentable unit, not a nested block, so this never nests.
+
+    Everything before the first ENTRY (PROGRAM/TEXT/VIEW/EXTERNAL
+    declarations) belongs to no routine -- callers treat that as the
+    member's main/declaration body, same as a line outside every Natural
+    DEFINE SUBROUTINE. `end_line` is None when no matching EXIT was found
+    before EOF or the next ENTRY -- recorded as unresolved via a gap by the
+    caller, not guessed here."""
+    routines: list[dict] = []
+    open_routine: dict | None = None
+    for line_no, _, raw in lines:
+        body, is_remark = _split_depth_marker(raw.strip())
+        if _is_comment(raw) or is_remark or not raw.strip():
+            continue
+        stmt = _strip_trailing_remark(body)
+        masked, _ = mask_literals(stmt)
+        if (m := RE_ENTRY.match(masked)):
+            if open_routine is not None:
+                routines.append(open_routine)
+            open_routine = {
+                "name": m.group("name").upper(), "kind": "mantis_entry",
+                "start_line": line_no, "end_line": None,
+            }
+        elif open_routine is not None and RE_EXIT.match(masked):
+            open_routine["end_line"] = line_no
+            routines.append(open_routine)
+            open_routine = None
+    if open_routine is not None:
+        routines.append(open_routine)
+    return routines
+
+
 def extract(conn, member_id: int, lines, member_name: str = "?") -> dict:
+    lines = list(lines)
+    routines = _scan_routines(lines)
+    internal_entries = {r["name"] for r in routines}
+    for r in routines:
+        if r["end_line"] is None:
+            add_gap(
+                conn, "unparsed_line",
+                f"ENTRY {r['name']} opened at line {r['start_line']} has no matching "
+                "EXIT; its extent is unknown, so facts inside it can't be grouped "
+                "under this routine.",
+                member_id=member_id, line_no=r["start_line"], severity="medium",
+            )
+        insert(conn, "routine", member_id=member_id, name=r["name"], kind=r["kind"],
+               start_line=r["start_line"], end_line=r["end_line"])
+
     stats = {"lines": len(lines), "code_lines": 0, "comment_lines": 0, "unparsed": 0}
     views: dict[str, str] = {}
     depth = 0
     open_blocks: list[tuple[str, int]] = []
+    # Most recent assignment to each variable name, by line -- consulted by
+    # access() below to trace a bare key variable (e.g. `INST_KEY` in
+    # `GET TTMTTR01(INST_KEY)FIRST`) back to the expression that actually
+    # built it (`INST_KEY="H"+NEXT_IDENT(1,1,5)+...`), so the generated doc
+    # doesn't have to describe an opaque token as if it were the real key.
+    last_assign: dict[str, tuple[int, str]] = {}
+    # IF/ELSE branch-extent tracking, mirroring natural.py's _match_rules:
+    # the rule_candidate id of the IF that opened each currently-open
+    # block, and of its ELSE (if one has fired), keyed by the IF's own
+    # line_no -- so, once the matching END is found, both rows' end_line
+    # can be set to where their branch actually ends. Without this, a
+    # generated document has no structural cue that a later GET/DELETE/
+    # etc. belongs to a particular IF's ELSE branch rather than being
+    # unrelated main-line code.
+    if_rule_ids: dict[int, int] = {}
+    else_rule_ids: dict[int, int] = {}
 
-    def rule(construct, cond, line_no, raw):
+    def rule(construct, cond, line_no, raw, pair_line_no=None):
         f, l = _facts(cond or "")
-        insert(conn, "rule_candidate", member_id=member_id, line_no=line_no,
+        return insert(conn, "rule_candidate", member_id=member_id, line_no=line_no,
                construct=construct, condition=(cond or "").strip()[:500] or None,
-               depth=depth, fields_used=f or None, literals=l or None, raw=raw.strip()[:500])
+               depth=depth, fields_used=f or None, literals=l or None, raw=raw.strip()[:500],
+               pair_line_no=pair_line_no)
 
-    def access(verb, crud, entity, key_expr, line_no, raw, via=None, confidence="verified"):
+    def access(verb, crud, entity, key_expr, line_no, raw, via=None, confidence="verified",
+               key_vars: list[str] | None = None):
         eid = resolve_entity(conn, entity, "supra", "supra_master") if entity else None
+        key_source_line = key_source_expr = None
+        for var in key_vars or []:
+            prior = last_assign.get(var)
+            if prior and prior[0] < line_no:
+                key_source_line, key_source_expr = prior
+                break
         insert(conn, "data_access", member_id=member_id, line_no=line_no, verb=verb,
                crud=crud, entity_name=entity, entity_id=eid, via_view=via,
-               key_expr=(key_expr or "").strip()[:500] or None, raw=raw.strip()[:500],
-               confidence=confidence)
+               key_expr=(key_expr or "").strip()[:500] or None,
+               key_source_line=key_source_line,
+               key_source_expr=(key_source_expr or "").strip()[:500] or None,
+               raw=raw.strip()[:500], confidence=confidence)
 
-    lines = list(lines)
     idx = 0
     while idx < len(lines):
         line_no, seq, raw = lines[idx]
@@ -349,7 +493,8 @@ def extract(conn, member_id: int, lines, member_name: str = "?") -> dict:
             args = m.group("args")
             ent, _ = _view_target(args)
             access(fn, SUPRA_DML.get(fn, "?"), ent, args, line_no, stmt,
-                   confidence="verified" if ent else "unresolved")
+                   confidence="verified" if ent else "unresolved",
+                   key_vars=_key_var_candidates(args, ent))
             if not ent:
                 add_gap(conn, "undefined_entity",
                         f"Supra DML call {fn} found but the target dataset could not be "
@@ -367,7 +512,8 @@ def extract(conn, member_id: int, lines, member_name: str = "?") -> dict:
                     ent, key = _view_target(m.group("rest"))
                     via = ent if ent in views else None
                     resolved = views.get(ent or "", ent)
-                    access(verb, crud, resolved, key, line_no, stmt, via=via)
+                    access(verb, crud, resolved, key, line_no, stmt, via=via,
+                           key_vars=_key_var_candidates(m.group("rest"), ent))
                     matched = True
                     break
 
@@ -400,8 +546,19 @@ def extract(conn, member_id: int, lines, member_name: str = "?") -> dict:
                         member_id=member_id, line_no=line_no, severity="high", raw=stmt[:300])
             matched = True
         elif not matched and (m := RE_DO_ENTRY.match(masked)):
-            insert(conn, "call_edge", caller_id=member_id, callee_name=m.group("target").upper(),
-                   call_kind="PERFORM", args=m.group("args"), line_no=line_no)
+            # A DO/PERFORM target matching one of this member's own ENTRY
+            # points (see _scan_routines) is an internal call, not a
+            # missing external module -- tagged the same way natural.py
+            # tags PERFORM_INTERNAL, so it doesn't cost an SME a trip to
+            # the gap register to confirm what's already provable from
+            # source.
+            target = m.group("target").upper()
+            internal = target in internal_entries
+            insert(conn, "call_edge", caller_id=member_id, callee_name=target,
+                   call_kind="PERFORM_INTERNAL" if internal else "PERFORM",
+                   callee_id=member_id if internal else None,
+                   resolved=1 if internal else 0,
+                   args=m.group("args"), line_no=line_no)
             matched = True
         elif not matched and (m := RE_PERFORM_STR.match(stmt)):
             # Site convention: `PERFORM"/BACK,APPTT,APPTT,TTGP185P;TTPLP211"`
@@ -416,7 +573,18 @@ def extract(conn, member_id: int, lines, member_name: str = "?") -> dict:
         if not matched:
             if RE_END.match(masked):
                 if open_blocks:
-                    open_blocks.pop()
+                    popped_construct, opened_line = open_blocks.pop()
+                    if popped_construct == "IF":
+                        if_id = if_rule_ids.pop(opened_line, None)
+                        else_id = else_rule_ids.pop(opened_line, None)
+                        if if_id is not None:
+                            conn.execute(
+                                "UPDATE rule_candidate SET end_line=? WHERE id=?", (line_no, if_id)
+                            )
+                        if else_id is not None:
+                            conn.execute(
+                                "UPDATE rule_candidate SET end_line=? WHERE id=?", (line_no, else_id)
+                            )
                 depth = max(depth - 1, 0)
                 matched = True
             else:
@@ -427,15 +595,22 @@ def extract(conn, member_id: int, lines, member_name: str = "?") -> dict:
                     (RE_ONERR, "ON ERROR", "rest"),
                 ):
                     if (m := pat.match(masked)):
-                        rule(name, orig(stmt, m, grp), line_no, stmt)
+                        rule_id = rule(name, orig(stmt, m, grp), line_no, stmt)
                         if name in {"IF", "WHILE", "FOR", "CASE"}:
+                            if name == "IF":
+                                if_rule_ids[line_no] = rule_id
                             open_blocks.append((name, line_no))
                             depth += 1
                         matched = True
                         break
                 else:
                     if RE_ELSE.match(masked):
-                        rule("ELSE", None, line_no, stmt)
+                        pair_line = (
+                            open_blocks[-1][1] if open_blocks and open_blocks[-1][0] == "IF" else None
+                        )
+                        else_id = rule("ELSE", None, line_no, stmt, pair_line_no=pair_line)
+                        if pair_line is not None:
+                            else_rule_ids[pair_line] = else_id
                         matched = True
 
         if not matched and RE_PAD.match(masked):
@@ -459,6 +634,8 @@ def extract(conn, member_id: int, lines, member_name: str = "?") -> dict:
 
         if not matched and RE_ASSIGN.match(masked):
             rule("ASSIGN", stmt, line_no, stmt)
+            for var, rhs in _assignment_pairs(stmt, masked):
+                last_assign[var] = (line_no, rhs)
             matched = True
 
         if not matched:

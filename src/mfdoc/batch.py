@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import __version__
-from .brief import fetch_rule_candidate_rows, module_brief
+from .brief import fetch_routines, fetch_rule_candidate_rows, module_brief, routine_aware_chunk_ranges
 from .redact import NULL_REDACTOR, Redactor
 from .validate import BR_REF, _split_frontmatter, validate_doc
 
@@ -43,7 +43,10 @@ BATCHABLE_DIALECTS = {"natural", "mantis"}
 # entire rule set in one pass risks the response running out of room partway
 # through and silently dropping the remaining subroutines/rules -- a
 # response that still validates (every rule it did write is cited) but is
-# nowhere near complete, and nothing before this caught that.
+# nowhere near complete, and nothing before this caught that. Chunk
+# boundaries are chosen by routine_aware_chunk_ranges (brief.py), which
+# packs whole routines into each chunk rather than cutting at a flat rule
+# count -- see that function's docstring for why.
 DEFAULT_MAX_RULES_PER_CALL = 40
 
 
@@ -61,12 +64,6 @@ def _resolve_max_rules_per_call(max_rules_per_call: int | None) -> int:
             f"got {max_rules_per_call!r}"
         )
     return max_rules_per_call
-
-
-def _chunk_ranges(total: int, size: int) -> list[tuple[int, int]]:
-    """1-based, inclusive `(start, end)` ranges of `size` over `total`
-    items -- e.g. `_chunk_ranges(5, 2) == [(1, 2), (3, 4), (5, 5)]`."""
-    return [(i + 1, min(i + size, total)) for i in range(0, total, size)]
 
 
 @dataclass
@@ -289,7 +286,7 @@ def _render_module_chunk_index(member_name: str, system: str | None,
     return fm + body
 
 
-def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rule_count: int,
+def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rule_rows: list,
                                   out_path: Path, caller: ModelCaller, writing_rules: str,
                                   template: str, redact: Redactor, lexicon: dict[str, str] | None,
                                   max_attempts: int, chunk_size: int) -> DocResult:
@@ -297,11 +294,14 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
     deterministic index doc at `out_path`, instead of asking one completion
     to cover the member's whole rule set. Each chunk goes through the exact
     same call/validate/retry path (_generate_module_doc_from_brief) a
-    normal single-call member does, scoped to `chunk_size` rules via
-    module_brief's `rule_range` -- so one bad chunk retries and reports on
-    its own, rather than forcing a full-member re-generation, and no
-    chunk's prompt asks for any more rules than a normal small member's."""
-    ranges = _chunk_ranges(rule_count, chunk_size)
+    normal single-call member does, scoped to a routine-aware slice via
+    module_brief's `rule_range` (see routine_aware_chunk_ranges) -- so one
+    bad chunk retries and reports on its own, rather than forcing a
+    full-member re-generation, and (short of a single oversized routine)
+    no chunk's prompt asks for much more than a normal small member's."""
+    ranges = routine_aware_chunk_ranges(
+        [r["line_no"] for r in rule_rows], fetch_routines(conn, rule_rows[0]["member_id"]), chunk_size,
+    )
     chunk_count = len(ranges)
     input_tokens = output_tokens = 0
     chunk_entries: list[tuple[int, tuple[int, int], Path, DocResult]] = []
@@ -366,7 +366,7 @@ def generate_module_doc(conn, member_name: str, out_path: Path, caller: ModelCal
             "SELECT system FROM member WHERE UPPER(name)=UPPER(?)", (member_name,)
         ).fetchone()
         return _generate_module_doc_chunked(
-            conn, member_name, system["system"] if system else None, len(rows), out_path, caller,
+            conn, member_name, system["system"] if system else None, rows, out_path, caller,
             writing_rules, template, redact, lexicon, max_attempts, threshold,
         )
 

@@ -821,6 +821,42 @@ def _seed_fakemod_scenarios(conn, count: int):
     conn.commit()
 
 
+def _seed_fakemod_scenarios_with_routines(conn, per_routine: dict[str, int]):
+    """Like _seed_fakemod_scenarios, but each scenario is linked (via
+    rule_candidate_id) to a rule_candidate that falls inside a named
+    routine -- `per_routine` maps routine name to how many scenarios it
+    gets, in the order given. Used to prove chunking and brief rendering
+    both honour routine boundaries for generated tests, the same way they
+    already do for module docs."""
+    from mfdoc.db import insert
+
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
+    line = 1
+    n = 0
+    for routine_name, count in per_routine.items():
+        start = line
+        for _ in range(count):
+            n += 1
+            line += 1
+            rc_id = insert(
+                conn, "rule_candidate", member_id=1, line_no=line, construct="IF",
+                condition=f"COND-{n}", raw=f"IF COND-{n}",
+            )
+            insert(
+                conn, "test_case", member_id=1, kind="unit", rule_candidate_id=rc_id,
+                scenario_name=f"FAKEMOD:BR-{n:03d}",
+                given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+                when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+                then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+                status="characterization", citation="FAKEMOD:1", confidence="verified",
+            )
+        insert(conn, "routine", member_id=1, name=routine_name, kind="natural_subroutine",
+               start_line=start, end_line=line)
+        line += 1
+    conn.commit()
+
+
 def _chunk_aware_caller(language: str, framework: str):
     """A fake caller that returns a fully valid single-chunk document citing
     exactly the FAKEMOD:BR-nnn ids present in the prompt it was sent --
@@ -940,6 +976,54 @@ def test_generate_member_test_doc_reports_failure_when_one_chunk_fails(tmp_path)
     index_text = out_path.read_text(encoding="utf-8")
     assert "FAKEMOD:BR-001" in index_text and "FAKEMOD:BR-002" in index_text
     assert "FAKEMOD:BR-003" not in index_text, "a failed chunk's scenarios must not be claimed as covered"
+
+
+def test_generate_member_test_doc_chunks_by_routine_not_flat_count(tmp_path):
+    """Two routines, X (3 scenarios) and Y (2 scenarios) -- with
+    max_scenarios_per_call=2, a flat count would cut X down the middle;
+    routine-aware chunking must keep X whole as an oversized chunk and Y
+    as its own, matching batch.py's identical guarantee for module docs."""
+    import sqlite3
+
+    from mfdoc import testbatch
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_scenarios_with_routines(conn, {"X": 3, "Y": 2})
+
+    out_path = tmp_path / "FAKEMOD.md"
+    result = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, _chunk_aware_caller("python", "pytest"),
+        "writing rules text", "template text", max_scenarios_per_call=2,
+    )
+    assert result.ok is True, result.problems
+    assert result.attempts == 2, "X (3 scenarios) and Y (2 scenarios) pack as two chunks, not three"
+
+    chunk1 = (tmp_path / "FAKEMOD.chunk1.md").read_text(encoding="utf-8")
+    chunk2 = (tmp_path / "FAKEMOD.chunk2.md").read_text(encoding="utf-8")
+    for n in (1, 2, 3):
+        assert f"FAKEMOD:BR-{n:03d}" in chunk1
+        assert f"FAKEMOD:BR-{n:03d}" not in chunk2
+    for n in (4, 5):
+        assert f"FAKEMOD:BR-{n:03d}" in chunk2
+
+
+def test_test_case_brief_tags_scenarios_with_their_routine():
+    """test_case_brief must surface each scenario's routine, the same
+    grouping cue module_brief gives narrative docs."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_scenarios_with_routines(conn, {"X": 2})
+
+    brief = testplan.test_case_brief(conn, "FAKEMOD")
+    assert "routine: `X`" in brief
 
 
 def test_failed_chunk_confidence_is_not_counted_in_the_index(tmp_path):

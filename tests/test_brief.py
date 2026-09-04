@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from mfdoc.brief import _rule_id, entity_brief, module_brief
+from mfdoc.brief import _rule_id, entity_brief, module_brief, routine_aware_chunk_ranges, routine_for_line
 from mfdoc.redact import NULL_REDACTOR
 
 
@@ -88,3 +88,104 @@ def test_module_brief_rule_ids_are_stable_across_regeneration(indexed_db):
     first = module_brief(indexed_db, "MMP0100", redact=NULL_REDACTOR)
     second = module_brief(indexed_db, "MMP0100", redact=NULL_REDACTOR)
     assert first == second
+
+
+def test_module_brief_tags_rules_and_data_access_with_their_routine(indexed_db):
+    """MMP0100's WRITE-AUDIT subroutine must show up both as its own
+    "Internal routines" entry and tagged onto any rule candidate whose
+    line falls inside it -- see reference/writing-rules.md's expectation
+    that generated docs group by routine, not a flat rule list."""
+    brief = module_brief(indexed_db, "MMP0100", redact=NULL_REDACTOR)
+    assert "## Internal routines" in brief
+    assert "`WRITE-AUDIT` (natural_subroutine)" in brief
+
+
+# --- routine_for_line / routine_aware_chunk_ranges -------------------------
+
+_ROUTINES = [
+    {"name": "A", "start_line": 1, "end_line": 10},
+    {"name": "B", "start_line": 20, "end_line": None},  # unresolved -- extends to EOF (last routine)
+]
+
+
+def test_routine_for_line_finds_containing_routine():
+    assert routine_for_line(_ROUTINES, 5)["name"] == "A"
+    assert routine_for_line(_ROUTINES, 25)["name"] == "B"
+
+
+def test_routine_for_line_returns_none_outside_every_routine():
+    assert routine_for_line(_ROUTINES, 15) is None
+
+
+def test_routine_for_line_unresolved_end_extends_to_next_start_not_eof():
+    routines = [
+        {"name": "A", "start_line": 1, "end_line": None},
+        {"name": "B", "start_line": 10, "end_line": 20},
+    ]
+    assert routine_for_line(routines, 8)["name"] == "A"
+    assert routine_for_line(routines, 10)["name"] == "B"
+
+
+def test_chunk_ranges_never_splits_a_routine_even_when_oversized():
+    """A -> lines 1-3 (routine X), lines 4-5 (routine Y), lines 6-11
+    (routine Z, 6 rules -- bigger than chunk_size) -- Z must become its own
+    oversized chunk rather than being cut at the nominal size."""
+    routines = [
+        {"name": "X", "start_line": 1, "end_line": 3},
+        {"name": "Y", "start_line": 4, "end_line": 5},
+        {"name": "Z", "start_line": 6, "end_line": 11},
+    ]
+    line_nos = list(range(1, 12))  # one rule per line, 11 rules total
+    ranges = routine_aware_chunk_ranges(line_nos, routines, chunk_size=3)
+    assert ranges == [(1, 3), (4, 5), (6, 11)]
+
+
+def test_chunk_ranges_splits_main_body_rules_by_count():
+    """Rules with no enclosing routine at all (a member with no internal
+    subroutines) must still chunk by the nominal size -- otherwise the
+    members most likely to need chunking (no structure to protect) would
+    never split."""
+    ranges = routine_aware_chunk_ranges(list(range(1, 6)), [], chunk_size=2)
+    assert ranges == [(1, 2), (3, 4), (5, 5)]
+
+
+def test_chunk_ranges_empty_input():
+    assert routine_aware_chunk_ranges([], [], chunk_size=3) == []
+
+
+def test_module_brief_surfaces_else_branch_data_access_next_to_the_rule():
+    """The exact defect reported: an IF's error branch got documented but
+    the ELSE's GET/DELETE silently disappeared. The brief must put those
+    accesses right on the ELSE's own bullet, and flag the IF as having a
+    paired branch that needs documenting too -- not leave a narrator to
+    correlate line numbers across two separate brief sections by hand."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA
+    from mfdoc.dialects import mantis
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'TESTMOD', 'mantis')")
+    src = (
+        'PROGRAM "TESTMOD"\n'
+        "ENTRY MAIN\n"
+        "  IF NO_SCHEDULE_FOUND = 1\n"
+        '    MSG="no active schedules for this unit"\n'
+        "  ELSE\n"
+        "    GET TTMTTR01(SCHED_KEY)FIRST\n"
+        "    DELETE TTMTTR02(SCHED_KEY)\n"
+        "  END\n"
+        "EXIT\n"
+    )
+    lines = [(i + 1, None, t) for i, t in enumerate(src.splitlines())]
+    mantis.extract(conn, 1, lines, "TESTMOD")
+
+    brief = module_brief(conn, "TESTMOD", redact=NULL_REDACTOR)
+    assert "has a paired ELSE at [[TESTMOD:5]]" in brief
+    assert "document what happens on BOTH branches" in brief
+    else_line = [l for l in brief.splitlines() if l.startswith("- **TESTMOD:BR-003**")][0]
+    assert "pairs with the IF at [[TESTMOD:3]]" in else_line
+    assert "GET" in else_line and "TTMTTR01" in else_line and "[[TESTMOD:6]]" in else_line
+    assert "DELETE" in else_line and "TTMTTR02" in else_line and "[[TESTMOD:7]]" in else_line

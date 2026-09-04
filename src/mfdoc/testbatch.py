@@ -24,6 +24,7 @@ from pathlib import Path
 from .batch import ModelCaller, DocResult
 from .batch import _corpus_signature as _base_corpus_signature
 from .batch import _load_state, _output_subdir, _save_state, _skip_result
+from .brief import fetch_routines, routine_aware_chunk_ranges
 from .redact import NULL_REDACTOR, Redactor
 from .testlang import sidecar_path_for
 from .testplan import fetch_test_case_rows, test_case_brief, test_case_brief_chunk
@@ -179,10 +180,6 @@ def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: 
     return DocResult(member_name, str(out_path), False, attempt, input_tokens, output_tokens, problems)
 
 
-def _chunk_rows(rows: list, size: int) -> list[list]:
-    return [rows[i:i + size] for i in range(0, len(rows), size)]
-
-
 def _aggregate_chunk_confidence(chunk_paths: list[Path]) -> dict[str, int]:
     """Sum each given chunk's own (model-produced, already validated)
     confidence_summary -- never re-guessed here. Callers must pass only ok
@@ -281,19 +278,29 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
     deterministic index doc at `out_path`, instead of asking one completion
     to cover every scenario. Each chunk goes through the exact same
     call/validate/retry path (_generate_test_doc_from_brief) a normal
-    single-call member does, scoped to `chunk_size` scenarios via
-    test_case_brief_chunk -- so one bad chunk retries and reports on its
-    own, rather than forcing a full-member re-generation, and no chunk's
-    prompt is any larger than a normal small member's."""
-    chunks = _chunk_rows(rows, chunk_size)
-    chunk_count = len(chunks)
+    single-call member does, scoped to a routine-aware slice via
+    brief.routine_aware_chunk_ranges -- the same grouping module-doc
+    chunking uses (batch.py), joined here through each row's originating
+    rule_candidate (test_case.rule_candidate_id) -- so one bad chunk
+    retries and reports on its own, rather than forcing a full-member
+    re-generation, and (short of a single oversized routine) no chunk's
+    prompt is much larger than a normal small member's. A row with no
+    rule_candidate_id (rule_line_no is NULL) is treated as belonging to no
+    routine, same as brief.py's main-body facts."""
+    routines = fetch_routines(conn, rows[0]["member_id"])
+    line_nos = [r["rule_line_no"] if r["rule_line_no"] is not None else -1 for r in rows]
+    ranges = routine_aware_chunk_ranges(line_nos, routines, chunk_size)
+    chunk_count = len(ranges)
     input_tokens = output_tokens = 0
     chunk_entries: list[tuple[int, Path, DocResult]] = []
     problems: list[str] = []
 
-    for i, chunk_rows in enumerate(chunks, start=1):
+    for i, (start, end) in enumerate(ranges, start=1):
+        chunk_rows = rows[start - 1:end]
         chunk_path = out_path.with_name(f"{out_path.stem}.chunk{i}{out_path.suffix}")
-        brief = test_case_brief_chunk(member_name, system, chunk_rows, i, chunk_count, redact=redact)
+        brief = test_case_brief_chunk(
+            member_name, system, chunk_rows, i, chunk_count, redact=redact, routines=routines,
+        )
         result = _generate_test_doc_from_brief(
             conn, member_name, brief, language, framework, chunk_path, caller,
             writing_rules, template, max_attempts=max_attempts,
