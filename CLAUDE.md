@@ -19,6 +19,41 @@ and `docs/guides/architecture.md` before changing pipeline behaviour; they
 explain *why* the stages are split this way, which matters more here than in
 most repos when deciding where a fix belongs.
 
+## Never commit client-specific content
+
+This is a public-ish, general-purpose tool repo, not an engagement workspace.
+Nothing that identifies or derives from any specific client, codebase, or
+engagement may go into a commit, PR title/description, commit message, code
+comment, docstring, test fixture, or example under `examples/` — regardless
+of how it reaches you (a file the user shares, a paste from their own
+functional-doc output, a screen/report export, a review comment, anything).
+This includes, but isn't limited to:
+
+- Real program/module/screen/file/field/variable names from a client system
+  (e.g. copied verbatim out of a real listing, review doc, or export)
+- Real business-rule text, system/error messages, or data values from a
+  client's actual source or generated documentation
+- The client's name, or any detail that would let someone infer it
+- Real screen, map, or report export content (even trimmed) — these are
+  exactly the kind of site-specific artefacts `docs/guides/security-and-
+  compliance.md` already treats as sensitive; a *sample* of one belongs in a
+  private engagement workspace, never in this repo's `examples/inputs/`,
+  tests, or docs
+
+When a task needs a worked example (a new dialect, a parser fix, a test
+fixture), invent the names and content from scratch. If you need to preserve a
+real export’s *shape* (structure/format quirks like a truncated-quote column
+layout or a specific statement shape), recreate that shape manually with
+invented content — don’t paste a client export and edit it down.
+is safe to include, treat it as unsafe and ask before committing rather
+than after: a scrub after the fact (see PR #44, 2026-09) is possible but
+costly — it leaves traces in git history, and SQLite fixtures bake schema
+*comments* into the binary's `sqlite_master`, so a leak can hide in a
+place a text-only review would miss (regenerate `examples/outputs/index.db`
+if a scrub ever touches `SCHEMA` in `db.py`).
+
+This applies to every branch and PR against this repo, not just `main`.
+
 ## Commands
 
 ```bash
