@@ -41,10 +41,10 @@ This includes, but isn't limited to:
   tests, or docs
 
 When a task needs a worked example (a new dialect, a parser fix, a test
-fixture), invent the names and content from scratch, or genericise a
-real shape enough that nothing recognisable survives (structure/format
-quirks are fine to keep — a truncated-quote column layout, a specific
-statement shape — content is not). If you're not sure whether something
+fixture), invent the names and content from scratch. If you need to preserve a
+real export’s *shape* (structure/format quirks like a truncated-quote column
+layout or a specific statement shape), recreate that shape manually with
+invented content — don’t paste a client export and edit it down.
 is safe to include, treat it as unsafe and ask before committing rather
 than after: a scrub after the fact (see PR #44, 2026-09) is possible but
 costly — it leaves traces in git history, and SQLite fixtures bake schema
