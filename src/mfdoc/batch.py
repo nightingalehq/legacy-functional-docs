@@ -514,21 +514,24 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
     )
     corpus_unchanged = bool(state_path) and state.get("_corpus_sha256") == corpus_sig
     results: list[DocResult] = []
+    # Keyed by the subdir-qualified state_key computed below, not bare
+    # member name: two batchable members can share a name across
+    # libraries/dialects (member.name is only unique together with
+    # library+dialect), and `members` can legitimately contain that bare
+    # name more than once (once per colliding member). A bare-name-keyed
+    # dict here would let the second one's brief/state silently clobber the
+    # first's between the loop below and the two loops that consume these
+    # -- keying by state_key throughout (not just in `state` itself) is
+    # what actually prevents that, not merely computing a qualified key and
+    # then discarding it.
     briefs: dict[str, str] = {}
-    to_run: list[tuple[str, str, Path]] = []
-    to_run_chunked: list[tuple[str, str, Path]] = []
+    to_run: list[tuple[str, str, Path, str]] = []
+    to_run_chunked: list[tuple[str, str, Path, str]] = []
 
-    state_keys: dict[str, str] = {}
     for name in members:
         subdir = _output_subdir(conn, name)
         out_path = out_dir / subdir / f"{name}.md"
-        # Keyed by subdir+name, not bare name: two batchable members can
-        # share a name across libraries/dialects (member.name is only
-        # unique together with library+dialect), and each now gets its own
-        # output path -- state must track them separately too, or one's
-        # resume state would silently overwrite the other's.
         state_key = f"{subdir.as_posix()}/{name}"
-        state_keys[name] = state_key
         prior = state.get(state_key)
         # `prior` is only ever meaningful as this member's own state entry;
         # guard against the (currently reserved but unenforced) "_corpus_sha256"
@@ -552,18 +555,19 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
 
         rows, ambiguous_libs = fetch_rule_candidate_rows(conn, name)
         if not ambiguous_libs and rows and len(rows) > threshold:
-            to_run_chunked.append((name, brief_hash, out_path))
+            to_run_chunked.append((name, brief_hash, out_path, state_key))
         else:
-            briefs[name] = brief
-            to_run.append((name, brief_hash, out_path))
+            briefs[state_key] = brief
+            to_run.append((name, brief_hash, out_path, state_key))
 
     with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
         futures = {
-            pool.submit(caller, build_prompt(briefs[name], writing_rules, template)): (name, brief_hash, out_path)
-            for name, brief_hash, out_path in to_run
+            pool.submit(caller, build_prompt(briefs[state_key], writing_rules, template)):
+                (name, brief_hash, out_path, state_key)
+            for name, brief_hash, out_path, state_key in to_run
         }
         for fut in as_completed(futures):
-            name, brief_hash, out_path = futures[fut]
+            name, brief_hash, out_path, state_key = futures[fut]
             response = fut.result()
             input_tokens, output_tokens = response.input_tokens, response.output_tokens
 
@@ -573,7 +577,7 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
             attempts = 1
             if not validation["ok"]:
                 retry_note = "\n".join(f"- {p}" for p in validation["problems"])
-                retry_prompt = build_prompt(briefs[name], writing_rules, template, retry_note)
+                retry_prompt = build_prompt(briefs[state_key], writing_rules, template, retry_note)
                 retry_response = caller(retry_prompt)
                 input_tokens += retry_response.input_tokens
                 output_tokens += retry_response.output_tokens
@@ -586,15 +590,15 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
                 validation.get("problems", []),
             )
             results.append(result)
-            state[state_keys[name]] = {"ok": result.ok, "attempts": attempts, "brief_sha256": brief_hash}
+            state[state_key] = {"ok": result.ok, "attempts": attempts, "brief_sha256": brief_hash}
 
-    for name, brief_hash, out_path in to_run_chunked:
+    for name, brief_hash, out_path, state_key in to_run_chunked:
         result = generate_module_doc(
             conn, name, out_path, caller, writing_rules, template, redact=redact,
             lexicon=lexicon, max_rules_per_call=threshold,
         )
         results.append(result)
-        state[state_keys[name]] = {"ok": result.ok, "attempts": result.attempts, "brief_sha256": brief_hash}
+        state[state_key] = {"ok": result.ok, "attempts": result.attempts, "brief_sha256": brief_hash}
 
     if state_path:
         state["_corpus_sha256"] = corpus_sig
