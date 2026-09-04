@@ -71,6 +71,57 @@ def test_referenced_entities_deduplicates_across_sources():
     assert len(ents) == 1
 
 
+def test_referenced_entities_ignores_view_of_on_an_unrelated_scope():
+    """Only scope IN ('view', 'screen') legitimately means "this member
+    touches the entity view_of names" -- some other scope happening to
+    carry a view_of-shaped value (not something any current extractor
+    does, but not guaranteed by the schema either) must not be treated
+    as a reference."""
+    conn = _conn()
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'PROG1', 'mantis')")
+    upsert_entity(conn, "SOMEFILE", "supra_master")
+    insert(conn, "variable", member_id=1, scope="mantis_local", name="X", view_of="SOMEFILE", line_no=1)
+    ents = graph.referenced_entities(conn, 1)
+    assert ents == []
+
+
+def test_unused_fields_ignores_a_name_appearing_only_in_a_comment():
+    """A field name mentioned only inside a comment line (is_comment=1)
+    is not actually referenced by the code -- must still count as
+    unused, not be masked by the comment's mention of it."""
+    conn = _conn()
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'PROG1', 'mantis')")
+    conn.execute(
+        "INSERT INTO source_line (member_id, line_no, text, is_comment) VALUES "
+        "(1, 1, '* TODO: use FIELD_UNUSED here', 1)"
+    )
+    eid = upsert_entity(conn, "SOMESCREEN", "mantis_map")
+    upsert_field(conn, eid, "FIELD_UNUSED", format="TEXT")
+    insert(conn, "interaction", member_id=1, line_no=1, kind="CONVERSE", target="SOMESCREEN")
+
+    unused = graph.unused_entity_fields_for_member(conn, 1)
+    assert {f["field_name"] for f in unused} == {"FIELD_UNUSED"}
+
+
+def test_unused_fields_matches_identifiers_with_non_word_leading_chars():
+    """A field name starting with `#`/`&` (both valid Natural/Mantis
+    identifier characters) must still be recognised as used when it
+    genuinely appears -- plain `\\b` can't fire between two non-word
+    characters (e.g. a space then `#`), so this specifically guards
+    against reverting to that."""
+    conn = _conn()
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'PROG1', 'mantis')")
+    conn.execute(
+        "INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'IF #COUNTER = 1')"
+    )
+    eid = upsert_entity(conn, "SOMESCREEN", "mantis_map")
+    upsert_field(conn, eid, "#COUNTER", format="TEXT")
+    insert(conn, "interaction", member_id=1, line_no=1, kind="CONVERSE", target="SOMESCREEN")
+
+    unused = graph.unused_entity_fields_for_member(conn, 1)
+    assert unused == []
+
+
 def test_unused_fields_excludes_referenced_and_heading_fields():
     conn = _conn()
     conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'PROG1', 'mantis')")

@@ -167,7 +167,16 @@ def referenced_entities(conn, member_id: int) -> list[dict]:
     this member is known to touch: read/written via data_access, declared
     as a view over one, shown/converged as a screen, or otherwise INCLUDEd
     -- one row per distinct entity. The set unused_entity_fields_for_member
-    checks each entity's own fields against."""
+    checks each entity's own fields against.
+
+    The `variable.view_of` join is deliberately restricted to
+    `scope IN ('view', 'screen')` -- the only two scopes any dialect
+    extractor currently populates `view_of` for (a Natural/Mantis `VIEW`,
+    and Mantis's `SCREEN name("physical")` local-alias binding; see
+    natural.py/mantis.py) -- rather than accepting any scope's `view_of`
+    unconditionally. Both of those really do mean "this member touches
+    that entity"; a future scope that happened to reuse the `view_of`
+    column for something else must not silently start counting here too."""
     rows = conn.execute(
         """
         SELECT DISTINCT e.id, e.name, e.kind FROM entity e
@@ -175,7 +184,7 @@ def referenced_entities(conn, member_id: int) -> list[dict]:
              SELECT entity_id FROM data_access WHERE member_id=? AND entity_id IS NOT NULL
              UNION
              SELECT e2.id FROM variable v JOIN entity e2 ON UPPER(e2.name) = UPPER(v.view_of)
-              WHERE v.member_id = ? AND v.view_of IS NOT NULL
+              WHERE v.member_id = ? AND v.view_of IS NOT NULL AND v.scope IN ('view', 'screen')
              UNION
              SELECT e3.id FROM interaction i JOIN entity e3 ON UPPER(e3.name) = UPPER(i.target)
               WHERE i.member_id = ? AND i.target IS NOT NULL
@@ -190,7 +199,7 @@ def referenced_entities(conn, member_id: int) -> list[dict]:
 
 
 def unused_entity_fields_for_member(conn, member_id: int) -> list[dict]:
-    """For every entity `member_id` is known to reference, that entity's
+    r"""For every entity `member_id` is known to reference, that entity's
     own data fields (a screen's HEADING rows are literal text, not a
     referenceable field, and are excluded by format) which never appear --
     as a whole word, case-insensitive -- anywhere in this member's own
@@ -202,12 +211,26 @@ def unused_entity_fields_for_member(conn, member_id: int) -> list[dict]:
 
     Deterministic: a whole-word text scan, nothing inferred about *why* a
     field is unused. One dict per unused field: entity_id, entity_name,
-    entity_kind, field_name, field_format."""
+    entity_kind, field_name, field_format.
+
+    Scans only non-comment lines (`source_line.is_comment=0`) -- a field
+    name mentioned only in a comment (a TODO, a commented-out statement)
+    is not actually referenced by the code, and counting it as used would
+    hide a real finding. Matches are bounded by lookarounds against this
+    codebase's own identifier character set (`[A-Z0-9#@$&-_.]`, the union
+    of natural.py's and mantis.py's own identifier patterns) rather than
+    `\b`: Python's `\b` is defined relative to `\w` (letters/digits/`_`
+    only), so a field name starting or ending with `#`/`$`/`&`/`-` --
+    all valid leading/trailing identifier characters in both dialects --
+    would never match at all, since `\b` cannot fire between two
+    non-word characters (e.g. a space then `#`)."""
     import re
+
+    _IDENT_CHAR = r"[A-Z0-9#@$&\-_.]"
 
     text = "\n".join(
         r["text"] for r in conn.execute(
-            "SELECT text FROM source_line WHERE member_id=?", (member_id,)
+            "SELECT text FROM source_line WHERE member_id=? AND is_comment=0", (member_id,)
         ).fetchall()
     )
     out: list[dict] = []
@@ -218,7 +241,8 @@ def unused_entity_fields_for_member(conn, member_id: int) -> list[dict]:
             (ent["id"],),
         ).fetchall()
         for f in fields:
-            if not re.search(rf"\b{re.escape(f['name'])}\b", text, re.I):
+            pattern = rf"(?<!{_IDENT_CHAR}){re.escape(f['name'])}(?!{_IDENT_CHAR})"
+            if not re.search(pattern, text, re.I):
                 out.append({
                     "entity_id": ent["id"], "entity_name": ent["name"], "entity_kind": ent["kind"],
                     "field_name": f["name"], "field_format": f["format"],

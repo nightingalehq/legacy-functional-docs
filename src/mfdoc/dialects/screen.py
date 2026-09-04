@@ -13,9 +13,12 @@ the program's own source never happened to mention it (see
 Anchored on the field's TYPE keyword rather than fixed column positions,
 because a screen's field-name column is fixed-width in the export but a
 quoted `HEADING` literal longer than that width gets truncated mid-string,
-sometimes losing its closing quote entirely (see e.g. `examples/inputs`'s
-sample screen export) — a fixed-width slice would misread the columns that
-follow on every truncated row, where anchoring on TYPE does not.
+sometimes losing its closing quote entirely — a fixed-width slice would
+misread the columns that follow on every truncated row, where anchoring
+on TYPE does not. See `tests/test_screen_dialect.py` for synthetic cases
+exercising this (there is no real export fixture under `examples/inputs`
+for this dialect, deliberately -- see `CLAUDE.md`'s "Never commit
+client-specific content").
 """
 
 from __future__ import annotations
