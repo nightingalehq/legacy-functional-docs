@@ -1,0 +1,83 @@
+"""Guards on db.connect()'s column-migration step (_apply_column_migrations).
+
+CREATE TABLE IF NOT EXISTS never adds a column to a table that already
+exists -- an index.db built before a column was added to SCHEMA keeps the
+table it already has, forever, regardless of how many times `mfdoc ingest`
+reruns SCHEMA against it. Without a migration step, the first INSERT naming
+that column on such a database fails with "no such column", confusingly far
+from the actual cause (a code upgrade, not anything the user did wrong).
+"""
+
+from __future__ import annotations
+
+import sqlite3
+
+from mfdoc import db as db_mod
+
+# A stand-in for a pre-migration rule_candidate/data_access shape -- just
+# enough columns to exercise the migration, not a full historical schema.
+_OLD_SCHEMA = """
+CREATE TABLE member (
+    id INTEGER PRIMARY KEY, name TEXT NOT NULL, dialect TEXT NOT NULL,
+    library TEXT, system TEXT, object_type TEXT, mode TEXT, source_file_id INTEGER
+);
+CREATE TABLE rule_candidate (
+    id INTEGER PRIMARY KEY, member_id INTEGER NOT NULL, line_no INTEGER NOT NULL,
+    end_line INTEGER, construct TEXT NOT NULL, condition TEXT, depth INTEGER DEFAULT 0,
+    fields_used TEXT, literals TEXT, raw TEXT NOT NULL, confidence TEXT NOT NULL DEFAULT 'verified'
+);
+CREATE TABLE data_access (
+    id INTEGER PRIMARY KEY, member_id INTEGER NOT NULL, line_no INTEGER NOT NULL,
+    verb TEXT NOT NULL, crud TEXT NOT NULL, entity_name TEXT, entity_id INTEGER,
+    via_view TEXT, key_expr TEXT, descriptor TEXT, raw TEXT NOT NULL,
+    confidence TEXT NOT NULL DEFAULT 'verified'
+);
+"""
+
+
+def _make_old_db(path):
+    conn = sqlite3.connect(path)
+    conn.executescript(_OLD_SCHEMA)
+    conn.close()
+
+
+def test_connect_adds_missing_columns_to_a_pre_existing_database(tmp_path):
+    path = tmp_path / "old.db"
+    _make_old_db(path)
+
+    conn = db_mod.connect(path)
+    rc_cols = {r["name"] for r in conn.execute("PRAGMA table_info(rule_candidate)").fetchall()}
+    da_cols = {r["name"] for r in conn.execute("PRAGMA table_info(data_access)").fetchall()}
+    assert "pair_line_no" in rc_cols
+    assert "key_source_line" in da_cols
+    assert "key_source_expr" in da_cols
+
+
+def test_connect_migration_lets_new_columns_be_inserted_on_an_old_db(tmp_path):
+    path = tmp_path / "old.db"
+    _make_old_db(path)
+
+    conn = db_mod.connect(path)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'X', 'mantis')")
+    # Would raise sqlite3.OperationalError: no such column, pre-migration.
+    conn.execute(
+        "INSERT INTO rule_candidate (member_id, line_no, construct, raw, pair_line_no) "
+        "VALUES (1, 1, 'ELSE', 'x', 1)"
+    )
+    conn.execute(
+        "INSERT INTO data_access (member_id, line_no, verb, crud, raw, key_source_line, key_source_expr) "
+        "VALUES (1, 2, 'GET', 'R', 'x', 1, 'expr')"
+    )
+    row = conn.execute("SELECT pair_line_no FROM rule_candidate").fetchone()
+    assert row["pair_line_no"] == 1
+
+
+def test_connect_migration_is_a_no_op_on_a_brand_new_database(tmp_path):
+    """A database created fresh (via SCHEMA's own CREATE TABLE) already has
+    every column -- the migration step must not error or duplicate a
+    column on the ordinary, already-current case."""
+    path = tmp_path / "new.db"
+    conn = db_mod.connect(path)
+    conn2 = db_mod.connect(path)  # re-`connect()` to the same, already-migrated db
+    cols = {r["name"] for r in conn2.execute("PRAGMA table_info(rule_candidate)").fetchall()}
+    assert "pair_line_no" in cols

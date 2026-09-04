@@ -259,10 +259,29 @@ def fetch_test_case_rows(conn, member_name: str):
     if ambiguous_libs:
         return None, [], ambiguous_libs
     system = matches[0]["system"] if matches else None
+    # LEFT JOIN rule_candidate for its line_no -- lets a caller group
+    # scenarios by the routine (see brief.routine_for_line) their
+    # originating rule falls in, the same way module docs group business
+    # rules. A test_case with no rule_candidate_id (none currently derive
+    # that way, but the column is nullable) still comes back, just with a
+    # NULL rule_line_no.
+    #
+    # Ordered by rc.line_no (source order), not tc.id (insertion order):
+    # testbatch.py's routine-aware chunking (brief.routine_aware_chunk_ranges)
+    # assumes consecutive rows sharing a routine are contiguous, which only
+    # holds if rows come back in the same source-line order rule_candidate
+    # rows do -- insertion order happening to match that today is not a
+    # guarantee build_member_test_cases makes going forward. `rc.line_no IS
+    # NULL` sorts rows with no rule_candidate link (line_no NULL) after
+    # every row that has one, rather than SQLite's default of NULL-first.
     rows = conn.execute(
         """
-        SELECT tc.* FROM test_case tc JOIN member m ON m.id = tc.member_id
-         WHERE UPPER(m.name)=UPPER(?) ORDER BY tc.id
+        SELECT tc.*, rc.line_no AS rule_line_no
+          FROM test_case tc
+          JOIN member m ON m.id = tc.member_id
+          LEFT JOIN rule_candidate rc ON rc.id = tc.rule_candidate_id AND rc.member_id = tc.member_id
+         WHERE UPPER(m.name)=UPPER(?)
+         ORDER BY rc.line_no IS NULL, rc.line_no, tc.id
         """,
         (member_name,),
     ).fetchall()
@@ -293,17 +312,27 @@ def _brief_header(member_name: str, system: str | None, rows, title_suffix: str 
     return out
 
 
-def _brief_scenarios(rows, redact) -> list[str]:
+def _brief_scenarios(rows, redact, routines: list[dict] | None = None) -> list[str]:
     """The per-scenario `### {scenario_name} ...` sections -- the part of
     a test brief that *does* vary between a full-member brief and one
     chunk's brief, so both test_case_brief and test_case_brief_chunk render
     it from whatever `rows` they're given rather than always the member's
-    full set."""
+    full set. `routines` (see brief.fetch_routines), when given, tags each
+    scenario with the routine its originating rule falls in -- the same
+    grouping module docs use, so generated tests can be organised (and, in
+    testbatch.py, chunked) along the same lines rather than an arbitrary
+    scenario count."""
+    from .brief import routine_for_line
+
     out = []
     for r in rows:
         when = json.loads(r["when_json"])
         then = json.loads(r["then_json"])
         out.append(f"### {r['scenario_name']} ({r['status']}) [[{r['citation']}]]")
+        if routines and r["rule_line_no"] is not None:
+            routine = routine_for_line(routines, r["rule_line_no"])
+            if routine:
+                out.append(f"- routine: `{routine['name']}`")
         out.append(f"- construct: `{when['construct']}`")
         if when.get("condition"):
             out.append(f"- condition: `{redact(when['condition'])}`")
@@ -342,15 +371,18 @@ def test_case_brief(conn, member_name: str, redact=None) -> str:
     if not rows:
         return f"# Test brief: {member_name}\n\nNo derived test_case rows for this member. Run `mfdoc test-plan` first.\n"
 
+    from .brief import fetch_routines
+    routines = fetch_routines(conn, rows[0]["member_id"])
+
     out = _brief_header(member_name, system, rows)
     out.append("## Scenarios")
     out.append("")
-    out.extend(_brief_scenarios(rows, redact))
+    out.extend(_brief_scenarios(rows, redact, routines))
     return "\n".join(out) + "\n"
 
 
 def test_case_brief_chunk(member_name: str, system: str | None, rows, chunk_index: int,
-                           chunk_count: int, redact=None) -> str:
+                           chunk_count: int, redact=None, routines: list[dict] | None = None) -> str:
     """A test brief covering only `rows` -- one slice of this member's full
     test_case set -- for testbatch.py's chunked render path. Same
     Parameters/Dependencies header every chunk of this member shares (any
@@ -359,14 +391,15 @@ def test_case_brief_chunk(member_name: str, system: str | None, rows, chunk_inde
     proportional to the chunk, not the whole member. `system`/`rows` are
     passed in rather than looked up again, since the caller (testbatch.py's
     chunk-or-not decision) already called fetch_test_case_rows once for
-    this member."""
+    this member; `routines` likewise, since chunking itself needs the same
+    list (see brief.routine_aware_chunk_ranges) before any brief is built."""
     from .redact import NULL_REDACTOR
     redact = redact or NULL_REDACTOR
 
     out = _brief_header(member_name, system, rows, title_suffix=f" (chunk {chunk_index}/{chunk_count})")
     out.append(f"## Scenarios (this chunk only -- {len(rows)} of the member's full set)")
     out.append("")
-    out.extend(_brief_scenarios(rows, redact))
+    out.extend(_brief_scenarios(rows, redact, routines))
     return "\n".join(out) + "\n"
 
 

@@ -50,10 +50,18 @@ One row per store. Say what each access is *for*, not merely that it happens.
 
 Numbered, each with citation, confidence, and the rule's `{MEMBER}:BR-nnn` ID from
 the brief. Group by the decision they serve rather than by source order — source
-order reflects how the code was built, not how the business thinks about it. The ID
-is a stable, system-wide-unique handle for referring back to this exact rule later
-(in a revision, or a gap-register conversation with an SME) — copy it from the
-brief verbatim, never invent or renumber one.
+order reflects how the code was built, not how the business thinks about it. When
+the brief's "Internal routines" section lists more than one routine, use those as
+the grouping (a subsection per routine, or a clear heading), not a flat list —
+a reader trying to find everything one routine does should not have to read the
+whole document. The ID is a stable, system-wide-unique handle for referring back
+to this exact rule later (in a revision, or a gap-register conversation with an
+SME) — copy it from the brief verbatim, never invent or renumber one.
+
+When a rule is an `IF` the brief marks with a paired ELSE, document what happens
+on *both* branches — not just the one that reads as interesting. The brief lists
+the data access found on each branch precisely so this doesn't get missed; every
+one of those accesses belongs in this section, attributed to its branch.
 
 1. **{Rule name}** ({MEMBER}:BR-nnn) — {statement in business terms}. {Citation}
 2. …

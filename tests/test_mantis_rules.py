@@ -2,6 +2,142 @@
 
 from __future__ import annotations
 
+import sqlite3
+
+from mfdoc.db import SCHEMA
+from mfdoc.dialects import mantis
+
+
+def _extract(src: str, member_name: str = "TESTMOD"):
+    """Isolated in-memory index for a hand-written snippet -- used for
+    shapes not present in the bundled fixtures (an internal DO/PERFORM to
+    a locally-declared ENTRY point; a GET key built from a prior
+    assignment), rather than editing the shared, line-number-sensitive
+    ORDENQ.mantis/SCRNENT.mantis fixtures."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, ?, 'mantis')", (member_name,))
+    lines = [(i + 1, None, t) for i, t in enumerate(src.splitlines())]
+    mantis.extract(conn, 1, lines, member_name)
+    return conn
+
+
+def test_do_call_to_local_entry_point_resolves_as_internal():
+    """A `DO`/`PERFORM` target matching one of this member's own ENTRY
+    points must resolve as PERFORM_INTERNAL, the same false-positive-
+    avoidance natural.py already does for DEFINE SUBROUTINE -- otherwise
+    every internal paragraph call looks like a missing external module in
+    the gap register."""
+    conn = _extract(
+        'PROGRAM "TESTMOD"\n'
+        "ENTRY MAIN\n"
+        "  DO BUILD_KEY\n"
+        "EXIT\n"
+        "\n"
+        "ENTRY BUILD_KEY\n"
+        "  X=1\n"
+        "EXIT\n"
+    )
+    edge = conn.execute(
+        "SELECT call_kind, resolved, callee_id FROM call_edge WHERE callee_name='BUILD_KEY'"
+    ).fetchone()
+    assert edge is not None
+    assert edge["call_kind"] == "PERFORM_INTERNAL"
+    assert edge["resolved"] == 1
+    assert edge["callee_id"] == 1
+
+    routines = conn.execute("SELECT name, start_line, end_line FROM routine ORDER BY start_line").fetchall()
+    assert [r["name"] for r in routines] == ["MAIN", "BUILD_KEY"]
+
+
+def test_key_built_from_prior_assignment_is_traced():
+    """The exact shape a key gets built across lines before it's used --
+    `INST_KEY="H"+NEXT_IDENT(...)+...` then `GET TTMTTR01(INST_KEY)FIRST` --
+    must resolve `data_access.key_source_line`/`key_source_expr` back to the
+    assignment, not leave the key as an opaque variable name. Without this,
+    a narrator has no cue that INST_KEY is a composed value worth
+    explaining rather than a bare token."""
+    conn = _extract(
+        'PROGRAM "TESTMOD"\n'
+        "ENTRY MAIN\n"
+        '  INST_KEY="H"+NEXT_IDENT(1,1,5)+NEXT_IDENT(1,7,8)+NEXT_IDENT(1,10,10)\n'
+        "  GET TTMTTR01(INST_KEY)FIRST\n"
+        "EXIT\n"
+    )
+    row = conn.execute(
+        "SELECT entity_name, key_expr, key_source_line, key_source_expr FROM data_access WHERE verb='GET'"
+    ).fetchone()
+    assert row is not None
+    assert row["entity_name"] == "TTMTTR01"
+    assert row["key_expr"] == "TTMTTR01(INST_KEY)FIRST"
+    assert row["key_source_line"] == 3
+    assert row["key_source_expr"] == '"H"+NEXT_IDENT(1,1,5)+NEXT_IDENT(1,7,8)+NEXT_IDENT(1,10,10)'
+
+
+def test_key_source_is_none_when_no_prior_assignment_found():
+    """A key variable with no preceding assignment in this member (e.g. a
+    parameter, or genuinely not traceable from the supplied source) must
+    leave key_source_line/key_source_expr NULL -- never guessed."""
+    conn = _extract(
+        'PROGRAM "TESTMOD"\n'
+        "ENTRY MAIN\n"
+        "  GET TTMTTR01(SOME_KEY)FIRST\n"
+        "EXIT\n"
+    )
+    row = conn.execute(
+        "SELECT key_source_line, key_source_expr FROM data_access WHERE verb='GET'"
+    ).fetchone()
+    assert row["key_source_line"] is None
+    assert row["key_source_expr"] is None
+
+
+def test_if_else_branch_extent_and_pairing_is_recorded():
+    """The exact shape reported: an IF's error/hold branch is easy to
+    document, but the ELSE's GET/DELETE must not silently disappear.
+    end_line on the IF must stop at the ELSE (not swallow its branch too),
+    pair_line_no on the ELSE must point back to the IF, and end_line on
+    the ELSE must reach the matching END."""
+    conn = _extract(
+        'PROGRAM "TESTMOD"\n'
+        "ENTRY MAIN\n"
+        "  IF NO_SCHEDULE_FOUND = 1\n"
+        '    MSG="no active schedules for this unit"\n'
+        "  ELSE\n"
+        "    GET TTMTTR01(SCHED_KEY)FIRST\n"
+        "    DELETE TTMTTR02(SCHED_KEY)\n"
+        "  END\n"
+        "EXIT\n"
+    )
+    if_row = conn.execute("SELECT line_no, end_line FROM rule_candidate WHERE construct='IF'").fetchone()
+    else_row = conn.execute(
+        "SELECT line_no, pair_line_no, end_line FROM rule_candidate WHERE construct='ELSE'"
+    ).fetchone()
+    assert if_row["line_no"] == 3
+    assert if_row["end_line"] == 8, "IF's end_line must stop at END, not be left unresolved"
+    assert else_row["pair_line_no"] == 3
+    assert else_row["line_no"] == 5
+    assert else_row["end_line"] == 8
+
+
+def test_supra_dml_key_arg_is_also_traced():
+    """The same backward-trace applies to Supra DML calls
+    (`READM(ORDERMST, ORDER_NO)`), not only GET -- the key argument there is
+    a bare comma-separated token, not a parenthesised sub-expression."""
+    conn = _extract(
+        'PROGRAM "TESTMOD"\n'
+        "ENTRY MAIN\n"
+        '  ORDER_NO="A1"+"B2"\n'
+        "  READM(ORDERMST, ORDER_NO)\n"
+        "EXIT\n"
+    )
+    row = conn.execute(
+        "SELECT key_source_line, key_source_expr FROM data_access WHERE verb='READM'"
+    ).fetchone()
+    assert row is not None
+    assert row["key_source_line"] == 3
+    assert row["key_source_expr"] == '"A1"+"B2"'
+
 
 def test_continuation_fold_joins_a_condition_wrapped_with_a_quote_marker(indexed_db):
     """`IF ORDER_WT > 500` wrapping onto `'OR CUST_NO = " "` on the next line
@@ -47,6 +183,27 @@ def test_continuation_line_is_still_visited_and_gapped_on_its_own(indexed_db):
         """
     ).fetchone()
     assert row is not None, "continuation line must still raise its own unparsed_line gap"
+
+
+def test_orderq_entry_points_recorded_as_routines(indexed_db):
+    """ORDENQ.mantis declares two ENTRY points, MAIN and
+    VALIDATE_CREDIT_LIMIT (see the module docstring on the continuation-fold
+    test above) -- both must land in the `routine` table with resolved
+    boundaries, the same grouping Natural's DEFINE SUBROUTINE gets."""
+    conn = indexed_db
+    rows = conn.execute(
+        """
+        SELECT r.name, r.kind, r.start_line, r.end_line FROM routine r
+        JOIN member m ON m.id = r.member_id
+        WHERE m.name='ORDENQ' ORDER BY r.start_line
+        """
+    ).fetchall()
+    names = [r["name"] for r in rows]
+    assert names == ["MAIN", "VALIDATE_CREDIT_LIMIT"]
+    for r in rows:
+        assert r["kind"] == "mantis_entry"
+        assert r["end_line"] is not None
+        assert r["start_line"] < r["end_line"]
 
 
 def test_entry_only_program_still_gets_object_type_program(indexed_db):

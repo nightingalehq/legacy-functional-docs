@@ -139,8 +139,18 @@ CREATE TABLE IF NOT EXISTS data_access (
     entity_name   TEXT,                   -- as written in source
     entity_id     INTEGER REFERENCES entity(id),
     via_view      TEXT,                   -- Natural view name / Mantis view
-    key_expr      TEXT,                   -- WITH/BY/WHERE clause text
+    key_expr      TEXT,                   -- WITH/BY/WHERE clause text, as written at this access
     descriptor    TEXT,                   -- descriptor or key used, if identifiable
+    -- When key_expr is (or contains) a bare variable rather than a literal
+    -- or inline expression, and that variable's most recent assignment in
+    -- this member (before this line) was found, these two record where and
+    -- how it was actually built -- e.g. GET TTMTTR01(INST_KEY)FIRST with
+    -- INST_KEY="H"+NEXT_IDENT(1,1,5)+... assigned a few lines earlier.
+    -- Without this, "the key is INST_KEY" tells a reader nothing about what
+    -- value is really being looked up. NULL when no such assignment was
+    -- found (or key_expr isn't a bare variable) -- never guessed.
+    key_source_line INTEGER,
+    key_source_expr TEXT,
     raw           TEXT NOT NULL,
     confidence    TEXT NOT NULL DEFAULT 'verified'
 );
@@ -191,12 +201,46 @@ CREATE TABLE IF NOT EXISTS interaction (
     fields        TEXT
 );
 
+-- Internal subroutine/paragraph boundaries: Natural's DEFINE SUBROUTINE /
+-- END-SUBROUTINE, Mantis's ENTRY name / EXIT. Every other per-line fact
+-- table (rule_candidate, data_access, interaction, call_edge) only ever
+-- recorded *that* a line belongs to some member -- never *which internal
+-- routine within it*, so there was no deterministic way to group a
+-- member's facts by subroutine, measure per-routine coverage, or chunk
+-- narration along routine lines rather than an arbitrary rule count. A
+-- line whose line_no falls in no routine's [start_line, end_line] belongs
+-- to the member's main body, not to any named routine.
+CREATE TABLE IF NOT EXISTS routine (
+    id            INTEGER PRIMARY KEY,
+    member_id     INTEGER NOT NULL REFERENCES member(id),
+    name          TEXT NOT NULL,
+    kind          TEXT NOT NULL,          -- natural_subroutine | mantis_entry
+    start_line    INTEGER NOT NULL,
+    end_line      INTEGER,                -- NULL when no matching END-SUBROUTINE/EXIT was found
+    confidence    TEXT NOT NULL DEFAULT 'verified'
+);
+CREATE INDEX IF NOT EXISTS ix_routine_member ON routine(member_id);
+
 -- Candidate business rules: conditionals, validations, computations, escapes
 CREATE TABLE IF NOT EXISTS rule_candidate (
     id            INTEGER PRIMARY KEY,
     member_id     INTEGER NOT NULL REFERENCES member(id),
     line_no       INTEGER NOT NULL,
+    -- For a construct that opens a block (IF, WHILE, FOR, CASE, ...), the
+    -- line of its matching END/END-*, once found -- the block's extent.
+    -- Populated for IF specifically (natural.py's _match_rules, mantis.py's
+    -- extract()) so a later fact (a GET, a DELETE, another rule) inside
+    -- either the IF's or its ELSE's own extent can be told apart from
+    -- unrelated code that merely follows it -- without this, narration has
+    -- no structural cue that the two share a branch, and consistently
+    -- describes only the branch that reads as interesting (typically the
+    -- error/validation one) while silently dropping the other's effects.
     end_line      INTEGER,
+    -- For an ELSE (or an equivalent alternate-branch construct), the
+    -- line_no of the IF/etc. it pairs with -- lets a reader join "if this
+    -- condition is false" back to the condition itself without relying on
+    -- indentation the brief doesn't carry.
+    pair_line_no  INTEGER,
     construct     TEXT NOT NULL,          -- IF | DECIDE ON | DECIDE FOR | CASE | WHILE | FOR | REPEAT | AT BREAK | ON ERROR | REINPUT | ESCAPE | LOOP
     condition     TEXT,
     depth         INTEGER DEFAULT 0,
@@ -316,12 +360,38 @@ CREATE TABLE IF NOT EXISTS doc_claim (
 """
 
 
+# Columns added to an *existing* table after its CREATE TABLE first shipped.
+# `CREATE TABLE IF NOT EXISTS` (SCHEMA, above) only ever creates a table
+# that doesn't exist yet -- an index.db built before one of these columns
+# existed keeps the table it already has, forever, no matter how many
+# times `mfdoc ingest` reruns SCHEMA against it. Without this, a column
+# added here in source stays invisible on every pre-existing engagement's
+# index.db, and the first INSERT naming it fails with "no such column",
+# well after the point a reader would connect that error to a schema
+# change. A brand new table (e.g. `routine`) never needs an entry here --
+# CREATE TABLE IF NOT EXISTS already covers it correctly either way.
+_COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
+    ("rule_candidate", "pair_line_no", "INTEGER"),
+    ("data_access", "key_source_line", "INTEGER"),
+    ("data_access", "key_source_expr", "TEXT"),
+]
+
+
+def _apply_column_migrations(conn: sqlite3.Connection) -> None:
+    for table, column, coltype in _COLUMN_MIGRATIONS:
+        existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+    conn.commit()
+
+
 def connect(db_path: str | Path) -> sqlite3.Connection:
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    _apply_column_migrations(conn)
     return conn
 
 

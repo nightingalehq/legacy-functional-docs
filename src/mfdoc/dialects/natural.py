@@ -367,6 +367,41 @@ def reporting_loop_plan(lines) -> dict[int, int] | None:
     return loop_indents
 
 
+def _scan_routines(lines: list[tuple[int, str | None, str]]) -> list[dict]:
+    """`DEFINE SUBROUTINE name` / `END-SUBROUTINE` boundaries, as a
+    standalone pre-scan independent of the main per-statement dispatch loop
+    below -- deliberately: that loop's continuation-folding and dual
+    masked/masked2 handling is already intricate, and routine boundaries
+    only need two keywords recognised, never nested (Natural subroutines
+    don't nest), so a dedicated single pass is both simpler and safer than
+    threading "current open routine" state through the existing dispatch.
+
+    Returns dicts with name/kind/start_line/end_line (end_line is None when
+    no matching END-SUBROUTINE was found before EOF or the next DEFINE
+    SUBROUTINE -- recorded as unresolved via a gap by the caller, not
+    guessed here)."""
+    routines: list[dict] = []
+    open_routine: dict | None = None
+    for line_no, _, raw in lines:
+        code, _ = strip_comment(raw)
+        if not code.strip():
+            continue
+        if (m := RE_DEFINE_SUB.match(code)):
+            if open_routine is not None:
+                routines.append(open_routine)
+            open_routine = {
+                "name": m.group("name").upper(), "kind": "natural_subroutine",
+                "start_line": line_no, "end_line": None,
+            }
+        elif open_routine is not None and RE_END_ANY.match(code) and RE_END_ANY.match(code).group(1).upper() == "SUBROUTINE":
+            open_routine["end_line"] = line_no
+            routines.append(open_routine)
+            open_routine = None
+    if open_routine is not None:
+        routines.append(open_routine)
+    return routines
+
+
 def extract(conn, member_id: int, lines: list[tuple[int, str | None, str]], member_name: str = "?") -> dict:
     """Populate fact tables for one Natural member."""
     mode = detect_mode(lines)
@@ -421,12 +456,34 @@ def extract(conn, member_id: int, lines: list[tuple[int, str | None, str]], memb
         for _, _, t in lines
         if (m := RE_DEFINE_SUB.match(strip_comment(t)[0]))
     }
+    for r in _scan_routines(lines):
+        if r["end_line"] is None:
+            add_gap(
+                conn, "unparsed_line",
+                f"DEFINE SUBROUTINE {r['name']} opened at line {r['start_line']} has no "
+                "matching END-SUBROUTINE; its extent is unknown, so facts inside it "
+                "can't be grouped under this routine.",
+                member_id=member_id, line_no=r["start_line"], severity="medium",
+            )
+        insert(conn, "routine", member_id=member_id, name=r["name"], kind=r["kind"],
+               start_line=r["start_line"], end_line=r["end_line"])
     stats = {"lines": len(lines), "code_lines": 0, "comment_lines": 0, "unparsed": 0}
 
     in_define = False
     scope = None
     depth = 0
     open_blocks: list[tuple[str, int]] = []
+    # IF/ELSE branch-extent tracking (see _match_rules): the rule_candidate
+    # id of the IF that opened each currently-open block, and of its ELSE
+    # (if one has fired), keyed by the IF's own line_no -- so, once the
+    # matching END is found, both rows' end_line can be set to where
+    # their branch actually ends. Without this, a generated document has
+    # no structural cue that a later GET/DELETE/etc. belongs to a
+    # particular IF's ELSE branch rather than being unrelated main-line
+    # code, and narration silently describes only the branch that read as
+    # interesting (usually the error/validation one).
+    if_rule_ids: dict[int, int] = {}
+    else_rule_ids: dict[int, int] = {}
     # Reporting-mode LOOP nesting (issue #5) -- (line_no, indent_col) per
     # open LOOP, decoupled from open_blocks/the END-* keyword closing
     # mechanism above, since LOOP closes on dedent, not on a keyword. Stays
@@ -558,7 +615,8 @@ def extract(conn, member_id: int, lines: list[tuple[int, str | None, str]], memb
         # ------------------------------------------------------ rule candidates
         if not matched:
             matched, depth, open_blocks = _match_rules(
-                conn, member_id, line_no, stmt, masked, depth, open_blocks)
+                conn, member_id, line_no, stmt, masked, depth, open_blocks,
+                if_rule_ids, else_rule_ids)
 
         # ------------------------------------------------ arithmetic candidates
         if not matched:
@@ -593,7 +651,8 @@ def extract(conn, member_id: int, lines: list[tuple[int, str | None, str]], memb
             )
             if not matched:
                 matched, depth, open_blocks = _match_rules(
-                    conn, member_id, line_no, stmt2, masked2, depth, open_blocks)
+                    conn, member_id, line_no, stmt2, masked2, depth, open_blocks,
+                    if_rule_ids, else_rule_ids)
             if not matched:
                 matched = _match_arithmetic(conn, member_id, line_no, stmt2, masked2, depth)
             if not matched:
@@ -907,18 +966,39 @@ def _match_arithmetic(conn, member_id, line_no, stmt, masked, depth) -> bool:
     return True
 
 
-def _match_rules(conn, member_id, line_no, stmt, masked, depth, open_blocks):
-    def rec(construct, cond):
+def _match_rules(conn, member_id, line_no, stmt, masked, depth, open_blocks,
+                  if_rule_ids: dict[int, int] | None = None,
+                  else_rule_ids: dict[int, int] | None = None):
+    if_rule_ids = {} if if_rule_ids is None else if_rule_ids
+    else_rule_ids = {} if else_rule_ids is None else else_rule_ids
+
+    def rec(construct, cond, pair_line_no=None):
         fields, lits = _condition_facts(cond or "")
-        insert(conn, "rule_candidate", member_id=member_id, line_no=line_no,
+        return insert(conn, "rule_candidate", member_id=member_id, line_no=line_no,
                construct=construct, condition=(cond or "").strip()[:500] or None,
                depth=depth, fields_used=fields[:500] or None, literals=lits[:500] or None,
-               raw=stmt.strip()[:500])
+               raw=stmt.strip()[:500], pair_line_no=pair_line_no)
 
     if (m := RE_END_ANY.match(masked)):
         openers = _END_TO_OPENERS.get(m.group(1).upper())
         if openers and open_blocks and open_blocks[-1][0] in openers:
-            open_blocks.pop()
+            popped_construct, opened_line = open_blocks.pop()
+            if popped_construct == "IF":
+                # This IF's (and, if it had one, its ELSE's) branch extent
+                # is now known -- record it so a reader/narrator can see
+                # exactly which later facts (a GET, a DELETE, another
+                # rule) fall inside which branch, rather than having to
+                # guess from indentation the brief doesn't carry.
+                if_id = if_rule_ids.pop(opened_line, None)
+                else_id = else_rule_ids.pop(opened_line, None)
+                if if_id is not None:
+                    conn.execute(
+                        "UPDATE rule_candidate SET end_line=? WHERE id=?", (line_no, if_id)
+                    )
+                if else_id is not None:
+                    conn.execute(
+                        "UPDATE rule_candidate SET end_line=? WHERE id=?", (line_no, else_id)
+                    )
             return True, max(depth - 1, 0), open_blocks
         return True, depth, open_blocks
     if RE_IF_NO.match(masked):
@@ -926,11 +1006,15 @@ def _match_rules(conn, member_id, line_no, stmt, masked, depth, open_blocks):
         open_blocks.append(("IF NO RECORDS FOUND", line_no))
         return True, depth + 1, open_blocks
     if (m := RE_IF.match(masked)):
-        rec("IF", orig(stmt, m, "cond"))
+        if_id = rec("IF", orig(stmt, m, "cond"))
+        if_rule_ids[line_no] = if_id
         open_blocks.append(("IF", line_no))
         return True, depth + 1, open_blocks
     if RE_ELSE.match(masked):
-        rec("ELSE", None)
+        pair_line = open_blocks[-1][1] if open_blocks and open_blocks[-1][0] == "IF" else None
+        else_id = rec("ELSE", None, pair_line_no=pair_line)
+        if pair_line is not None:
+            else_rule_ids[pair_line] = else_id
         return True, depth, open_blocks
     if (m := RE_DECIDE_ON.match(masked)):
         rec(f"DECIDE ON {m.group('mods').upper()}", orig(stmt, m, "subj"))

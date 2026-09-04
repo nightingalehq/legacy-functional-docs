@@ -49,6 +49,117 @@ def _copycode_rule_candidates(conn, mid: int, _seen: set | None = None) -> list[
     return out
 
 
+def _branch_data_access(conn, mid: int, name: str, start_line: int, end_line: int) -> str | None:
+    """Compact citation list of every data_access row strictly between
+    `start_line` and `end_line` (inclusive of end_line, exclusive of
+    start_line -- the construct's own line) -- attached to an IF/ELSE
+    rule's bullet so a GET/UPDATE/DELETE inside that specific branch is
+    impossible to miss when writing the branch up, rather than only
+    appearing, uncorrelated, in the brief's separate "Data access"
+    section. None when nothing falls in range."""
+    rows = conn.execute(
+        "SELECT * FROM data_access WHERE member_id=? AND line_no > ? AND line_no <= ? ORDER BY line_no",
+        (mid, start_line, end_line),
+    ).fetchall()
+    if not rows:
+        return None
+    return "; ".join(
+        f"`{r['verb']}` on `{r['entity_name'] or 'UNKNOWN'}` {_cite(name, r['line_no'])}" for r in rows
+    )
+
+
+def fetch_routines(conn, member_id: int) -> list[dict]:
+    """This member's routine rows (db.py's `routine` table -- Natural's
+    DEFINE SUBROUTINE/END-SUBROUTINE, Mantis's ENTRY name/EXIT), ordered by
+    start_line. The grouping every routine-aware consumer builds from:
+    module_brief's per-routine rule headings and batch.py's chunk-boundary
+    computation (chunk on a routine boundary, never split one routine's
+    rules across two chunks)."""
+    rows = conn.execute(
+        "SELECT * FROM routine WHERE member_id=? ORDER BY start_line", (member_id,)
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def routine_for_line(routines: list[dict], line_no: int) -> dict | None:
+    """Which of `routines` (as returned by fetch_routines, ordered by
+    start_line) contains `line_no`, or None when the line belongs to the
+    member's main body -- outside every routine. A routine whose end_line
+    is None (no matching END-SUBROUTINE/EXIT found -- see each dialect's
+    _scan_routines) is treated as extending up to just before the next
+    routine's start (or indefinitely, for the last one): an unresolved end
+    is still evidence the routine's body continues at least that far, and
+    treating it as zero-width would wrongly disown every fact inside it."""
+    for i, r in enumerate(routines):
+        end = r["end_line"]
+        if end is None:
+            end = routines[i + 1]["start_line"] - 1 if i + 1 < len(routines) else None
+        if r["start_line"] <= line_no and (end is None or line_no <= end):
+            return r
+    return None
+
+
+def routine_aware_chunk_ranges(rule_line_nos: list[int], routines: list[dict],
+                                chunk_size: int) -> list[tuple[int, int]]:
+    """1-based, inclusive `(start, end)` rule-ordinal ranges over
+    `rule_line_nos` (already in source order, one entry per rule
+    candidate), packing whole routines into each chunk rather than cutting
+    every `chunk_size` rules regardless of structure.
+
+    Consecutive rules sharing the same enclosing routine (via
+    routine_for_line) form a contiguous run, since rules are already in
+    line order and routines don't overlap or repeat -- these are kept
+    whole no matter their size: a single routine with more rules than
+    `chunk_size` becomes an oversized chunk by itself rather than being
+    split, since keeping one routine's nested IF/DECIDE structure together
+    for the model to narrate coherently matters more than an exact token
+    budget. A run of rules belonging to *no* routine (the member's main
+    body) has no such nested structure worth protecting, so it's the one
+    thing still split into `chunk_size`-sized pieces before packing --
+    without this, a member with no internal routines at all (every rule in
+    the main body) would never chunk, defeating the point for exactly the
+    members large enough to need it most.
+
+    Runs (routine ones whole, main-body ones pre-split) are then packed
+    greedily: keep adding the next run to the current chunk while doing so
+    wouldn't exceed `chunk_size`; otherwise start a new chunk with it."""
+    n = len(rule_line_nos)
+    if n == 0:
+        return []
+    keys = [(routine_for_line(routines, ln) or {}).get("name") for ln in rule_line_nos]
+    runs: list[tuple[int, int, str | None]] = []
+    run_start = 0
+    for idx in range(1, n + 1):
+        if idx == n or keys[idx] != keys[run_start]:
+            runs.append((run_start + 1, idx, keys[run_start]))  # 1-based, inclusive
+            run_start = idx
+
+    units: list[tuple[int, int]] = []
+    for r_start, r_end, key in runs:
+        if key is None:
+            pos = r_start
+            while pos <= r_end:
+                piece_end = min(pos + chunk_size - 1, r_end)
+                units.append((pos, piece_end))
+                pos = piece_end + 1
+        else:
+            units.append((r_start, r_end))
+
+    ranges: list[tuple[int, int]] = []
+    cur: tuple[int, int] | None = None
+    for u_start, u_end in units:
+        if cur is None:
+            cur = (u_start, u_end)
+        elif (cur[1] - cur[0] + 1) + (u_end - u_start + 1) <= chunk_size:
+            cur = (cur[0], u_end)
+        else:
+            ranges.append(cur)
+            cur = (u_start, u_end)
+    if cur is not None:
+        ranges.append(cur)
+    return ranges
+
+
 def fetch_rule_candidate_rows(conn, member_name: str):
     """(rows, ambiguous_libs) for member_name's own rule_candidate rows, in
     the exact order/selection module_brief() numbers them from -- factored
@@ -198,6 +309,27 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
             add(f"- {_cite(name, r['line_no'])} view `{r['name']}` over `{r['view_of']}`")
         add("")
 
+    # --- internal routines (Natural DEFINE SUBROUTINE / Mantis ENTRY) --
+    # the structural grouping the "Candidate business rules" section below
+    # tags each rule with, so the narrator can (and should) write one
+    # subsection per routine rather than a flat list -- see writing-rules.md.
+    routines = fetch_routines(conn, mid)
+    if routines:
+        add("## Internal routines")
+        add(
+            "Every rule below is tagged with the routine it falls in, when "
+            "it falls in one. Structure the \"Business rules\" (and, where "
+            "it helps, \"Processing sequence\") section of the generated "
+            "document around these routines rather than a flat list -- a "
+            "reader trying to find everything one routine does should not "
+            "have to read the whole document."
+        )
+        for r in routines:
+            span = _cite(name, r["start_line"], r["end_line"]) if r["end_line"] else \
+                f"{_cite(name, r['start_line'])} **[no matching end found -- extent unresolved]**"
+            add(f"- `{r['name']}` ({r['kind']}) {span}")
+        add("")
+
     # --- data access
     acc = conn.execute(
         "SELECT * FROM data_access WHERE member_id=? ORDER BY line_no", (mid,)
@@ -208,8 +340,14 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
             key = f" key/where: `{redact(r['key_expr'])}`" if r["key_expr"] else ""
             desc = f" descriptor: `{r['descriptor']}`" if r["descriptor"] else ""
             flag = "" if r["confidence"] == "verified" else f" **[{r['confidence']}]**"
+            source = ""
+            if r["key_source_line"] is not None:
+                source = (
+                    f" -- **key built at** {_cite(name, r['key_source_line'])}: "
+                    f"`{redact(r['key_source_expr'])}`"
+                )
             add(f"- {_cite(name, r['line_no'])} `{r['verb']}` ({r['crud']}) on "
-                f"`{r['entity_name'] or 'UNKNOWN'}`{desc}{key}{flag}")
+                f"`{r['entity_name'] or 'UNKNOWN'}`{desc}{key}{flag}{source}")
         add("")
 
     # --- transaction markers
@@ -302,10 +440,40 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
             if rule_range and not (rule_range[0] <= n <= rule_range[1]):
                 continue
             bits = [f"**{_rule_id(name, n)}** {_cite(name, r['line_no'])} depth {r['depth']} `{r['construct']}`"]
+            routine = routine_for_line(routines, r["line_no"])
+            if routine:
+                bits.append(f"routine: `{routine['name']}`")
             if r["condition"]:
                 bits.append(f"condition: `{redact(r['condition'])}`")
             if r["literals"]:
                 bits.append(f"literals: `{redact(r['literals'])}`")
+            # --- IF/ELSE branch extent and what's inside it -- see
+            # db.py's rule_candidate.end_line/pair_line_no comment. Told
+            # apart explicitly so the generated document has no excuse to
+            # describe only the branch that reads as interesting (usually
+            # the validation/error one) and silently drop the other's
+            # effects -- exactly the failure this exists to prevent.
+            if r["construct"] == "IF" and r["end_line"]:
+                else_line = next(
+                    (rr["line_no"] for rr in rules if rr["pair_line_no"] == r["line_no"]), None
+                )
+                body_end = (else_line - 1) if else_line else r["end_line"]
+                bits.append(f"true-branch extent {_cite(name, r['line_no'], body_end)}")
+                if else_line:
+                    bits.append(
+                        f"has a paired ELSE at {_cite(name, else_line)} -- "
+                        "document what happens on BOTH branches, not just this one"
+                    )
+                access_summary = _branch_data_access(conn, mid, name, r["line_no"], body_end)
+                if access_summary:
+                    bits.append(f"data access on the true branch: {access_summary}")
+            elif r["construct"] == "ELSE" and r["pair_line_no"]:
+                bits.append(f"pairs with the IF at {_cite(name, r['pair_line_no'])}")
+                if r["end_line"]:
+                    bits.append(f"else-branch extent {_cite(name, r['line_no'], r['end_line'])}")
+                    access_summary = _branch_data_access(conn, mid, name, r["line_no"], r["end_line"])
+                    if access_summary:
+                        bits.append(f"data access on this branch: {access_summary}")
             add("- " + " — ".join(bits))
         add("")
 

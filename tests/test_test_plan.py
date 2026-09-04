@@ -177,6 +177,40 @@ def test_scoping_to_one_member_leaves_others_untouched(indexed_db):
     assert before > 0
 
 
+def test_fetch_test_case_rows_orders_by_source_line_not_insertion_order():
+    """testbatch.py's routine-aware chunking assumes rows come back in
+    source-line order (rule_candidate rows sharing a routine must be
+    contiguous) -- inserting test_case rows out of that order (BR-002's
+    rule at a later line than BR-001's, but stored first) must not change
+    the order fetch_test_case_rows returns them in."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'x')")
+
+    rc_late = insert(conn, "rule_candidate", member_id=1, line_no=10, construct="IF", raw="x")
+    rc_early = insert(conn, "rule_candidate", member_id=1, line_no=5, construct="IF", raw="x")
+
+    def _tc(rc_id, name):
+        insert(
+            conn, "test_case", member_id=1, kind="unit", rule_candidate_id=rc_id,
+            scenario_name=name,
+            given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+            when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+            then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+            status="characterization", citation="FAKEMOD:1", confidence="verified",
+        )
+
+    # Inserted in reverse of source-line order on purpose.
+    _tc(rc_late, "FAKEMOD:BR-LATE")
+    _tc(rc_early, "FAKEMOD:BR-EARLY")
+
+    system, rows, ambiguous = testplan.fetch_test_case_rows(conn, "FAKEMOD")
+    assert not ambiguous
+    assert [r["scenario_name"] for r in rows] == ["FAKEMOD:BR-EARLY", "FAKEMOD:BR-LATE"]
+
+
 def test_register_lists_scenarios_with_resolvable_citations(indexed_db):
     conn = indexed_db
     testplan.run_all(conn)
