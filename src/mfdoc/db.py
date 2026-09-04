@@ -360,12 +360,38 @@ CREATE TABLE IF NOT EXISTS doc_claim (
 """
 
 
+# Columns added to an *existing* table after its CREATE TABLE first shipped.
+# `CREATE TABLE IF NOT EXISTS` (SCHEMA, above) only ever creates a table
+# that doesn't exist yet -- an index.db built before one of these columns
+# existed keeps the table it already has, forever, no matter how many
+# times `mfdoc ingest` reruns SCHEMA against it. Without this, a column
+# added here in source stays invisible on every pre-existing engagement's
+# index.db, and the first INSERT naming it fails with "no such column",
+# well after the point a reader would connect that error to a schema
+# change. A brand new table (e.g. `routine`) never needs an entry here --
+# CREATE TABLE IF NOT EXISTS already covers it correctly either way.
+_COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
+    ("rule_candidate", "pair_line_no", "INTEGER"),
+    ("data_access", "key_source_line", "INTEGER"),
+    ("data_access", "key_source_expr", "TEXT"),
+]
+
+
+def _apply_column_migrations(conn: sqlite3.Connection) -> None:
+    for table, column, coltype in _COLUMN_MIGRATIONS:
+        existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+    conn.commit()
+
+
 def connect(db_path: str | Path) -> sqlite3.Connection:
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    _apply_column_migrations(conn)
     return conn
 
 

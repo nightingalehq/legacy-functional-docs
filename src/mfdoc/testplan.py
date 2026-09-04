@@ -265,13 +265,23 @@ def fetch_test_case_rows(conn, member_name: str):
     # rules. A test_case with no rule_candidate_id (none currently derive
     # that way, but the column is nullable) still comes back, just with a
     # NULL rule_line_no.
+    #
+    # Ordered by rc.line_no (source order), not tc.id (insertion order):
+    # testbatch.py's routine-aware chunking (brief.routine_aware_chunk_ranges)
+    # assumes consecutive rows sharing a routine are contiguous, which only
+    # holds if rows come back in the same source-line order rule_candidate
+    # rows do -- insertion order happening to match that today is not a
+    # guarantee build_member_test_cases makes going forward. `rc.line_no IS
+    # NULL` sorts rows with no rule_candidate link (line_no NULL) after
+    # every row that has one, rather than SQLite's default of NULL-first.
     rows = conn.execute(
         """
         SELECT tc.*, rc.line_no AS rule_line_no
           FROM test_case tc
           JOIN member m ON m.id = tc.member_id
           LEFT JOIN rule_candidate rc ON rc.id = tc.rule_candidate_id
-         WHERE UPPER(m.name)=UPPER(?) ORDER BY tc.id
+         WHERE UPPER(m.name)=UPPER(?)
+         ORDER BY rc.line_no IS NULL, rc.line_no, tc.id
         """,
         (member_name,),
     ).fetchall()
