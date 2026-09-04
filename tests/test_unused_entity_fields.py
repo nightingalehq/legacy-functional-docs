@@ -40,10 +40,32 @@ def test_referenced_entities_via_screen_interaction_target():
     assert [e["name"] for e in ents] == ["SOMESCREEN"]
 
 
-def test_referenced_entities_via_include_call_edge():
+def test_referenced_entities_ignores_an_include_edge_that_isnt_a_screen_reference():
+    """A Mantis CONVERSE/SHOW/PROMPT/INPUT INCLUDE edge is always paired
+    with an interaction row carrying the same target (see mantis.py) --
+    already covered by the interaction join, so referenced_entities must
+    not *also* join on call_kind='INCLUDE' directly. Natural's INCLUDE
+    edges are also used for `DEFINE DATA ... USING` a copycode/LDA/GDA,
+    which has no reason to be an entity at all -- this guards against
+    treating one as referenced just because it happens to share a name
+    with a real entity."""
+    conn = _conn()
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'PROG1', 'natural')")
+    upsert_entity(conn, "SOMECOPYCODE", "mantis_map")
+    insert(conn, "call_edge", caller_id=1, callee_name="SOMECOPYCODE", call_kind="INCLUDE", line_no=1)
+    ents = graph.referenced_entities(conn, 1)
+    assert ents == []
+
+
+def test_referenced_entities_via_converse_still_resolves_with_its_paired_include_edge():
+    """The real shape mantis.py produces for CONVERSE/SHOW: an interaction
+    row AND an INCLUDE call_edge with the same target, in the same
+    statement -- must still resolve to exactly the one screen entity, not
+    be affected by removing the direct INCLUDE join."""
     conn = _conn()
     conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'PROG1', 'mantis')")
     upsert_entity(conn, "SOMESCREEN", "mantis_map")
+    insert(conn, "interaction", member_id=1, line_no=1, kind="CONVERSE", target="SOMESCREEN")
     insert(conn, "call_edge", caller_id=1, callee_name="SOMESCREEN", call_kind="INCLUDE", line_no=1)
     ents = graph.referenced_entities(conn, 1)
     assert [e["name"] for e in ents] == ["SOMESCREEN"]

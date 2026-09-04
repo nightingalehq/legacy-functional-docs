@@ -165,9 +165,9 @@ def crud_matrix(conn) -> list[dict]:
 def referenced_entities(conn, member_id: int) -> list[dict]:
     """Every entity (Adabas file, Supra dataset, Mantis screen/map, ...)
     this member is known to touch: read/written via data_access, declared
-    as a view over one, shown/converged as a screen, or otherwise INCLUDEd
-    -- one row per distinct entity. The set unused_entity_fields_for_member
-    checks each entity's own fields against.
+    as a view over one, or shown/converged as a screen -- one row per
+    distinct entity. The set unused_entity_fields_for_member checks each
+    entity's own fields against.
 
     The `variable.view_of` join is deliberately restricted to
     `scope IN ('view', 'screen')` -- the only two scopes any dialect
@@ -176,7 +176,18 @@ def referenced_entities(conn, member_id: int) -> list[dict]:
     natural.py/mantis.py) -- rather than accepting any scope's `view_of`
     unconditionally. Both of those really do mean "this member touches
     that entity"; a future scope that happened to reuse the `view_of`
-    column for something else must not silently start counting here too."""
+    column for something else must not silently start counting here too.
+
+    Deliberately does NOT join on `call_edge.call_kind = 'INCLUDE'`: every
+    Mantis CONVERSE/SHOW/PROMPT/INPUT handler that creates one of those
+    also creates an `interaction` row with the same target in the same
+    statement (see mantis.py), so that case is already covered by the
+    interaction join above without it. Natural's INCLUDE edges, on the
+    other hand, are also used for `DEFINE DATA ... USING` a copycode/LDA/
+    GDA -- names that have no reason to be entities at all, but would be
+    silently (and wrongly) treated as referenced entities if one happened
+    to share a name with a real one. Joining on INCLUDE indiscriminately
+    would add that risk for no case it actually needs to cover."""
     rows = conn.execute(
         """
         SELECT DISTINCT e.id, e.name, e.kind FROM entity e
@@ -188,12 +199,9 @@ def referenced_entities(conn, member_id: int) -> list[dict]:
              UNION
              SELECT e3.id FROM interaction i JOIN entity e3 ON UPPER(e3.name) = UPPER(i.target)
               WHERE i.member_id = ? AND i.target IS NOT NULL
-             UNION
-             SELECT e4.id FROM call_edge ce JOIN entity e4 ON UPPER(e4.name) = UPPER(ce.callee_name)
-              WHERE ce.caller_id = ? AND ce.call_kind = 'INCLUDE'
          )
         """,
-        (member_id, member_id, member_id, member_id),
+        (member_id, member_id, member_id),
     ).fetchall()
     return [dict(r) for r in rows]
 
