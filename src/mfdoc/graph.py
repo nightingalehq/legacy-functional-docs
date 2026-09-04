@@ -225,16 +225,28 @@ def unused_entity_fields_for_member(conn, member_id: int) -> list[dict]:
     name mentioned only in a comment (a TODO, a commented-out statement)
     is not actually referenced by the code, and counting it as used would
     hide a real finding. Matches are bounded by lookarounds against this
-    codebase's own identifier character set (`[A-Z0-9#@$&-_.]`, the union
+    codebase's own identifier character set (`[A-Z0-9#@$&-_]`, the union
     of natural.py's and mantis.py's own identifier patterns) rather than
     `\b`: Python's `\b` is defined relative to `\w` (letters/digits/`_`
     only), so a field name starting or ending with `#`/`$`/`&`/`-` --
     all valid leading/trailing identifier characters in both dialects --
     would never match at all, since `\b` cannot fire between two
-    non-word characters (e.g. a space then `#`)."""
+    non-word characters (e.g. a space then `#`).
+
+    Deliberately excludes `.` from that boundary set, even though it's
+    part of both dialects' own identifier patterns (it separates a
+    qualifier from a field, e.g. Natural's `ORDER-VIEW.ORDER-STATUS`) --
+    a bare field name is exactly as "used" when it appears after a `.`
+    qualifier as when it appears alone. Treating `.` as a boundary
+    character (not part of the identifier) is what lets `ORDER-STATUS`
+    match inside `ORDER-VIEW.ORDER-STATUS`; treating it as one of the
+    identifier's own characters, like every other regex in this codebase
+    reasonably does, would have blocked that match here specifically and
+    produced a false unused_field finding for exactly the qualified-
+    reference style Natural code most commonly uses."""
     import re
 
-    _IDENT_CHAR = r"[A-Z0-9#@$&\-_.]"
+    _IDENT_CHAR = r"[A-Z0-9#@$&\-_]"
 
     text = "\n".join(
         r["text"] for r in conn.execute(

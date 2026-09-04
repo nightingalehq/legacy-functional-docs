@@ -144,6 +144,44 @@ def test_unused_fields_matches_identifiers_with_non_word_leading_chars():
     assert unused == []
 
 
+def test_unused_fields_matches_a_qualified_view_dot_field_reference():
+    """A field used only as `VIEW.FIELD_NAME` (the common Natural style of
+    qualifying a field with its view) must still be recognised as used --
+    `.` must be a boundary, not part of the identifier, or a field
+    referenced exclusively this way would always look unused."""
+    conn = _conn()
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'PROG1', 'natural')")
+    conn.execute(
+        "INSERT INTO source_line (member_id, line_no, text) VALUES "
+        "(1, 1, \"IF ORDER-VIEW.ORDER-STATUS NE 'CONF'\")"
+    )
+    eid = upsert_entity(conn, "SOMEFILE", "supra_master")
+    upsert_field(conn, eid, "ORDER-STATUS", format="TEXT")
+    insert(conn, "data_access", member_id=1, line_no=1, verb="READ", crud="R",
+           entity_name="SOMEFILE", entity_id=eid, raw="x")
+
+    unused = graph.unused_entity_fields_for_member(conn, 1)
+    assert unused == []
+
+
+def test_unused_fields_still_rejects_a_longer_dotted_identifier():
+    """The flip side of the qualified-reference case: a field name that is
+    only a *prefix* of a longer dotted identifier (ORDER.STATUS-CODE vs.
+    field STATUS) must not count as a match either."""
+    conn = _conn()
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'PROG1', 'natural')")
+    conn.execute(
+        "INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'MOVE 1 TO ORDER.STATUS-CODE')"
+    )
+    eid = upsert_entity(conn, "SOMEFILE", "supra_master")
+    upsert_field(conn, eid, "STATUS", format="TEXT")
+    insert(conn, "data_access", member_id=1, line_no=1, verb="READ", crud="R",
+           entity_name="SOMEFILE", entity_id=eid, raw="x")
+
+    unused = graph.unused_entity_fields_for_member(conn, 1)
+    assert {f["field_name"] for f in unused} == {"STATUS"}
+
+
 def test_unused_fields_excludes_referenced_and_heading_fields():
     conn = _conn()
     conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'PROG1', 'mantis')")
