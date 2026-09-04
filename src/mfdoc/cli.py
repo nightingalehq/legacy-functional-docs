@@ -34,7 +34,7 @@ from . import graph, normalise
 from . import testadvisor as testadvisor_mod
 from . import testplan as testplan_mod
 from .db import add_gap, connect, insert, purge_member, purge_member_facts, set_metric, upsert_member
-from .dialects import adabas, environment, mantis, natural, supra
+from .dialects import adabas, environment, mantis, natural, screen, supra
 from .redact import Redactor
 
 VERSION = "0.1.0"
@@ -49,11 +49,13 @@ DIALECT_ROUTER = {
     "cobol_copybook": lambda conn, mid, lines, name: environment.extract_copybook(conn, mid, lines, name),
     "jcl": lambda conn, mid, lines, name: environment.extract_jcl(conn, mid, lines, name),
     "cics_csd": lambda conn, mid, lines, name: environment.extract_cics_csd(conn, mid, lines, name),
+    "mantis_screen": lambda conn, mid, lines, name: screen.extract(conn, mid, lines, name),
 }
 
 DIALECT_DEFAULT_TYPE = {
     "ddm": "ddm", "adabas_fdt": "fdt", "supra_dir": "directory",
     "sql_ddl": "ddl", "cobol_copybook": "copybook", "jcl": "job", "cics_csd": "csd",
+    "mantis_screen": "map",
 }
 
 

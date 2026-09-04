@@ -45,7 +45,9 @@ sources:
     system: <SYSTEM CODE>
 
   # Delete or add source sets for the dialects actually present in this
-  # codebase: mantis, supra_dir, sql_ddl, cobol_copybook, jcl, cics_csd.
+  # codebase: mantis, supra_dir, sql_ddl, cobol_copybook, jcl, cics_csd,
+  # mantis_screen (screen/map painter export -- field inventory, used to
+  # flag fields a program never references, see graph.unused_entity_fields).
 
 # -------------------------------------------------------------------- options
 options:

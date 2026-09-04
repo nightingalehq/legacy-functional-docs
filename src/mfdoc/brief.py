@@ -350,6 +350,34 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
                 f"`{r['entity_name'] or 'UNKNOWN'}`{desc}{key}{flag}{source}")
         add("")
 
+    # --- unreferenced fields on every screen/table this member touches --
+    # completeness in the other direction from "Data access" above: not
+    # just what the module reads/writes, but what it *never* touches on a
+    # store it otherwise uses at all. A screen's field inventory (or a
+    # Supra/Adabas table's) is complete on its own terms, so a field that
+    # never turns up in this member's own source is a real finding, not a
+    # scanner gap -- also recorded as a `gap` row (gap_kind='unused_field')
+    # by `mfdoc derive`, so it reaches the gap register too.
+    from .graph import unused_entity_fields_for_member
+
+    unused = unused_entity_fields_for_member(conn, mid)
+    if unused:
+        add("## Unreferenced fields on entities this module touches")
+        add(
+            "Present on the corresponding screen/table but never found, as a whole "
+            "word, anywhere in this member's own source -- worth naming explicitly "
+            "as unused (or flagging as a possible scanner gap) rather than omitting "
+            "silently, the same way a field that *is* used gets documented."
+        )
+        by_entity: dict[str, list[dict]] = {}
+        for f in unused:
+            by_entity.setdefault(f["entity_name"], []).append(f)
+        for entity_name, fields in by_entity.items():
+            kind = fields[0]["entity_kind"]
+            field_list = ", ".join(f"`{f['field_name']}`" for f in fields)
+            add(f"- `{entity_name}` ({kind}): {field_list}")
+        add("")
+
     # --- transaction markers
     tx = conn.execute(
         "SELECT * FROM transaction_marker WHERE member_id=? ORDER BY line_no", (mid,)

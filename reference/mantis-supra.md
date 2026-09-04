@@ -103,6 +103,20 @@ step in the online process flow and should appear in the process document.
 **Transactions.** `COMMIT`, `ROLLBACK`, `ENDTR`, `CTRL-BEGIN`, `CTRL-END`,
 `SINON`, `SINOF`.
 
+**Screen/map exports (`mantis_screen` dialect).** A separate dialect from
+`mantis` source itself — pin it on its own source set (`dialect:
+mantis_screen`) for whatever a site's screen painter exports (field name,
+type, row/col position, length, occurrence count). This is what a
+`CONVERSE`/`SHOW screen` target resolves against once the screen's own
+export is ingested, and what lets `mfdoc derive` report a field the
+screen defines but no program ever references
+(`gap_kind='unused_field'`) — see `graph.unused_entity_fields` and
+`dialects/screen.py`. Like `mantis`/`supra_dir`, treat this as a starting
+point calibrated against one real export, not a validated format: check
+`FIELD_TYPES` in `dialects/screen.py` against the export's own TYPE
+column values, and expect a `high`-severity gap (not a silent empty
+result) if nothing matches at all.
+
 ## Supra data model
 
 Supra is a network-model DBMS, not relational:
