@@ -9,6 +9,8 @@ belongs in brief.py's narrative-brief functions instead, not here.
 from __future__ import annotations
 
 from . import graph
+from .brief import _cite, _rule_id
+from .redact import NULL_REDACTOR, Redactor
 
 
 def gap_summary(conn) -> str:
@@ -255,5 +257,98 @@ def complexity_heatmap(conn, metric: str = "rule_depth") -> str:
             f"| `{name}` | — | — | — | — | ambiguous: name is ambiguous across "
             f"libraries ({libs}) -- re-run against a library-qualified export |"
         )
+    out.append("")
+    return "\n".join(out) + "\n"
+
+
+def thematic_rules_register(conn, redact: Redactor = NULL_REDACTOR) -> str:
+    """Same rows as brief.rules_register(), grouped by rule_theme.theme
+    instead of by member -- lets a reviewer see every rule about one
+    business concept across the whole system in one place.
+
+    BR-ID numbering is computed exactly the way rules_register() computes
+    it -- per member, in ascending line_no order -- and only afterwards
+    bucketed by theme for display. This ordering separation matters: a
+    single member's rules can be split across multiple themes, and if the
+    per-member sequence counter were driven by a query ordered by theme
+    first, a member's own rules would be numbered in theme order rather
+    than line order, diverging from rules_register()'s IDs for that
+    member. Computing the sequence from a member_id/line_no-ordered pass
+    keeps `MEMBER:BR-nnn` identical between the two documents regardless
+    of how theme classification splits a member's rules across sections.
+
+    Ambiguous member names (a bare name shared across >1 library) are
+    skipped from numbering entirely, mirroring rules_register()'s refusal
+    to guess -- see the comment there for why silently picking one would
+    misattribute rules.
+    """
+    from .batch import select_batch_members  # local: avoids a circular import at load time
+
+    names = list(dict.fromkeys(select_batch_members(conn)))
+    placeholders = ",".join("?" * len(names))
+    member_rows = (
+        conn.execute(
+            f"SELECT id, name, library FROM member WHERE name IN ({placeholders})", names
+        ).fetchall()
+        if names
+        else []
+    )
+    rows_by_name: dict[str, list] = {}
+    for row in member_rows:
+        rows_by_name.setdefault(row["name"], []).append(row)
+
+    resolved_names = [name for name in names if len(rows_by_name.get(name, [])) == 1]
+    id_to_name = {rows_by_name[name][0]["id"]: name for name in resolved_names}
+    resolved_ids = list(id_to_name)
+
+    id_placeholders = ",".join("?" * len(resolved_ids))
+    rule_rows = (
+        conn.execute(
+            f"""
+            SELECT rc.*, COALESCE(rt.theme, 'uncategorized') AS theme
+              FROM rule_candidate rc
+              LEFT JOIN rule_theme rt ON rt.rule_candidate_id = rc.id
+             WHERE rc.member_id IN ({id_placeholders})
+             ORDER BY rc.member_id, rc.line_no
+            """,
+            resolved_ids,
+        ).fetchall()
+        if resolved_ids
+        else []
+    )
+
+    # Sequence numbers assigned in member_id/line_no order (matching
+    # rules_register()'s numbering exactly) -- theme grouping happens only
+    # in the second pass below, after every rule_id is already fixed.
+    per_member_seq: dict[int, int] = {}
+    by_theme: dict[str, list[str]] = {}
+    total = 0
+    for r in rule_rows:
+        member_name = id_to_name[r["member_id"]]
+        per_member_seq[r["member_id"]] = per_member_seq.get(r["member_id"], 0) + 1
+        rule_id = _rule_id(member_name, per_member_seq[r["member_id"]])
+        cond = redact(r["condition"]).replace("|", "\\|") if r["condition"] else ""
+        lits = redact(r["literals"]).replace("|", "\\|") if r["literals"] else ""
+        by_theme.setdefault(r["theme"], []).append(
+            f"| **{rule_id}** | `{member_name}` | {_cite(member_name, r['line_no'])} | "
+            f"{r['depth']} | `{r['construct']}` | `{cond}` | `{lits}` |"
+        )
+        total += 1
+
+    out = ["---", 'title: "Rules register — by theme"', "doc_type: register", "---", "",
+           "# Rules register — by theme", "", (
+        "Every candidate business rule, grouped by business theme instead "
+        "of by module. Same `MEMBER:BR-nnn` IDs as the per-module docs and "
+        "`mfdoc rules-register`. Regenerate with `mfdoc rules-theme-register` "
+        "after any source or taxonomy change; do not hand-edit."
+    ), ""]
+    for theme in sorted(by_theme):
+        out.append(f"## {theme}")
+        out.append("")
+        out.append("| BR-ID | member | line | depth | construct | condition | literals |")
+        out.append("|---|---|---|---|---|---|---|")
+        out.extend(by_theme[theme])
+        out.append("")
+    out.append(f"Total: {total} rule candidate(s) across {len(by_theme)} theme(s).")
     out.append("")
     return "\n".join(out) + "\n"
