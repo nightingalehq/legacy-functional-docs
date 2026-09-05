@@ -57,7 +57,12 @@ def _mermaid_id(name: str) -> str:
     injective -- no randomness, same id every regeneration for the same
     name."""
     sanitized = "".join(c if c.isalnum() else "_" for c in name)
-    suffix = hashlib.md5(name.encode("utf-8")).hexdigest()[:6]
+    # usedforsecurity=False: this hash only needs to be deterministic and
+    # collision-resistant enough for diagram node ids, never a security
+    # boundary -- without the flag, md5 raises under a FIPS-enforcing
+    # Python build, which would break diagram generation entirely rather
+    # than just being theoretically weak.
+    suffix = hashlib.md5(name.encode("utf-8"), usedforsecurity=False).hexdigest()[:6]
     return f"n_{sanitized}_{suffix}"
 
 
@@ -98,8 +103,12 @@ def data_flow_diagram(conn) -> str:
 
 
 def build_call_graph(conn, cluster_by: str = "module") -> dict[str, dict]:
-    """Every member with at least one call edge (as caller or callee),
-    with its outgoing calls and cluster label. cluster_by picks which
+    """Every member that appears as a caller in at least one call_edge row
+    (a callee-only member, with no outgoing calls of its own, gets no
+    top-level entry here -- it still appears as a callee name inside
+    another member's "calls" list, and call_graph_diagram accounts for
+    it separately when computing the diagram's total node count), with
+    its outgoing calls and cluster label. cluster_by picks which
     column feeds the cluster label: "subsystem" uses member.system,
     "module"/"library" (aliases for the same grouping) use member.library --
     clustering by subsystem/module happens at render time in

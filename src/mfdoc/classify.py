@@ -133,7 +133,10 @@ def classify_rules_llm(
             f"module {row['member_name']}: condition={condition!r} literals={literals!r}"
         )
         response = caller(prompt)
-        theme = response.text.strip().lower().splitlines()[0][:40]
+        lines = response.text.strip().lower().splitlines()
+        if not lines:
+            continue
+        theme = lines[0][:40]
         if not theme:
             continue
         if taxonomy_keys_lower is not None:

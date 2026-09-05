@@ -77,6 +77,22 @@ def test_llm_fallback_reclassifies_structural_rows(indexed_db):
     assert after_llm == before
 
 
+def test_llm_empty_response_does_not_crash(indexed_db):
+    """Regression test: response.text.strip().lower().splitlines()[0] raised
+    IndexError for an empty/whitespace-only response, since splitlines() on
+    an empty string returns [] -- a caller returning "" or "   " must be
+    skipped gracefully, not crash the whole classify pass."""
+    conn = indexed_db
+    classify.classify_rules_deterministic(conn, taxonomy={})
+
+    def empty_caller(prompt: str):
+        from mfdoc.batch import ModelResponse
+        return ModelResponse(text="   ", input_tokens=0, output_tokens=0)
+
+    reclassified = classify.classify_rules_llm(conn, empty_caller)
+    assert reclassified == 0
+
+
 def test_llm_refusal_is_not_stored_as_a_theme(indexed_db):
     """Regression test: classify_rules_llm's docstring promises a rule the
     model can't confidently theme is left at its existing structural

@@ -142,8 +142,8 @@ Suggested document set, in this order (each builds vocabulary the next needs):
 5. `gap-register.md` — every unresolved item, as SME questions
 6. `coverage-report.md` — the numbers, unspun
 7. `executive-summary.md` — one page per program, for a reviewer who
-   won't read the per-module docs. From `brief.executive_brief()` (no
-   `mfdoc brief` flag yet — call it directly, same fact-brief-then-write
+   won't read the per-module docs. From `mfdoc brief --executive NAME`
+   (or `brief.executive_brief()` directly — same fact-brief-then-write
    pattern as the others) against `templates/executive-summary.md`.
    **Run `mfdoc classify-rules`, `mfdoc call-graph`, and `mfdoc
    complexity` first**: `executive_brief()`'s "Top rules" section joins

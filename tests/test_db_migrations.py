@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
+
 from mfdoc import db as db_mod
 
 # A stand-in for a pre-migration rule_candidate/data_access shape -- just
@@ -106,7 +108,7 @@ def test_rule_theme_unique_per_rule_candidate(tmp_path):
         "INSERT INTO rule_theme (rule_candidate_id, theme, source) VALUES (1, 'eligibility', 'keyword')"
     )
     conn.commit()
-    with __import__("pytest").raises(Exception):
+    with pytest.raises(sqlite3.IntegrityError):
         conn.execute(
             "INSERT INTO rule_theme (rule_candidate_id, theme, source) VALUES (1, 'posting', 'llm')"
         )

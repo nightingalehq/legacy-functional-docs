@@ -25,7 +25,6 @@ def test_grouped_under_theme_headings(indexed_db):
     conn = indexed_db
     classify.classify_rules_deterministic(conn, taxonomy={"validation": [".*error.*"]})
     out = structural.thematic_rules_register(conn)
-    assert "## validation" in out or "## uncategorized" in out or True  # at least one theme heading present
     assert any(line.startswith("## ") for line in out.splitlines())
 
 
