@@ -124,11 +124,31 @@ def _logical_units(body: str) -> list[str]:
 
 
 def _uncited_assertions(body: str) -> list[str]:
-    return [
-        u.strip()[:140]
-        for u in _logical_units(body)
-        if ASSERTIVE.match(u) and not CITATION.search(u) and not HEDGE.search(u)
-    ]
+    """Every logical unit (see `_logical_units`) that asserts a claim with no
+    citation and no hedge -- except when the *next* unit opens with a
+    citation.
+
+    `SENTENCE_SPLIT` treats `[[MEMBER:LINE]]` as a valid sentence-starter (so
+    a sentence that deliberately opens with a citation isn't itself
+    mis-flagged), but that means a citation placed right after the period
+    that ends the *previous* claim -- "...falls short. [[MMP0100:57]] If
+    available stock..." -- gets split away from that claim and read as
+    belonging to the sentence after it instead. Citation resolution itself
+    reads `body` directly and is unaffected either way; this only stops that
+    split from also making the claim it supports look uncited. Deliberately
+    doesn't move the citation out of the next unit -- if that unit is itself
+    an uncited assertion needing it, this check still credits it there too.
+    """
+    units = _logical_units(body)
+    out = []
+    for i, u in enumerate(units):
+        if not (ASSERTIVE.match(u) and not CITATION.search(u) and not HEDGE.search(u)):
+            continue
+        nxt = units[i + 1] if i + 1 < len(units) else ""
+        if nxt.lstrip().startswith("[["):
+            continue
+        out.append(u.strip()[:140])
+    return out
 
 
 def _split_frontmatter(text: str) -> tuple[dict | None, str, str | None]:
