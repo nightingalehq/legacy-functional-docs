@@ -14,6 +14,9 @@ from __future__ import annotations
 
 import re
 
+from .batch import ModelCaller
+from .redact import NULL_REDACTOR, Redactor
+
 
 def classify_rules_deterministic(conn, taxonomy: dict[str, list[str]]) -> dict:
     """Classify every rule_candidate not already in rule_theme: keyword
@@ -62,3 +65,41 @@ def classify_rules_deterministic(conn, taxonomy: dict[str, list[str]]) -> dict:
         )
     conn.commit()
     return counts
+
+
+def classify_rules_llm(conn, caller: ModelCaller, redact: Redactor = NULL_REDACTOR) -> int:
+    """Ask the model for a one-word theme for every rule_candidate still
+    classified 'structural' (the keyword taxonomy didn't match it).
+    Upserts source='llm' for each; a rule the model can't confidently
+    theme is left at its existing structural label -- never guessed past
+    what the model actually returned."""
+    rows = conn.execute(
+        """
+        SELECT rc.id, rc.condition, rc.literals, m.name AS member_name
+          FROM rule_candidate rc
+          JOIN member m ON m.id = rc.member_id
+          JOIN rule_theme rt ON rt.rule_candidate_id = rc.id
+         WHERE rt.source = 'structural'
+        """
+    ).fetchall()
+
+    reclassified = 0
+    for row in rows:
+        condition = redact(row["condition"]) or ""
+        literals = redact(row["literals"]) or ""
+        prompt = (
+            "Reply with exactly one short lowercase business-theme word "
+            f"(e.g. eligibility, posting, validation) for this rule from "
+            f"module {row['member_name']}: condition={condition!r} literals={literals!r}"
+        )
+        response = caller(prompt)
+        theme = response.text.strip().lower().splitlines()[0][:40]
+        if not theme:
+            continue
+        conn.execute(
+            "UPDATE rule_theme SET theme=?, source='llm' WHERE rule_candidate_id=?",
+            (theme, row["id"]),
+        )
+        reclassified += 1
+    conn.commit()
+    return reclassified

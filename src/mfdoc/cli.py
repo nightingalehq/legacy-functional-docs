@@ -7,6 +7,7 @@
     mfdoc calibrate --config project.yml --dialect mantis
     mfdoc brief    --config project.yml [--module NAME | --entity NAME | --system]
     mfdoc rules-register --config project.yml --out docs/functional/rules-register.md
+    mfdoc classify-rules --config project.yml [--llm-fallback]
     mfdoc test-plan --config project.yml --out docs/functional/test-plan-register.md --overlay test-overlay.yml
     mfdoc test-overlay-draft --config project.yml --out test-overlay.yml
     mfdoc test-advisory --config project.yml --out docs/functional/testability-report.md
@@ -30,6 +31,7 @@ from pathlib import Path
 import yaml
 
 from . import brief as brief_mod
+from . import classify
 from . import graph, normalise
 from . import testadvisor as testadvisor_mod
 from . import testplan as testplan_mod
@@ -271,6 +273,27 @@ def cmd_rules_register(args) -> int:
     redact = Redactor.from_options(cfg["options"])
     out = brief_mod.rules_register(conn, redact=redact)
     _write_or_print(out, args.out)
+    return 0
+
+
+def cmd_classify_rules(args) -> int:
+    cfg = load_config(args.config)
+    conn = connect(Path(args.config).parent / cfg["index_db"])
+    themes_cfg = ((cfg["options"] or {}).get("overview") or {}).get("themes") or {}
+    taxonomy = themes_cfg.get("taxonomy") or {}
+    counts = classify.classify_rules_deterministic(conn, taxonomy)
+    print(f"keyword: {counts['keyword']}, structural: {counts['structural']}")
+    if getattr(args, "llm_fallback", None) is None:
+        use_llm = bool(themes_cfg.get("llm_fallback"))
+    else:
+        use_llm = args.llm_fallback
+    if use_llm:
+        redact = Redactor.from_options(cfg["options"])
+        caller = _build_model_caller(args)
+        if caller is None:
+            return 1
+        n = classify.classify_rules_llm(conn, caller, redact=redact)
+        print(f"llm reclassified: {n}")
     return 0
 
 
@@ -978,6 +1001,18 @@ def main(argv=None) -> int:
     p.add_argument("--config", required=True)
     p.add_argument("--out", help="write to this path instead of stdout")
     p.set_defaults(func=cmd_rules_register)
+
+    p = sub.add_parser("classify-rules")
+    p.add_argument("--config", required=True)
+    p.add_argument("--llm-fallback", dest="llm_fallback", action="store_true", default=None,
+                    help="override options.overview.themes.llm_fallback from --config")
+    p.add_argument("--model", default=None)
+    p.add_argument("--caller", choices=["anthropic", "fake-echo"], default="anthropic")
+    p.add_argument("--provider", choices=["anthropic", "vertex", "claude-code"], default="anthropic")
+    p.add_argument("--gcp-project")
+    p.add_argument("--gcp-region")
+    p.add_argument("--claude-code-timeout", type=int, default=None)
+    p.set_defaults(func=cmd_classify_rules)
 
     p = sub.add_parser("test-plan")
     p.add_argument("--config", required=True)
