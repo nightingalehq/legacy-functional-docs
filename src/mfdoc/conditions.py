@@ -89,15 +89,23 @@ FAILURE_WORDS = re.compile(
     re.IGNORECASE,
 )
 
-# Words appearing near a literal value in narrative prose that negate an
-# otherwise-implied equality reading of it (e.g. "...is not '****'" claims a
-# not-equal comparison). Deliberately a denylist, not an allowlist of
-# positive phrasing: most equality claims read as plain juxtaposition ("is",
-# "equals", "= "), so there's no single reliable positive marker to require,
-# but the negative ones are a closed, checkable set.
+# Words (and, since a sentence commonly quotes the raw condition verbatim
+# right next to its citation -- "IF #RETURN-CODE NE '****' [[...]]" -- the
+# raw inequality operators too) appearing near a literal value in narrative
+# prose that negate an otherwise-implied equality reading of it. Missing the
+# operator forms here isn't a near-miss: the *first* occurrence of a literal
+# in a sentence is very often that verbatim quotation, so without them this
+# always reads such a sentence as claiming equality regardless of which
+# operator the quoted condition actually uses, even when a later, plainer
+# English clause in the same sentence gets it right. Deliberately a
+# denylist, not an allowlist of positive phrasing: most equality claims read
+# as plain juxtaposition ("is", "equals", "= "), so there's no single
+# reliable positive marker to require, but the negative ones are a closed,
+# checkable set.
 _NEGATION_NEAR_LITERAL = re.compile(
     r"\b(not|isn't|is\s+not|other\s+than|differs?\s+from|unless|except|"
-    r"does(?:n't|\s+not)\s+equal|no\s+longer)\b",
+    r"does(?:n't|\s+not)\s+equal|no\s+longer|NE)\b"
+    r"|<>|!=",
     re.IGNORECASE,
 )
 

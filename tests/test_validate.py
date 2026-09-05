@@ -410,3 +410,42 @@ def test_validator_accepts_a_lower_level_heading_as_the_opening_line(indexed_db,
     )
     result = validate_doc(indexed_db, doc)
     assert not any("does not open with a top-level" in p for p in result["problems"])
+
+
+def test_validator_accepts_a_sentence_that_quotes_the_raw_ne_condition_before_explaining_it(tmp_path):
+    """Regression: a sentence describing an IF's own condition often quotes
+    it verbatim right next to the citation, then explains it in English
+    afterward -- "`IF #RETURN-CODE NE '0000'` [[TESTCOND:1]] (the condition
+    tests inequality...)". The first occurrence of the literal is the raw
+    quotation; its own `NE` must be read as negation, not overridden by
+    treating the sentence as claiming equality by default."""
+    conn = _member_with_return_code_if_else()
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        COND_FRONTMATTER
+        + "\nThe routine checks `IF #RETURN-CODE NE '0000'` [[TESTCOND:1]] "
+          "(the condition tests inequality -- not equal to '0000' -- so the "
+          "failure branch below fires when a real error code has been set).\n"
+    )
+    result = validate_doc(conn, doc)
+    assert not any("comparison direction may be reversed" in p for p in result["problems"]), result["problems"]
+
+
+def test_validator_reads_the_real_sentence_when_a_trailing_citation_is_split_into_its_own_unit(tmp_path):
+    """Regression: a numbered-list rule bullet with no blank line before the
+    next item, whose only citation trails right after the closing period,
+    gets that citation split into its own near-empty unit by SENTENCE_SPLIT
+    -- the reversed-condition check must still read the real preceding
+    sentence, not just the orphaned citation fragment, or every such
+    citation looks like it has no polarity claim to check at all and a real
+    reversal there would go undetected."""
+    conn = _member_with_return_code_if_else()
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        COND_FRONTMATTER
+        + "\n31. **Entries are skipped unless the code equals `'0000'`** -- "
+          "entries not in code `'0000'` are skipped. [[TESTCOND:1-6]]\n"
+          "32. Something unrelated follows immediately, no blank line above.\n"
+    )
+    result = validate_doc(conn, doc)
+    assert not any("comparison direction may be reversed" in p for p in result["problems"]), result["problems"]

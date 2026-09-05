@@ -63,3 +63,22 @@ def test_prose_polarity_ignores_a_negation_outside_the_window():
     long_prefix = "not " + ("filler word " * 20)
     sentence = long_prefix + "the code equals '0000'"
     assert prose_polarity(sentence, "0000", window=40) == "eq"
+
+
+def test_prose_polarity_reads_a_quoted_ne_operator_as_negation():
+    """A sentence commonly quotes the raw condition verbatim right next to
+    its citation -- "IF #RETURN-CODE NE '****'" -- before any plain-English
+    explanation. The bare keyword operator must register as negation on its
+    own, not rely on a later English clause to get the direction right."""
+    assert prose_polarity("the condition reads `IF X NE '****'` here", "****") == "ne"
+
+
+def test_prose_polarity_reads_symbolic_inequality_operators_as_negation():
+    assert prose_polarity("quoted as `X <> '****'`", "****") == "ne"
+    assert prose_polarity("quoted as `X != '****'`", "****") == "ne"
+
+
+def test_prose_polarity_does_not_misread_ne_inside_an_unrelated_word():
+    """`NE` must only fire as its own word -- not as a substring of an
+    unrelated one that happens to end in it."""
+    assert prose_polarity("drawn from the online '0000' queue", "0000") == "eq"
