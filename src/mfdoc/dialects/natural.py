@@ -237,6 +237,18 @@ _STRUCTURED_TELLS = re.compile(r"\bEND-(IF|DEFINE|DECIDE|REPEAT|FOR|SUBROUTINE|W
 IDENT = re.compile(r"[A-Z][A-Z0-9#@$&\-_.]*", re.I)
 NUMLIT = re.compile(r"(?<![A-Z0-9#\-])\d+(?:\.\d+)?")
 
+# Natural's two logical-field literals, `TRUE`/`FALSE` -- bare keywords, not
+# quoted strings (`mask_literals`) or numbers (`NUMLIT`), so a statement
+# like `#DEBUG := TRUE` was invisible to _match_arithmetic's "does this
+# assignment carry a literal value" test and to _condition_facts' own
+# `literals` output for an `IF #FLAG = TRUE`-shaped condition, even though
+# a boolean flag assignment is exactly the kind of fixed-value business
+# decision `_match_arithmetic` exists to capture. Bounded the same way as
+# every other identifier-adjacent match in this codebase (not `\b`, which
+# cannot fire between two non-word characters -- see `_condition_facts`'
+# sibling checks and reference/writing-rules.md for the same lesson).
+BOOL_LITERAL = re.compile(r"(?<![A-Z0-9#@$&\-_])(TRUE|FALSE)(?![A-Z0-9#@$&\-_])", re.I)
+
 CONTINUATION_TAIL = re.compile(r"(\b(AND|OR|NOT|THRU|THROUGH|TO|WITH|BY)\s*$)|([=<>,+\-*/]\s*$)", re.I)
 
 # Real Natural wraps long clauses at whatever column runs out, not only after a
@@ -306,7 +318,8 @@ def _condition_facts(cond: str) -> tuple[str, str]:
     masked, literals = mask_literals(cond)
     idents = [t for t in IDENT.findall(masked) if t.upper() not in _NOISE_WORDS]
     nums = NUMLIT.findall(masked)
-    lits = [l.strip("'\"") for l in literals] + nums
+    bools = [b.upper() for b in BOOL_LITERAL.findall(masked)]
+    lits = [l.strip("'\"") for l in literals] + nums + bools
     return ",".join(dict.fromkeys(idents)), ",".join(dict.fromkeys(lits))
 
 
@@ -944,7 +957,8 @@ def _match_arithmetic(conn, member_id, line_no, stmt, masked, depth) -> bool:
     or without the optional ASSIGN keyword -- `#FIELD := value` is a complete
     statement on its own, see RE_BARE_ASSIGN) as a rule candidate when a
     literal is involved -- assigning a fixed value to a field (a status
-    code, a threshold, a return code) is a business decision. Pure
+    code, a threshold, a return code, a boolean flag) is a business
+    decision. Pure
     variable-to-variable movement or accumulation (no literal operand) and
     the ADD/SUBTRACT-1 loop-counter idiom are left alone; capturing every
     arithmetic statement would bury the ones that actually carry a decision
@@ -955,7 +969,7 @@ def _match_arithmetic(conn, member_id, line_no, stmt, masked, depth) -> bool:
     if not (is_keyword_form or is_bare_assign) or RE_LOOP_COUNTER.match(masked):
         return False
     _, str_literals = mask_literals(stmt)
-    if not str_literals and not NUMLIT.search(masked):
+    if not str_literals and not NUMLIT.search(masked) and not BOOL_LITERAL.search(masked):
         return False
     verb = masked.split()[0].upper() if is_keyword_form else "ASSIGN"
     fields, lits = _condition_facts(stmt)
