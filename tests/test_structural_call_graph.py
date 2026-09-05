@@ -24,8 +24,12 @@ def _conn():
 
 def test_build_call_graph_includes_known_edge(indexed_db):
     graph_data = structural.build_call_graph(indexed_db)
-    assert "MMB0100" in graph_data
-    callees = {c["callee"] for c in graph_data["MMB0100"]["calls"]}
+    caller_id = indexed_db.execute(
+        "SELECT id FROM member WHERE name='MMB0100'"
+    ).fetchone()["id"]
+    assert caller_id in graph_data
+    assert graph_data[caller_id]["name"] == "MMB0100"
+    callees = {c["callee_name"] for c in graph_data[caller_id]["calls"]}
     assert "MMP0100" in callees
 
 
@@ -41,8 +45,11 @@ def test_unresolved_call_marked_not_resolved():
     )
     conn.commit()
     graph_data = structural.build_call_graph(conn)
-    calls = graph_data["CGTEST"]["calls"]
-    assert any(c["callee"] == "NOSUCHPROG" and c["resolved"] is False for c in calls)
+    calls = graph_data[member_id]["calls"]
+    assert any(
+        c["callee_name"] == "NOSUCHPROG" and c["callee_id"] is None and c["resolved"] is False
+        for c in calls
+    )
 
 
 def test_inline_diagram_below_threshold(indexed_db):
@@ -154,6 +161,80 @@ def test_unsupported_cluster_by_raises():
         structural.build_call_graph(conn, cluster_by="subsytem")
     with pytest.raises(ValueError):
         structural.call_graph_diagram(conn, cluster_by="subsytem")
+
+
+def test_ambiguous_member_name_renders_as_two_distinct_nodes():
+    """Finding 1: build_call_graph() must key on member.id, not the bare
+    member.name -- member.name is only unique together with
+    (library, dialect) (see the UNIQUE(name, library, dialect) constraint
+    in db.py), so two distinct members sharing a name in different
+    libraries must never be silently conflated into one call-graph node.
+
+    Two members named DUPPROG live in LIBA/LIBB. Each is exercised as
+    both a caller (it calls a distinct downstream target) and a callee
+    (a distinct upstream caller resolves to it via callee_id -- the real
+    foreign key graph.resolve() sets, not a name match) so the fix must
+    hold in both directions, not just for outgoing calls."""
+    conn = _conn()
+    conn.execute("INSERT INTO member (name, dialect, library) VALUES ('DUPPROG', 'natural', 'LIBA')")
+    conn.execute("INSERT INTO member (name, dialect, library) VALUES ('DUPPROG', 'natural', 'LIBB')")
+    conn.execute("INSERT INTO member (name, dialect, library) VALUES ('UPSTREAMA', 'natural', 'LIBA')")
+    conn.execute("INSERT INTO member (name, dialect, library) VALUES ('UPSTREAMB', 'natural', 'LIBB')")
+    conn.execute("INSERT INTO member (name, dialect, library) VALUES ('DOWNSTREAMA', 'natural', 'LIBA')")
+    conn.execute("INSERT INTO member (name, dialect, library) VALUES ('DOWNSTREAMB', 'natural', 'LIBB')")
+
+    def mid(name, library):
+        return conn.execute(
+            "SELECT id FROM member WHERE name=? AND library=?", (name, library)
+        ).fetchone()["id"]
+
+    dup_a, dup_b = mid("DUPPROG", "LIBA"), mid("DUPPROG", "LIBB")
+    upstream_a, upstream_b = mid("UPSTREAMA", "LIBA"), mid("UPSTREAMB", "LIBB")
+    downstream_a, downstream_b = mid("DOWNSTREAMA", "LIBA"), mid("DOWNSTREAMB", "LIBB")
+
+    # DUPPROG(A) and DUPPROG(B) each called from a distinct upstream member,
+    # resolved via the real callee_id foreign key (not just a name match).
+    conn.execute(
+        "INSERT INTO call_edge (caller_id, callee_name, callee_id, call_kind, line_no, resolved) "
+        "VALUES (?, 'DUPPROG', ?, 'CALLNAT', 1, 1)", (upstream_a, dup_a),
+    )
+    conn.execute(
+        "INSERT INTO call_edge (caller_id, callee_name, callee_id, call_kind, line_no, resolved) "
+        "VALUES (?, 'DUPPROG', ?, 'CALLNAT', 1, 1)", (upstream_b, dup_b),
+    )
+    # DUPPROG(A) and DUPPROG(B) each also call a distinct downstream member.
+    conn.execute(
+        "INSERT INTO call_edge (caller_id, callee_name, callee_id, call_kind, line_no, resolved) "
+        "VALUES (?, 'DOWNSTREAMA', ?, 'CALLNAT', 1, 1)", (dup_a, downstream_a),
+    )
+    conn.execute(
+        "INSERT INTO call_edge (caller_id, callee_name, callee_id, call_kind, line_no, resolved) "
+        "VALUES (?, 'DOWNSTREAMB', ?, 'CALLNAT', 1, 1)", (dup_b, downstream_b),
+    )
+    conn.commit()
+
+    graph_data = structural.build_call_graph(conn)
+    assert dup_a in graph_data and dup_b in graph_data
+    assert graph_data[dup_a]["library"] == "LIBA"
+    assert graph_data[dup_b]["library"] == "LIBB"
+    assert {c["callee_name"] for c in graph_data[dup_a]["calls"]} == {"DOWNSTREAMA"}
+    assert {c["callee_id"] for c in graph_data[dup_a]["calls"]} == {downstream_a}
+    assert {c["callee_name"] for c in graph_data[dup_b]["calls"]} == {"DOWNSTREAMB"}
+    assert {c["callee_id"] for c in graph_data[dup_b]["calls"]} == {downstream_b}
+
+    out = structural.call_graph_diagram(conn, cluster_by="module", max_nodes_inline=10_000)
+    inline = out["inline"]
+    # Both colliding members must render as their own, distinctly-labeled
+    # node -- never merged into a single "DUPPROG" node.
+    assert 'DUPPROG (LIBA)' in inline
+    assert 'DUPPROG (LIBB)' in inline
+    assert inline.count('"DUPPROG"') == 0, "the bare ambiguous name must not appear unqualified"
+
+    # Each upstream caller's edge must land on its own DUPPROG node, not a
+    # shared merged one -- i.e. two distinct mermaid node ids for DUPPROG.
+    assert structural._mermaid_id(f"__member_id_{dup_a}") != structural._mermaid_id(
+        f"__member_id_{dup_b}"
+    )
 
 
 def test_call_graph_cli_stdout(cli_args, derive_result, capsys):

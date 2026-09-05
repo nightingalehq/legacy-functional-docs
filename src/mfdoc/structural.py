@@ -102,22 +102,39 @@ def data_flow_diagram(conn) -> str:
     return "\n".join(out) + "\n"
 
 
-def build_call_graph(conn, cluster_by: str = "module") -> dict[str, dict]:
+def build_call_graph(conn, cluster_by: str = "module") -> dict[int, dict]:
     """Every member that appears as a caller in at least one call_edge row
     (a callee-only member, with no outgoing calls of its own, gets no
-    top-level entry here -- it still appears as a callee name inside
-    another member's "calls" list, and call_graph_diagram accounts for
-    it separately when computing the diagram's total node count), with
-    its outgoing calls and cluster label. cluster_by picks which
-    column feeds the cluster label: "subsystem" uses member.system,
-    "module"/"library" (aliases for the same grouping) use member.library --
-    clustering by subsystem/module happens at render time in
-    call_graph_diagram, this just carries the raw fact under the
-    requested grouping. Any other value raises ValueError rather than
-    silently falling back to library clustering (e.g. a config typo like
-    "subsytem" would otherwise cluster by library with no warning),
-    matching complexity_heatmap's posture for its own unsupported-value
-    case."""
+    top-level entry here -- it still appears as a callee inside another
+    member's "calls" list, and call_graph_diagram accounts for it
+    separately when computing the diagram's total node count), with its
+    outgoing calls and cluster label. cluster_by picks which column feeds
+    the cluster label: "subsystem" uses member.system, "module"/"library"
+    (aliases for the same grouping) use member.library -- clustering by
+    subsystem/module happens at render time in call_graph_diagram, this
+    just carries the raw fact under the requested grouping. Any other
+    value raises ValueError rather than silently falling back to library
+    clustering (e.g. a config typo like "subsytem" would otherwise
+    cluster by library with no warning), matching complexity_heatmap's
+    posture for its own unsupported-value case.
+
+    Keyed by the caller's member.id, not its bare name: `member.name` is
+    only unique together with (library, dialect) (see the
+    `UNIQUE(name, library, dialect)` constraint in db.py), so two
+    distinct members in different libraries can share a name, and
+    keying by name alone would silently conflate them into one node
+    (Finding 1). The caller's own display name/library are carried
+    inside the entry so a caller can still render/label it.
+
+    Each entry's "calls" list carries, per call_edge row: "callee_id"
+    (graph.resolve()'s real, unambiguous foreign key when the edge is
+    resolved and the callee is an ingested member -- None for a genuinely
+    unresolved call, or for an internal PERFORM/PERFORM-like target that
+    has no member row of its own), "callee_name" (always present, the
+    display name), "callee_library" (the callee member's library, only
+    when callee_id is set), and "resolved" (bool). A caller must key off
+    "callee_id" when present rather than "callee_name" -- that name alone
+    is exactly as ambiguous as the caller's own bare name is."""
     valid_cluster_by = {"module", "library", "subsystem"}
     if cluster_by not in valid_cluster_by:
         raise ValueError(
@@ -126,19 +143,35 @@ def build_call_graph(conn, cluster_by: str = "module") -> dict[str, dict]:
     cluster_column = "system" if cluster_by == "subsystem" else "library"
     rows = conn.execute(
         f"""
-        SELECT m.name AS caller, m.{cluster_column} AS caller_cluster,
-               ce.callee_name, ce.resolved
-          FROM call_edge ce JOIN member m ON m.id = ce.caller_id
+        SELECT m.id AS caller_id, m.name AS caller, m.library AS caller_library,
+               m.{cluster_column} AS caller_cluster,
+               ce.callee_name, ce.resolved, ce.callee_id,
+               cm.library AS callee_library
+          FROM call_edge ce
+          JOIN member m ON m.id = ce.caller_id
+          LEFT JOIN member cm ON cm.id = ce.callee_id
          ORDER BY m.name, ce.line_no, ce.callee_name
         """
     ).fetchall()
 
-    graph_data: dict[str, dict] = {}
+    graph_data: dict[int, dict] = {}
     for r in rows:
         entry = graph_data.setdefault(
-            r["caller"], {"cluster": r["caller_cluster"] or "unknown", "calls": []}
+            r["caller_id"],
+            {
+                "name": r["caller"],
+                "library": r["caller_library"] or "unknown",
+                "cluster": r["caller_cluster"] or "unknown",
+                "calls": [],
+            },
         )
-        entry["calls"].append({"callee": r["callee_name"], "resolved": bool(r["resolved"])})
+        callee_id = r["callee_id"]
+        entry["calls"].append({
+            "callee_id": callee_id,
+            "callee_name": r["callee_name"],
+            "callee_library": (r["callee_library"] or "unknown") if callee_id is not None else None,
+            "resolved": bool(r["resolved"]),
+        })
     return graph_data
 
 
@@ -154,38 +187,91 @@ def call_graph_diagram(conn, cluster_by: str = "module", max_nodes_inline: int =
     -- so a reader can see *which* program is missing, not just that
     something is. Both resolved and unresolved edges are deduped per
     (caller, callee) pair -- a caller invoking the same callee from
-    multiple lines produces one edge, not one per call site."""
-    graph_data = build_call_graph(conn, cluster_by=cluster_by)
-    nodes = set(graph_data) | {c["callee"] for e in graph_data.values() for c in e["calls"]}
+    multiple lines produces one edge, not one per call site.
 
-    def render(callers: dict[str, dict], title: str) -> str:
+    Nodes are identified by member id wherever build_call_graph gives us
+    one (every caller; a callee whose call_edge resolved to a real
+    member via graph.resolve()'s callee_id), never by bare name --
+    member.name is only unique together with (library, dialect), so two
+    distinct members sharing a name in different libraries must render
+    as two distinct nodes (Finding 1), not merge into one. A callee with
+    no callee_id (a genuinely unresolved call, or an internal
+    PERFORM-style target with no member row of its own) still has only
+    its bare name to key/label off -- that's all the data supports, and
+    matches the existing unresolved-edge rendering. When a name is
+    shared by more than one known member id, each id's node is labeled
+    "NAME (LIBRARY)" instead of the bare name, so a reader can tell them
+    apart -- mirroring complexity_heatmap's explicit ambiguous-row
+    convention for the identical underlying ambiguity."""
+    graph_data = build_call_graph(conn, cluster_by=cluster_by)
+
+    # id_info maps every known member id (caller or resolved callee) to its
+    # (name, library); name_to_ids inverts that to detect which bare names
+    # are actually shared by more than one id, so only genuinely ambiguous
+    # names get the disambiguating "(LIBRARY)" suffix in their label.
+    id_info: dict[int, tuple[str, str]] = {}
+    for caller_id, entry in graph_data.items():
+        id_info[caller_id] = (entry["name"], entry["library"])
+    for entry in graph_data.values():
+        for call in entry["calls"]:
+            if call["callee_id"] is not None:
+                id_info.setdefault(
+                    call["callee_id"], (call["callee_name"], call["callee_library"] or "unknown")
+                )
+    name_to_ids: dict[str, set[int]] = {}
+    for member_id, (name, _library) in id_info.items():
+        name_to_ids.setdefault(name, set()).add(member_id)
+
+    def node_key(callee_id: int | None, callee_name: str) -> tuple[str, object]:
+        return ("id", callee_id) if callee_id is not None else ("name", callee_name)
+
+    def node_label(key: tuple[str, object]) -> str:
+        kind, val = key
+        if kind == "name":
+            return str(val)
+        name, library = id_info[val]
+        if len(name_to_ids.get(name, ())) > 1:
+            return f"{name} ({library})"
+        return name
+
+    def mermaid_node_id(key: tuple[str, object]) -> str:
+        kind, val = key
+        return _mermaid_id(f"__member_id_{val}" if kind == "id" else str(val))
+
+    nodes = {node_key(cid, entry["name"]) for cid, entry in graph_data.items()} | {
+        node_key(c["callee_id"], c["callee_name"]) for e in graph_data.values() for c in e["calls"]
+    }
+
+    def render(callers: dict[int, dict], title: str) -> str:
         lines = ["```mermaid", "graph TD"]
         seen: set[str] = set()
         seen_edges: set[tuple[str, str, bool]] = set()
-        for caller, entry in callers.items():
-            caller_id = _mermaid_id(caller)
-            if caller_id not in seen:
-                caller_label = caller.replace('"', '\\"')
-                lines.append(f'    {caller_id}["{caller_label}"]')
-                seen.add(caller_id)
+        for caller_member_id, entry in callers.items():
+            caller_key = node_key(caller_member_id, entry["name"])
+            caller_node_id = mermaid_node_id(caller_key)
+            if caller_node_id not in seen:
+                caller_label = node_label(caller_key).replace('"', '\\"')
+                lines.append(f'    {caller_node_id}["{caller_label}"]')
+                seen.add(caller_node_id)
             for call in entry["calls"]:
-                callee_id = _mermaid_id(call["callee"])
-                edge_key = (caller_id, callee_id, call["resolved"])
+                callee_key = node_key(call["callee_id"], call["callee_name"])
+                callee_node_id = mermaid_node_id(callee_key)
+                edge_key = (caller_node_id, callee_node_id, call["resolved"])
                 if edge_key in seen_edges:
                     continue
                 seen_edges.add(edge_key)
                 if call["resolved"]:
-                    if callee_id not in seen:
-                        callee_label = call["callee"].replace('"', '\\"')
-                        lines.append(f'    {callee_id}["{callee_label}"]')
-                        seen.add(callee_id)
-                    lines.append(f"    {caller_id} --> {callee_id}")
+                    if callee_node_id not in seen:
+                        callee_label = node_label(callee_key).replace('"', '\\"')
+                        lines.append(f'    {callee_node_id}["{callee_label}"]')
+                        seen.add(callee_node_id)
+                    lines.append(f"    {caller_node_id} --> {callee_node_id}")
                 else:
-                    if callee_id not in seen:
-                        callee_label = call["callee"].replace('"', '\\"')
-                        lines.append(f'    {callee_id}(["{callee_label} (unresolved)"])')
-                        seen.add(callee_id)
-                    lines.append(f"    {caller_id} -.->|unresolved| {callee_id}")
+                    if callee_node_id not in seen:
+                        callee_label = node_label(callee_key).replace('"', '\\"')
+                        lines.append(f'    {callee_node_id}(["{callee_label} (unresolved)"])')
+                        seen.add(callee_node_id)
+                    lines.append(f"    {caller_node_id} -.->|unresolved| {callee_node_id}")
         lines.append("```")
         return (
             f'---\ntitle: "{title}"\ndoc_type: register\n---\n\n'
@@ -196,8 +282,8 @@ def call_graph_diagram(conn, cluster_by: str = "module", max_nodes_inline: int =
         return {"inline": render(graph_data, "Call graph")}
 
     clusters: dict[str, dict] = {}
-    for caller, entry in graph_data.items():
-        clusters.setdefault(entry["cluster"], {})[caller] = entry
+    for caller_member_id, entry in graph_data.items():
+        clusters.setdefault(entry["cluster"], {})[caller_member_id] = entry
 
     collapsed_lines = ["```mermaid", "graph TD"]
     for cluster_name in clusters:
@@ -264,12 +350,18 @@ def _complexity_rows(conn, metric: str = "rule_depth") -> list[dict]:
     for r in rule_rows:
         rows_by_name.setdefault(r["member"], []).append(r)
 
+    # Keyed by member id (not name) so in/out-degree is attributed to the
+    # correct member even when its bare name collides with another one --
+    # build_call_graph's own keys/callee_id already carry that distinction
+    # (see Finding 1), so degree must be looked up the same way here rather
+    # than re-flattening back onto bare names.
     graph_data = build_call_graph(conn)
-    out_degree = {name: len(entry["calls"]) for name, entry in graph_data.items()}
-    in_degree: dict[str, int] = {}
+    out_degree_by_id = {member_id: len(entry["calls"]) for member_id, entry in graph_data.items()}
+    in_degree_by_id: dict[int, int] = {}
     for entry in graph_data.values():
         for call in entry["calls"]:
-            in_degree[call["callee"]] = in_degree.get(call["callee"], 0) + 1
+            if call["callee_id"] is not None:
+                in_degree_by_id[call["callee_id"]] = in_degree_by_id.get(call["callee_id"], 0) + 1
 
     raw_scores = []
     ambiguous_names: set[str] = set()
@@ -278,7 +370,8 @@ def _complexity_rows(conn, metric: str = "rule_depth") -> list[dict]:
             ambiguous_names.add(name)
             continue
         r = matches[0]
-        ind, outd = in_degree.get(name, 0), out_degree.get(name, 0)
+        ind = in_degree_by_id.get(r["member_id"], 0)
+        outd = out_degree_by_id.get(r["member_id"], 0)
         raw = (r["rule_count"] + (r["max_depth"] or 0)) * (ind + outd + 1)
         raw_scores.append((r["member_id"], name, r["rule_count"], r["max_depth"] or 0, ind, outd, raw))
 
