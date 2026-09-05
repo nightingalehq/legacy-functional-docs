@@ -26,7 +26,7 @@ ENTRY_KINDS = {"EXEC_PGM"}
 # derive pass) would silently double every one of these gap rows.
 DERIVED_GAP_KINDS = (
     "ambiguous_adabas_file", "no_ddl_for_entity", "unresolved_call",
-    "orphan_module", "sme_question", "unused_field",
+    "orphan_module", "sme_question", "unused_field", "shadowed_assignment",
 )
 
 
@@ -296,6 +296,92 @@ def unused_entity_fields(conn) -> list[dict]:
     return out
 
 
+def shadowed_assignments_for_member(conn, member_id: int) -> list[dict]:
+    """Every literal-valued assignment inside a conditional branch (`depth`
+    >= 1) that is provably dead: unconditionally overwritten (a same-field
+    assignment at `depth` 0) before anything ever reads the field it wrote.
+
+    A user-ID or feature-flag check that sets a field one way per branch,
+    then has that value immediately, unconditionally stomped before use, is
+    a common source of narration that overstates a branch's real effect --
+    the branch runs, but its outcome can never be observed at runtime. This
+    is a definite-assignment / dead-store analysis, deliberately narrow:
+    only rule_candidate rows already captured as literal-valued ASSIGNs
+    (natural.py's/mantis.py's own capture already excludes pure
+    variable-to-variable movement, so a hit here is always "field set to a
+    fixed value", never a copy from another field) are considered, and a
+    write is only flagged when the *next* rule_candidate row anywhere that
+    touches the same field -- skipping over any number of other branches'
+    own writes to it, since sibling branches never execute in the same
+    pass -- is itself a depth-0 literal write, with no read (a non-ASSIGN
+    row referencing the field, e.g. an IF/WHEN condition) in between. No
+    attempt is made to trace further than that: a write with nothing else
+    touching the field afterward in this member is left alone rather than
+    guessed at, and a write followed eventually by a read is left alone too,
+    exactly as it should be.
+    """
+    rows = conn.execute(
+        "SELECT id, line_no, construct, depth, fields_used, literals "
+        "FROM rule_candidate WHERE member_id=? ORDER BY line_no", (member_id,)
+    ).fetchall()
+
+    by_field: dict[str, list[dict]] = defaultdict(list)
+    for r in rows:
+        fields = [f for f in (r["fields_used"] or "").split(",") if f]
+        if len(fields) != 1:
+            continue  # narrow on purpose -- skip anything touching more than one field
+        is_write = r["construct"] == "ASSIGN" and (r["literals"] or "")
+        by_field[fields[0]].append({
+            "id": r["id"], "line_no": r["line_no"], "depth": r["depth"],
+            "is_write": bool(is_write),
+            "literal": (r["literals"] or "").split(",")[0] if is_write else None,
+        })
+
+    out: list[dict] = []
+    for field, touches in by_field.items():
+        for i, w in enumerate(touches):
+            if not (w["is_write"] and w["depth"] >= 1):
+                continue
+            for later in touches[i + 1:]:
+                if not later["is_write"]:
+                    break  # a read happens before any unconditional overwrite -- safe
+                if later["depth"] == 0:
+                    out.append({
+                        "field": field, "line_no": w["line_no"], "literal": w["literal"],
+                        "override_line": later["line_no"], "override_literal": later["literal"],
+                    })
+                    break
+                # another branch's own write to the same field -- doesn't
+                # affect this write's fate, keep scanning past it
+    return out
+
+
+def shadowed_assignments(conn) -> list[dict]:
+    """shadowed_assignments_for_member, across every Natural/Mantis member,
+    each result also recording which member it was found in -- and adds one
+    `shadowed_assignment` gap per finding. Called from run_all(); see
+    DERIVED_GAP_KINDS for why prior findings are cleared before this
+    reruns."""
+    out: list[dict] = []
+    members = conn.execute(
+        "SELECT id, name FROM member WHERE dialect IN ('natural','mantis')"
+    ).fetchall()
+    for m in members:
+        for f in shadowed_assignments_for_member(conn, m["id"]):
+            f = {**f, "member_id": m["id"], "member_name": m["name"]}
+            out.append(f)
+            add_gap(
+                conn, "shadowed_assignment",
+                f"{f['field']} is set to {f['literal']} here, inside a conditional branch, "
+                f"but is unconditionally reassigned to {f['override_literal']} at line "
+                f"{f['override_line']} before anything reads it -- this branch's effective "
+                f"value can never be observed at runtime. Confirm whether this is dormant/"
+                f"dead logic or the override is itself conditional in a way not captured here.",
+                member_id=m["id"], line_no=f["line_no"], severity="medium",
+            )
+    return out
+
+
 def orphans(conn) -> list[dict]:
     """Modules with no inbound reference from anywhere, including JCL and CICS."""
     rows = conn.execute(
@@ -467,12 +553,15 @@ def run_all(conn) -> dict:
     orph = orphans(conn)
     scopes = transaction_scopes(conn)
     unused_fields = unused_entity_fields(conn)
+    shadowed = shadowed_assignments(conn)
     cov = coverage(conn)
     set_metric(conn, "global", "derived.orphan_modules", [o["name"] for o in orph])
     set_metric(conn, "global", "derived.transaction_scopes", len(scopes))
     set_metric(conn, "global", "derived.unused_entity_fields", len(unused_fields))
+    set_metric(conn, "global", "derived.shadowed_assignments", len(shadowed))
     conn.commit()
     return {
         **res, "orphans": len(orph), "transaction_scopes": len(scopes),
-        "unused_entity_fields": len(unused_fields), "coverage": cov,
+        "unused_entity_fields": len(unused_fields), "shadowed_assignments": len(shadowed),
+        "coverage": cov,
     }
