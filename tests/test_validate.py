@@ -6,8 +6,11 @@ must accept unchanged.
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
+from mfdoc.db import SCHEMA, insert
+from mfdoc.dialects import natural
 from mfdoc.validate import validate_doc, validate_tree
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -165,3 +168,110 @@ def test_validator_accepts_the_worked_example_unchanged(indexed_db):
     )
     assert result["ok"], result["problems"]
     assert result["invalid_citations"] == 0
+
+
+def _member_with_return_code_if_else():
+    """A minimal in-memory index with one Natural member scanned for real
+    (not hand-built rule_candidate rows), mirroring the exact shape of a
+    real reversed-condition finding: `IF <outcome-field> NE '<code>' ...
+    ELSE ... END-IF`, where the ELSE branch is the success path."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    mid = insert(conn, "member", name="TESTCOND", dialect="natural", object_type="subprogram")
+    lines = [
+        "IF #RETURN-CODE NE '0000'",
+        "  BACKOUT TRANSACTION",
+        "ELSE",
+        "  COMPRESS 'message sent successfully' INTO #MSG",
+        "  END TRANSACTION",
+        "END-IF",
+    ]
+    natural.extract(conn, mid, [(i + 1, None, line) for i, line in enumerate(lines)], "TESTCOND")
+    conn.commit()
+    return conn
+
+
+COND_FRONTMATTER = """---
+title: Test doc
+doc_type: module
+system: MOM
+generated_by: legacy-functional-docs 0.1.0
+generated_at: "2026-01-01T00:00:00"
+review_status: draft
+confidence_summary:
+  verified: 1
+sources:
+  - TESTCOND
+---
+"""
+
+
+def test_validator_flags_reversed_success_condition(tmp_path):
+    """The IF's own condition is `#RETURN-CODE NE '0000'` (true => failure,
+    handled by BACKOUT), so the success path -- the ELSE branch -- runs when
+    `#RETURN-CODE` *equals* '0000'. A sentence describing the successful case
+    as `#RETURN-CODE` being *not* '0000' has the direction backwards."""
+    conn = _member_with_return_code_if_else()
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        COND_FRONTMATTER
+        + "\nAfter a successful transmission (`#RETURN-CODE` not `'0000'`), "
+          "the message is shown [[TESTCOND:1-6]].\n"
+    )
+    result = validate_doc(conn, doc)
+    assert not result["ok"]
+    assert any("comparison direction may be reversed" in p for p in result["problems"])
+    assert any("0000" in p for p in result["problems"])
+
+
+def test_validator_accepts_correctly_stated_success_condition(tmp_path):
+    conn = _member_with_return_code_if_else()
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        COND_FRONTMATTER
+        + "\nAfter a successful transmission (`#RETURN-CODE` equals `'0000'`), "
+          "the message is shown [[TESTCOND:1-6]].\n"
+    )
+    result = validate_doc(conn, doc)
+    assert not any("comparison direction may be reversed" in p for p in result["problems"])
+
+
+def test_validator_accepts_correctly_stated_failure_condition(tmp_path):
+    """No success/failure hint spans both branches here -- the citation only
+    covers the IF line itself, so the check compares directly against the
+    IF's own (uninverted) condition."""
+    conn = _member_with_return_code_if_else()
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        COND_FRONTMATTER
+        + "\nIf the transmission fails (`#RETURN-CODE` is not `'0000'`), "
+          "the transaction is backed out [[TESTCOND:1-2]].\n"
+    )
+    result = validate_doc(conn, doc)
+    assert not any("comparison direction may be reversed" in p for p in result["problems"])
+
+
+def test_validator_ignores_reversed_wording_on_a_non_outcome_field(tmp_path):
+    """The check is scoped to outcome-shaped fields (return/response codes,
+    status, flags) -- an unrelated field must never trigger it, reversed
+    wording or not."""
+    conn = _member_with_return_code_if_else()
+    conn.execute(
+        "INSERT INTO source_line (member_id, line_no, text) VALUES "
+        "((SELECT id FROM member WHERE name='TESTCOND'), 100, 'IF #COIL-ID = ''12345''')"
+    )
+    insert(
+        conn, "rule_candidate",
+        member_id=conn.execute("SELECT id FROM member WHERE name='TESTCOND'").fetchone()["id"],
+        line_no=100, construct="IF", condition="IF #COIL-ID = '12345'",
+        raw="IF #COIL-ID = '12345'",
+    )
+    conn.commit()
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        COND_FRONTMATTER
+        + "\nThe coil is accepted when the id is not `'12345'` [[TESTCOND:100]].\n"
+    )
+    result = validate_doc(conn, doc)
+    assert not any("comparison direction may be reversed" in p for p in result["problems"])
