@@ -20,9 +20,11 @@ from .redact import NULL_REDACTOR, Redactor
 
 
 def classify_rules_deterministic(conn, taxonomy: dict[str, list[str]]) -> dict:
-    """Classify every rule_candidate not already in rule_theme: keyword
-    match against `taxonomy` first, else a structural fallback (the
-    rule's member's library, or 'uncategorized' if library is NULL).
+    """Classify every rule_candidate not already keyword- or llm-classified
+    (this includes rows currently classified 'structural', so a rerun after
+    a taxonomy edit can promote them): keyword match against `taxonomy`
+    first, else a structural fallback (the rule's member's library, or
+    'uncategorized' if library is NULL).
 
     Upserts on rule_candidate_id -- calling this again after a taxonomy
     edit reclassifies rows whose current source is 'structural' (never
