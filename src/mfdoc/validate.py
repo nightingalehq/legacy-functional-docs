@@ -67,10 +67,17 @@ def _name_mentioned(text: str, name: str) -> bool:
     match, as in `PGMX02.EXT`) when another name-charset character follows
     it -- a bare `.` immediately after the name is ordinary sentence-ending
     punctuation (`"...calls PGMX02. It then..."`), not part of the name, and
-    must not hide a real mention.
+    must not hide a real mention. The lookbehind mirrors this symmetrically
+    on the leading side (a bare `.` immediately before the name doesn't
+    block the match; `.` preceded by another name-charset character does,
+    as in `EXT.PGMX02`) even though, unlike the trailing case, this side has
+    no realistic motivating example in prose -- a sentence never opens
+    mid-name the way it closes one -- so it's kept consistent with the
+    trailing side on principle rather than because a real case forced it.
     """
     pattern = re.compile(
-        rf"(?<![A-Z0-9#@$&.\-_]){re.escape(name)}"
+        rf"(?<![A-Z0-9#@$&\-_])(?<![A-Z0-9#@$&\-_]\.)"
+        rf"{re.escape(name)}"
         rf"(?![A-Z0-9#@$&\-_]|\.[A-Z0-9#@$&\-_])",
         re.I,
     )
@@ -653,7 +660,16 @@ def validate_tree(conn, root: Path) -> dict:
         "completeness_problems": module_completeness_problems(conn, results),
         # Advisory only (see _statement_completeness_problems) -- never
         # subtracted from documents_ok and never affects a caller's exit code.
-        "omitted_statement_targets": [
+        #
+        # Deduplicated across the whole tree: `_statement_completeness_problems`
+        # runs once per citation with no dedup of its own, so the same
+        # statement is reported once per citation whose range covers its
+        # line (e.g. two overlapping-range citations of the same member both
+        # covering one omitted FETCH target produce the same message twice).
+        # The message string already encodes member/line/target uniquely, so
+        # deduping on it is sufficient; `dict.fromkeys` preserves first-seen
+        # order.
+        "omitted_statement_targets": list(dict.fromkeys(
             p for r in results for p in r.get("omitted_statement_targets", [])
-        ],
+        )),
     }

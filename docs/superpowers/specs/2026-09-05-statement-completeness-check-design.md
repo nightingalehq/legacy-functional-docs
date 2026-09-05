@@ -194,6 +194,75 @@ reversed-condition test shapes (`_member_with_return_code_if_else` /
    `PGMX02` inside prose word `PGMX023`), and a name containing `#`/`-`/`.`
    must still match as a whole token.
 
+## As built
+
+Corrections against what actually shipped (`src/mfdoc/validate.py`), plus
+data gathered since the non-goals section above was written:
+
+- **`_name_mentioned`**: the shipped regex differs from the sample above —
+  it special-cases a bare trailing `.` so ordinary sentence-ending
+  punctuation right after a name doesn't block a match (`"...calls
+  PGMX02. It then..."` still counts as a mention), while `PGMX02.EXT` still
+  correctly doesn't. The lookbehind is written symmetrically for the same
+  reasoning on the leading side, even though no realistic prose shape
+  motivates it. Current shipped form:
+
+  ```python
+  def _name_mentioned(text: str, name: str) -> bool:
+      pattern = re.compile(
+          rf"(?<![A-Z0-9#@$&\-_])(?<![A-Z0-9#@$&\-_]\.)"
+          rf"{re.escape(name)}"
+          rf"(?![A-Z0-9#@$&\-_]|\.[A-Z0-9#@$&\-_])",
+          re.I,
+      )
+      return bool(pattern.search(text))
+  ```
+
+- **`_STATEMENT_SOURCES`**: the sample above shows 4-tuples with a
+  table-name string as the first element; the shipped list is 3-tuples —
+  `(target_col, kind_col, sql)`, since the caller never needed the table
+  name itself (each `sql` string already names its own table, and the
+  problem message is built from `target_col`/`kind_col`/`row["line_no"]`
+  alone):
+
+  ```python
+  _STATEMENT_SOURCES = [
+      ("callee_name", "call_kind",
+       "SELECT line_no, call_kind, callee_name FROM call_edge "
+       "WHERE caller_id=? AND line_no BETWEEN ? AND ? AND dynamic=0 "
+       "AND callee_name IS NOT NULL AND callee_name != ''"),
+      ("target", "kind",
+       "SELECT line_no, kind, target FROM interaction "
+       "WHERE member_id=? AND line_no BETWEEN ? AND ? "
+       "AND target IS NOT NULL AND target != ''"),
+      ("entity_name", "verb",
+       "SELECT line_no, verb, entity_name FROM data_access "
+       "WHERE member_id=? AND line_no BETWEEN ? AND ? "
+       "AND entity_name IS NOT NULL AND entity_name != ''"),
+  ]
+  ```
+
+- **False-positive baseline (was "unknown")**: running `mfdoc validate`
+  against this repo's own bundled fixtures (`examples/outputs/docs/`) found
+  24 raw findings, 20 distinct after a dedup fix (the same message could be
+  produced by more than one citation of the same range; see below). All 20
+  are of the "paraphrase" class — a citation to a member whose statement
+  target is narrated only by description, never by name (e.g. a citation
+  covering an `ORDLINE` access narrated only as "order lines" in prose).
+  These are genuine omissions the check is designed to catch, not false
+  positives from this sample. This is the first data point for the still-open
+  promote-to-blocking decision the original non-goals section deferred; it
+  is not itself a decision to promote.
+
+- **Dedup**: `_statement_completeness_problems` runs once per citation with
+  no dedup of its own, so a statement covered by more than one citation
+  whose ranges overlap (or are identical) is reported once per covering
+  citation. `validate_tree` now dedups the final flattened
+  `omitted_statement_targets` list by the message string itself
+  (`list(dict.fromkeys(...))`, preserving first-seen order) — the message
+  already encodes member/line/target uniquely, so this is sufficient
+  without changing where in the pipeline the list is assembled.
+
 ## Follow-up (not in this change)
 
 - Once run against a real engagement's generated docs, revisit whether the
@@ -201,4 +270,17 @@ reversed-condition test shapes (`_member_with_return_code_if_else` /
   `problems` (blocking), possibly gated per-table (e.g. `call_edge` omissions
   are more likely to change a branch's actual meaning than a `data_access`
   omission, per the motivating case) — that's a data-driven decision issue
-  #59 itself leaves open, not one to guess at here.
+  #59 itself leaves open, not one to guess at here. The bundled-fixture
+  baseline above is a first data point, not a resolution.
+- `interaction` has no index on `member_id`, so the new per-citation query
+  (`WHERE member_id=? AND line_no BETWEEN ? AND ?`) does an unindexed scan.
+  Invisible on these small fixtures; worth revisiting if this check runs
+  against an engagement with many more members. No schema change made here
+  — out of scope for this change.
+- `interaction` has no `dynamic` column (unlike `call_edge`), so a
+  variable-driven `CONVERSE`/`SHOW` target (e.g. a map name held in a
+  variable rather than written as a literal) is always flagged as omitted,
+  even though its target isn't a fixed name to search prose for in the
+  first place — the same false-positive class `call_edge`'s `dynamic=1`
+  filter exists to avoid, just with no equivalent column on `interaction`
+  to filter on. No schema change made here — out of scope for this change.

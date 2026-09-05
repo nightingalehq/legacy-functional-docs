@@ -499,6 +499,24 @@ def test_name_mentioned_returns_false_when_absent():
     assert not _name_mentioned("The program calls another routine.", "PGMX02")
 
 
+def test_name_mentioned_allows_a_bare_trailing_sentence_period():
+    """A `.` immediately after the name that ends a sentence is ordinary
+    punctuation, not a same-name continuation -- must not block the match
+    (regression guard for commit 0c53bf8)."""
+    from mfdoc.validate import _name_mentioned
+
+    assert _name_mentioned("The program calls PGMX02. It then returns.", "PGMX02")
+
+
+def test_name_mentioned_still_rejects_trailing_period_plus_extension():
+    """A `.` immediately followed by another name-charset character is a
+    same-name continuation (e.g. a qualified/extended name) and must still
+    block the match -- unchanged by the trailing-period fix above."""
+    from mfdoc.validate import _name_mentioned
+
+    assert not _name_mentioned("The program calls PGMX02.EXT for details.", "PGMX02")
+
+
 def _member_with_statements(**extra_rows):
     """A minimal in-memory index with one member (TESTSTMT) and, per
     `extra_rows`, a `call_edge`/`interaction`/`data_access` row at line 692
@@ -622,14 +640,44 @@ def test_validator_scopes_statement_completeness_to_module_docs(tmp_path):
 
 
 def test_validate_tree_aggregates_omitted_statement_targets_across_documents(tmp_path):
+    """Each document's own (distinct) contribution must still be counted --
+    doc2 flags a different target (PGMX03, line 694) from doc1's (PGMX02,
+    line 691-693) so this doesn't collide with the dedup-by-message fix
+    covered separately below."""
     conn = _member_with_statements(call_edge={})
+    mid = conn.execute("SELECT id FROM member WHERE name='TESTSTMT'").fetchone()["id"]
+    conn.execute(
+        "INSERT INTO source_line (member_id, line_no, text) VALUES (?, 694, 'line 694')",
+        (mid,),
+    )
+    insert(conn, "call_edge", caller_id=mid, callee_name="PGMX03", call_kind="FETCH",
+           dynamic=0, line_no=694)
+    conn.commit()
     (tmp_path / "doc1.md").write_text(
         STMT_FRONTMATTER + "\nThe branch exits the transaction [[TESTSTMT:691-693]].\n"
     )
     (tmp_path / "doc2.md").write_text(
-        STMT_FRONTMATTER + "\nThe branch exits the transaction [[TESTSTMT:691-693]].\n"
+        STMT_FRONTMATTER + "\nThe branch exits the transaction [[TESTSTMT:694]].\n"
     )
     res = validate_tree(conn, tmp_path)
     assert len(res["omitted_statement_targets"]) == 2
+    assert any("PGMX02" in p for p in res["omitted_statement_targets"])
+    assert any("PGMX03" in p for p in res["omitted_statement_targets"])
     # Advisory only -- must never affect pass/fail.
     assert res["documents_ok"] == res["documents"] == 2
+
+
+def test_validate_tree_dedups_identical_omitted_statement_messages(tmp_path):
+    """The same omission message must be reported once, not once per
+    citation that produces it -- e.g. two paragraphs in the same document
+    both citing the same range and both omitting the same target."""
+    conn = _member_with_statements(call_edge={})
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        STMT_FRONTMATTER
+        + "\nThe branch exits the transaction [[TESTSTMT:691-693]].\n\n"
+          "The branch exits the transaction [[TESTSTMT:691-693]].\n"
+    )
+    res = validate_tree(conn, tmp_path)
+    assert len(res["omitted_statement_targets"]) == 1
+    assert "PGMX02" in res["omitted_statement_targets"][0]

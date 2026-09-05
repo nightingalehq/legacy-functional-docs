@@ -17,9 +17,16 @@ from mfdoc.db import connect  # noqa: E402
 from mfdoc.validate import validate_tree  # noqa: E402
 
 
-def test_cmd_validate_reports_omitted_statement_targets_without_failing(cli_args, capsys):
+def test_cmd_validate_reports_omitted_statement_targets_without_failing(indexed_db, cli_args, capsys):
     """The advisory section must print if and only if there is something to
     report, and must never affect the exit code either way.
+
+    Depends on `indexed_db` (not just `cli_args`) so pytest resolves the
+    session-scoped `derive_result` fixture chain as a real dependency of
+    *this* test -- without it nothing runs `mfdoc ingest`/`derive` against
+    `cli_args`'s config before `cmd_validate` executes, and this test only
+    "passes" by accident when an earlier-collected test file happens to
+    populate the same session-scoped index database first.
 
     Note: the real bundled fixtures under examples/outputs/docs do currently
     have genuine per-statement completeness findings (paraphrased citations
@@ -46,5 +53,7 @@ def test_cmd_validate_reports_omitted_statement_targets_without_failing(cli_args
     ) else 1)
     if res["omitted_statement_targets"]:
         assert "advisory, does not fail validation" in captured.out
+        assert f"{len(res['omitted_statement_targets'])} statement(s)" in captured.out
+        assert res["omitted_statement_targets"][0] in captured.out
     else:
         assert "advisory, does not fail validation" not in captured.out
