@@ -82,14 +82,18 @@ def data_flow_diagram(conn) -> str:
     return "\n".join(out) + "\n"
 
 
-def build_call_graph(conn) -> dict[str, dict]:
+def build_call_graph(conn, cluster_by: str = "module") -> dict[str, dict]:
     """Every member with at least one call edge (as caller or callee),
-    with its outgoing calls and cluster label. cluster is the member's
-    own library -- clustering by subsystem/module happens at render
-    time in call_graph_diagram, this just carries the raw fact."""
+    with its outgoing calls and cluster label. cluster_by picks which
+    column feeds the cluster label: "subsystem" uses member.system,
+    anything else (the "module"/"library" default) uses member.library --
+    clustering by subsystem/module happens at render time in
+    call_graph_diagram, this just carries the raw fact under the
+    requested grouping."""
+    cluster_column = "system" if cluster_by == "subsystem" else "library"
     rows = conn.execute(
-        """
-        SELECT m.name AS caller, m.library AS caller_library,
+        f"""
+        SELECT m.name AS caller, m.{cluster_column} AS caller_cluster,
                ce.callee_name, ce.resolved
           FROM call_edge ce JOIN member m ON m.id = ce.caller_id
         """
@@ -98,7 +102,7 @@ def build_call_graph(conn) -> dict[str, dict]:
     graph_data: dict[str, dict] = {}
     for r in rows:
         entry = graph_data.setdefault(
-            r["caller"], {"cluster": r["caller_library"] or "unknown", "calls": []}
+            r["caller"], {"cluster": r["caller_cluster"] or "unknown", "calls": []}
         )
         entry["calls"].append({"callee": r["callee_name"], "resolved": bool(r["resolved"])})
     return graph_data
@@ -114,7 +118,7 @@ def call_graph_diagram(conn, cluster_by: str = "module", max_nodes_inline: int =
     Unresolved calls render as dashed edges into a single shared
     "unresolved" sink node, so gaps are visible in the diagram instead
     of silently dropped."""
-    graph_data = build_call_graph(conn)
+    graph_data = build_call_graph(conn, cluster_by=cluster_by)
     nodes = set(graph_data) | {c["callee"] for e in graph_data.values() for c in e["calls"]}
 
     def render(callers: dict[str, dict], title: str) -> str:

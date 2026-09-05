@@ -72,6 +72,40 @@ def test_unresolved_edge_renders_dashed():
     assert "-.->|unresolved|" in out["inline"]
 
 
+def test_cluster_by_subsystem_changes_clustering():
+    """cluster_by="subsystem" must actually drive clustering off
+    member.system, not silently fall back to library grouping -- two
+    synthetic members share one library but have different system
+    values, so the standalone-file keys differ between the two
+    cluster_by settings."""
+    conn = _conn()
+    conn.execute(
+        "INSERT INTO member (name, dialect, library, system) VALUES "
+        "('CGA', 'natural', 'SHAREDLIB', 'SYSALPHA')"
+    )
+    conn.execute(
+        "INSERT INTO member (name, dialect, library, system) VALUES "
+        "('CGB', 'natural', 'SHAREDLIB', 'SYSBETA')"
+    )
+    a_id = conn.execute("SELECT id FROM member WHERE name='CGA'").fetchone()["id"]
+    b_id = conn.execute("SELECT id FROM member WHERE name='CGB'").fetchone()["id"]
+    conn.execute(
+        "INSERT INTO call_edge (caller_id, callee_name, callee_id, call_kind, line_no, resolved) "
+        "VALUES (?, 'TARGETA', NULL, 'CALLNAT', 1, 0)", (a_id,)
+    )
+    conn.execute(
+        "INSERT INTO call_edge (caller_id, callee_name, callee_id, call_kind, line_no, resolved) "
+        "VALUES (?, 'TARGETB', NULL, 'CALLNAT', 1, 0)", (b_id,)
+    )
+    conn.commit()
+
+    by_module = structural.call_graph_diagram(conn, cluster_by="module", max_nodes_inline=0)
+    by_subsystem = structural.call_graph_diagram(conn, cluster_by="subsystem", max_nodes_inline=0)
+
+    assert set(by_module.keys()) - {"inline"} == {"SHAREDLIB"}
+    assert set(by_subsystem.keys()) - {"inline"} == {"SYSALPHA", "SYSBETA"}
+
+
 def test_call_graph_cli_stdout(cli_args, derive_result, capsys):
     from types import SimpleNamespace
     from mfdoc import cli
