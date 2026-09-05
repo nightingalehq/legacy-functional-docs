@@ -464,3 +464,47 @@ def test_batch_tolerates_non_dict_state_entry_for_a_member(indexed_db, tmp_path)
     )
     assert result.ok == 1 and result.skipped == 0
     assert caller.calls == 1
+
+
+def test_retry_prompt_carries_a_specific_hint_for_a_dropped_front_matter_block(indexed_db, tmp_path):
+    members = ["MMP0100"]
+    caller = FakeCaller(fail_first=True)
+    batch_mod.run_batch(indexed_db, members, tmp_path / "out", caller, "rules", "template")
+    assert caller.calls == 2
+    assert "begin with the literal" in caller.prompts[1]
+
+
+class _SelfNarratingThenGoodCaller:
+    """First response has valid front matter but opens its body with
+    commentary instead of the template's required heading; second response
+    (the retry) is well-formed."""
+
+    def __init__(self):
+        self.calls = 0
+        self.prompts: list[str] = []
+
+    def __call__(self, prompt: str) -> batch_mod.ModelResponse:
+        self.calls += 1
+        self.prompts.append(prompt)
+        member = prompt.split("# Fact brief:")[1].splitlines()[0].strip()
+        if "Previous attempt failed validation" not in prompt:
+            text = (
+                GOOD_FRONTMATTER.format(member=member)
+                + f"\nI'll now document {member} as instructed.\n\n"
+                  f"This module does something [[{member}:1]].\n"
+            )
+        else:
+            text = (
+                GOOD_FRONTMATTER.format(member=member)
+                + f"\n# {member}\n\nThis module does something [[{member}:1]].\n"
+            )
+        return batch_mod.ModelResponse(text=text, input_tokens=100, output_tokens=200)
+
+
+def test_retry_prompt_carries_a_specific_hint_for_a_self_narrating_opening(indexed_db, tmp_path):
+    members = ["MMP0100"]
+    caller = _SelfNarratingThenGoodCaller()
+    summary = batch_mod.run_batch(indexed_db, members, tmp_path / "out", caller, "rules", "template")
+    assert caller.calls == 2
+    assert "Do not narrate what you are about to do" in caller.prompts[1]
+    assert summary.ok == 1

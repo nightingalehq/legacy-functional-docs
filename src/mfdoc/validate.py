@@ -287,6 +287,15 @@ def validate_doc(conn, path: Path) -> dict:
         else:
             problems.append("confidence_summary should be a mapping of confidence level to count")
 
+        if fm.get("doc_type") == "module":
+            first_line = next((ln for ln in body.splitlines() if ln.strip()), "")
+            if not first_line.lstrip().startswith("#"):
+                problems.append(
+                    "body does not open with a top-level '# ' heading -- looks like the "
+                    "response narrated commentary (e.g. restating its own scope/instructions) "
+                    "before the actual document content instead of starting with it"
+                )
+
     # Scoped to narrative module docs only. A generated-test doc or a flat
     # register echoes source syntax and field-inventory phrasing verbatim,
     # sentence-per-YAML-field rather than sentence-per-claim -- the same
