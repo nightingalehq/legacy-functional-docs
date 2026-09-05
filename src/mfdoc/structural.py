@@ -8,6 +8,8 @@ belongs in brief.py's narrative-brief functions instead, not here.
 
 from __future__ import annotations
 
+import hashlib
+
 from . import graph
 from .brief import _cite, _rule_id
 from .redact import NULL_REDACTOR, Redactor
@@ -44,8 +46,19 @@ def gap_summary(conn) -> str:
 def _mermaid_id(name: str) -> str:
     """A Mermaid-safe node id: alnum/underscore only, so a source-derived
     name with spaces, hyphens, or punctuation can't break the diagram
-    syntax."""
-    return "n_" + "".join(c if c.isalnum() else "_" for c in name)
+    syntax.
+
+    The alnum-or-underscore substitution alone is not injective: distinct
+    names that differ only in punctuation-vs-underscore (e.g. `MILL-CERT`
+    and `MILL_CERT`, a real collision shape between a DDM entity and a
+    SQL-derived one in this repo's own fixtures) would otherwise map to
+    the same id and silently merge two distinct nodes into one. Append a
+    short deterministic hash of the *original* name to keep the mapping
+    injective -- no randomness, same id every regeneration for the same
+    name."""
+    sanitized = "".join(c if c.isalnum() else "_" for c in name)
+    suffix = hashlib.md5(name.encode("utf-8")).hexdigest()[:6]
+    return f"n_{sanitized}_{suffix}"
 
 
 def data_flow_diagram(conn) -> str:
@@ -88,16 +101,26 @@ def build_call_graph(conn, cluster_by: str = "module") -> dict[str, dict]:
     """Every member with at least one call edge (as caller or callee),
     with its outgoing calls and cluster label. cluster_by picks which
     column feeds the cluster label: "subsystem" uses member.system,
-    anything else (the "module"/"library" default) uses member.library --
+    "module"/"library" (aliases for the same grouping) use member.library --
     clustering by subsystem/module happens at render time in
     call_graph_diagram, this just carries the raw fact under the
-    requested grouping."""
+    requested grouping. Any other value raises ValueError rather than
+    silently falling back to library clustering (e.g. a config typo like
+    "subsytem" would otherwise cluster by library with no warning),
+    matching complexity_heatmap's posture for its own unsupported-value
+    case."""
+    valid_cluster_by = {"module", "library", "subsystem"}
+    if cluster_by not in valid_cluster_by:
+        raise ValueError(
+            f"unsupported cluster_by {cluster_by!r}; expected one of {sorted(valid_cluster_by)}"
+        )
     cluster_column = "system" if cluster_by == "subsystem" else "library"
     rows = conn.execute(
         f"""
         SELECT m.name AS caller, m.{cluster_column} AS caller_cluster,
                ce.callee_name, ce.resolved
           FROM call_edge ce JOIN member m ON m.id = ce.caller_id
+         ORDER BY m.name, ce.line_no, ce.callee_name
         """
     ).fetchall()
 
@@ -178,15 +201,26 @@ def call_graph_diagram(conn, cluster_by: str = "module", max_nodes_inline: int =
     return result
 
 
-def complexity_heatmap(conn, metric: str = "rule_depth") -> str:
-    """Risk-ranked member table. Only 'rule_depth' is implemented: rule
-    count + max nesting depth per member (both already recorded in
-    rule_candidate at extraction time -- no new parsing), combined with
-    call-graph in/out-degree from build_call_graph(). 'cyclomatic' is a
-    documented-but-unimplemented future option (see
-    options.overview.complexity.metric in project.yml) so a project can
-    already select it in config without a later migration; requesting
-    it today raises rather than silently falling back to rule_depth."""
+def _complexity_rows(conn, metric: str = "rule_depth") -> list[dict]:
+    """The per-member structured data complexity_heatmap() renders into a
+    markdown table -- factored out so a caller that needs this data (e.g.
+    brief.executive_brief's Risk section) can look a member up by id
+    directly, instead of re-parsing complexity_heatmap()'s markdown output
+    (which would silently break the moment the table's format changes).
+
+    Returns one dict per unambiguous member with at least one
+    rule_candidate row -- {"ambiguous": False, "member_id", "member"
+    (name), "rule_count", "max_depth", "in_degree", "out_degree",
+    "risk_score"} -- plus one dict per *ambiguous* bare name (a name
+    shared by >1 member.id, only unique together with library+dialect --
+    see the `UNIQUE(name, library, dialect)` constraint in db.py):
+    {"ambiguous": True, "member": name, "member_ids": [...], "libraries":
+    [...]}. A caller holding a specific member_id should match on
+    "member_id" for a normal row, or check membership in "member_ids" for
+    an ambiguous one -- mirroring rules_register()'s refusal to guess
+    which of the colliding members a bare name means, instead of
+    silently merging their counts into one row or dropping one entirely.
+    """
     if metric != "rule_depth":
         raise ValueError(f"unsupported complexity metric {metric!r}; only 'rule_depth' is implemented")
 
@@ -207,10 +241,7 @@ def complexity_heatmap(conn, metric: str = "rule_depth") -> str:
         """
     ).fetchall()
     if not rule_rows:
-        return (
-            '---\ntitle: "Complexity/risk heatmap"\ndoc_type: register\n---\n\n'
-            "# Complexity/risk heatmap\n\nNo rule candidates recorded.\n"
-        )
+        return []
 
     rows_by_name: dict[str, list] = {}
     for r in rule_rows:
@@ -232,14 +263,55 @@ def complexity_heatmap(conn, metric: str = "rule_depth") -> str:
         r = matches[0]
         ind, outd = in_degree.get(name, 0), out_degree.get(name, 0)
         raw = (r["rule_count"] + (r["max_depth"] or 0)) * (ind + outd + 1)
-        raw_scores.append((name, r["rule_count"], r["max_depth"] or 0, ind, outd, raw))
+        raw_scores.append((r["member_id"], name, r["rule_count"], r["max_depth"] or 0, ind, outd, raw))
 
     max_raw = (max(s[-1] for s in raw_scores) if raw_scores else 0) or 1
-    scored = [
-        (member, rc, md, ind, outd, round(100 * raw / max_raw, 1))
-        for member, rc, md, ind, outd, raw in raw_scores
+    result = [
+        {
+            "ambiguous": False,
+            "member_id": member_id,
+            "member": member,
+            "rule_count": rc,
+            "max_depth": md,
+            "in_degree": ind,
+            "out_degree": outd,
+            "risk_score": round(100 * raw / max_raw, 1),
+        }
+        for member_id, member, rc, md, ind, outd, raw in raw_scores
     ]
-    scored.sort(key=lambda row: row[-1], reverse=True)
+    result.sort(key=lambda row: row["risk_score"], reverse=True)
+
+    for name in sorted(ambiguous_names):
+        matches = rows_by_name[name]
+        result.append(
+            {
+                "ambiguous": True,
+                "member": name,
+                "member_ids": [m["member_id"] for m in matches],
+                "libraries": sorted({m["library"] or "unknown" for m in matches}),
+            }
+        )
+    return result
+
+
+def complexity_heatmap(conn, metric: str = "rule_depth") -> str:
+    """Risk-ranked member table. Only 'rule_depth' is implemented: rule
+    count + max nesting depth per member (both already recorded in
+    rule_candidate at extraction time -- no new parsing), combined with
+    call-graph in/out-degree from build_call_graph(). 'cyclomatic' is a
+    documented-but-unimplemented future option (see
+    options.overview.complexity.metric in project.yml) so a project can
+    already select it in config without a later migration; requesting
+    it today raises rather than silently falling back to rule_depth.
+
+    Pure rendering over _complexity_rows()'s structured data -- see that
+    function for how ambiguous bare names are represented."""
+    rows = _complexity_rows(conn, metric=metric)
+    if not rows:
+        return (
+            '---\ntitle: "Complexity/risk heatmap"\ndoc_type: register\n---\n\n'
+            "# Complexity/risk heatmap\n\nNo rule candidates recorded.\n"
+        )
 
     out = ["---", 'title: "Complexity/risk heatmap"', "doc_type: register", "---", "",
            "# Complexity/risk heatmap", "", (
@@ -249,14 +321,18 @@ def complexity_heatmap(conn, metric: str = "rule_depth") -> str:
     ), "",
            "| member | rule_count | max_depth | in_degree | out_degree | risk_score |",
            "|---|---|---|---|---|---|"]
-    for member, rc, md, ind, outd, score in scored:
-        out.append(f"| `{member}` | {rc} | {md} | {ind} | {outd} | {score} |")
-    for name in sorted(ambiguous_names):
-        libs = ", ".join(sorted({m["library"] or "unknown" for m in rows_by_name[name]}))
-        out.append(
-            f"| `{name}` | — | — | — | — | ambiguous: name is ambiguous across "
-            f"libraries ({libs}) -- re-run against a library-qualified export |"
-        )
+    for row in rows:
+        if row["ambiguous"]:
+            libs = ", ".join(row["libraries"])
+            out.append(
+                f"| `{row['member']}` | — | — | — | — | ambiguous: name is ambiguous across "
+                f"libraries ({libs}) -- re-run against a library-qualified export |"
+            )
+        else:
+            out.append(
+                f"| `{row['member']}` | {row['rule_count']} | {row['max_depth']} | "
+                f"{row['in_degree']} | {row['out_degree']} | {row['risk_score']} |"
+            )
     out.append("")
     return "\n".join(out) + "\n"
 
@@ -280,7 +356,12 @@ def thematic_rules_register(conn, redact: Redactor = NULL_REDACTOR) -> str:
     Ambiguous member names (a bare name shared across >1 library) are
     skipped from numbering entirely, mirroring rules_register()'s refusal
     to guess -- see the comment there for why silently picking one would
-    misattribute rules.
+    misattribute rules. Unlike rules_register() though, an ambiguous
+    member's rules can't be filed under any theme heading (there's no
+    single member to resolve the rows from), so each ambiguous name gets
+    one explicit row -- in the same format rules_register() renders for
+    the identical case -- under a trailing `## (ambiguous)` section,
+    rather than silently vanishing from the document.
     """
     from .batch import select_batch_members  # local: avoids a circular import at load time
 
@@ -298,6 +379,7 @@ def thematic_rules_register(conn, redact: Redactor = NULL_REDACTOR) -> str:
         rows_by_name.setdefault(row["name"], []).append(row)
 
     resolved_names = [name for name in names if len(rows_by_name.get(name, [])) == 1]
+    ambiguous_names = [name for name in names if len(rows_by_name.get(name, [])) != 1]
     id_to_name = {rows_by_name[name][0]["id"]: name for name in resolved_names}
     resolved_ids = list(id_to_name)
 
@@ -349,33 +431,72 @@ def thematic_rules_register(conn, redact: Redactor = NULL_REDACTOR) -> str:
         out.append("|---|---|---|---|---|---|---|")
         out.extend(by_theme[theme])
         out.append("")
-    out.append(f"Total: {total} rule candidate(s) across {len(by_theme)} theme(s).")
+
+    if ambiguous_names:
+        out.append("## (ambiguous)")
+        out.append("")
+        out.append("| BR-ID | member | line | depth | construct | condition | literals |")
+        out.append("|---|---|---|---|---|---|---|")
+        for member_name in sorted(ambiguous_names):
+            libs = ", ".join(sorted({m["library"] or "unknown" for m in rows_by_name[member_name]}))
+            out.append(
+                f"| — | `{member_name}` | — | — | ambiguous | name is ambiguous across "
+                f"libraries ({libs}) -- re-run `mfdoc brief --module {member_name}` "
+                "per library | — |"
+            )
+        out.append("")
+
+    if ambiguous_names:
+        out.append(
+            f"Total: {total} rule candidate(s) across {len(by_theme)} theme(s) and "
+            f"{len(resolved_names)} unambiguous batchable module(s); rules belonging to "
+            f"{len(ambiguous_names)} ambiguous-named module(s) are listed under "
+            '"(ambiguous)" above and excluded from this count.'
+        )
+    else:
+        out.append(f"Total: {total} rule candidate(s) across {len(by_theme)} theme(s).")
     out.append("")
     return "\n".join(out) + "\n"
 
 
 def glossary(conn, redact: Redactor = NULL_REDACTOR) -> str:
-    """One entry per entity with its fields nested underneath -- reads
-    directly from entity.notes / entity_field.remark, which already carry
-    description text at extraction time. Deliberately does not parse
-    already-generated data-entity.md prose: the DB is the source of
-    truth and this stays independent of doc-generation order."""
+    """One entry per (entity name, kind) pair with its fields nested
+    underneath -- reads directly from entity.notes / entity_field.remark,
+    which already carry description text at extraction time. Deliberately
+    does not parse already-generated data-entity.md prose: the DB is the
+    source of truth and this stays independent of doc-generation order.
+
+    A name is only unique together with kind (a legitimate case in this
+    repo's own fixtures: `MILL-ORDER` exists both as a `ddm` and as an
+    `adabas_file`, each with its own notes/fields) -- so this renders one
+    `### NAME` heading per distinct (name, kind) pair rather than
+    deduplicating to one row per bare name, which would silently drop
+    every kind but the first one `ORDER BY name` happened to return.
+    `ORDER BY name, kind` gives that ordering an explicit, deterministic
+    tie-break so which kind's block comes first no longer depends on
+    incidental row order -- restoring the byte-identical-regeneration
+    guarantee for *content*, not just line order."""
     entities = conn.execute(
-        "SELECT id, name, kind, notes FROM entity ORDER BY name"
+        "SELECT id, name, kind, notes FROM entity ORDER BY name, kind"
     ).fetchall()
 
     out = ["---", 'title: "Glossary"', "doc_type: register", "---", "",
            "# Glossary", "", (
         "Every known entity (Adabas file, DDM, table, dataset, ...) and "
-        "its fields, deduplicated across the whole system. Regenerate "
-        "with `mfdoc glossary` after any source change; do not hand-edit."
+        "its fields, deduplicated across the whole system. A name shared "
+        "by more than one kind (e.g. a DDM and its underlying Adabas "
+        "file) gets one heading per kind, labelled accordingly. "
+        "Regenerate with `mfdoc glossary` after any source change; do "
+        "not hand-edit."
     ), ""]
-    seen_names: set[str] = set()
+    name_seen_count: dict[str, int] = {}
     for e in entities:
-        if e['name'] in seen_names:
-            continue
-        seen_names.add(e['name'])
-        out.append(f"### {e['name']}")
+        name_seen_count[e["name"]] = name_seen_count.get(e["name"], 0) + 1
+    for e in entities:
+        heading = e["name"]
+        if name_seen_count[e["name"]] > 1:
+            heading = f"{e['name']} ({e['kind']})"
+        out.append(f"### {heading}")
         out.append("")
         out.append(f"- kind: `{e['kind']}`")
         if e["notes"]:

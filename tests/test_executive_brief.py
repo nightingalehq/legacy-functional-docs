@@ -94,6 +94,53 @@ def test_executive_brief_external_dependents_are_cited(indexed_db):
             assert 1 <= line <= row["maxline"]
 
 
+def test_executive_brief_risk_section_uses_structured_data_not_markdown_parsing(indexed_db, monkeypatch):
+    r"""Regression test for the string-matching coupling: executive_brief's
+    Risk section used to re-render the whole complexity_heatmap() markdown
+    table and grep it for `| \`{name}\``. If the heatmap's rendered format
+    ever changed, that grep would silently stop matching and the brief
+    would then assert the confidently-wrong "no rule candidates recorded"
+    line even though the member has real rule_candidate rows.
+
+    Prove the coupling is now via structural._complexity_rows()'s data,
+    not via string-matching complexity_heatmap()'s markdown, by making
+    complexity_heatmap() return something the old grep could never match
+    (a completely different, reordered table) and asserting the risk
+    section is unaffected."""
+    conn = indexed_db
+    classify.classify_rules_deterministic(conn, taxonomy={})
+    from mfdoc import structural
+
+    member = conn.execute(
+        """
+        SELECT m.id AS id, m.name AS name FROM member m
+         WHERE EXISTS (SELECT 1 FROM rule_candidate rc WHERE rc.member_id = m.id)
+           AND (SELECT COUNT(*) FROM member m2 WHERE m2.name = m.name) = 1
+         ORDER BY m.name LIMIT 1
+        """
+    ).fetchone()
+    assert member is not None, "fixture has no unambiguous member with rule candidates"
+
+    expected_row = next(
+        r for r in structural._complexity_rows(conn)
+        if not r["ambiguous"] and r["member_id"] == member["id"]
+    )
+
+    # Simulate a heatmap format change: a table with the columns in a
+    # different order and no line beginning with the old `| \`{name}\``
+    # shape at all -- the old string-matching implementation would find
+    # nothing here and silently report "no rule candidates recorded".
+    monkeypatch.setattr(
+        structural, "complexity_heatmap",
+        lambda conn, metric="rule_depth": "# Complexity/risk heatmap (reformatted)\n\nrisk_score | member\n---|---\n999.9 | " + member["name"] + "\n",
+    )
+
+    out = brief.executive_brief(conn, member["name"])
+    assert "no rule candidates recorded for this member" not in out
+    assert f"{expected_row['risk_score']}" in out
+    assert f"{expected_row['rule_count']}" in out
+
+
 def test_executive_brief_unknown_member_is_graceful(indexed_db):
     """Matches module_brief/entity_brief's established convention: an
     unresolvable member name gets a graceful markdown response, not a raise."""

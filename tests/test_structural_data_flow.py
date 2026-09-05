@@ -16,6 +16,20 @@ def test_every_crud_matrix_row_becomes_an_edge(indexed_db):
         assert f'{mod_id}[' in out and f'{ent_id}[' in out
 
 
+def test_mermaid_id_is_injective_across_punctuation_collisions():
+    """`MILL-CERT` and `MILL_CERT` (this repo's own fixture has exactly
+    this collision shape: a DDM-derived entity and a SQL-derived one)
+    must not collapse to the same node id -- the naive alnum-or-
+    underscore substitution alone maps both to `n_MILL_CERT`, silently
+    merging two distinct nodes in the rendered diagram."""
+    id_a = structural._mermaid_id("MILL-CERT")
+    id_b = structural._mermaid_id("MILL_CERT")
+    assert id_a != id_b
+    # Deterministic: same name always yields the same id, so regeneration
+    # stays byte-identical.
+    assert structural._mermaid_id("MILL-CERT") == id_a
+
+
 def test_data_flow_diagram_has_no_gaps_when_no_data_access(tmp_path):
     from mfdoc.db import connect
 

@@ -106,6 +106,20 @@ def test_cluster_by_subsystem_changes_clustering():
     assert set(by_subsystem.keys()) - {"inline"} == {"SYSALPHA", "SYSBETA"}
 
 
+def test_unsupported_cluster_by_raises():
+    """A config typo (e.g. "subsytem") must not silently fall back to
+    library clustering with no warning -- matching complexity_heatmap's
+    posture of raising ValueError for its own unsupported `metric`
+    value, rather than guessing at what the caller meant."""
+    import pytest
+
+    conn = _conn()
+    with pytest.raises(ValueError, match="subsytem"):
+        structural.build_call_graph(conn, cluster_by="subsytem")
+    with pytest.raises(ValueError):
+        structural.call_graph_diagram(conn, cluster_by="subsytem")
+
+
 def test_call_graph_cli_stdout(cli_args, derive_result, capsys):
     from types import SimpleNamespace
     from mfdoc import cli

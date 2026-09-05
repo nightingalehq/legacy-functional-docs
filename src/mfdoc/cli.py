@@ -360,7 +360,7 @@ def cmd_classify_rules(args) -> int:
         caller = _build_model_caller(args)
         if caller is None:
             return 1
-        n = classify.classify_rules_llm(conn, caller, redact=redact)
+        n = classify.classify_rules_llm(conn, caller, redact=redact, taxonomy=taxonomy)
         print(f"llm reclassified: {n}")
     return 0
 

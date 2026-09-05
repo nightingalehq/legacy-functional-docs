@@ -807,17 +807,29 @@ def executive_brief(conn, member_name: str, redact: Redactor = NULL_REDACTOR, to
     out.append("")
 
     out.append("## Risk")
-    heatmap_rows = [
-        line for line in structural.complexity_heatmap(conn).splitlines()
-        if line.startswith(f"| `{member['name']}`")
-    ]
-    if not heatmap_rows:
+    # Looked up via structural._complexity_rows()'s structured data by this
+    # member's own id, not by re-parsing complexity_heatmap()'s rendered
+    # markdown -- a string match against `| \`{name}\`` would silently stop
+    # matching (and this section would then wrongly assert "no rule
+    # candidates recorded") the moment the heatmap's column layout changes,
+    # even though the underlying data never went away.
+    complexity_rows = structural._complexity_rows(conn)
+    match = None
+    for row in complexity_rows:
+        if row["ambiguous"]:
+            if member["id"] in row["member_ids"]:
+                match = row
+                break
+        elif row["member_id"] == member["id"]:
+            match = row
+            break
+    if match is None:
         out.append("- no rule candidates recorded for this member")
-    elif "| ambiguous:" in heatmap_rows[0]:
+    elif match["ambiguous"]:
         # Defence-in-depth only: unreachable via this function's own
         # resolve_member_by_name guard above (which already refuses any name
         # matching more than one member row before we ever get here), but
-        # complexity_heatmap's own ambiguity check is scoped only to members
+        # _complexity_rows()'s own ambiguity check is scoped only to members
         # with rule_candidate rows, a narrower condition than
         # resolve_member_by_name's -- kept in case that ever diverges.
         out.append(
@@ -825,7 +837,10 @@ def executive_brief(conn, member_name: str, redact: Redactor = NULL_REDACTOR, to
             "libraries -- re-run against a library-qualified export"
         )
     else:
-        out.extend(heatmap_rows)
+        out.append(
+            f"| `{match['member']}` | {match['rule_count']} | {match['max_depth']} | "
+            f"{match['in_degree']} | {match['out_degree']} | {match['risk_score']} |"
+        )
     out.append("")
     return "\n".join(out) + "\n"
 

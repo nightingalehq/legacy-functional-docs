@@ -67,12 +67,52 @@ def classify_rules_deterministic(conn, taxonomy: dict[str, list[str]]) -> dict:
     return counts
 
 
-def classify_rules_llm(conn, caller: ModelCaller, redact: Redactor = NULL_REDACTOR) -> int:
+_REFUSAL_MARKERS = ("cannot", "can't", "unable", "don't know", "do not know", "i'm not sure", "not sure")
+_MAX_THEME_WORDS = 6
+
+# Rows are committed in batches of this size rather than only once at the
+# end -- if `caller` raises partway through a large run (a real, expected
+# failure mode: network error, rate limit, ...), every row already
+# classified before the raise stays committed instead of being lost.
+_COMMIT_BATCH_SIZE = 20
+
+
+def _looks_like_a_refusal_or_non_answer(theme: str) -> bool:
+    """A genuine theme is a short label (eligibility, posting,
+    validation, ...), not a sentence -- a refusal like "I cannot
+    determine a theme" or "I don't know" must not be stored verbatim as
+    if it were one."""
+    if any(marker in theme for marker in _REFUSAL_MARKERS):
+        return True
+    if len(theme.split()) > _MAX_THEME_WORDS:
+        return True
+    return False
+
+
+def classify_rules_llm(
+    conn,
+    caller: ModelCaller,
+    redact: Redactor = NULL_REDACTOR,
+    taxonomy: dict[str, list[str]] | None = None,
+) -> int:
     """Ask the model for a one-word theme for every rule_candidate still
     classified 'structural' (the keyword taxonomy didn't match it).
     Upserts source='llm' for each; a rule the model can't confidently
     theme is left at its existing structural label -- never guessed past
-    what the model actually returned."""
+    what the model actually returned.
+
+    "Can't confidently theme" is enforced two ways, not just on empty
+    text: if `taxonomy` is given, only a theme whose lowercase form
+    matches one of `taxonomy`'s own keys (case-insensitively) is
+    accepted -- anything else stays 'structural', so a constrained
+    project can't have its taxonomy silently bypassed by free-form LLM
+    text. If `taxonomy` is omitted (free-form theming is intended), any
+    non-empty short theme is still accepted as before, but a
+    refusal/non-answer (e.g. "I cannot determine a theme", or anything
+    longer than a short label) is rejected rather than stored verbatim as
+    if it were a genuine theme.
+    """
+    taxonomy_keys_lower = {theme.lower() for theme in taxonomy} if taxonomy else None
     rows = conn.execute(
         """
         SELECT rc.id, rc.condition, rc.literals, m.name AS member_name
@@ -84,7 +124,7 @@ def classify_rules_llm(conn, caller: ModelCaller, redact: Redactor = NULL_REDACT
     ).fetchall()
 
     reclassified = 0
-    for row in rows:
+    for i, row in enumerate(rows, start=1):
         condition = redact(row["condition"]) or ""
         literals = redact(row["literals"]) or ""
         prompt = (
@@ -96,10 +136,17 @@ def classify_rules_llm(conn, caller: ModelCaller, redact: Redactor = NULL_REDACT
         theme = response.text.strip().lower().splitlines()[0][:40]
         if not theme:
             continue
+        if taxonomy_keys_lower is not None:
+            if theme not in taxonomy_keys_lower:
+                continue
+        elif _looks_like_a_refusal_or_non_answer(theme):
+            continue
         conn.execute(
             "UPDATE rule_theme SET theme=?, source='llm' WHERE rule_candidate_id=?",
             (theme, row["id"]),
         )
         reclassified += 1
+        if i % _COMMIT_BATCH_SIZE == 0:
+            conn.commit()
     conn.commit()
     return reclassified

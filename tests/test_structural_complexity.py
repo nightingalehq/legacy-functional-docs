@@ -17,18 +17,31 @@ def _conn():
 def test_heatmap_sorted_descending_by_risk_score(indexed_db):
     out = structural.complexity_heatmap(indexed_db)
     assert out.startswith("---\n")
-    lines = [l for l in out.splitlines() if l.startswith("| `")]
+    # An "ambiguous" row has no numeric risk_score (its score column is
+    # explanatory text, not a float) -- explicitly excluded here rather
+    # than relying on this fixture's collisions happening to carry no
+    # rule_candidate rows today (see test_heatmap_handles_name_collision_
+    # across_libraries, which exercises a real ambiguous+scored row mix).
+    lines = [
+        l for l in out.splitlines()
+        if l.startswith("| `") and "ambiguous" not in l
+    ]
     scores = [float(l.split("|")[-2].strip()) for l in lines]
     assert scores == sorted(scores, reverse=True)
 
 
 def test_heatmap_row_count_matches_members_with_rules(indexed_db):
     conn = indexed_db
-    expected = conn.execute(
-        "SELECT COUNT(DISTINCT member_id) FROM rule_candidate"
-    ).fetchone()[0]
+    rows = structural._complexity_rows(conn)
+    # Ambiguous names are rendered as one collapsed row per *name*, not
+    # one row per member_id -- excluded here so this count only compares
+    # apples to apples against the scored (non-ambiguous) row count.
+    expected = len([r for r in rows if not r["ambiguous"]])
     out = structural.complexity_heatmap(conn)
-    actual = len([l for l in out.splitlines() if l.startswith("| `")])
+    actual = len([
+        l for l in out.splitlines()
+        if l.startswith("| `") and "ambiguous" not in l
+    ])
     assert actual == expected
 
 
