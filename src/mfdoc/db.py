@@ -389,6 +389,7 @@ _COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     ("rule_candidate", "pair_line_no", "INTEGER"),
     ("data_access", "key_source_line", "INTEGER"),
     ("data_access", "key_source_expr", "TEXT"),
+    ("interaction", "dynamic", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 

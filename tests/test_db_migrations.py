@@ -34,6 +34,10 @@ CREATE TABLE data_access (
     via_view TEXT, key_expr TEXT, descriptor TEXT, raw TEXT NOT NULL,
     confidence TEXT NOT NULL DEFAULT 'verified'
 );
+CREATE TABLE interaction (
+    id INTEGER PRIMARY KEY, member_id INTEGER NOT NULL, line_no INTEGER NOT NULL,
+    kind TEXT NOT NULL, target TEXT, fields TEXT
+);
 """
 
 
@@ -50,9 +54,11 @@ def test_connect_adds_missing_columns_to_a_pre_existing_database(tmp_path):
     conn = db_mod.connect(path)
     rc_cols = {r["name"] for r in conn.execute("PRAGMA table_info(rule_candidate)").fetchall()}
     da_cols = {r["name"] for r in conn.execute("PRAGMA table_info(data_access)").fetchall()}
+    int_cols = {r["name"] for r in conn.execute("PRAGMA table_info(interaction)").fetchall()}
     assert "pair_line_no" in rc_cols
     assert "key_source_line" in da_cols
     assert "key_source_expr" in da_cols
+    assert "dynamic" in int_cols
 
 
 def test_connect_migration_lets_new_columns_be_inserted_on_an_old_db(tmp_path):
@@ -70,8 +76,35 @@ def test_connect_migration_lets_new_columns_be_inserted_on_an_old_db(tmp_path):
         "INSERT INTO data_access (member_id, line_no, verb, crud, raw, key_source_line, key_source_expr) "
         "VALUES (1, 2, 'GET', 'R', 'x', 1, 'expr')"
     )
+    conn.execute(
+        "INSERT INTO interaction (member_id, line_no, kind, target, dynamic) "
+        "VALUES (1, 3, 'CONVERSE', 'SCREEN1', 1)"
+    )
     row = conn.execute("SELECT pair_line_no FROM rule_candidate").fetchone()
     assert row["pair_line_no"] == 1
+    row = conn.execute("SELECT dynamic FROM interaction").fetchone()
+    assert row["dynamic"] == 1
+
+
+def test_connect_migration_backfills_existing_interaction_rows_with_default(tmp_path):
+    """An `interaction` row inserted before the `dynamic` column existed
+    must read back as 0 (the schema's own default), not NULL or an error
+    -- the retrofit case a brand-new-row test can't exercise, since that
+    row was never written pre-migration."""
+    path = tmp_path / "old.db"
+    _make_old_db(path)
+    pre_conn = sqlite3.connect(path)
+    pre_conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'X', 'mantis')")
+    pre_conn.execute(
+        "INSERT INTO interaction (member_id, line_no, kind, target) "
+        "VALUES (1, 1, 'CONVERSE', 'SCREEN1')"
+    )
+    pre_conn.commit()
+    pre_conn.close()
+
+    conn = db_mod.connect(path)
+    row = conn.execute("SELECT dynamic FROM interaction WHERE target='SCREEN1'").fetchone()
+    assert row["dynamic"] == 0
 
 
 def test_connect_migration_is_a_no_op_on_a_brand_new_database(tmp_path):

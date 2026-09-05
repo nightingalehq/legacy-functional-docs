@@ -202,7 +202,7 @@ _LEADING_CITATION_RUN = re.compile(r"^(?:\[\[[^\]]+\]\]\s*)+")
 
 
 def _containing_paragraph(body: str, start: int, end: int) -> tuple[str, int]:
-    """The paragraph in `body` that spans byte offset `start`..`end`, and
+    """The paragraph in `body` that spans character offset `start`..`end`, and
     `start`'s offset relative to that paragraph's own start.
 
     Factored out of `_containing_sentence` so a caller that needs the whole
@@ -218,7 +218,7 @@ def _containing_paragraph(body: str, start: int, end: int) -> tuple[str, int]:
 
 
 def _containing_sentence(body: str, start: int, end: int) -> str:
-    """The sentence in `body` that spans byte offset `start`..`end`.
+    """The sentence in `body` that spans character offset `start`..`end`.
 
     Reuses `SENTENCE_SPLIT` (the same boundary `_logical_units` splits on) so
     a citation's surrounding claim is read the same way whether checked for
