@@ -69,10 +69,12 @@ def data_flow_diagram(conn) -> str:
     for row in rows:
         mod_id, ent_id = _mermaid_id(row["module"]), _mermaid_id(row["entity"])
         if mod_id not in seen_nodes:
-            out.append(f'    {mod_id}["{row["module"]}"]')
+            mod_label = row["module"].replace('"', '\\"')
+            out.append(f'    {mod_id}["{mod_label}"]')
             seen_nodes.add(mod_id)
         if ent_id not in seen_nodes:
-            out.append(f'    {ent_id}[("{row["entity"]}")]')
+            ent_label = row["entity"].replace('"', '\\"')
+            out.append(f'    {ent_id}[("{ent_label}")]')
             seen_nodes.add(ent_id)
         out.append(f'    {mod_id} -->|{row["crud"]}| {ent_id}')
     out.append("```")
