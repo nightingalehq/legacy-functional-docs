@@ -113,3 +113,31 @@ def test_rule_theme_unique_per_rule_candidate(tmp_path):
             "INSERT INTO rule_theme (rule_candidate_id, theme, source) VALUES (1, 'posting', 'llm')"
         )
         conn.commit()
+
+
+def test_purge_member_facts_removes_orphaned_rule_theme_rows(tmp_path):
+    """Regression test: rule_theme carries no member_id of its own -- only
+    rule_candidate_id, a foreign key into a table purge_member_facts DOES
+    delete per-member. Without an explicit cleanup, deleting a member's
+    rule_candidate rows left their rule_theme rows behind, orphaned; if a
+    later re-ingest let SQLite reuse one of those freed rowids for an
+    unrelated new rule_candidate, the stale theme would silently reattach
+    to it."""
+    from mfdoc.db import connect, purge_member_facts
+
+    conn = connect(tmp_path / "index.db")
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'X', 'natural')")
+    conn.execute(
+        "INSERT INTO rule_candidate (id, member_id, line_no, construct, raw) "
+        "VALUES (1, 1, 10, 'IF', 'IF X')"
+    )
+    conn.execute(
+        "INSERT INTO rule_theme (rule_candidate_id, theme, source) VALUES (1, 'eligibility', 'keyword')"
+    )
+    conn.commit()
+
+    purge_member_facts(conn, 1)
+    conn.commit()
+
+    remaining = conn.execute("SELECT COUNT(*) FROM rule_theme").fetchone()[0]
+    assert remaining == 0, "rule_theme rows must not survive their rule_candidate's deletion"

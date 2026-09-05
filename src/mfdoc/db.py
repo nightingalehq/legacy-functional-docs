@@ -498,6 +498,17 @@ def purge_member_facts(conn, member_id: int) -> None:
     incorrectly null out cross-references from *other* members that are
     still valid because this member still exists.
     """
+    # rule_theme.rule_candidate_id references rule_candidate(id), but
+    # rule_theme carries no member_id of its own -- it isn't reachable by
+    # the member_id-keyed loop below. Must run before the rule_candidate
+    # DELETE removes the rows this join needs, or a later re-ingest that
+    # lets SQLite reuse one of those freed rowids for an unrelated new
+    # rule_candidate would silently inherit this orphaned theme.
+    conn.execute(
+        "DELETE FROM rule_theme WHERE rule_candidate_id IN "
+        "(SELECT id FROM rule_candidate WHERE member_id=?)",
+        (member_id,),
+    )
     for table in _MEMBER_OWNED_TABLES:
         conn.execute(f"DELETE FROM {table} WHERE member_id=?", (member_id,))
     conn.execute("DELETE FROM gap WHERE member_id=?", (member_id,))
