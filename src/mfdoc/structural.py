@@ -174,3 +174,62 @@ def call_graph_diagram(conn, cluster_by: str = "module", max_nodes_inline: int =
     for cluster_name, members in clusters.items():
         result[cluster_name] = render(members, f"Call graph — {cluster_name}")
     return result
+
+
+def complexity_heatmap(conn, metric: str = "rule_depth") -> str:
+    """Risk-ranked member table. Only 'rule_depth' is implemented: rule
+    count + max nesting depth per member (both already recorded in
+    rule_candidate at extraction time -- no new parsing), combined with
+    call-graph in/out-degree from build_call_graph(). 'cyclomatic' is a
+    documented-but-unimplemented future option (see
+    options.overview.complexity.metric in project.yml) so a project can
+    already select it in config without a later migration; requesting
+    it today raises rather than silently falling back to rule_depth."""
+    if metric != "rule_depth":
+        raise ValueError(f"unsupported complexity metric {metric!r}; only 'rule_depth' is implemented")
+
+    rule_rows = conn.execute(
+        """
+        SELECT m.name AS member, COUNT(*) AS rule_count, MAX(rc.depth) AS max_depth
+          FROM rule_candidate rc JOIN member m ON m.id = rc.member_id
+         GROUP BY m.name
+        """
+    ).fetchall()
+    if not rule_rows:
+        return (
+            '---\ntitle: "Complexity/risk heatmap"\ndoc_type: register\n---\n\n'
+            "# Complexity/risk heatmap\n\nNo rule candidates recorded.\n"
+        )
+
+    graph_data = build_call_graph(conn)
+    out_degree = {name: len(entry["calls"]) for name, entry in graph_data.items()}
+    in_degree: dict[str, int] = {}
+    for entry in graph_data.values():
+        for call in entry["calls"]:
+            in_degree[call["callee"]] = in_degree.get(call["callee"], 0) + 1
+
+    raw_scores = []
+    for r in rule_rows:
+        ind, outd = in_degree.get(r["member"], 0), out_degree.get(r["member"], 0)
+        raw = (r["rule_count"] + (r["max_depth"] or 0)) * (ind + outd + 1)
+        raw_scores.append((r["member"], r["rule_count"], r["max_depth"] or 0, ind, outd, raw))
+
+    max_raw = max(s[-1] for s in raw_scores) or 1
+    scored = [
+        (member, rc, md, ind, outd, round(100 * raw / max_raw, 1))
+        for member, rc, md, ind, outd, raw in raw_scores
+    ]
+    scored.sort(key=lambda row: row[-1], reverse=True)
+
+    out = ["---", 'title: "Complexity/risk heatmap"', "doc_type: register", "---", "",
+           "# Complexity/risk heatmap", "", (
+        "risk_score = (rule_count + max_depth) * (in_degree + out_degree + 1), "
+        "normalized 0-100 across this run's members. A simple v1 proxy for "
+        "where to focus review, not a certified complexity metric."
+    ), "",
+           "| member | rule_count | max_depth | in_degree | out_degree | risk_score |",
+           "|---|---|---|---|---|---|"]
+    for member, rc, md, ind, outd, score in scored:
+        out.append(f"| `{member}` | {rc} | {md} | {ind} | {outd} | {score} |")
+    out.append("")
+    return "\n".join(out) + "\n"

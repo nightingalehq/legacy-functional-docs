@@ -7,6 +7,7 @@
     mfdoc calibrate --config project.yml --dialect mantis
     mfdoc brief    --config project.yml [--module NAME | --entity NAME | --system]
     mfdoc rules-register --config project.yml --out docs/functional/rules-register.md
+    mfdoc complexity --config project.yml --out docs/functional/complexity-heatmap.md
     mfdoc classify-rules --config project.yml [--llm-fallback]
     mfdoc test-plan --config project.yml --out docs/functional/test-plan-register.md --overlay test-overlay.yml
     mfdoc test-overlay-draft --config project.yml --out test-overlay.yml
@@ -313,6 +314,15 @@ def cmd_call_graph(args) -> int:
             continue
         (out_dir / f"call-graph-{name}.md").write_text(content, encoding="utf-8")
     print(f"wrote {len(diagrams)} file(s) to {out_dir}")
+    return 0
+
+
+def cmd_complexity(args) -> int:
+    cfg = load_config(args.config)
+    conn = connect(Path(args.config).parent / cfg["index_db"])
+    complexity_cfg = ((cfg["options"] or {}).get("overview") or {}).get("complexity") or {}
+    out = structural.complexity_heatmap(conn, metric=complexity_cfg.get("metric", "rule_depth"))
+    _write_or_print(out, args.out)
     return 0
 
 
@@ -1056,6 +1066,11 @@ def main(argv=None) -> int:
     p.add_argument("--config", required=True)
     p.add_argument("--out", help="directory to write call-graph*.md files into; omit to print the inline diagram to stdout")
     p.set_defaults(func=cmd_call_graph)
+
+    p = sub.add_parser("complexity")
+    p.add_argument("--config", required=True)
+    p.add_argument("--out", help="write to this path instead of stdout")
+    p.set_defaults(func=cmd_complexity)
 
     p = sub.add_parser("classify-rules")
     p.add_argument("--config", required=True)
