@@ -523,6 +523,125 @@ def module_completeness_problems(conn, results: list[dict]) -> list[str]:
     return problems
 
 
+# Row/line-count patterns used by `_artifact_consistency_problems` to
+# re-derive a cheap invariant from a `structural.py`-rendered artifact's own
+# markdown, without re-rendering (and diffing) the whole document.
+_GAP_SUMMARY_ROW = re.compile(r"^\|\s*`[^`|]*`\s*\|[^|]*\|\s*(\d+)\s*\|\s*$", re.M)
+_GLOSSARY_HEADING = re.compile(r"^### ", re.M)
+# A call-graph node declaration line, e.g. `    n_ABC123["NAME"]` (resolved)
+# or `    n_ABC123(["NAME (unresolved)"])` (unresolved) -- see
+# structural.call_graph_diagram's render(). Deliberately distinct from an
+# edge line (`    id --> id` / `    id -.->|unresolved| id`): after the node
+# id (always plain alnum/underscore, per structural._mermaid_id) an edge
+# line has a space next, never `[` or `(`, so this pattern never matches one.
+_CALL_GRAPH_NODE = re.compile(r'^ {4}\S+[\[(]', re.M)
+
+
+def _gap_summary_artifact_problems(conn, path: Path, body: str) -> list[str]:
+    """gap-summary.md's table is one row per (gap_kind, severity), each
+    carrying that group's `COUNT(*)`. Summing every row's count column must
+    equal the live `gap` table's total row count -- a stale hand-edited copy
+    (or one regenerated before a later `mfdoc derive`/`gap-summary` run) with
+    a wrong count would otherwise sail through the citation checks above,
+    since a `doc_type: register` doc like this carries no prose citations
+    for them to check at all."""
+    expected = conn.execute("SELECT COUNT(*) AS n FROM gap").fetchone()["n"]
+    actual = sum(int(m) for m in _GAP_SUMMARY_ROW.findall(body))
+    if actual != expected:
+        return [
+            f"{path.name}: table rows sum to {actual} gap(s), but the fact store "
+            f"currently has {expected} -- looks stale, regenerate with `mfdoc gap-summary`"
+        ]
+    return []
+
+
+def _glossary_artifact_problems(conn, path: Path, body: str) -> list[str]:
+    """glossary.md renders one `### ` heading per distinct (name, kind) pair
+    in `entity` (structural.glossary). A heading count that doesn't match
+    the live table means the glossary was hand-edited or regenerated
+    against an older fact store."""
+    expected = conn.execute(
+        "SELECT COUNT(*) AS n FROM (SELECT DISTINCT name, kind FROM entity)"
+    ).fetchone()["n"]
+    actual = len(_GLOSSARY_HEADING.findall(body))
+    if actual != expected:
+        return [
+            f"{path.name}: {actual} entity heading(s) found, but the fact store "
+            f"currently has {expected} distinct (name, kind) entit(y/ies) -- looks "
+            f"stale, regenerate with `mfdoc glossary`"
+        ]
+    return []
+
+
+def _call_graph_artifact_problems(conn, path: Path, body: str, fm: dict) -> list[str]:
+    """call-graph.md's node count should match the distinct set of nodes
+    `structural.build_call_graph` derives from `call_edge` (every caller,
+    plus every callee -- keyed by member id where `call_edge.callee_id` is
+    set, else by bare callee name, mirroring `call_graph_diagram`'s own
+    node identity rule (Finding 1): a name alone is not a stable node key.
+
+    Only checked when the diagram actually rendered every node inline --
+    once the graph exceeds `max_nodes_inline`, `call_graph_diagram` collapses
+    `call-graph.md` to one node per cluster instead (see its `title:
+    "Call graph (collapsed)"` front matter), which this invariant does not
+    apply to; the full per-cluster files it points at
+    (`call-graph-<cluster>.md`) are not checked here since a cluster's own
+    node set additionally depends on config (`cluster_by`), not just
+    `call_edge` -- too fragile a heuristic for the exact node count."""
+    if fm.get("title") == "Call graph (collapsed)":
+        return []
+    nodes: set[tuple[str, object]] = set()
+    for r in conn.execute("SELECT caller_id, callee_id, callee_name FROM call_edge"):
+        nodes.add(("id", r["caller_id"]))
+        nodes.add(("id", r["callee_id"]) if r["callee_id"] is not None else ("name", r["callee_name"]))
+    expected = len(nodes)
+    actual = len(_CALL_GRAPH_NODE.findall(body))
+    if actual != expected:
+        return [
+            f"{path.name}: {actual} node(s) drawn, but call_edge implies {expected} distinct "
+            f"node(s) -- looks stale, regenerate with `mfdoc call-graph`"
+        ]
+    return []
+
+
+def _artifact_consistency_problems(conn, results: list[dict]) -> list[str]:
+    """A cheap, doc_type-aware consistency check for the deterministic
+    structural artifacts (`structural.py`) that the citation/uncited-
+    assertion checks above are nearly a no-op against: each one is a
+    `doc_type: register` document with little to no prose, so a stale
+    hand-edited copy (or one left over from before a later `mfdoc derive`
+    run) can carry a wrong count and still validate clean by every check
+    upstream of this one.
+
+    There is no machine-readable tag naming *which* structural artifact a
+    given file is -- only `doc_type: register` in front matter, shared by
+    every one of them (and by other, unrelated register docs like
+    rules-register.md). This falls back to the filename convention
+    `structural.py`'s own CLI commands (`cmd_gap_summary`/`cmd_call_graph`/
+    `cmd_glossary` in cli.py) write to by default -- `gap-summary.md`,
+    `call-graph.md`, `glossary.md`. That is inherently a fragile match (a
+    project could name its output file anything via `--out`); it only
+    covers the default filenames, and silently skips a doc under any other
+    name rather than guessing. Gated the same way by construction: a docs
+    tree with none of these filenames contributes nothing here, so a project
+    not using the structural-overview extension validates exactly as
+    before."""
+    problems: list[str] = []
+    for r in results:
+        fm = r.get("_fm")
+        if not fm or fm.get("doc_type") != "register":
+            continue
+        path = Path(r["path"])
+        body = r.get("_body") or ""
+        if path.name == "gap-summary.md":
+            problems.extend(_gap_summary_artifact_problems(conn, path, body))
+        elif path.name == "glossary.md":
+            problems.extend(_glossary_artifact_problems(conn, path, body))
+        elif path.name == "call-graph.md":
+            problems.extend(_call_graph_artifact_problems(conn, path, body, fm))
+    return problems
+
+
 def validate_tree(conn, root: Path) -> dict:
     results = [validate_doc(conn, p) for p in sorted(root.rglob("*.md")) if _is_pipeline_doc(p)]
     return {
@@ -532,4 +651,5 @@ def validate_tree(conn, root: Path) -> dict:
         "invalid_citations": sum(r["invalid_citations"] for r in results),
         "results": results,
         "completeness_problems": module_completeness_problems(conn, results),
+        "artifact_problems": _artifact_consistency_problems(conn, results),
     }

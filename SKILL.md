@@ -153,6 +153,15 @@ Suggested document set, in this order (each builds vocabulary the next needs):
    beforehand too, to keep this document's numbers consistent with the
    standalone complexity/call-graph docs rather than derived separately.
 
+Standalone files are the supported default for `mfdoc gap-summary` and
+`mfdoc call-graph` (see `options.overview` in project.yml) — that's what
+each of those commands produces, and what `mfdoc validate` checks for
+consistency against the fact store. For a single-document handoff, the
+gap-summary and call-graph content may optionally be pasted into
+`system-overview.md`, above or alongside its narrative, instead of
+shipping them as separate files — but that's a presentation choice made
+after generation, not a change to how they're produced.
+
 ### 5. Validate
 
 ```bash

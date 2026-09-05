@@ -934,10 +934,15 @@ def cmd_validate(args) -> int:
         print(f"\n{len(res['completeness_problems'])} member(s) with incomplete rule coverage:")
         for p in res["completeness_problems"]:
             print(f"  - {p}")
+    if res["artifact_problems"]:
+        print(f"\n{len(res['artifact_problems'])} structural artifact(s) inconsistent with the fact store:")
+        for p in res["artifact_problems"]:
+            print(f"  - {p}")
     return 0 if (
         res["invalid_citations"] == 0
         and res["documents_ok"] == res["documents"]
         and not res["completeness_problems"]
+        and not res["artifact_problems"]
     ) else 1
 
 
