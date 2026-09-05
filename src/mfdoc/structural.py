@@ -8,6 +8,8 @@ belongs in brief.py's narrative-brief functions instead, not here.
 
 from __future__ import annotations
 
+from . import graph
+
 
 def gap_summary(conn) -> str:
     """Gap counts by kind and severity, for the top of system-overview.md
@@ -33,5 +35,46 @@ def gap_summary(conn) -> str:
     out.append("|---|---|---|")
     for r in rows:
         out.append(f"| `{r['gap_kind']}` | {r['severity']} | {r['n']} |")
+    out.append("")
+    return "\n".join(out) + "\n"
+
+
+def _mermaid_id(name: str) -> str:
+    """A Mermaid-safe node id: alnum/underscore only, so a source-derived
+    name with spaces, hyphens, or punctuation can't break the diagram
+    syntax."""
+    return "n_" + "".join(c if c.isalnum() else "_" for c in name)
+
+
+def data_flow_diagram(conn) -> str:
+    """Which modules read/write which entities -- a thin Mermaid wrapper
+    over graph.crud_matrix(), which already does the join; no new
+    extraction here."""
+    rows = graph.crud_matrix(conn)
+
+    out = ["---", 'title: "Data-flow diagram"', "doc_type: register", "---", "",
+           "# Data-flow diagram", "", (
+        "Module-to-entity read/write edges, derived from every recorded "
+        "data-access statement. Regenerate with `mfdoc data-flow` after "
+        "any source change; do not hand-edit."
+    ), ""]
+    if not rows:
+        out.append("No data access recorded.")
+        out.append("")
+        return "\n".join(out) + "\n"
+
+    out.append("```mermaid")
+    out.append("graph LR")
+    seen_nodes: set[str] = set()
+    for row in rows:
+        mod_id, ent_id = _mermaid_id(row["module"]), _mermaid_id(row["entity"])
+        if mod_id not in seen_nodes:
+            out.append(f'    {mod_id}["{row["module"]}"]')
+            seen_nodes.add(mod_id)
+        if ent_id not in seen_nodes:
+            out.append(f'    {ent_id}[("{row["entity"]}")]')
+            seen_nodes.add(ent_id)
+        out.append(f'    {mod_id} -->|{row["crud"]}| {ent_id}')
+    out.append("```")
     out.append("")
     return "\n".join(out) + "\n"

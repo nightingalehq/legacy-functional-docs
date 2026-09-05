@@ -285,6 +285,14 @@ def cmd_gap_summary(args) -> int:
     return 0
 
 
+def cmd_data_flow(args) -> int:
+    cfg = load_config(args.config)
+    conn = connect(Path(args.config).parent / cfg["index_db"])
+    out = structural.data_flow_diagram(conn)
+    _write_or_print(out, args.out)
+    return 0
+
+
 def cmd_classify_rules(args) -> int:
     cfg = load_config(args.config)
     conn = connect(Path(args.config).parent / cfg["index_db"])
@@ -1015,6 +1023,11 @@ def main(argv=None) -> int:
     p.add_argument("--config", required=True)
     p.add_argument("--out", help="write to this path instead of stdout")
     p.set_defaults(func=cmd_gap_summary)
+
+    p = sub.add_parser("data-flow")
+    p.add_argument("--config", required=True)
+    p.add_argument("--out", help="write to this path instead of stdout")
+    p.set_defaults(func=cmd_data_flow)
 
     p = sub.add_parser("classify-rules")
     p.add_argument("--config", required=True)
