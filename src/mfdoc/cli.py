@@ -296,6 +296,15 @@ def cmd_data_flow(args) -> int:
     return 0
 
 
+def _safe_cluster_filename(name: str) -> str:
+    """Sanitize a cluster name (fact-store data: member.library/system, not
+    trusted input) before using it in an output filename -- a cluster name
+    containing path separators or a ".." segment must not be able to write
+    outside the intended --out directory."""
+    sanitized = "".join(c if (c.isalnum() or c in "-_") else "_" for c in name)
+    return sanitized or "_"
+
+
 def cmd_call_graph(args) -> int:
     cfg = load_config(args.config)
     conn = connect(Path(args.config).parent / cfg["index_db"])
@@ -310,11 +319,17 @@ def cmd_call_graph(args) -> int:
         print(diagrams["inline"])
         return 0
     out_dir.mkdir(parents=True, exist_ok=True)
+    resolved_out_dir = out_dir.resolve()
     (out_dir / "call-graph.md").write_text(diagrams["inline"], encoding="utf-8")
     for name, content in diagrams.items():
         if name == "inline":
             continue
-        (out_dir / f"call-graph-{name}.md").write_text(content, encoding="utf-8")
+        target = out_dir / f"call-graph-{_safe_cluster_filename(name)}.md"
+        # Defense in depth on top of the sanitizer above: refuse to write
+        # anywhere the resolved path doesn't land inside out_dir.
+        if resolved_out_dir not in target.resolve().parents:
+            raise ValueError(f"refusing to write outside --out directory: {target}")
+        target.write_text(content, encoding="utf-8")
     print(f"wrote {len(diagrams)} file(s) to {out_dir}")
     return 0
 

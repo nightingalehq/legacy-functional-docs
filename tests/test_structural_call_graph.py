@@ -334,6 +334,38 @@ def test_node_ids_stable_across_member_id_renumbering():
     assert stable_node_id in out2["inline"]
 
 
+def test_call_graph_cli_sanitizes_unsafe_cluster_names(cli_args, derive_result, tmp_path, monkeypatch):
+    """Cluster names come from fact-store data (member.library/system), not
+    trusted input -- a cluster name containing path separators or a ".."
+    segment must not be able to write outside the intended --out
+    directory. Force an unsafe cluster name via a monkeypatched
+    call_graph_diagram() and confirm the written file stays inside
+    out_dir under a sanitized name."""
+    from types import SimpleNamespace
+
+    from mfdoc import cli
+
+    escape_attempt = "../../etc/evil"
+
+    def fake_call_graph_diagram(conn, cluster_by="module", max_nodes_inline=40):
+        return {"inline": "# inline\n", escape_attempt: "# escaped cluster\n"}
+
+    monkeypatch.setattr(cli.structural, "call_graph_diagram", fake_call_graph_diagram)
+
+    out_dir = tmp_path / "cg-out"
+    args = SimpleNamespace(config=cli_args.config, out=str(out_dir))
+    assert cli.cmd_call_graph(args) == 0
+
+    written = sorted(p.name for p in out_dir.iterdir())
+    assert "call-graph.md" in written
+    assert len(written) == 2, f"expected exactly 2 files, got {written}"
+    escaped_name = [n for n in written if n != "call-graph.md"][0]
+    assert "/" not in escaped_name and ".." not in escaped_name
+    # Nothing must have been written outside out_dir.
+    assert not (tmp_path / "etc").exists()
+    assert not (tmp_path.parent / "etc").exists()
+
+
 def test_call_graph_cli_stdout(cli_args, derive_result, capsys):
     from types import SimpleNamespace
     from mfdoc import cli
