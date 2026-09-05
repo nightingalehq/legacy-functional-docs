@@ -145,13 +145,14 @@ Suggested document set, in this order (each builds vocabulary the next needs):
    won't read the per-module docs. From `mfdoc brief --executive NAME`
    (or `brief.executive_brief()` directly — same fact-brief-then-write
    pattern as the others) against `templates/executive-summary.md`.
-   **Run `mfdoc classify-rules`, `mfdoc call-graph`, and `mfdoc
-   complexity` first**: `executive_brief()`'s "Top rules" section joins
-   against `rule_theme`, so without a prior `classify-rules` run every
-   rule shows as `uncategorized`; its "Risk" section calls
-   `complexity_heatmap()` directly, so run `complexity`/`call-graph`
-   beforehand too, to keep this document's numbers consistent with the
-   standalone complexity/call-graph docs rather than derived separately.
+   **Run `mfdoc classify-rules` first**: `executive_brief()`'s "Top
+   rules" section joins against `rule_theme`, so without a prior
+   `classify-rules` run every rule shows as `uncategorized`. Its "Risk"
+   section reads `structural._complexity_rows()` directly against the
+   live fact store (the same underlying data `mfdoc complexity` renders,
+   not that command's output) — running `mfdoc call-graph`/`mfdoc
+   complexity` beforehand is not required and has no effect on this
+   brief's numbers; they're computed fresh either way.
 
 Standalone files are the supported default for `mfdoc gap-summary` and
 `mfdoc call-graph` (see `options.overview` in project.yml) — that's what

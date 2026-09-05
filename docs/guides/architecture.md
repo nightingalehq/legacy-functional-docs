@@ -188,12 +188,18 @@ do.
 
 This changes the pipeline order for a project that uses it: `mfdoc derive`
 → `mfdoc classify-rules` (new, optional — only needed if you want themed
-output or the LLM fallback) → `mfdoc call-graph`/`data-flow`/`complexity`/
-`rules-theme-register`/`gap-summary`/`glossary` (new, all deterministic,
-no ordering dependency between them) → `mfdoc batch` (existing, per-module,
-unchanged) → the interactive executive-summary narrative (new, depends on
-`classify-rules` and the deterministic renderers above having already
-populated the facts `brief.executive_brief()` reads).
+output or the LLM fallback; the only structural-overview step that writes
+to the fact store, populating `rule_theme`) → `mfdoc call-graph`/`data-flow`/
+`complexity`/`rules-theme-register`/`gap-summary`/`glossary` (new, all
+deterministic, no ordering dependency between them or with anything after
+`derive` — they're pure renderers, reading the fact store but never
+writing to it) → `mfdoc batch` (existing, per-module, unchanged) → the
+interactive executive-summary narrative (new; depends only on
+`classify-rules` having already populated `rule_theme` for its "Top rules"
+section — its "Risk" section reads the same underlying complexity data
+`mfdoc complexity` renders, directly from the fact store, so running that
+or any other renderer first has no effect on `brief.executive_brief()`'s
+output).
 
 ### 3 — Narrate (two paths, by design — see the plan doc's "Option C")
 
