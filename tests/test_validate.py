@@ -399,6 +399,140 @@ def test_validator_rejects_module_doc_not_opening_with_a_heading(indexed_db, tmp
     assert any("does not open with a top-level" in p for p in result["problems"])
 
 
+def _synthetic_structural_db():
+    """A minimal in-memory index with just enough `gap`, `entity`/
+    `entity_field`, and `member`/`call_edge` rows for
+    `structural.gap_summary`/`glossary`/`call_graph_diagram` to render
+    something non-trivial, without depending on the real fixture pipeline's
+    (unpredictable, could grow past max_nodes_inline) call graph shape."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    insert(conn, "gap", gap_kind="unresolved_call", severity="high", detail="d1")
+    insert(conn, "gap", gap_kind="unresolved_call", severity="high", detail="d2")
+    insert(conn, "gap", gap_kind="missing_source", severity="low", detail="d3")
+    e1 = insert(conn, "entity", name="MILL-ORDER", kind="ddm")
+    e2 = insert(conn, "entity", name="MILL-ORDER", kind="adabas_file")
+    insert(conn, "entity_field", entity_id=e1, name="FIELD-A")
+    insert(conn, "entity_field", entity_id=e2, name="FIELD-B")
+    caller = insert(conn, "member", name="TESTCALLER", dialect="natural", object_type="subprogram")
+    callee = insert(conn, "member", name="TESTCALLEE", dialect="natural", object_type="subprogram")
+    insert(conn, "call_edge", caller_id=caller, callee_name="TESTCALLEE", callee_id=callee,
+           call_kind="CALLNAT", line_no=1, resolved=1)
+    insert(conn, "call_edge", caller_id=caller, callee_name="MISSINGPGM", callee_id=None,
+           call_kind="CALLNAT", line_no=2, resolved=0)
+    conn.commit()
+    return conn
+
+
+def test_gap_summary_artifact_passes_when_unmodified(tmp_path):
+    from mfdoc import structural
+    from mfdoc.validate import validate_tree
+
+    conn = _synthetic_structural_db()
+    doc = tmp_path / "gap-summary.md"
+    doc.write_text(structural.gap_summary(conn), encoding="utf-8")
+    res = validate_tree(conn, tmp_path)
+    assert res["artifact_problems"] == []
+    assert res["documents_ok"] == res["documents"]
+
+
+def test_gap_summary_artifact_flags_a_stale_corrupted_copy(tmp_path):
+    """A hand-edited copy of gap-summary.md with a wrong row count is exactly
+    the 'stale hand-edited doc slips through' failure mode this check
+    exists for -- it has no prose citations for the existing checks to
+    catch it with."""
+    from mfdoc import structural
+    from mfdoc.validate import validate_tree
+
+    conn = _synthetic_structural_db()
+    good = structural.gap_summary(conn)
+    corrupted = good.replace("| `unresolved_call` | high | 2 |", "| `unresolved_call` | high | 99 |")
+    assert corrupted != good
+    doc = tmp_path / "gap-summary.md"
+    doc.write_text(corrupted, encoding="utf-8")
+    res = validate_tree(conn, tmp_path)
+    assert len(res["artifact_problems"]) == 1
+    assert "gap-summary.md" in res["artifact_problems"][0]
+    assert res["documents_ok"] == res["documents"]  # citation checks alone still pass it
+
+
+def test_glossary_artifact_passes_when_unmodified(tmp_path):
+    from mfdoc import structural
+    from mfdoc.validate import validate_tree
+
+    conn = _synthetic_structural_db()
+    doc = tmp_path / "glossary.md"
+    doc.write_text(structural.glossary(conn), encoding="utf-8")
+    res = validate_tree(conn, tmp_path)
+    assert res["artifact_problems"] == []
+
+
+def test_glossary_artifact_flags_a_stale_corrupted_copy(tmp_path):
+    from mfdoc import structural
+    from mfdoc.validate import validate_tree
+
+    conn = _synthetic_structural_db()
+    good = structural.glossary(conn)
+    corrupted = good.replace("### MILL-ORDER (adabas_file)\n\n", "", 1)
+    assert corrupted != good
+    doc = tmp_path / "glossary.md"
+    doc.write_text(corrupted, encoding="utf-8")
+    res = validate_tree(conn, tmp_path)
+    assert len(res["artifact_problems"]) == 1
+    assert "glossary.md" in res["artifact_problems"][0]
+
+
+def test_call_graph_artifact_passes_when_unmodified(tmp_path):
+    from mfdoc import structural
+    from mfdoc.validate import validate_tree
+
+    conn = _synthetic_structural_db()
+    diagrams = structural.call_graph_diagram(conn)
+    doc = tmp_path / "call-graph.md"
+    doc.write_text(diagrams["inline"], encoding="utf-8")
+    res = validate_tree(conn, tmp_path)
+    assert res["artifact_problems"] == []
+
+
+def test_call_graph_artifact_flags_a_stale_corrupted_copy(tmp_path):
+    from mfdoc import structural
+    from mfdoc.validate import validate_tree
+
+    conn = _synthetic_structural_db()
+    diagrams = structural.call_graph_diagram(conn)
+    good = diagrams["inline"]
+    # Drop one node declaration line (the unresolved MISSINGPGM node) --
+    # simulates a hand-edited/stale copy missing a node the live call_edge
+    # table still implies.
+    corrupted = "\n".join(
+        ln for ln in good.splitlines()
+        if not (ln.strip().startswith("n_") and "MISSINGPGM" in ln and "(unresolved)" in ln)
+    ) + "\n"
+    assert corrupted != good
+    doc = tmp_path / "call-graph.md"
+    doc.write_text(corrupted, encoding="utf-8")
+    res = validate_tree(conn, tmp_path)
+    assert len(res["artifact_problems"]) == 1
+    assert "call-graph.md" in res["artifact_problems"][0]
+
+
+def test_validate_tree_gates_artifact_checks_when_no_structural_artifacts_present(indexed_db, tmp_path):
+    """A docs tree containing none of the new structural artifacts (the
+    common case for a project not using the structural-overview extension)
+    must validate exactly as before -- no new required files, no new
+    failures contributed by `_artifact_consistency_problems`."""
+    from mfdoc.validate import validate_tree
+
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        GOOD_FRONTMATTER + "\nThe program resets the return code [[MMP0100:31]].\n"
+    )
+    res = validate_tree(indexed_db, tmp_path)
+    assert res["artifact_problems"] == []
+    assert res["documents_ok"] == res["documents"] == 1
+
+
 def test_validator_accepts_a_lower_level_heading_as_the_opening_line(indexed_db, tmp_path):
     """The check only requires *a* markdown heading to open the body, not
     specifically an H1 -- a stricter level requirement isn't what this
