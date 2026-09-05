@@ -144,9 +144,9 @@ def build_call_graph(conn, cluster_by: str = "module") -> dict[int, dict]:
     rows = conn.execute(
         f"""
         SELECT m.id AS caller_id, m.name AS caller, m.library AS caller_library,
-               m.{cluster_column} AS caller_cluster,
+               m.dialect AS caller_dialect, m.{cluster_column} AS caller_cluster,
                ce.callee_name, ce.resolved, ce.callee_id,
-               cm.library AS callee_library
+               cm.library AS callee_library, cm.dialect AS callee_dialect
           FROM call_edge ce
           JOIN member m ON m.id = ce.caller_id
           LEFT JOIN member cm ON cm.id = ce.callee_id
@@ -161,6 +161,7 @@ def build_call_graph(conn, cluster_by: str = "module") -> dict[int, dict]:
             {
                 "name": r["caller"],
                 "library": r["caller_library"] or "unknown",
+                "dialect": r["caller_dialect"] or "unknown",
                 "cluster": r["caller_cluster"] or "unknown",
                 "calls": [],
             },
@@ -170,6 +171,7 @@ def build_call_graph(conn, cluster_by: str = "module") -> dict[int, dict]:
             "callee_id": callee_id,
             "callee_name": r["callee_name"],
             "callee_library": (r["callee_library"] or "unknown") if callee_id is not None else None,
+            "callee_dialect": (r["callee_dialect"] or "unknown") if callee_id is not None else None,
             "resolved": bool(r["resolved"]),
         })
     return graph_data
@@ -202,24 +204,35 @@ def call_graph_diagram(conn, cluster_by: str = "module", max_nodes_inline: int =
     shared by more than one known member id, each id's node is labeled
     "NAME (LIBRARY)" instead of the bare name, so a reader can tell them
     apart -- mirroring complexity_heatmap's explicit ambiguous-row
-    convention for the identical underlying ambiguity."""
+    convention for the identical underlying ambiguity.
+
+    The *mermaid* node id rendered into the diagram (see
+    mermaid_node_id() below) is derived from the (library, name, dialect)
+    triple, not the member.id rowid used to key/group internally here --
+    so node ids stay stable across regenerations even when ingest order
+    changes and rowids get renumbered."""
     graph_data = build_call_graph(conn, cluster_by=cluster_by)
 
     # id_info maps every known member id (caller or resolved callee) to its
     # (name, library); name_to_ids inverts that to detect which bare names
     # are actually shared by more than one id, so only genuinely ambiguous
     # names get the disambiguating "(LIBRARY)" suffix in their label.
-    id_info: dict[int, tuple[str, str]] = {}
+    id_info: dict[int, tuple[str, str, str]] = {}
     for caller_id, entry in graph_data.items():
-        id_info[caller_id] = (entry["name"], entry["library"])
+        id_info[caller_id] = (entry["name"], entry["library"], entry["dialect"])
     for entry in graph_data.values():
         for call in entry["calls"]:
             if call["callee_id"] is not None:
                 id_info.setdefault(
-                    call["callee_id"], (call["callee_name"], call["callee_library"] or "unknown")
+                    call["callee_id"],
+                    (
+                        call["callee_name"],
+                        call["callee_library"] or "unknown",
+                        call["callee_dialect"] or "unknown",
+                    ),
                 )
     name_to_ids: dict[str, set[int]] = {}
-    for member_id, (name, _library) in id_info.items():
+    for member_id, (name, _library, _dialect) in id_info.items():
         name_to_ids.setdefault(name, set()).add(member_id)
 
     def node_key(callee_id: int | None, callee_name: str) -> tuple[str, object]:
@@ -229,14 +242,27 @@ def call_graph_diagram(conn, cluster_by: str = "module", max_nodes_inline: int =
         kind, val = key
         if kind == "name":
             return str(val)
-        name, library = id_info[val]
+        name, library, _dialect = id_info[val]
         if len(name_to_ids.get(name, ())) > 1:
             return f"{name} ({library})"
         return name
 
     def mermaid_node_id(key: tuple[str, object]) -> str:
+        # Derived from the content-stable (library, name, dialect) triple --
+        # the same uniqueness constraint as member's own
+        # UNIQUE(name, library, dialect) -- rather than member.id (a SQLite
+        # rowid). Keying by rowid meant inserting one new source file
+        # earlier in ingest order renumbered every downstream member id,
+        # which churned every node id in call-graph.md even though nothing
+        # about the actual members changed (Finding 1 follow-up). This
+        # composite still disambiguates two members sharing a bare name in
+        # different libraries, since that's the real DB uniqueness
+        # constraint being mirrored here.
         kind, val = key
-        return _mermaid_id(f"__member_id_{val}" if kind == "id" else str(val))
+        if kind == "name":
+            return _mermaid_id(str(val))
+        name, library, dialect = id_info[val]
+        return _mermaid_id(f"{library}|{name}|{dialect}")
 
     nodes = {node_key(cid, entry["name"]) for cid, entry in graph_data.items()} | {
         node_key(c["callee_id"], c["callee_name"]) for e in graph_data.values() for c in e["calls"]

@@ -231,10 +231,65 @@ def test_ambiguous_member_name_renders_as_two_distinct_nodes():
     assert inline.count('"DUPPROG"') == 0, "the bare ambiguous name must not appear unqualified"
 
     # Each upstream caller's edge must land on its own DUPPROG node, not a
-    # shared merged one -- i.e. two distinct mermaid node ids for DUPPROG.
-    assert structural._mermaid_id(f"__member_id_{dup_a}") != structural._mermaid_id(
-        f"__member_id_{dup_b}"
+    # shared merged one -- i.e. two distinct mermaid node ids for DUPPROG,
+    # derived from the (library, name, dialect) triple, not the member.id
+    # rowid (see test_node_ids_stable_across_member_id_renumbering below
+    # for why rowid-derived ids are the wrong choice).
+    assert structural._mermaid_id("LIBA|DUPPROG|natural") != structural._mermaid_id(
+        "LIBB|DUPPROG|natural"
     )
+
+
+def test_node_ids_stable_across_member_id_renumbering():
+    """Regression for the call-graph node-id-churn follow-up finding:
+    mermaid node ids must be derived from the content-stable
+    (library, name, dialect) triple, not member.id (a SQLite rowid).
+    Keying by rowid meant inserting one unrelated source file earlier in
+    ingest order (so it grabs a lower id) renumbered every downstream
+    member id, which churned every node id in call-graph.md even though
+    none of the actual members changed. Here the same two members
+    (STABLEPROG calling TARGETPROG) get different ids across two runs
+    because an unrelated member is inserted first in the second run --
+    the rendered node id for STABLEPROG must be identical in both."""
+    conn1 = _conn()
+    conn1.execute("INSERT INTO member (name, dialect, library) VALUES ('STABLEPROG', 'natural', 'LIBX')")
+    conn1.execute("INSERT INTO member (name, dialect, library) VALUES ('TARGETPROG', 'natural', 'LIBX')")
+
+    def mid1(name):
+        return conn1.execute("SELECT id FROM member WHERE name=?", (name,)).fetchone()["id"]
+
+    conn1.execute(
+        "INSERT INTO call_edge (caller_id, callee_name, callee_id, call_kind, line_no, resolved) "
+        "VALUES (?, 'TARGETPROG', ?, 'CALLNAT', 1, 1)",
+        (mid1("STABLEPROG"), mid1("TARGETPROG")),
+    )
+    conn1.commit()
+    out1 = structural.call_graph_diagram(conn1, cluster_by="module", max_nodes_inline=10_000)
+
+    conn2 = _conn()
+    # An unrelated member inserted first, with an explicit low id but a
+    # different name -- simulates an earlier source file in ingest order.
+    conn2.execute("INSERT INTO member (id, name, dialect, library) VALUES (1, 'UNRELATED', 'natural', 'LIBY')")
+    conn2.execute("INSERT INTO member (name, dialect, library) VALUES ('STABLEPROG', 'natural', 'LIBX')")
+    conn2.execute("INSERT INTO member (name, dialect, library) VALUES ('TARGETPROG', 'natural', 'LIBX')")
+
+    def mid2(name):
+        return conn2.execute("SELECT id FROM member WHERE name=?", (name,)).fetchone()["id"]
+
+    conn2.execute(
+        "INSERT INTO call_edge (caller_id, callee_name, callee_id, call_kind, line_no, resolved) "
+        "VALUES (?, 'TARGETPROG', ?, 'CALLNAT', 1, 1)",
+        (mid2("STABLEPROG"), mid2("TARGETPROG")),
+    )
+    conn2.commit()
+    out2 = structural.call_graph_diagram(conn2, cluster_by="module", max_nodes_inline=10_000)
+
+    # member ids for STABLEPROG differ between the two runs (renumbered by
+    # the unrelated insert), but the rendered node id must not.
+    assert mid1("STABLEPROG") != mid2("STABLEPROG")
+    stable_node_id = structural._mermaid_id("LIBX|STABLEPROG|natural")
+    assert stable_node_id in out1["inline"]
+    assert stable_node_id in out2["inline"]
 
 
 def test_call_graph_cli_stdout(cli_args, derive_result, capsys):
