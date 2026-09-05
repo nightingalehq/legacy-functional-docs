@@ -30,8 +30,11 @@ released, or leaves it unreleased and returns a rejection code
 
 ## Trigger
 
-Called by `MMB0100` [[MMB0100:10]]. No other caller was found in the ingested
-source.
+Batch entry: MMP0100 is a Natural program stacked on the CMSYNIN input to
+JCL member `MMB0100`'s step STEP010 (after a LOGON to library MILLPROD),
+not a direct `EXEC PGM=` — the batch scheduler reaches it only through
+that stacked command sequence [[MMB0100:10]]. No online (CICS) or other
+caller was found in the ingested source.
 
 ## Top business rules
 

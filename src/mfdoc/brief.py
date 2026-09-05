@@ -13,6 +13,7 @@ a business rule without seeing its exact condition is where invention creeps in.
 from __future__ import annotations
 
 import json
+import re
 
 from .citations import _cite, _rule_id
 from .redact import NULL_REDACTOR, Redactor
@@ -758,6 +759,48 @@ def executive_brief(conn, member_name: str, redact: Redactor = NULL_REDACTOR, to
         out.append(f"- `{row['entity']}`: {row['crud']} {_cite(member['name'], row['first_line'])}")
     out.append("")
 
+    out.append("## Entry point")
+    # How this member gets invoked in the first place -- batch (JCL EXEC PGM=,
+    # or a Natural program named on a CMSYNIN stack under a JCL step) vs.
+    # online (a CICS transaction DEFINE'd with PROGRAM(this member)). All three
+    # shapes land in call_edge as call_kind='EXEC_PGM' rows (see
+    # dialects/environment.py's extract_jcl/_parse_natural_stack/
+    # extract_cics_csd) with only the *caller* member's own dialect
+    # distinguishing a JCL job step from a CICS transaction definition --
+    # there is no separate "entry point" table to join against, and matching
+    # literally against job_step.program or cics_resource.resource_name would
+    # miss the Natural-batch-stack shape entirely (its program name never
+    # appears in job_step.program, only stacked in a CMSYNIN body under a
+    # different step_program). Querying call_edge by callee + caller dialect
+    # catches all three shapes uniformly.
+    entry_rows = conn.execute(
+        """
+        SELECT m.name AS caller, m.dialect AS caller_dialect, ce.line_no, ce.args
+          FROM call_edge ce JOIN member m ON m.id = ce.caller_id
+         WHERE UPPER(ce.callee_name) = UPPER(?) AND ce.call_kind = 'EXEC_PGM'
+         ORDER BY m.name, ce.line_no
+        """,
+        (member["name"],),
+    ).fetchall()
+    batch_rows = [r for r in entry_rows if r["caller_dialect"] == "jcl"]
+    cics_rows = [r for r in entry_rows if r["caller_dialect"] == "cics_csd"]
+    for row in batch_rows:
+        detail = f" ({row['args']})" if row["args"] else ""
+        out.append(
+            f"- batch entry: invoked from JCL member `{row['caller']}`{detail} "
+            f"{_cite(row['caller'], row['line_no'])}"
+        )
+    for row in cics_rows:
+        txn_match = re.search(r"CICS transaction (\S+)", row["args"] or "")
+        txn = txn_match.group(1) if txn_match else "unknown"
+        out.append(
+            f"- online entry: CICS transaction `{txn}` defined in `{row['caller']}` "
+            f"{_cite(row['caller'], row['line_no'])}"
+        )
+    if not batch_rows and not cics_rows:
+        out.append("- no entry-point fact was found for this member")
+    out.append("")
+
     out.append("## External dependents")
     # build_call_graph()'s per-call dict deliberately carries no line_no (see
     # Tasks 6/7/8, which depend on its exact current shape) -- so this queries
@@ -817,8 +860,9 @@ def executive_brief(conn, member_name: str, redact: Redactor = NULL_REDACTOR, to
         )
     else:
         out.append(
-            f"| `{match['member']}` | {match['rule_count']} | {match['max_depth']} | "
-            f"{match['in_degree']} | {match['out_degree']} | {match['risk_score']} |"
+            f"- risk_score: {match['risk_score']} (rule_count {match['rule_count']}, "
+            f"max_depth {match['max_depth']}, in_degree {match['in_degree']}, "
+            f"out_degree {match['out_degree']})"
         )
     out.append("")
     return "\n".join(out) + "\n"

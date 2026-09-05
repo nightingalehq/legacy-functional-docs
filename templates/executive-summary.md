@@ -29,7 +29,7 @@ _1-2 sentences: what this program does and when it runs._
 ## Trigger
 
 _How this program starts (batch job step, online transaction, called
-by another program) — cite the brief's entry-point facts._
+by another program) — cite the brief's "Entry point" section's facts._
 
 ## Top business rules
 

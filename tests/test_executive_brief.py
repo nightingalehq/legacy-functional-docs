@@ -221,6 +221,116 @@ def test_executive_brief_handles_ambiguous_heatmap_row_defensively(indexed_db):
         conn.commit()
 
 
+def test_executive_brief_entry_point_batch_via_jcl_natural_stack(indexed_db):
+    """MMP0100 is a real fixture member whose only invocation is a Natural
+    program name stacked on a CMSYNIN DD under JCL member MMB0100 (see
+    dialects/environment.py's _parse_natural_stack) -- not a direct JCL
+    EXEC PGM= naming it. The Entry point section must surface this real
+    batch entry fact (caller MMB0100, real line, JCL dialect), not silently
+    miss it because there's no literal job_step.program match."""
+    conn = indexed_db
+    classify.classify_rules_deterministic(conn, taxonomy={})
+    edge = conn.execute(
+        """
+        SELECT m.name AS caller, ce.line_no
+          FROM call_edge ce JOIN member m ON m.id = ce.caller_id
+         WHERE UPPER(ce.callee_name) = 'MMP0100' AND m.dialect = 'jcl'
+        """
+    ).fetchone()
+    assert edge is not None, "fixture no longer has a JCL-side call edge into MMP0100"
+
+    out = brief.executive_brief(conn, "MMP0100")
+    assert "## Entry point" in out
+    assert "batch entry" in out
+    assert f"`{edge['caller']}`" in out
+    assert f"[[{edge['caller']}:{edge['line_no']}]]" in out
+    assert "no entry-point fact was found" not in out
+
+
+def test_executive_brief_entry_point_none_found(indexed_db):
+    """A member nothing in the fixture ever calls (batch or online) must
+    state plainly that no entry-point fact was found -- never fabricate a
+    plausible-sounding trigger."""
+    conn = indexed_db
+    classify.classify_rules_deterministic(conn, taxonomy={})
+    conn.execute("INSERT INTO member (name, dialect) VALUES ('ZZORPHANMOD', 'natural')")
+    conn.commit()
+    try:
+        out = brief.executive_brief(conn, "ZZORPHANMOD")
+        assert "## Entry point" in out
+        assert "no entry-point fact was found for this member" in out
+    finally:
+        conn.execute("DELETE FROM member WHERE name='ZZORPHANMOD'")
+        conn.commit()
+
+
+def test_executive_brief_entry_point_cics_transaction():
+    """Synthetic case (no CICS fixture data associates with MMP0100 itself):
+    a member invoked via a CICS TRANSACTION DEFINE's PROGRAM() clause must
+    be reported as an online entry, citing the transaction id and the real
+    CSD member/line that defined it."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'ONLPGM01', 'natural')")
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (2, 'CSDDEF01', 'cics_csd')")
+    conn.execute(
+        "INSERT INTO cics_resource (member_id, line_no, resource_type, resource_name, attributes) "
+        "VALUES (2, 42, 'TRANSACTION', 'TX01', 'PROGRAM=ONLPGM01')"
+    )
+    conn.execute(
+        "INSERT INTO call_edge (caller_id, callee_name, call_kind, line_no, args) "
+        "VALUES (2, 'ONLPGM01', 'EXEC_PGM', 42, 'CICS transaction TX01')"
+    )
+    conn.commit()
+
+    out = brief.executive_brief(conn, "ONLPGM01")
+    assert "## Entry point" in out
+    assert "online entry" in out
+    assert "`TX01`" in out
+    assert "`CSDDEF01`" in out
+    assert "[[CSDDEF01:42]]" in out
+    assert "no entry-point fact was found" not in out
+
+
+def test_executive_brief_risk_section_uses_labeled_bullets_not_raw_table_row(indexed_db):
+    """Finding 10: the Risk section used to drop in a raw headerless
+    markdown-table-row fragment (`| \\`NAME\\` | 17 | 1 | 1 | 4 | 100.0 |`)
+    inside a bullet list with no column labels. It must now read as a
+    labeled bullet instead, using the same underlying data."""
+    conn = indexed_db
+    classify.classify_rules_deterministic(conn, taxonomy={})
+    from mfdoc import structural
+
+    member = conn.execute(
+        """
+        SELECT m.id AS id, m.name AS name FROM member m
+         WHERE EXISTS (SELECT 1 FROM rule_candidate rc WHERE rc.member_id = m.id)
+           AND (SELECT COUNT(*) FROM member m2 WHERE m2.name = m.name) = 1
+         ORDER BY m.name LIMIT 1
+        """
+    ).fetchone()
+    assert member is not None, "fixture has no unambiguous member with rule candidates"
+    expected_row = next(
+        r for r in structural._complexity_rows(conn)
+        if not r["ambiguous"] and r["member_id"] == member["id"]
+    )
+
+    out = brief.executive_brief(conn, member["name"])
+    expected_bullet = (
+        f"- risk_score: {expected_row['risk_score']} (rule_count {expected_row['rule_count']}, "
+        f"max_depth {expected_row['max_depth']}, in_degree {expected_row['in_degree']}, "
+        f"out_degree {expected_row['out_degree']})"
+    )
+    assert expected_bullet in out
+    # The old raw fragment shape must not appear anywhere in the output.
+    assert f"| `{member['name']}` |" not in out
+
+
 def test_cli_brief_executive_flag(cli_args, derive_result, capsys):
     from types import SimpleNamespace
 
