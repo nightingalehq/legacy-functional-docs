@@ -204,6 +204,10 @@ mfdoc glossary --config project.yml --out docs/functional/glossary.md
 # one entry per entity, with its fields nested underneath, from entity/field
 # descriptions already recorded in the fact store
 
+# Note: unlike the other structural overview commands above (gap-summary, data-flow,
+# complexity, rules-theme-register, glossary), call-graph's --out must be a directory
+# path, not a file path; it generates multiple files (one per cluster if needed).
+
 mfdoc validate --config project.yml --docs docs/functional
 
 # smoke-test against the bundled fixtures and worked examples:
