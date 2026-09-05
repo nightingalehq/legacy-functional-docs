@@ -141,6 +141,27 @@ Suggested document set, in this order (each builds vocabulary the next needs):
 4. `processes/<process>.md` — batch job or online transaction end-to-end
 5. `gap-register.md` — every unresolved item, as SME questions
 6. `coverage-report.md` — the numbers, unspun
+7. `executive-summary.md` — one page per program, for a reviewer who
+   won't read the per-module docs. From `mfdoc brief --executive NAME`
+   (or `brief.executive_brief()` directly — same fact-brief-then-write
+   pattern as the others) against `templates/executive-summary.md`.
+   **Run `mfdoc classify-rules` first**: `executive_brief()`'s "Top
+   rules" section joins against `rule_theme`, so without a prior
+   `classify-rules` run every rule shows as `uncategorized`. Its "Risk"
+   section reads `structural._complexity_rows()` directly against the
+   live fact store (the same underlying data `mfdoc complexity` renders,
+   not that command's output) — running `mfdoc call-graph`/`mfdoc
+   complexity` beforehand is not required and has no effect on this
+   brief's numbers; they're computed fresh either way.
+
+Standalone files are the supported default for `mfdoc gap-summary` and
+`mfdoc call-graph` (see `options.overview` in project.yml) — that's what
+each of those commands produces, and what `mfdoc validate` checks for
+consistency against the fact store. For a single-document handoff, the
+gap-summary and call-graph content may optionally be pasted into
+`system-overview.md`, above or alongside its narrative, instead of
+shipping them as separate files — but that's a presentation choice made
+after generation, not a change to how they're produced.
 
 ### 5. Validate
 

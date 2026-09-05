@@ -13,7 +13,9 @@ a business rule without seeing its exact condition is where invention creeps in.
 from __future__ import annotations
 
 import json
+import re
 
+from .citations import _cite, _rule_id
 from .redact import NULL_REDACTOR, Redactor
 
 
@@ -183,28 +185,6 @@ def fetch_rule_candidate_rows(conn, member_name: str):
     ).fetchall()
     return rows, []
 
-
-def _rule_id(member_name: str, n: int) -> str:
-    """A stable handle for one rule candidate, e.g. `MMP0100:BR-003`.
-
-    Qualified with the member name so it is unique across the whole system,
-    not just within one module's doc -- an unqualified `BR-003` would mean a
-    different rule in every module that has one. Numbered in the order
-    rules appear in that member's own brief, which is itself ordered by
-    source line, so for unchanged source, re-running the pipeline produces
-    the same IDs. This is a positional scheme, not a content hash:
-    inserting a new rule earlier in the source shifts every later ID in
-    that module, the same trade-off any sequential numbering makes. See
-    reference/writing-rules.md."""
-    return f"{member_name}:BR-{n:03d}"
-
-
-def _cite(name: str, line: int | None, end: int | None = None) -> str:
-    if line is None:
-        return f"[[{name}]]"
-    if end and end != line:
-        return f"[[{name}:{line}-{end}]]"
-    return f"[[{name}:{line}]]"
 
 
 def module_brief(conn, member_name: str, excerpt_rules: bool = True,
@@ -719,6 +699,187 @@ def system_brief(conn, redact: Redactor = NULL_REDACTOR) -> str:
     return "\n".join(out) + "\n"
 
 
+def executive_brief(conn, member_name: str, redact: Redactor = NULL_REDACTOR, top_n: int = 10) -> str:
+    """Cited-facts brief for one program's executive summary: purpose/
+    entry data, top rules by theme, I/O, external dependents, risk score.
+    Same contract as module_brief/system_brief -- the narrative pass may
+    only assert what this brief hands it, and every claim must carry a
+    [[MEMBER:line]] citation back to source.
+
+    Resolves `member_name` the same way module_brief/entity_brief do -- via
+    db.resolve_member_by_name -- and returns the same kind of graceful
+    "no such member"/"ambiguous across libraries" markdown they return,
+    rather than raising, for the identical reason: a bare name is only
+    unique together with library+dialect (see the `UNIQUE(name, library,
+    dialect)` constraint in db.py), so blending facts from two distinct
+    members that happen to share a name under one member's identity would
+    be a citation-integrity bug, not just an edge case."""
+    from . import structural  # local: avoids a circular import at load time (structural imports from this module)
+    from .db import resolve_member_by_name
+
+    matches, ambiguous_libs = resolve_member_by_name(conn, member_name)
+    if ambiguous_libs:
+        libs = ", ".join(ambiguous_libs)
+        return (
+            f"# Executive brief: {member_name}\n\nMember name is ambiguous across libraries ({libs}). "
+            f"Re-run with a library-qualified name.\n"
+        )
+    if not matches:
+        return f"# Executive brief: {member_name}\n\nNo such member in the index.\n"
+    member = matches[0]
+
+    out = [f"# Executive brief: {member['name']}", "",
+           f"- library: `{member['library'] or 'unknown'}`",
+           f"- object_type: `{member['object_type'] or 'unknown'}`", ""]
+
+    out.append("## Top rules")
+    rows = conn.execute(
+        """
+        SELECT rc.id, rc.line_no, rc.condition, COALESCE(rt.theme, 'uncategorized') AS theme
+          FROM rule_candidate rc
+          LEFT JOIN rule_theme rt ON rt.rule_candidate_id = rc.id
+         WHERE rc.member_id = ?
+         ORDER BY rc.depth DESC, rc.line_no
+         LIMIT ?
+        """,
+        (member["id"], top_n),
+    ).fetchall()
+    if not rows:
+        out.append("- no rule candidates recorded for this member")
+    for r in rows:
+        cond = redact(r["condition"]) if r["condition"] else "(no condition text)"
+        out.append(f"- [{r['theme']}] {cond} {_cite(member['name'], r['line_no'])}")
+    out.append("")
+
+    out.append("## I/O")
+    crud_rows = [row for row in structural.graph.crud_matrix(conn) if row["module"] == member["name"]]
+    if not crud_rows:
+        out.append("- no data access recorded for this member")
+    for row in crud_rows:
+        out.append(f"- `{row['entity']}`: {row['crud']} {_cite(member['name'], row['first_line'])}")
+    out.append("")
+
+    out.append("## Entry point")
+    # How this member gets invoked in the first place -- batch (JCL EXEC PGM=,
+    # or a Natural program named on a CMSYNIN stack under a JCL step) vs.
+    # online (a CICS transaction DEFINE'd with PROGRAM(this member)). All three
+    # shapes land in call_edge as call_kind='EXEC_PGM' rows (see
+    # dialects/environment.py's extract_jcl/_parse_natural_stack/
+    # extract_cics_csd) with only the *caller* member's own dialect
+    # distinguishing a JCL job step from a CICS transaction definition --
+    # there is no separate "entry point" table to join against, and matching
+    # literally against job_step.program or cics_resource.resource_name would
+    # miss the Natural-batch-stack shape entirely (its program name never
+    # appears in job_step.program, only stacked in a CMSYNIN body under a
+    # different step_program). Querying call_edge by callee + caller dialect
+    # catches all three shapes uniformly.
+    entry_rows = conn.execute(
+        """
+        SELECT m.name AS caller, m.dialect AS caller_dialect, ce.line_no, ce.args
+          FROM call_edge ce JOIN member m ON m.id = ce.caller_id
+         WHERE UPPER(ce.callee_name) = UPPER(?) AND ce.call_kind = 'EXEC_PGM'
+         ORDER BY m.name, ce.line_no
+        """,
+        (member["name"],),
+    ).fetchall()
+    batch_rows = [r for r in entry_rows if r["caller_dialect"] == "jcl"]
+    cics_rows = [r for r in entry_rows if r["caller_dialect"] == "cics_csd"]
+    for row in batch_rows:
+        detail = f" ({row['args']})" if row["args"] else ""
+        out.append(
+            f"- batch entry: invoked from JCL member `{row['caller']}`{detail} "
+            f"{_cite(row['caller'], row['line_no'])}"
+        )
+    for row in cics_rows:
+        txn_match = re.search(r"CICS transaction (\S+)", row["args"] or "")
+        txn = txn_match.group(1) if txn_match else "unknown"
+        out.append(
+            f"- online entry: CICS transaction `{txn}` defined in `{row['caller']}` "
+            f"{_cite(row['caller'], row['line_no'])}"
+        )
+    if not batch_rows and not cics_rows:
+        out.append("- no entry-point fact was found for this member")
+    out.append("")
+
+    out.append("## External dependents")
+    # build_call_graph()'s per-call dict deliberately carries no line_no (see
+    # Tasks 6/7/8, which depend on its exact current shape) -- so this queries
+    # call_edge directly for the citation instead of reusing that structure.
+    # Matched by callee_name (not callee_id): graph.resolve() sets callee_id
+    # via an unqualified UPPER(name) lookup with its own LIMIT 1, so comparing
+    # names here mirrors exactly which edges build_call_graph would consider a
+    # match for this member, resolved or not. This member's own name is
+    # already confirmed unique across the whole member table by the
+    # resolve_member_by_name call above, so no other member could also match
+    # this same callee_name. The CALLERS are not similarly guaranteed unique,
+    # though -- two distinct caller members can share a bare name across
+    # libraries (member uniqueness is (name, library, dialect)) -- so this
+    # groups by the caller's member id, not its bare name, and disambiguates
+    # any name collision with a library label rather than collapsing two
+    # distinct callers into one row and losing one's citation.
+    caller_rows = conn.execute(
+        """
+        SELECT m.id AS caller_id, m.name AS caller, m.library AS caller_library,
+               MIN(ce.line_no) AS first_line
+          FROM call_edge ce JOIN member m ON m.id = ce.caller_id
+         WHERE UPPER(ce.callee_name) = UPPER(?)
+         GROUP BY m.id
+         ORDER BY m.name, m.library
+        """,
+        (member["name"],),
+    ).fetchall()
+    if not caller_rows:
+        out.append("- no known callers recorded for this member")
+    name_counts: dict[str, int] = {}
+    for row in caller_rows:
+        name_counts[row["caller"]] = name_counts.get(row["caller"], 0) + 1
+    for row in caller_rows:
+        label = row["caller"]
+        if name_counts[label] > 1:
+            label = f"{row['caller']} ({row['caller_library'] or 'unknown'})"
+        out.append(f"- called by `{label}` {_cite(row['caller'], row['first_line'])}")
+    out.append("")
+
+    out.append("## Risk")
+    # Looked up via structural._complexity_rows()'s structured data by this
+    # member's own id, not by re-parsing complexity_heatmap()'s rendered
+    # markdown -- a string match against `| \`{name}\`` would silently stop
+    # matching (and this section would then wrongly assert "no rule
+    # candidates recorded") the moment the heatmap's column layout changes,
+    # even though the underlying data never went away.
+    complexity_rows = structural._complexity_rows(conn)
+    match = None
+    for row in complexity_rows:
+        if row["ambiguous"]:
+            if member["id"] in row["member_ids"]:
+                match = row
+                break
+        elif row["member_id"] == member["id"]:
+            match = row
+            break
+    if match is None:
+        out.append("- no rule candidates recorded for this member")
+    elif match["ambiguous"]:
+        # Defence-in-depth only: unreachable via this function's own
+        # resolve_member_by_name guard above (which already refuses any name
+        # matching more than one member row before we ever get here), but
+        # _complexity_rows()'s own ambiguity check is scoped only to members
+        # with rule_candidate rows, a narrower condition than
+        # resolve_member_by_name's -- kept in case that ever diverges.
+        out.append(
+            f"- risk score unavailable: `{member['name']}` is ambiguous across "
+            "libraries -- re-run against a library-qualified export"
+        )
+    else:
+        out.append(
+            f"- risk_score: {match['risk_score']} (rule_count {match['rule_count']}, "
+            f"max_depth {match['max_depth']}, in_degree {match['in_degree']}, "
+            f"out_degree {match['out_degree']})"
+        )
+    out.append("")
+    return "\n".join(out) + "\n"
+
+
 def rules_register(conn, redact: Redactor = NULL_REDACTOR) -> str:
     """A flat, system-wide index of every `MEMBER:BR-nnn` rule ID, generated
     straight from the fact store so it can never drift from what the module
@@ -800,9 +961,13 @@ def rules_register(conn, redact: Redactor = NULL_REDACTOR) -> str:
 
     total = 0
     modules_included = 0
+    ambiguous_names: list[str] = []
+    ambiguous_ids: list[int] = []
     for member_name in names:
         matches = rows_by_name.get(member_name, [])
         if len(matches) != 1:
+            ambiguous_names.append(member_name)
+            ambiguous_ids.extend(m["id"] for m in matches)
             libs = ", ".join(sorted({m["library"] or "unknown" for m in matches})) or "none found"
             out.append(
                 f"| — | `{member_name}` | — | — | ambiguous | name is ambiguous across "
@@ -826,7 +991,35 @@ def rules_register(conn, redact: Redactor = NULL_REDACTOR) -> str:
                 f"`{cond}` | `{lits}` |"
             )
     out.append("")
-    out.append(f"Total: {total} rule candidate(s) across {modules_included} batchable module(s).")
+
+    if ambiguous_names:
+        # Same disclosure `structural.thematic_rules_register()` makes for its
+        # own ambiguous-name exclusion -- a rule count silently missing from
+        # `total` (because an ambiguous member's rules can't be assigned a
+        # `MEMBER:BR-nnn` ID without guessing which library it belongs to)
+        # would otherwise read as if the system simply had no more rules,
+        # rather than as an explicit, counted exclusion. The excluded
+        # candidates aren't rendered as rows here (unlike the resolved ones
+        # above) -- only their count -- since there's no single member to
+        # attribute a `line`/`construct`/`condition` to; the ambiguous rows
+        # already appended above name which modules they belong to.
+        ambiguous_placeholders = ",".join("?" * len(ambiguous_ids))
+        excluded_total = (
+            conn.execute(
+                f"SELECT COUNT(*) AS n FROM rule_candidate WHERE member_id IN ({ambiguous_placeholders})",
+                ambiguous_ids,
+            ).fetchone()["n"]
+            if ambiguous_ids
+            else 0
+        )
+        out.append(
+            f"Total: {total} rule candidate(s) across {modules_included} batchable "
+            f"module(s); {excluded_total} rule candidate(s) belonging to "
+            f"{len(ambiguous_names)} ambiguous-named module(s) are listed under "
+            '"ambiguous" above and excluded from this count.'
+        )
+    else:
+        out.append(f"Total: {total} rule candidate(s) across {modules_included} batchable module(s).")
     out.append("")
     return "\n".join(out) + "\n"
 

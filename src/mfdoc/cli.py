@@ -7,6 +7,8 @@
     mfdoc calibrate --config project.yml --dialect mantis
     mfdoc brief    --config project.yml [--module NAME | --entity NAME | --system]
     mfdoc rules-register --config project.yml --out docs/functional/rules-register.md
+    mfdoc complexity --config project.yml --out docs/functional/complexity-heatmap.md
+    mfdoc classify-rules --config project.yml [--llm-fallback]
     mfdoc test-plan --config project.yml --out docs/functional/test-plan-register.md --overlay test-overlay.yml
     mfdoc test-overlay-draft --config project.yml --out test-overlay.yml
     mfdoc test-advisory --config project.yml --out docs/functional/testability-report.md
@@ -30,7 +32,9 @@ from pathlib import Path
 import yaml
 
 from . import brief as brief_mod
+from . import classify
 from . import graph, normalise
+from . import structural
 from . import testadvisor as testadvisor_mod
 from . import testplan as testplan_mod
 from .db import add_gap, connect, insert, purge_member, purge_member_facts, set_metric, upsert_member
@@ -258,8 +262,10 @@ def cmd_brief(args) -> int:
         out = brief_mod.module_brief(conn, args.module, redact=redact, lexicon=lexicon)
     elif args.entity:
         out = brief_mod.entity_brief(conn, args.entity, redact=redact, lexicon=lexicon)
+    elif args.executive:
+        out = brief_mod.executive_brief(conn, args.executive, redact=redact)
     else:
-        print("specify --module, --entity or --system", file=sys.stderr)
+        print("specify --module, --entity, --system or --executive", file=sys.stderr)
         return 2
     _write_or_print(out, args.out)
     return 0
@@ -271,6 +277,133 @@ def cmd_rules_register(args) -> int:
     redact = Redactor.from_options(cfg["options"])
     out = brief_mod.rules_register(conn, redact=redact)
     _write_or_print(out, args.out)
+    return 0
+
+
+def cmd_gap_summary(args) -> int:
+    cfg = load_config(args.config)
+    conn = connect(Path(args.config).parent / cfg["index_db"])
+    out = structural.gap_summary(conn)
+    _write_or_print(out, args.out)
+    return 0
+
+
+def cmd_data_flow(args) -> int:
+    cfg = load_config(args.config)
+    conn = connect(Path(args.config).parent / cfg["index_db"])
+    out = structural.data_flow_diagram(conn)
+    _write_or_print(out, args.out)
+    return 0
+
+
+def _write_contained(target: Path, content: str, resolved_out_dir: Path) -> None:
+    """Write `content` to `target`, refusing anything that would land or
+    write outside `resolved_out_dir` -- whether via an unsafe path
+    component (caller's job to have already sanitized that) or via
+    `target` itself already existing as a symlink pointing elsewhere
+    (write_text follows symlinks, so a pre-planted one at this exact
+    filename would otherwise silently escape --out on write)."""
+    if target.is_symlink():
+        raise ValueError(f"refusing to write through an existing symlink: {target}")
+    if resolved_out_dir not in target.resolve().parents:
+        raise ValueError(f"refusing to write outside --out directory: {target}")
+    target.write_text(content, encoding="utf-8")
+
+
+def cmd_call_graph(args) -> int:
+    cfg = load_config(args.config)
+    conn = connect(Path(args.config).parent / cfg["index_db"])
+    diagrams_cfg = ((cfg["options"] or {}).get("overview") or {}).get("diagrams") or {}
+    diagrams = structural.call_graph_diagram(
+        conn,
+        cluster_by=diagrams_cfg.get("cluster_by", "module"),
+        max_nodes_inline=diagrams_cfg.get("max_nodes_inline", 40),
+    )
+    out_dir = Path(args.out) if args.out else None
+    if out_dir is None:
+        print(diagrams["inline"])
+        return 0
+    out_dir.mkdir(parents=True, exist_ok=True)
+    resolved_out_dir = out_dir.resolve()
+    _write_contained(out_dir / "call-graph.md", diagrams["inline"], resolved_out_dir)
+    for name, content in diagrams.items():
+        if name == "inline":
+            continue
+        # structural.safe_cluster_filename is also what call_graph_diagram
+        # itself uses when it labels this file in the collapsed view's
+        # node text -- using anything else here would desync the label
+        # from the file actually written.
+        target = out_dir / f"call-graph-{structural.safe_cluster_filename(name)}.md"
+        _write_contained(target, content, resolved_out_dir)
+    print(f"wrote {len(diagrams)} file(s) to {out_dir}")
+    return 0
+
+
+def cmd_complexity(args) -> int:
+    cfg = load_config(args.config)
+    conn = connect(Path(args.config).parent / cfg["index_db"])
+    complexity_cfg = ((cfg["options"] or {}).get("overview") or {}).get("complexity") or {}
+    out = structural.complexity_heatmap(conn, metric=complexity_cfg.get("metric", "rule_depth"))
+    _write_or_print(out, args.out)
+    return 0
+
+
+def cmd_rules_theme_register(args) -> int:
+    cfg = load_config(args.config)
+    conn = connect(Path(args.config).parent / cfg["index_db"])
+    redact = Redactor.from_options(cfg["options"])
+    out = structural.thematic_rules_register(conn, redact=redact)
+    _write_or_print(out, args.out)
+    return 0
+
+
+def cmd_glossary(args) -> int:
+    cfg = load_config(args.config)
+    conn = connect(Path(args.config).parent / cfg["index_db"])
+    redact = Redactor.from_options(cfg["options"])
+    out = structural.glossary(conn, redact=redact)
+    _write_or_print(out, args.out)
+    return 0
+
+
+def cmd_classify_rules(args) -> int:
+    cfg = load_config(args.config)
+    conn = connect(Path(args.config).parent / cfg["index_db"])
+    themes_cfg = ((cfg["options"] or {}).get("overview") or {}).get("themes") or {}
+    taxonomy = themes_cfg.get("taxonomy") or {}
+    counts = classify.classify_rules_deterministic(conn, taxonomy)
+    print(f"keyword: {counts['keyword']}, structural: {counts['structural']}")
+    if getattr(args, "llm_fallback", None) is None:
+        use_llm = bool(themes_cfg.get("llm_fallback"))
+    else:
+        use_llm = args.llm_fallback
+    if use_llm:
+        from . import batch as batch_mod
+
+        redact = Redactor.from_options(cfg["options"])
+        caller = _build_model_caller(args)
+        if caller is None:
+            return 1
+        def _print_progress(i: int, total: int) -> None:
+            print(f"classify-rules: {i}/{total} rows sent to the model")
+
+        result = classify.classify_rules_llm(
+            conn, caller, redact=redact, taxonomy=taxonomy, limit=getattr(args, "limit", None),
+            progress_callback=_print_progress,
+        )
+        print(f"llm reclassified: {result['reclassified']}")
+        narrative_opts = (cfg["options"] or {}).get("narrative") or {}
+        pricing = narrative_opts.get("pricing") or {}
+        cost_per_mtok_in = pricing.get("input_per_mtok")
+        cost_per_mtok_out = pricing.get("output_per_mtok")
+        print(f"tokens: {result['input_tokens']} in, {result['output_tokens']} out")
+        cost = batch_mod.estimate_cost(
+            result["input_tokens"], result["output_tokens"], cost_per_mtok_in, cost_per_mtok_out
+        )
+        if cost is not None:
+            print(f"cost: ${cost:.4f}")
+        else:
+            print("cost: unknown -- set options.narrative.pricing.input_per_mtok/output_per_mtok in project.yml")
     return 0
 
 
@@ -829,10 +962,15 @@ def cmd_validate(args) -> int:
         print(f"\n{len(res['completeness_problems'])} member(s) with incomplete rule coverage:")
         for p in res["completeness_problems"]:
             print(f"  - {p}")
+    if res["artifact_problems"]:
+        print(f"\n{len(res['artifact_problems'])} structural artifact(s) inconsistent with the fact store:")
+        for p in res["artifact_problems"]:
+            print(f"  - {p}")
     return 0 if (
         res["invalid_citations"] == 0
         and res["documents_ok"] == res["documents"]
         and not res["completeness_problems"]
+        and not res["artifact_problems"]
     ) else 1
 
 
@@ -972,6 +1110,8 @@ def main(argv=None) -> int:
     p.add_argument("--module")
     p.add_argument("--entity")
     p.add_argument("--system", action="store_true")
+    p.add_argument("--executive", help="member name; emits the cited-facts brief for the "
+                                        "executive-summary narrative template (templates/executive-summary.md)")
     p.add_argument("--out")
     p.set_defaults(func=cmd_brief)
 
@@ -979,6 +1119,50 @@ def main(argv=None) -> int:
     p.add_argument("--config", required=True)
     p.add_argument("--out", help="write to this path instead of stdout")
     p.set_defaults(func=cmd_rules_register)
+
+    p = sub.add_parser("gap-summary")
+    p.add_argument("--config", required=True)
+    p.add_argument("--out", help="write to this path instead of stdout")
+    p.set_defaults(func=cmd_gap_summary)
+
+    p = sub.add_parser("data-flow")
+    p.add_argument("--config", required=True)
+    p.add_argument("--out", help="write to this path instead of stdout")
+    p.set_defaults(func=cmd_data_flow)
+
+    p = sub.add_parser("call-graph")
+    p.add_argument("--config", required=True)
+    p.add_argument("--out", help="directory to write call-graph*.md files into; omit to print the inline diagram to stdout")
+    p.set_defaults(func=cmd_call_graph)
+
+    p = sub.add_parser("complexity")
+    p.add_argument("--config", required=True)
+    p.add_argument("--out", help="write to this path instead of stdout")
+    p.set_defaults(func=cmd_complexity)
+
+    p = sub.add_parser("rules-theme-register")
+    p.add_argument("--config", required=True)
+    p.add_argument("--out", help="write to this path instead of stdout")
+    p.set_defaults(func=cmd_rules_theme_register)
+
+    p = sub.add_parser("glossary")
+    p.add_argument("--config", required=True)
+    p.add_argument("--out", help="write to this path instead of stdout")
+    p.set_defaults(func=cmd_glossary)
+
+    p = sub.add_parser("classify-rules")
+    p.add_argument("--config", required=True)
+    p.add_argument("--llm-fallback", dest="llm_fallback", action="store_true", default=None,
+                    help="override options.overview.themes.llm_fallback from --config")
+    p.add_argument("--limit", type=int, default=None,
+                    help="cap how many structural rows are sent to the LLM in this run")
+    p.add_argument("--model", default=None)
+    p.add_argument("--caller", choices=["anthropic", "fake-echo"], default="anthropic")
+    p.add_argument("--provider", choices=["anthropic", "vertex", "claude-code"], default="anthropic")
+    p.add_argument("--gcp-project")
+    p.add_argument("--gcp-region")
+    p.add_argument("--claude-code-timeout", type=int, default=None)
+    p.set_defaults(func=cmd_classify_rules)
 
     p = sub.add_parser("test-plan")
     p.add_argument("--config", required=True)

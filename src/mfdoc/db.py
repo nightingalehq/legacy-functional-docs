@@ -254,6 +254,19 @@ CREATE TABLE IF NOT EXISTS rule_candidate (
 );
 CREATE INDEX IF NOT EXISTS ix_rule_member ON rule_candidate(member_id);
 
+-- Rule-theme classification: which business concept a rule_candidate
+-- belongs to, for the thematic rules-register rollup. UNIQUE on
+-- rule_candidate_id so re-classifying after a taxonomy edit is an
+-- upsert (INSERT ... ON CONFLICT), never an ever-growing history.
+CREATE TABLE IF NOT EXISTS rule_theme (
+    id                INTEGER PRIMARY KEY,
+    rule_candidate_id INTEGER NOT NULL REFERENCES rule_candidate(id),
+    theme             TEXT NOT NULL,
+    source            TEXT NOT NULL,   -- keyword | llm | structural
+    UNIQUE(rule_candidate_id)
+);
+CREATE INDEX IF NOT EXISTS ix_rule_theme_theme ON rule_theme(theme);
+
 -- Error / message handling, useful for surfacing user-visible business messages
 CREATE TABLE IF NOT EXISTS message_ref (
     id            INTEGER PRIMARY KEY,
@@ -485,6 +498,17 @@ def purge_member_facts(conn, member_id: int) -> None:
     incorrectly null out cross-references from *other* members that are
     still valid because this member still exists.
     """
+    # rule_theme.rule_candidate_id references rule_candidate(id), but
+    # rule_theme carries no member_id of its own -- it isn't reachable by
+    # the member_id-keyed loop below. Must run before the rule_candidate
+    # DELETE removes the rows this join needs, or a later re-ingest that
+    # lets SQLite reuse one of those freed rowids for an unrelated new
+    # rule_candidate would silently inherit this orphaned theme.
+    conn.execute(
+        "DELETE FROM rule_theme WHERE rule_candidate_id IN "
+        "(SELECT id FROM rule_candidate WHERE member_id=?)",
+        (member_id,),
+    )
     for table in _MEMBER_OWNED_TABLES:
         conn.execute(f"DELETE FROM {table} WHERE member_id=?", (member_id,))
     conn.execute("DELETE FROM gap WHERE member_id=?", (member_id,))
