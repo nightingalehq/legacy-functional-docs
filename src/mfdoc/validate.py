@@ -18,6 +18,13 @@ from pathlib import Path
 
 import yaml
 
+from .conditions import (
+    FAILURE_WORDS,
+    SUCCESS_WORDS,
+    comparisons_in,
+    invert,
+    prose_polarity,
+)
 from .db import insert
 from .testlang import sidecar_path_for
 
@@ -135,6 +142,104 @@ def _split_frontmatter(text: str) -> tuple[dict | None, str, str | None]:
     return fm, parts[2], None
 
 
+def _containing_sentence(body: str, start: int, end: int) -> str:
+    """The sentence in `body` that spans byte offset `start`..`end`.
+
+    Reuses `SENTENCE_SPLIT` (the same boundary `_logical_units` splits on) so
+    a citation's surrounding claim is read the same way whether checked for
+    an uncited assertion or for a reversed comparison. Falls back to the
+    whole enclosing paragraph if no sentence boundary is found, which is
+    always at least as much text as the citation itself sits in.
+    """
+    para_start = body.rfind("\n\n", 0, start)
+    para_start = 0 if para_start == -1 else para_start + 2
+    para_end = body.find("\n\n", end)
+    para_end = len(body) if para_end == -1 else para_end
+    para = body[para_start:para_end]
+    rel_start = start - para_start
+
+    bounds = [0] + [m.start() for m in SENTENCE_SPLIT.finditer(para)] + [len(para)]
+    for lo, hi in zip(bounds, bounds[1:]):
+        if lo <= rel_start < hi:
+            return para[lo:hi]
+    return para
+
+
+def _reversed_condition_problems(
+    conn, member: str, member_id: int, lf: int, lt: int | None, body: str, cite_start: int, cite_end: int
+) -> list[str]:
+    """Flag a citation whose surrounding sentence describes an equality
+    comparison in the opposite direction from the `rule_candidate` condition(s)
+    it cites.
+
+    Only fires for "outcome" fields (`conditions.OUTCOME_FIELD`) compared
+    against a literal -- the failure mode this exists for is a reversed
+    pass/fail interpretation, not general narration imprecision. A citation
+    range spanning an `IF` and its paired `ELSE` is resolved against whichever
+    branch the sentence's own wording (`SUCCESS_WORDS`/`FAILURE_WORDS`)
+    describes; with no such hint, only the `IF`'s own condition is checked --
+    guessing which branch an ambiguous sentence means is worse than not
+    checking it at all.
+    """
+    hi = lt or lf
+    rows = conn.execute(
+        "SELECT line_no, construct, condition, pair_line_no FROM rule_candidate "
+        "WHERE member_id=? AND line_no BETWEEN ? AND ?",
+        (member_id, lf, hi),
+    ).fetchall()
+    if not rows:
+        return []
+
+    if_comparisons: list[tuple[int, dict]] = []
+    else_comparisons: list[tuple[int, dict]] = []
+    for row in rows:
+        if row["construct"] == "IF":
+            if_comparisons.extend((row["line_no"], c) for c in comparisons_in(row["condition"]))
+        elif row["construct"] == "ELSE" and row["pair_line_no"] is not None:
+            if_row = conn.execute(
+                "SELECT condition FROM rule_candidate WHERE member_id=? AND line_no=? AND construct='IF'",
+                (member_id, row["pair_line_no"]),
+            ).fetchone()
+            if if_row is not None:
+                else_comparisons.extend(
+                    (row["line_no"], {**c, "polarity": invert(c["polarity"])})
+                    for c in comparisons_in(if_row["condition"])
+                )
+
+    if not if_comparisons and not else_comparisons:
+        return []
+
+    sentence = _containing_sentence(body, cite_start, cite_end)
+    success_hint = bool(SUCCESS_WORDS.search(sentence)) and not FAILURE_WORDS.search(sentence)
+    failure_hint = bool(FAILURE_WORDS.search(sentence)) and not SUCCESS_WORDS.search(sentence)
+
+    if success_hint and else_comparisons:
+        candidates = else_comparisons
+    elif failure_hint or not else_comparisons:
+        candidates = if_comparisons
+    else:
+        candidates = if_comparisons or else_comparisons
+
+    problems = []
+    seen = set()
+    for line_no, c in candidates:
+        key = (line_no, c["field"], c["literal"])
+        if key in seen:
+            continue
+        claimed = prose_polarity(sentence, c["literal"])
+        if claimed is None or claimed == c["polarity"]:
+            continue
+        seen.add(key)
+        actual = "equals" if c["polarity"] == "eq" else "does not equal"
+        claimed_as = "equals" if claimed == "eq" else "does not equal"
+        problems.append(
+            f"comparison direction may be reversed near [[{member}:{line_no}]]: "
+            f"text reads as though {c['field']} {claimed_as} '{c['literal']}', "
+            f"but the source condition means {c['field']} {actual} '{c['literal']}'"
+        )
+    return problems
+
+
 def validate_doc(conn, path: Path) -> dict:
     text = path.read_text(encoding="utf-8")
     problems: list[str] = []
@@ -159,6 +264,15 @@ def validate_doc(conn, path: Path) -> dict:
                     problems.append(f"confidence_summary key '{k}' not one of {sorted(VALID_CONFIDENCE)}")
         else:
             problems.append("confidence_summary should be a mapping of confidence level to count")
+
+    # Scoped to narrative module docs only. A generated-test doc or a flat
+    # register echoes source syntax and field-inventory phrasing verbatim,
+    # sentence-per-YAML-field rather than sentence-per-claim -- the same
+    # literal recurs across several adjacent lines with different framing
+    # each time (a precondition, a Given, a When), which defeats the
+    # single-nearest-occurrence assumption this check relies on and would
+    # make it noise rather than signal outside the doc type it was built for.
+    check_reversed_conditions = fm is not None and fm.get("doc_type") == "module"
 
     conn.execute("DELETE FROM doc_claim WHERE doc_path=?", (str(path),))
 
@@ -207,6 +321,12 @@ def validate_doc(conn, path: Path) -> dict:
             maxline = row["maxline"] or 0
             if lf < 1 or lf > maxline or (lt and lt > maxline):
                 valid, note = 0, f"line {lf}{'-' + str(lt) if lt and lt != lf else ''} outside 1..{maxline}"
+            elif check_reversed_conditions:
+                problems.extend(
+                    _reversed_condition_problems(
+                        conn, member, row["id"], lf, lt, body, m.start(), m.end()
+                    )
+                )
         insert(conn, "doc_claim", doc_path=str(path), confidence="verified",
                citation=m.group(0), member_name=member, line_from=lf, line_to=lt,
                valid=valid, note=note)
