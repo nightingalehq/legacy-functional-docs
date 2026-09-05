@@ -13,6 +13,7 @@ Every rule ends up classified; nothing is silently dropped.
 from __future__ import annotations
 
 import re
+from typing import Callable
 
 from .batch import ModelCaller
 from .redact import NULL_REDACTOR, Redactor
@@ -100,6 +101,7 @@ def classify_rules_llm(
     redact: Redactor = NULL_REDACTOR,
     taxonomy: dict[str, list[str]] | None = None,
     limit: int | None = None,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> dict:
     """Ask the model for a one-word theme for every rule_candidate still
     classified 'structural' (the keyword taxonomy didn't match it).
@@ -132,12 +134,16 @@ def classify_rules_llm(
 
     `limit`, if given, caps how many eligible rows are sent to the model
     in this call -- useful for bounding a first run against an unknown
-    project's rule count. Every `_PROGRESS_INTERVAL`th row prints a
-    running progress line, and the returned dict reports
-    `input_tokens`/`output_tokens` accumulated from each call's
-    `ModelResponse` (previously discarded) alongside the reclassified
-    count, so a caller can report usage/cost the same way `mfdoc batch`
-    does.
+    project's rule count. Every `_PROGRESS_INTERVAL`th row (and the last
+    row) invokes `progress_callback(i, total)` if one is given -- this
+    module is library code, not the CLI, so it never prints directly
+    (see batch.py/structural.py for the same convention); `cmd_classify_
+    rules` in cli.py passes a callback that does the actual printing.
+    Omitting the callback produces no output at all, just the return
+    value below. The returned dict reports `input_tokens`/`output_tokens`
+    accumulated from each call's `ModelResponse` (previously discarded)
+    alongside the reclassified count, so a caller can report usage/cost
+    the same way `mfdoc batch` does.
     """
     taxonomy_lookup = {theme.lower(): theme for theme in taxonomy} if taxonomy else None
     rows = conn.execute(
@@ -188,8 +194,8 @@ def classify_rules_llm(
         reclassified += 1
         if i % _COMMIT_BATCH_SIZE == 0:
             conn.commit()
-        if i % _PROGRESS_INTERVAL == 0 or i == total:
-            print(f"classify-rules: {i}/{total} rows sent to the model")
+        if progress_callback is not None and (i % _PROGRESS_INTERVAL == 0 or i == total):
+            progress_callback(i, total)
     conn.commit()
     return {
         "reclassified": reclassified,

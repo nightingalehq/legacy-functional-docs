@@ -362,8 +362,12 @@ def cmd_classify_rules(args) -> int:
         caller = _build_model_caller(args)
         if caller is None:
             return 1
+        def _print_progress(i: int, total: int) -> None:
+            print(f"classify-rules: {i}/{total} rows sent to the model")
+
         result = classify.classify_rules_llm(
             conn, caller, redact=redact, taxonomy=taxonomy, limit=getattr(args, "limit", None),
+            progress_callback=_print_progress,
         )
         print(f"llm reclassified: {result['reclassified']}")
         narrative_opts = (cfg["options"] or {}).get("narrative") or {}

@@ -266,6 +266,51 @@ def test_llm_limit_caps_rows_sent_to_model(indexed_db):
     assert result["reclassified"] == 2
 
 
+def test_llm_progress_callback_receives_row_and_total(indexed_db, monkeypatch):
+    """classify_rules_llm must never print directly (library-code/CLI
+    print-only-in-cli.py convention, see batch.py/structural.py) -- an
+    optional progress_callback(i, total) is invoked instead, at the same
+    cadence the old print() used. Lower _PROGRESS_INTERVAL to 1 so every
+    row invokes the callback, and assert the exact (row, total) sequence
+    a caller sees."""
+    conn = indexed_db
+    classify.classify_rules_deterministic(conn, taxonomy={})
+    structural_count = conn.execute(
+        "SELECT COUNT(*) FROM rule_theme WHERE source='structural'"
+    ).fetchone()[0]
+    assert structural_count >= 2, "fixture needs >=2 structural rows to exercise a multi-call sequence"
+
+    monkeypatch.setattr(classify, "_PROGRESS_INTERVAL", 1)
+
+    def fake_caller(prompt: str):
+        from mfdoc.batch import ModelResponse
+        return ModelResponse(text="posting", input_tokens=0, output_tokens=0)
+
+    seen: list[tuple[int, int]] = []
+    result = classify.classify_rules_llm(
+        conn, fake_caller, progress_callback=lambda i, total: seen.append((i, total))
+    )
+    assert seen == [(i, structural_count) for i in range(1, structural_count + 1)]
+    assert result["reclassified"] == structural_count
+
+
+def test_llm_no_progress_callback_produces_no_stdout(indexed_db, capsys):
+    """Omitting progress_callback must produce no output at all -- this
+    module is library code, not the CLI, and printing directly would
+    violate the print-only-in-cli.py convention."""
+    conn = indexed_db
+    classify.classify_rules_deterministic(conn, taxonomy={})
+
+    def fake_caller(prompt: str):
+        from mfdoc.batch import ModelResponse
+        return ModelResponse(text="posting", input_tokens=0, output_tokens=0)
+
+    classify.classify_rules_llm(conn, fake_caller)
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+
+
 def test_llm_casing_matches_taxonomy_key_exactly(indexed_db):
     """Finding 8: a capitalized taxonomy key (e.g. "Posting") must be stored
     with its own exact casing when the model's (lowercased) response matches
