@@ -291,3 +291,53 @@ def test_compress_folds_into_clause_on_its_own_continuation_line(indexed_db):
     assert "INTO #MESSAGE" in row["condition"], (
         f"INTO clause not folded into the COMPRESS condition: {row['condition']!r}"
     )
+
+
+def test_bare_boolean_assignment_is_captured_as_a_rule_candidate():
+    """`#FLAG := TRUE` has no quoted string or number -- `TRUE`/`FALSE` are
+    bare Natural keywords, invisible to mask_literals/NUMLIT alike -- but a
+    boolean flag assignment is exactly the fixed-value business decision
+    _match_arithmetic exists to capture, the same as a status code or a
+    return code would be."""
+    conn = _extract("#FLAG := TRUE\n")
+    row = conn.execute(
+        "SELECT construct, literals, fields_used FROM rule_candidate WHERE line_no=1"
+    ).fetchone()
+    assert row is not None, "expected #FLAG := TRUE to be captured as a rule_candidate"
+    assert row["construct"] == "ASSIGN"
+    assert row["literals"] == "TRUE"
+    assert row["fields_used"] == "FLAG"
+
+
+def test_bare_boolean_false_assignment_is_captured():
+    conn = _extract("#FLAG := FALSE\n")
+    row = conn.execute(
+        "SELECT literals FROM rule_candidate WHERE line_no=1"
+    ).fetchone()
+    assert row is not None
+    assert row["literals"] == "FALSE"
+
+
+def test_if_condition_against_true_records_true_as_a_literal():
+    """An `IF #FLAG = TRUE` condition previously recorded `literals=None` --
+    the same gap as the ASSIGN case, just on the read side rather than the
+    write side. Fixing _condition_facts fixes both from one place."""
+    conn = _extract("IF #FLAG = TRUE\n  IGNORE\nEND-IF\n")
+    row = conn.execute(
+        "SELECT literals, fields_used FROM rule_candidate WHERE line_no=1 AND construct='IF'"
+    ).fetchone()
+    assert row is not None
+    assert row["literals"] == "TRUE"
+    assert row["fields_used"] == "FLAG"
+
+
+def test_boolean_literal_match_does_not_fire_inside_an_unrelated_identifier():
+    """`TRUE`/`FALSE` must only match as their own token -- not as a
+    substring of a longer field/variable name that happens to contain one
+    (e.g. a field literally named `#TRUEUP-FLAG`)."""
+    conn = _extract("#TRUEUP-FLAG := 1\n")
+    row = conn.execute(
+        "SELECT literals FROM rule_candidate WHERE line_no=1"
+    ).fetchone()
+    assert row is not None
+    assert row["literals"] == "1"

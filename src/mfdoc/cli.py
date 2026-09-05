@@ -941,10 +941,11 @@ def cmd_gate(args) -> int:
 
 
 def cmd_validate(args) -> int:
+    from .conditions import outcome_field_from_options
     from .validate import validate_tree
     cfg = load_config(args.config)
     conn = connect(Path(args.config).parent / cfg["index_db"])
-    res = validate_tree(conn, Path(args.docs))
+    res = validate_tree(conn, Path(args.docs), outcome_field=outcome_field_from_options(cfg["options"]))
     for r in res["results"]:
         status = "OK " if r["ok"] else "FAIL"
         print(f"{status} {r['path']}  citations={r['citations']} invalid={r['invalid_citations']}")

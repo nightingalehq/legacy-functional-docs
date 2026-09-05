@@ -6,6 +6,7 @@ must accept unchanged.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from pathlib import Path
 
@@ -252,6 +253,116 @@ def test_validator_accepts_correctly_stated_failure_condition(tmp_path):
     )
     result = validate_doc(conn, doc)
     assert not any("comparison direction may be reversed" in p for p in result["problems"])
+
+
+def test_validator_flags_reversed_relational_condition(tmp_path):
+    """`#RETURN-CODE > '4'` means the failure path; a sentence describing the
+    success path as `#RETURN-CODE` being greater than '4' has the relational
+    direction backwards, the same class of bug as a reversed eq/ne."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    mid = insert(conn, "member", name="TESTREL", dialect="natural", object_type="subprogram")
+    lines = [
+        "IF #RETURN-CODE > '4'",
+        "  BACKOUT TRANSACTION",
+        "ELSE",
+        "  END TRANSACTION",
+        "END-IF",
+    ]
+    natural.extract(conn, mid, [(i + 1, None, line) for i, line in enumerate(lines)], "TESTREL")
+    conn.commit()
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        COND_FRONTMATTER.replace("TESTCOND", "TESTREL")
+        + "\nOn success (`#RETURN-CODE` greater than `'4'`), the transaction "
+          "completes [[TESTREL:1-5]].\n"
+    )
+    result = validate_doc(conn, doc)
+    assert not result["ok"]
+    assert any("comparison direction may be reversed" in p for p in result["problems"])
+
+
+def test_validator_accepts_correctly_stated_relational_condition(tmp_path):
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    mid = insert(conn, "member", name="TESTREL", dialect="natural", object_type="subprogram")
+    lines = [
+        "IF #RETURN-CODE > '4'",
+        "  BACKOUT TRANSACTION",
+        "ELSE",
+        "  END TRANSACTION",
+        "END-IF",
+    ]
+    natural.extract(conn, mid, [(i + 1, None, line) for i, line in enumerate(lines)], "TESTREL")
+    conn.commit()
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        COND_FRONTMATTER.replace("TESTCOND", "TESTREL")
+        + "\nWhen the transaction fails (`#RETURN-CODE` greater than `'4'`), "
+          "it is backed out [[TESTREL:1-2]].\n"
+    )
+    result = validate_doc(conn, doc)
+    assert not any("comparison direction may be reversed" in p for p in result["problems"])
+
+
+def test_validator_flags_reversed_field_to_field_condition(tmp_path):
+    """`#RETURN-CODE = #EXPECTED-CODE` (no literal on either side) must still
+    be checkable when the narrative names both fields directly."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    mid = insert(conn, "member", name="TESTF2F", dialect="natural", object_type="subprogram")
+    conn.execute(
+        "INSERT INTO source_line (member_id, line_no, text) VALUES (?, 1, ?)",
+        (mid, "IF #RETURN-CODE = #EXPECTED-CODE"),
+    )
+    insert(
+        conn, "rule_candidate", member_id=mid, line_no=1, construct="IF",
+        condition="IF #RETURN-CODE = #EXPECTED-CODE", raw="IF #RETURN-CODE = #EXPECTED-CODE",
+    )
+    conn.commit()
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        COND_FRONTMATTER.replace("TESTCOND", "TESTF2F")
+        + "\nThe transaction succeeds when `#RETURN-CODE` is not `#EXPECTED-CODE` "
+          "[[TESTF2F:1]].\n"
+    )
+    result = validate_doc(conn, doc)
+    assert not result["ok"]
+    assert any("comparison direction may be reversed" in p for p in result["problems"])
+
+
+def test_validator_supports_a_custom_outcome_field_pattern(tmp_path):
+    """A project with different outcome-field naming conventions gets
+    coverage from this check by supplying its own pattern, instead of
+    silently getting none because the field name doesn't match the built-in
+    denylist."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    mid = insert(conn, "member", name="TESTCUSTOM", dialect="natural", object_type="subprogram")
+    lines = [
+        "IF #RESULT NE '0000'",
+        "  BACKOUT TRANSACTION",
+        "ELSE",
+        "  END TRANSACTION",
+        "END-IF",
+    ]
+    natural.extract(conn, mid, [(i + 1, None, line) for i, line in enumerate(lines)], "TESTCUSTOM")
+    conn.commit()
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        COND_FRONTMATTER.replace("TESTCOND", "TESTCUSTOM")
+        + "\nOn success (`#RESULT` not `'0000'`), the message is shown "
+          "[[TESTCUSTOM:1-5]].\n"
+    )
+    custom = re.compile(r"\bRESULT\b", re.IGNORECASE)
+    default_result = validate_doc(conn, doc)
+    assert not any("comparison direction may be reversed" in p for p in default_result["problems"])
+    custom_result = validate_doc(conn, doc, outcome_field=custom)
+    assert any("comparison direction may be reversed" in p for p in custom_result["problems"])
 
 
 def test_validator_ignores_reversed_wording_on_a_non_outcome_field(tmp_path):
@@ -544,3 +655,42 @@ def test_validator_accepts_a_lower_level_heading_as_the_opening_line(indexed_db,
     )
     result = validate_doc(indexed_db, doc)
     assert not any("does not open with a top-level" in p for p in result["problems"])
+
+
+def test_validator_accepts_a_sentence_that_quotes_the_raw_ne_condition_before_explaining_it(tmp_path):
+    """Regression: a sentence describing an IF's own condition often quotes
+    it verbatim right next to the citation, then explains it in English
+    afterward -- "`IF #RETURN-CODE NE '0000'` [[TESTCOND:1]] (the condition
+    tests inequality...)". The first occurrence of the literal is the raw
+    quotation; its own `NE` must be read as negation, not overridden by
+    treating the sentence as claiming equality by default."""
+    conn = _member_with_return_code_if_else()
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        COND_FRONTMATTER
+        + "\nThe routine checks `IF #RETURN-CODE NE '0000'` [[TESTCOND:1]] "
+          "(the condition tests inequality -- not equal to '0000' -- so the "
+          "failure branch below fires when a real error code has been set).\n"
+    )
+    result = validate_doc(conn, doc)
+    assert not any("comparison direction may be reversed" in p for p in result["problems"]), result["problems"]
+
+
+def test_validator_reads_the_real_sentence_when_a_trailing_citation_is_split_into_its_own_unit(tmp_path):
+    """Regression: a numbered-list rule bullet with no blank line before the
+    next item, whose only citation trails right after the closing period,
+    gets that citation split into its own near-empty unit by SENTENCE_SPLIT
+    -- the reversed-condition check must still read the real preceding
+    sentence, not just the orphaned citation fragment, or every such
+    citation looks like it has no polarity claim to check at all and a real
+    reversal there would go undetected."""
+    conn = _member_with_return_code_if_else()
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        COND_FRONTMATTER
+        + "\n31. **Entries are skipped unless the code equals `'0000'`** -- "
+          "entries not in code `'0000'` are skipped. [[TESTCOND:1-6]]\n"
+          "32. Something unrelated follows immediately, no blank line above.\n"
+    )
+    result = validate_doc(conn, doc)
+    assert not any("comparison direction may be reversed" in p for p in result["problems"]), result["problems"]

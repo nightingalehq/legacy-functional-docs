@@ -4422,119 +4422,125 @@
     {
       "id": 108,
       "scope": "global",
+      "name": "derived.shadowed_assignments",
+      "value": "0"
+    },
+    {
+      "id": 109,
+      "scope": "global",
       "name": "coverage.members",
       "value": "23"
     },
     {
-      "id": 109,
+      "id": 110,
       "scope": "global",
       "name": "coverage.code_members",
       "value": "15"
     },
     {
-      "id": 110,
+      "id": 111,
       "scope": "global",
       "name": "coverage.source_lines",
       "value": "446"
     },
     {
-      "id": 111,
+      "id": 112,
       "scope": "global",
       "name": "coverage.unparsed_lines",
       "value": "11"
     },
     {
-      "id": 112,
+      "id": 113,
       "scope": "global",
       "name": "coverage.line_recognition_rate",
       "value": "0.9753"
     },
     {
-      "id": 113,
+      "id": 114,
       "scope": "global",
       "name": "coverage.entities",
       "value": "13"
     },
     {
-      "id": 114,
+      "id": 115,
       "scope": "global",
       "name": "coverage.entities_with_definition",
       "value": "9"
     },
     {
-      "id": 115,
+      "id": 116,
       "scope": "global",
       "name": "coverage.entity_definition_rate",
       "value": "0.6923"
     },
     {
-      "id": 116,
+      "id": 117,
       "scope": "global",
       "name": "coverage.entity_fields",
       "value": "46"
     },
     {
-      "id": 117,
+      "id": 118,
       "scope": "global",
       "name": "coverage.data_accesses",
       "value": "14"
     },
     {
-      "id": 118,
+      "id": 119,
       "scope": "global",
       "name": "coverage.rule_candidates",
       "value": "44"
     },
     {
-      "id": 119,
+      "id": 120,
       "scope": "global",
       "name": "coverage.invocation_edges",
       "value": "13"
     },
     {
-      "id": 120,
+      "id": 121,
       "scope": "global",
       "name": "coverage.invocations_resolved",
       "value": "2"
     },
     {
-      "id": 121,
+      "id": 122,
       "scope": "global",
       "name": "coverage.call_resolution_rate",
       "value": "0.1538"
     },
     {
-      "id": 122,
+      "id": 123,
       "scope": "global",
       "name": "coverage.dynamic_call_edges",
       "value": "1"
     },
     {
-      "id": 123,
+      "id": 124,
       "scope": "global",
       "name": "coverage.include_edges",
       "value": "10"
     },
     {
-      "id": 124,
+      "id": 125,
       "scope": "global",
       "name": "coverage.includes_resolved",
       "value": "1"
     },
     {
-      "id": 125,
+      "id": 126,
       "scope": "global",
       "name": "coverage.include_resolution_rate",
       "value": "0.1"
     },
     {
-      "id": 126,
+      "id": 127,
       "scope": "global",
       "name": "coverage.gaps_high",
       "value": "21"
     },
     {
-      "id": 127,
+      "id": 128,
       "scope": "global",
       "name": "coverage.gaps_total",
       "value": "137"

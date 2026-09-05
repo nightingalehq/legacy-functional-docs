@@ -198,6 +198,14 @@ class DocResult:
     # not retry attempts on a single call -- keeps BatchSummary.retried from
     # mischarging a 3-chunk member with zero actual retries as "retried".
     chunked: bool = False
+    # Populated only by _generate_module_doc_chunked: {"<chunk index>":
+    # {"ok": bool, "brief_sha256": str}} for every chunk this run touched
+    # (skipped or freshly rendered) -- run_batch persists this under the
+    # member's own state entry so a later run can skip a chunk whose own
+    # rule-range brief is unchanged, instead of the member-level resume
+    # check's all-or-nothing choice between reusing every chunk or
+    # re-rendering all of them.
+    chunk_state: dict | None = None
 
 
 def _generate_module_doc_from_brief(conn, member_name: str, brief: str, out_path: Path,
@@ -323,7 +331,8 @@ def _render_module_chunk_index(member_name: str, system: str | None,
 def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rule_rows: list,
                                   out_path: Path, caller: ModelCaller, writing_rules: str,
                                   template: str, redact: Redactor, lexicon: dict[str, str] | None,
-                                  max_attempts: int, chunk_size: int) -> DocResult:
+                                  max_attempts: int, chunk_size: int,
+                                  prior_chunks: dict | None = None) -> DocResult:
     """Render one member as several independent chunk documents plus a
     deterministic index doc at `out_path`, instead of asking one completion
     to cover the member's whole rule set. Each chunk goes through the exact
@@ -332,7 +341,16 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
     module_brief's `rule_range` (see routine_aware_chunk_ranges) -- so one
     bad chunk retries and reports on its own, rather than forcing a
     full-member re-generation, and (short of a single oversized routine)
-    no chunk's prompt asks for much more than a normal small member's."""
+    no chunk's prompt asks for much more than a normal small member's.
+
+    `prior_chunks` (from a previous run's state, keyed by chunk index as a
+    string) lets a chunk whose own rule-range brief is unchanged from that
+    prior run -- and whose file on disk still validates -- skip the model
+    call entirely and reuse the existing file, rather than the member-level
+    resume check's only choice: reuse every chunk (if the whole member's
+    combined brief hash is unchanged) or re-render all of them. This is
+    what makes a fix affecting only one routine's worth of source cheap to
+    pick up: only the chunk(s) whose own brief actually changed re-render."""
     ranges = routine_aware_chunk_ranges(
         [r["line_no"] for r in rule_rows], fetch_routines(conn, rule_rows[0]["member_id"]), chunk_size,
     )
@@ -340,6 +358,7 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
     input_tokens = output_tokens = 0
     chunk_entries: list[tuple[int, tuple[int, int], Path, DocResult]] = []
     problems: list[str] = []
+    chunk_state: dict[str, dict] = {}
 
     for i, (start, end) in enumerate(ranges, start=1):
         chunk_path = out_path.with_name(f"{out_path.stem}.chunk{i}{out_path.suffix}")
@@ -347,13 +366,30 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
             conn, member_name, redact=redact, lexicon=lexicon,
             rule_range=(start, end), chunk_info=(i, chunk_count),
         )
-        result = _generate_module_doc_from_brief(
-            conn, member_name, brief, chunk_path, caller, writing_rules, template,
-            max_attempts=max_attempts,
+        brief_hash = hashlib.sha256(brief.encode("utf-8")).hexdigest()
+        prior_chunk = (prior_chunks or {}).get(str(i))
+        reusable = (
+            isinstance(prior_chunk, dict) and prior_chunk.get("brief_sha256") == brief_hash
+            and chunk_path.exists()
         )
+        if reusable:
+            # Re-validate rather than trust the stored "ok" flag verbatim --
+            # the *content* is cached, but validate_doc's own logic can have
+            # changed since it was last checked, and this costs no model call.
+            revalidated = validate_doc(conn, chunk_path)
+            result = DocResult(
+                member_name, str(chunk_path), revalidated["ok"], 0, 0, 0,
+                revalidated["problems"],
+            )
+        else:
+            result = _generate_module_doc_from_brief(
+                conn, member_name, brief, chunk_path, caller, writing_rules, template,
+                max_attempts=max_attempts,
+            )
         input_tokens += result.input_tokens
         output_tokens += result.output_tokens
         chunk_entries.append((i, (start, end), chunk_path, result))
+        chunk_state[str(i)] = {"ok": result.ok, "brief_sha256": brief_hash}
         if not result.ok:
             problems.append(f"chunk {i}/{chunk_count} ({chunk_path.name}) failed: " + "; ".join(result.problems))
 
@@ -374,14 +410,15 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
 
     return DocResult(
         member_name, str(out_path), not problems, chunk_count, input_tokens, output_tokens,
-        problems, chunked=True,
+        problems, chunked=True, chunk_state=chunk_state,
     )
 
 
 def generate_module_doc(conn, member_name: str, out_path: Path, caller: ModelCaller,
                          writing_rules: str, template: str, redact: Redactor = NULL_REDACTOR,
                          max_attempts: int = 2, lexicon: dict[str, str] | None = None,
-                         max_rules_per_call: int | None = None) -> DocResult:
+                         max_rules_per_call: int | None = None,
+                         prior_chunks: dict | None = None) -> DocResult:
     """Single-member version of the harness: brief -> call -> validate ->
     retry once. Used directly for one-off generation and by run_batch's
     per-item work (with the model call itself dispatched to a thread pool
@@ -402,6 +439,7 @@ def generate_module_doc(conn, member_name: str, out_path: Path, caller: ModelCal
         return _generate_module_doc_chunked(
             conn, member_name, system["system"] if system else None, rows, out_path, caller,
             writing_rules, template, redact, lexicon, max_attempts, threshold,
+            prior_chunks=prior_chunks,
         )
 
     brief = module_brief(conn, member_name, redact=redact, lexicon=lexicon)
@@ -643,12 +681,17 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
             state[state_key] = {"ok": result.ok, "attempts": attempts, "brief_sha256": brief_hash}
 
     for name, brief_hash, out_path, state_key in to_run_chunked:
+        prior = state.get(state_key)
+        prior_chunks = prior.get("chunks") if isinstance(prior, dict) else None
         result = generate_module_doc(
             conn, name, out_path, caller, writing_rules, template, redact=redact,
-            lexicon=lexicon, max_rules_per_call=threshold,
+            lexicon=lexicon, max_rules_per_call=threshold, prior_chunks=prior_chunks,
         )
         results.append(result)
-        state[state_key] = {"ok": result.ok, "attempts": result.attempts, "brief_sha256": brief_hash}
+        state[state_key] = {
+            "ok": result.ok, "attempts": result.attempts, "brief_sha256": brief_hash,
+            "chunks": result.chunk_state,
+        }
 
     if state_path:
         state["_corpus_sha256"] = corpus_sig

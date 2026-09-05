@@ -76,6 +76,15 @@ options:
   #   natural:
   #     - '^\*+\s*>{2,}\s*(?P<type>\w+)?\s*(?P<name>[A-Z0-9#\-_&$]{1,32})\s*<{2,}'
 
+  # mfdoc validate's reversed-condition check (conditions.py). Deliberately
+  # no default here beyond the built-in RETURN-CODE/RESPONSE-CODE/STATUS/
+  # STAT/FLAG/RC denylist -- set this only if this codebase's outcome fields
+  # (return/response/status codes, flags) use different naming conventions
+  # the built-in pattern doesn't cover; a supplied pattern replaces the
+  # built-in one rather than extending it.
+  validate: {}
+  #   outcome_field_pattern: '\bRESULT\b'
+
   # Thresholds that decide whether a run is fit to build narrative on. These are
   # starting points; tighten them once you have a baseline for the codebase.
   quality_gates:
