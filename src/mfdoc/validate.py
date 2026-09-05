@@ -22,6 +22,7 @@ import yaml
 from .brief import _rule_id, fetch_rule_candidate_rows
 from .conditions import (
     FAILURE_WORDS,
+    OUTCOME_FIELD,
     SUCCESS_WORDS,
     comparisons_in,
     invert,
@@ -202,21 +203,37 @@ def _containing_sentence(body: str, start: int, end: int) -> str:
     return para
 
 
-def _reversed_condition_problems(
-    conn, member: str, member_id: int, lf: int, lt: int | None, body: str, cite_start: int, cite_end: int
-) -> list[str]:
-    """Flag a citation whose surrounding sentence describes an equality
-    comparison in the opposite direction from the `rule_candidate` condition(s)
-    it cites.
+# polarity -> narrative wording, for building the finding message. Covers
+# every polarity `conditions.comparisons_in` can produce.
+_POLARITY_WORDS = {
+    "eq": "equals", "ne": "does not equal",
+    "gt": "is greater than", "lt": "is less than",
+    "ge": "is at least", "le": "is at most",
+}
 
-    Only fires for "outcome" fields (`conditions.OUTCOME_FIELD`) compared
-    against a literal -- the failure mode this exists for is a reversed
-    pass/fail interpretation, not general narration imprecision. A citation
-    range spanning an `IF` and its paired `ELSE` is resolved against whichever
-    branch the sentence's own wording (`SUCCESS_WORDS`/`FAILURE_WORDS`)
-    describes; with no such hint, only the `IF`'s own condition is checked --
-    guessing which branch an ambiguous sentence means is worse than not
-    checking it at all.
+
+def _reversed_condition_problems(
+    conn, member: str, member_id: int, lf: int, lt: int | None, body: str, cite_start: int, cite_end: int,
+    outcome_field=OUTCOME_FIELD,
+) -> list[str]:
+    """Flag a citation whose surrounding sentence describes a comparison in
+    the opposite direction from the `rule_candidate` condition(s) it cites.
+
+    Only fires for "outcome" fields (`outcome_field`, defaulting to
+    `conditions.OUTCOME_FIELD`) -- the failure mode this exists for is a
+    reversed pass/fail interpretation, not general narration imprecision. A
+    citation range spanning an `IF` and its paired `ELSE` is resolved against
+    whichever branch the sentence's own wording (`SUCCESS_WORDS`/
+    `FAILURE_WORDS`) describes; with no such hint, only the `IF`'s own
+    condition is checked -- guessing which branch an ambiguous sentence means
+    is worse than not checking it at all.
+
+    Two comparison shapes reach this far (see `conditions.comparisons_in`):
+    field-vs-literal (`c["literal"]` set) and field-vs-field
+    (`c["other_field"]` set, `c["literal"]` `None`). For field-vs-field, the
+    narrative claim is read off the *other field's own identifier* appearing
+    in the sentence (stripped of its sigil) rather than a literal value --
+    there is no concrete value to search prose for otherwise.
     """
     hi = lt or lf
     rows = conn.execute(
@@ -231,7 +248,9 @@ def _reversed_condition_problems(
     else_comparisons: list[tuple[int, dict]] = []
     for row in rows:
         if row["construct"] == "IF":
-            if_comparisons.extend((row["line_no"], c) for c in comparisons_in(row["condition"]))
+            if_comparisons.extend(
+                (row["line_no"], c) for c in comparisons_in(row["condition"], outcome_field=outcome_field)
+            )
         elif row["construct"] == "ELSE" and row["pair_line_no"] is not None:
             if_row = conn.execute(
                 "SELECT condition FROM rule_candidate WHERE member_id=? AND line_no=? AND construct='IF'",
@@ -240,7 +259,7 @@ def _reversed_condition_problems(
             if if_row is not None:
                 else_comparisons.extend(
                     (row["line_no"], {**c, "polarity": invert(c["polarity"])})
-                    for c in comparisons_in(if_row["condition"])
+                    for c in comparisons_in(if_row["condition"], outcome_field=outcome_field)
                 )
 
     if not if_comparisons and not else_comparisons:
@@ -268,24 +287,26 @@ def _reversed_condition_problems(
     problems = []
     seen = set()
     for line_no, c in candidates:
-        key = (line_no, c["field"], c["literal"])
+        key = (line_no, c["field"], c["literal"], c["other_field"])
         if key in seen:
             continue
-        claimed = prose_polarity(sentence, c["literal"])
+        target = c["literal"] if c["literal"] is not None else c["other_field"].lstrip("#@$&")
+        claimed = prose_polarity(sentence, target)
         if claimed is None or claimed == c["polarity"]:
             continue
         seen.add(key)
-        actual = "equals" if c["polarity"] == "eq" else "does not equal"
-        claimed_as = "equals" if claimed == "eq" else "does not equal"
+        actual = _POLARITY_WORDS[c["polarity"]]
+        claimed_as = _POLARITY_WORDS[claimed]
+        described = f"'{c['literal']}'" if c["literal"] is not None else c["other_field"]
         problems.append(
             f"comparison direction may be reversed near [[{member}:{line_no}]]: "
-            f"text reads as though {c['field']} {claimed_as} '{c['literal']}', "
-            f"but the source condition means {c['field']} {actual} '{c['literal']}'"
+            f"text reads as though {c['field']} {claimed_as} {described}, "
+            f"but the source condition means {c['field']} {actual} {described}"
         )
     return problems
 
 
-def validate_doc(conn, path: Path) -> dict:
+def validate_doc(conn, path: Path, outcome_field=OUTCOME_FIELD) -> dict:
     text = path.read_text(encoding="utf-8")
     problems: list[str] = []
     fm, body, fm_err = _split_frontmatter(text)
@@ -378,7 +399,8 @@ def validate_doc(conn, path: Path) -> dict:
             elif check_reversed_conditions:
                 problems.extend(
                     _reversed_condition_problems(
-                        conn, member, row["id"], lf, lt, body, m.start(), m.end()
+                        conn, member, row["id"], lf, lt, body, m.start(), m.end(),
+                        outcome_field=outcome_field,
                     )
                 )
         insert(conn, "doc_claim", doc_path=str(path), confidence="verified",
@@ -545,8 +567,11 @@ def module_completeness_problems(conn, results: list[dict]) -> list[str]:
     return problems
 
 
-def validate_tree(conn, root: Path) -> dict:
-    results = [validate_doc(conn, p) for p in sorted(root.rglob("*.md")) if _is_pipeline_doc(p)]
+def validate_tree(conn, root: Path, outcome_field=OUTCOME_FIELD) -> dict:
+    results = [
+        validate_doc(conn, p, outcome_field=outcome_field)
+        for p in sorted(root.rglob("*.md")) if _is_pipeline_doc(p)
+    ]
     return {
         "documents": len(results),
         "documents_ok": sum(1 for r in results if r["ok"]),
