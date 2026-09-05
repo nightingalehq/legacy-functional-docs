@@ -62,9 +62,17 @@ def _name_mentioned(text: str, name: str) -> bool:
     even mid-name -- e.g. `\\bPGMX02\\b` would happily match inside
     `PGMX02-EXT`. `re.escape` is required since a target name may itself
     contain regex-special characters (`.`, `$`).
+
+    A trailing `.` only counts as a same-name continuation (blocking the
+    match, as in `PGMX02.EXT`) when another name-charset character follows
+    it -- a bare `.` immediately after the name is ordinary sentence-ending
+    punctuation (`"...calls PGMX02. It then..."`), not part of the name, and
+    must not hide a real mention.
     """
     pattern = re.compile(
-        rf"(?<![A-Z0-9#@$&.\-_]){re.escape(name)}(?![A-Z0-9#@$&.\-_])", re.I
+        rf"(?<![A-Z0-9#@$&.\-_]){re.escape(name)}"
+        rf"(?![A-Z0-9#@$&\-_]|\.[A-Z0-9#@$&\-_])",
+        re.I,
     )
     return bool(pattern.search(text))
 
@@ -229,6 +237,60 @@ def _containing_sentence(body: str, start: int, end: int) -> str:
     return para
 
 
+_STATEMENT_SOURCES = [
+    ("callee_name", "call_kind",
+     "SELECT line_no, call_kind, callee_name FROM call_edge "
+     "WHERE caller_id=? AND line_no BETWEEN ? AND ? AND dynamic=0 "
+     "AND callee_name IS NOT NULL AND callee_name != ''"),
+    ("target", "kind",
+     "SELECT line_no, kind, target FROM interaction "
+     "WHERE member_id=? AND line_no BETWEEN ? AND ? "
+     "AND target IS NOT NULL AND target != ''"),
+    ("entity_name", "verb",
+     "SELECT line_no, verb, entity_name FROM data_access "
+     "WHERE member_id=? AND line_no BETWEEN ? AND ? "
+     "AND entity_name IS NOT NULL AND entity_name != ''"),
+]
+
+
+def _statement_completeness_problems(
+    conn, member: str, member_id: int, lf: int, lt: int | None, body: str, cite_start: int, cite_end: int
+) -> list[str]:
+    """Flag a `call_edge`/`interaction`/`data_access` row inside a cited
+    range whose target name never appears anywhere in the paragraph citing
+    that range.
+
+    Deliberately paragraph-scoped, not sentence-scoped (unlike
+    `_reversed_condition_problems`): a branch's narration legitimately spans
+    several sentences in one paragraph (a setup sentence, then one sentence
+    per statement), and a target named two sentences after the citation is
+    still a real mention. `dynamic=1` call_edge rows are excluded at the SQL
+    level -- their target is a variable, not a literal name, so there is
+    nothing meaningful to search prose for.
+
+    Advisory only: the caller must not add these to `problems`. This is a
+    deliberately different shape of check from the ones already built (see
+    issue #59) and its false-positive rate against real generated docs is
+    not yet known.
+    """
+    hi = lt or lf
+    para, _ = _containing_paragraph(body, cite_start, cite_end)
+
+    range_str = f"{lf}{'-' + str(lt) if lt and lt != lf else ''}"
+    problems = []
+    for target_col, kind_col, sql in _STATEMENT_SOURCES:
+        for row in conn.execute(sql, (member_id, lf, hi)).fetchall():
+            target = row[target_col]
+            if _name_mentioned(para, target):
+                continue
+            problems.append(
+                f"statement inside [[{member}:{range_str}]] targets '{target}' "
+                f"({row[kind_col]} at line {row['line_no']}) but '{target}' is not "
+                f"named anywhere in the citing paragraph"
+            )
+    return problems
+
+
 def _reversed_condition_problems(
     conn, member: str, member_id: int, lf: int, lt: int | None, body: str, cite_start: int, cite_end: int
 ) -> list[str]:
@@ -315,6 +377,7 @@ def _reversed_condition_problems(
 def validate_doc(conn, path: Path) -> dict:
     text = path.read_text(encoding="utf-8")
     problems: list[str] = []
+    omitted_targets: list[str] = []
     fm, body, fm_err = _split_frontmatter(text)
     if fm_err:
         problems.append(fm_err)
@@ -353,7 +416,8 @@ def validate_doc(conn, path: Path) -> dict:
     # each time (a precondition, a Given, a When), which defeats the
     # single-nearest-occurrence assumption this check relies on and would
     # make it noise rather than signal outside the doc type it was built for.
-    check_reversed_conditions = fm is not None and fm.get("doc_type") == "module"
+    # (Gates `_statement_completeness_problems` below too, for the same reason.)
+    module_doc_checks = fm is not None and fm.get("doc_type") == "module"
 
     conn.execute("DELETE FROM doc_claim WHERE doc_path=?", (str(path),))
 
@@ -402,9 +466,14 @@ def validate_doc(conn, path: Path) -> dict:
             maxline = row["maxline"] or 0
             if lf < 1 or lf > maxline or (lt and lt > maxline):
                 valid, note = 0, f"line {lf}{'-' + str(lt) if lt and lt != lf else ''} outside 1..{maxline}"
-            elif check_reversed_conditions:
+            elif module_doc_checks:
                 problems.extend(
                     _reversed_condition_problems(
+                        conn, member, row["id"], lf, lt, body, m.start(), m.end()
+                    )
+                )
+                omitted_targets.extend(
+                    _statement_completeness_problems(
                         conn, member, row["id"], lf, lt, body, m.start(), m.end()
                     )
                 )
@@ -428,6 +497,7 @@ def validate_doc(conn, path: Path) -> dict:
         "valid_citations": good,
         "invalid_citations": bad,
         "uncited_assertions": uncited,
+        "omitted_statement_targets": omitted_targets,
         "problems": problems,
         "ok": not problems,
         # Front matter/body this call already parsed, for a caller (e.g.

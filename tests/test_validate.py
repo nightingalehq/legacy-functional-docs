@@ -497,3 +497,125 @@ def test_name_mentioned_returns_false_when_absent():
     from mfdoc.validate import _name_mentioned
 
     assert not _name_mentioned("The program calls another routine.", "PGMX02")
+
+
+def _member_with_statements(**extra_rows):
+    """A minimal in-memory index with one member (TESTSTMT) and, per
+    `extra_rows`, a `call_edge`/`interaction`/`data_access` row at line 692
+    inside a 691-693 source range -- mirrors the real DECIDE/FETCH/ESCAPE
+    case from issue #59 without needing the dialect scanner to parse it.
+
+    `extra_rows` keys: "call_edge", "interaction", "data_access", each a
+    dict of column overrides merged onto a minimal valid row for that table.
+    """
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    mid = insert(conn, "member", name="TESTSTMT", dialect="natural", object_type="subprogram")
+    for line_no in range(691, 694):
+        conn.execute(
+            "INSERT INTO source_line (member_id, line_no, text) VALUES (?, ?, ?)",
+            (mid, line_no, f"line {line_no}"),
+        )
+    if "call_edge" in extra_rows:
+        row = {"caller_id": mid, "callee_name": "PGMX02", "call_kind": "FETCH",
+               "dynamic": 0, "line_no": 692}
+        row.update(extra_rows["call_edge"])
+        insert(conn, "call_edge", **row)
+    if "interaction" in extra_rows:
+        row = {"member_id": mid, "target": "MAPX02", "kind": "CONVERSE", "line_no": 692}
+        row.update(extra_rows["interaction"])
+        insert(conn, "interaction", **row)
+    if "data_access" in extra_rows:
+        row = {"member_id": mid, "entity_name": "CUSTOMER-FILE", "verb": "READ",
+               "crud": "R", "raw": "READ CUSTOMER-FILE", "line_no": 692}
+        row.update(extra_rows["data_access"])
+        insert(conn, "data_access", **row)
+    conn.commit()
+    return conn
+
+
+STMT_FRONTMATTER = """---
+title: Test doc
+doc_type: module
+system: MOM
+generated_by: legacy-functional-docs 0.1.0
+generated_at: "2026-01-01T00:00:00"
+review_status: draft
+confidence_summary:
+  verified: 1
+sources:
+  - TESTSTMT
+---
+# Test doc
+"""
+
+
+def test_validator_flags_an_omitted_call_target(tmp_path):
+    conn = _member_with_statements(call_edge={})
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        STMT_FRONTMATTER
+        + "\nThe branch exits the transaction [[TESTSTMT:691-693]].\n"
+    )
+    result = validate_doc(conn, doc)
+    assert result["ok"], result["problems"]  # non-blocking: must not fail the doc
+    assert any("PGMX02" in p and "FETCH" in p for p in result["omitted_statement_targets"])
+
+
+def test_validator_ignores_a_call_target_named_elsewhere_in_the_paragraph(tmp_path):
+    conn = _member_with_statements(call_edge={})
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        STMT_FRONTMATTER
+        + "\nThe branch first transfers control to PGMX02. "
+          "It then exits the transaction [[TESTSTMT:691-693]].\n"
+    )
+    result = validate_doc(conn, doc)
+    assert result["omitted_statement_targets"] == []
+
+
+def test_validator_never_flags_a_dynamic_call_target(tmp_path):
+    conn = _member_with_statements(call_edge={"dynamic": 1, "callee_name": "*PGM-NAME"})
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        STMT_FRONTMATTER
+        + "\nThe branch exits the transaction [[TESTSTMT:691-693]].\n"
+    )
+    result = validate_doc(conn, doc)
+    assert result["omitted_statement_targets"] == []
+
+
+def test_validator_flags_an_omitted_interaction_target(tmp_path):
+    conn = _member_with_statements(interaction={})
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        STMT_FRONTMATTER
+        + "\nThe branch exits the transaction [[TESTSTMT:691-693]].\n"
+    )
+    result = validate_doc(conn, doc)
+    assert any("MAPX02" in p and "CONVERSE" in p for p in result["omitted_statement_targets"])
+
+
+def test_validator_flags_an_omitted_data_access_target(tmp_path):
+    conn = _member_with_statements(data_access={})
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        STMT_FRONTMATTER
+        + "\nThe branch exits the transaction [[TESTSTMT:691-693]].\n"
+    )
+    result = validate_doc(conn, doc)
+    assert any("CUSTOMER-FILE" in p and "READ" in p for p in result["omitted_statement_targets"])
+
+
+def test_validator_scopes_statement_completeness_to_module_docs(tmp_path):
+    """A register doc echoes source syntax/field-inventory phrasing verbatim
+    -- same reasoning as why the reversed-condition check is module-only."""
+    conn = _member_with_statements(call_edge={})
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        "---\ntitle: Register\ndoc_type: register\n---\n"
+        "# Register\n\nThe branch exits the transaction [[TESTSTMT:691-693]].\n"
+    )
+    result = validate_doc(conn, doc)
+    assert result["omitted_statement_targets"] == []
