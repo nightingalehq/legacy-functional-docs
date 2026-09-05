@@ -167,6 +167,22 @@ def _split_frontmatter(text: str) -> tuple[dict | None, str, str | None]:
 _LEADING_CITATION_RUN = re.compile(r"^(?:\[\[[^\]]+\]\]\s*)+")
 
 
+def _containing_paragraph(body: str, start: int, end: int) -> tuple[str, int]:
+    """The paragraph in `body` that spans byte offset `start`..`end`, and
+    `start`'s offset relative to that paragraph's own start.
+
+    Factored out of `_containing_sentence` so a caller that needs the whole
+    paragraph (e.g. `_statement_completeness_problems`, which tolerates a
+    target named anywhere in the paragraph, not just the citing sentence)
+    doesn't duplicate this boundary-finding.
+    """
+    para_start = body.rfind("\n\n", 0, start)
+    para_start = 0 if para_start == -1 else para_start + 2
+    para_end = body.find("\n\n", end)
+    para_end = len(body) if para_end == -1 else para_end
+    return body[para_start:para_end], start - para_start
+
+
 def _containing_sentence(body: str, start: int, end: int) -> str:
     """The sentence in `body` that spans byte offset `start`..`end`.
 
@@ -186,13 +202,7 @@ def _containing_sentence(body: str, start: int, end: int) -> str:
     the located unit is nothing but a leading run of citations, merge in the
     unit before it instead of returning the citation alone.
     """
-    para_start = body.rfind("\n\n", 0, start)
-    para_start = 0 if para_start == -1 else para_start + 2
-    para_end = body.find("\n\n", end)
-    para_end = len(body) if para_end == -1 else para_end
-    para = body[para_start:para_end]
-    rel_start = start - para_start
-
+    para, rel_start = _containing_paragraph(body, start, end)
     bounds = [0] + [m.start() for m in SENTENCE_SPLIT.finditer(para)] + [len(para)]
     for i, (lo, hi) in enumerate(zip(bounds, bounds[1:])):
         if lo <= rel_start < hi:

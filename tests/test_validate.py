@@ -31,6 +31,19 @@ sources:
 """
 
 
+def test_containing_paragraph_returns_the_full_paragraph_and_relative_offset():
+    from mfdoc.validate import _containing_paragraph
+
+    body = "First paragraph, one sentence.\n\nSecond paragraph. It has [[X:1]] a citation. And more text.\n\nThird paragraph."
+    cite_start = body.index("[[X:1]]")
+    cite_end = cite_start + len("[[X:1]]")
+
+    para, rel_start = _containing_paragraph(body, cite_start, cite_end)
+
+    assert para == "Second paragraph. It has [[X:1]] a citation. And more text."
+    assert para[rel_start:rel_start + len("[[X:1]]")] == "[[X:1]]"
+
+
 def test_validator_rejects_out_of_range_line(indexed_db, tmp_path):
     doc = tmp_path / "doc.md"
     doc.write_text(GOOD_FRONTMATTER + "\nThe program moves the field [[MMP0100:999999]].\n")
