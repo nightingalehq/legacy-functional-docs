@@ -81,3 +81,33 @@ def test_connect_migration_is_a_no_op_on_a_brand_new_database(tmp_path):
     conn2 = db_mod.connect(path)  # re-`connect()` to the same, already-migrated db
     cols = {r["name"] for r in conn2.execute("PRAGMA table_info(rule_candidate)").fetchall()}
     assert "pair_line_no" in cols
+
+
+def test_rule_theme_table_exists_with_expected_columns(tmp_path):
+    from mfdoc.db import connect
+
+    conn = connect(tmp_path / "index.db")
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(rule_theme)")}
+    assert cols == {"id", "rule_candidate_id", "theme", "source"}
+
+
+def test_rule_theme_unique_per_rule_candidate(tmp_path):
+    from mfdoc.db import connect
+
+    conn = connect(tmp_path / "index.db")
+    conn.execute(
+        "INSERT INTO member (id, name, dialect) VALUES (1, 'X', 'natural')"
+    )
+    conn.execute(
+        "INSERT INTO rule_candidate (id, member_id, line_no, construct, raw) "
+        "VALUES (1, 1, 10, 'IF', 'IF X')"
+    )
+    conn.execute(
+        "INSERT INTO rule_theme (rule_candidate_id, theme, source) VALUES (1, 'eligibility', 'keyword')"
+    )
+    conn.commit()
+    with __import__("pytest").raises(Exception):
+        conn.execute(
+            "INSERT INTO rule_theme (rule_candidate_id, theme, source) VALUES (1, 'posting', 'llm')"
+        )
+        conn.commit()

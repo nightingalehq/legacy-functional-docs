@@ -254,6 +254,19 @@ CREATE TABLE IF NOT EXISTS rule_candidate (
 );
 CREATE INDEX IF NOT EXISTS ix_rule_member ON rule_candidate(member_id);
 
+-- Rule-theme classification: which business concept a rule_candidate
+-- belongs to, for the thematic rules-register rollup. UNIQUE on
+-- rule_candidate_id so re-classifying after a taxonomy edit is an
+-- upsert (INSERT ... ON CONFLICT), never an ever-growing history.
+CREATE TABLE IF NOT EXISTS rule_theme (
+    id                INTEGER PRIMARY KEY,
+    rule_candidate_id INTEGER NOT NULL REFERENCES rule_candidate(id),
+    theme             TEXT NOT NULL,
+    source            TEXT NOT NULL,   -- keyword | llm | structural
+    UNIQUE(rule_candidate_id)
+);
+CREATE INDEX IF NOT EXISTS ix_rule_theme_theme ON rule_theme(theme);
+
 -- Error / message handling, useful for surfacing user-visible business messages
 CREATE TABLE IF NOT EXISTS message_ref (
     id            INTEGER PRIMARY KEY,
