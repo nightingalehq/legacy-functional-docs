@@ -1734,6 +1734,7 @@
       "line_no": 10,
       "kind": "MAP_TEXT",
       "target": null,
+      "dynamic": 0,
       "fields": "Order number:"
     },
     {
@@ -1742,6 +1743,7 @@
       "line_no": 11,
       "kind": "MAP_FIELD",
       "target": "#ORDER-NO",
+      "dynamic": 0,
       "fields": "AD=I"
     },
     {
@@ -1750,6 +1752,7 @@
       "line_no": 12,
       "kind": "MAP_TEXT",
       "target": null,
+      "dynamic": 0,
       "fields": "Status:"
     },
     {
@@ -1758,6 +1761,7 @@
       "line_no": 13,
       "kind": "MAP_FIELD",
       "target": "#ORDER-STATUS",
+      "dynamic": 0,
       "fields": "EM=XXXX,AD=I"
     },
     {
@@ -1766,6 +1770,7 @@
       "line_no": 11,
       "kind": "INPUT",
       "target": "MMM0200",
+      "dynamic": 0,
       "fields": "USING MAP \u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000"
     },
     {
@@ -1774,6 +1779,7 @@
       "line_no": 13,
       "kind": "REINPUT",
       "target": null,
+      "dynamic": 0,
       "fields": "FULL \u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000 MARK 1"
     },
     {
@@ -1782,6 +1788,7 @@
       "line_no": 17,
       "kind": "REINPUT",
       "target": null,
+      "dynamic": 0,
       "fields": "\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000"
     },
     {
@@ -1790,6 +1797,7 @@
       "line_no": 19,
       "kind": "DISPLAY",
       "target": null,
+      "dynamic": 0,
       "fields": "CERT-VIEW.HEAT-NO CERT-VIEW.CAST-DATE"
     },
     {
@@ -1798,6 +1806,7 @@
       "line_no": 25,
       "kind": "WRITE",
       "target": null,
+      "dynamic": 0,
       "fields": "\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000 *ERROR-NR"
     },
     {
@@ -1806,6 +1815,7 @@
       "line_no": 13,
       "kind": "WRITE",
       "target": null,
+      "dynamic": 0,
       "fields": "\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000 5T \u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000 #HEAT-NO 30T \u0000\u0000\u0000\u0000\u0000\u0000\u0000 #CAST-DATE"
     },
     {
@@ -1814,6 +1824,7 @@
       "line_no": 10,
       "kind": "DISPLAY",
       "target": null,
+      "dynamic": 0,
       "fields": "ORDER-NO"
     },
     {
@@ -1822,6 +1833,7 @@
       "line_no": 9,
       "kind": "DISPLAY",
       "target": null,
+      "dynamic": 0,
       "fields": "ORDER-NO"
     },
     {
@@ -1830,6 +1842,7 @@
       "line_no": 15,
       "kind": "INPUT",
       "target": null,
+      "dynamic": 0,
       "fields": "WINDOW = \u0000\u0000\u0000\u0000 /  1X \u0000\u0000\u0000\u0000\u0000\u0000\u0000 (CD=RE) // 1X #MESSAGE (AD=O)"
     },
     {
@@ -1838,6 +1851,7 @@
       "line_no": 10,
       "kind": "CONVERSE",
       "target": "ORDSCR1",
+      "dynamic": 0,
       "fields": null
     },
     {
@@ -1846,6 +1860,7 @@
       "line_no": 13,
       "kind": "SHOW",
       "target": "ORDSCR1",
+      "dynamic": 0,
       "fields": null
     },
     {
@@ -1854,6 +1869,7 @@
       "line_no": 18,
       "kind": "SHOW",
       "target": "ORDSCR1",
+      "dynamic": 0,
       "fields": null
     },
     {
@@ -1862,6 +1878,7 @@
       "line_no": 33,
       "kind": "CONVERSE",
       "target": "ORDSCR2",
+      "dynamic": 0,
       "fields": null
     },
     {
@@ -1870,6 +1887,7 @@
       "line_no": 40,
       "kind": "SHOW",
       "target": "ORDSCR1",
+      "dynamic": 0,
       "fields": null
     },
     {
@@ -1878,6 +1896,7 @@
       "line_no": 6,
       "kind": "CONVERSE",
       "target": "MAP",
+      "dynamic": 0,
       "fields": null
     },
     {
@@ -1886,6 +1905,7 @@
       "line_no": 8,
       "kind": "SHOW",
       "target": "MAP",
+      "dynamic": 0,
       "fields": null
     }
   ],
