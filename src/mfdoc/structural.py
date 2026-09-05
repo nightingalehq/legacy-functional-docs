@@ -188,11 +188,20 @@ def complexity_heatmap(conn, metric: str = "rule_depth") -> str:
     if metric != "rule_depth":
         raise ValueError(f"unsupported complexity metric {metric!r}; only 'rule_depth' is implemented")
 
+    # `member.name` is only unique together with library+dialect (see the
+    # `UNIQUE(name, library, dialect)` constraint in db.py) -- two distinct
+    # members can share a bare name across libraries/dialects. Group by
+    # m.id, not m.name, so each member's own rule_count/max_depth stays
+    # distinct even when names collide; a colliding name is then rendered
+    # as an explicit ambiguous row below (mirroring rules_register's
+    # refusal for the identical case) instead of silently merging the two
+    # members' counts into one row and dropping the other entirely.
     rule_rows = conn.execute(
         """
-        SELECT m.name AS member, COUNT(*) AS rule_count, MAX(rc.depth) AS max_depth
+        SELECT m.id AS member_id, m.name AS member, m.library AS library,
+               COUNT(*) AS rule_count, MAX(rc.depth) AS max_depth
           FROM rule_candidate rc JOIN member m ON m.id = rc.member_id
-         GROUP BY m.name
+         GROUP BY m.id
         """
     ).fetchall()
     if not rule_rows:
@@ -200,6 +209,10 @@ def complexity_heatmap(conn, metric: str = "rule_depth") -> str:
             '---\ntitle: "Complexity/risk heatmap"\ndoc_type: register\n---\n\n'
             "# Complexity/risk heatmap\n\nNo rule candidates recorded.\n"
         )
+
+    rows_by_name: dict[str, list] = {}
+    for r in rule_rows:
+        rows_by_name.setdefault(r["member"], []).append(r)
 
     graph_data = build_call_graph(conn)
     out_degree = {name: len(entry["calls"]) for name, entry in graph_data.items()}
@@ -209,12 +222,17 @@ def complexity_heatmap(conn, metric: str = "rule_depth") -> str:
             in_degree[call["callee"]] = in_degree.get(call["callee"], 0) + 1
 
     raw_scores = []
-    for r in rule_rows:
-        ind, outd = in_degree.get(r["member"], 0), out_degree.get(r["member"], 0)
+    ambiguous_names: set[str] = set()
+    for name, matches in rows_by_name.items():
+        if len(matches) != 1:
+            ambiguous_names.add(name)
+            continue
+        r = matches[0]
+        ind, outd = in_degree.get(name, 0), out_degree.get(name, 0)
         raw = (r["rule_count"] + (r["max_depth"] or 0)) * (ind + outd + 1)
-        raw_scores.append((r["member"], r["rule_count"], r["max_depth"] or 0, ind, outd, raw))
+        raw_scores.append((name, r["rule_count"], r["max_depth"] or 0, ind, outd, raw))
 
-    max_raw = max(s[-1] for s in raw_scores) or 1
+    max_raw = (max(s[-1] for s in raw_scores) if raw_scores else 0) or 1
     scored = [
         (member, rc, md, ind, outd, round(100 * raw / max_raw, 1))
         for member, rc, md, ind, outd, raw in raw_scores
@@ -231,5 +249,11 @@ def complexity_heatmap(conn, metric: str = "rule_depth") -> str:
            "|---|---|---|---|---|---|"]
     for member, rc, md, ind, outd, score in scored:
         out.append(f"| `{member}` | {rc} | {md} | {ind} | {outd} | {score} |")
+    for name in sorted(ambiguous_names):
+        libs = ", ".join(sorted({m["library"] or "unknown" for m in rows_by_name[name]}))
+        out.append(
+            f"| `{name}` | — | — | — | — | ambiguous: name is ambiguous across "
+            f"libraries ({libs}) -- re-run against a library-qualified export |"
+        )
     out.append("")
     return "\n".join(out) + "\n"
