@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 
 from . import graph
-from .brief import _cite, _rule_id
+from .citations import _cite, _rule_id
 from .redact import NULL_REDACTOR, Redactor
 
 

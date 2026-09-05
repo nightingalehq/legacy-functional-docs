@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 
-from .brief import _cite, _rule_id
+from .citations import _cite, _rule_id
 from .db import group_members_by_name, insert, resolve_member_by_name
 
 # rule_candidate construct *prefixes* treated as branch/decision points worth

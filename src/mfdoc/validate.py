@@ -19,7 +19,8 @@ from pathlib import Path
 
 import yaml
 
-from .brief import _rule_id, fetch_rule_candidate_rows
+from .brief import fetch_rule_candidate_rows
+from .citations import _rule_id
 from .conditions import (
     FAILURE_WORDS,
     SUCCESS_WORDS,
