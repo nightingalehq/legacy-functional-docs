@@ -275,3 +275,77 @@ def test_validator_ignores_reversed_wording_on_a_non_outcome_field(tmp_path):
     )
     result = validate_doc(conn, doc)
     assert not any("comparison direction may be reversed" in p for p in result["problems"])
+
+
+def _member_with_n_rules(name: str, n: int):
+    """An in-memory index with `name` having `n` trivial rule_candidate rows
+    (real member row via `insert`, not a full source scan -- the
+    completeness check only cares about `rule_candidate` count/order and
+    `_rule_id`'s numbering, not any particular construct shape)."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    insert(conn, "member", name=name, dialect="mantis", object_type="program")
+    mid = conn.execute("SELECT id FROM member WHERE name=?", (name,)).fetchone()["id"]
+    for i in range(n):
+        insert(
+            conn, "rule_candidate", member_id=mid, line_no=(i + 1) * 10,
+            construct="IF", condition="X = 1", raw="IF X = 1",
+        )
+    conn.commit()
+    return conn
+
+
+def _module_result(member: str, body: str) -> dict:
+    return {"_fm": {"doc_type": "module", "sources": [member]}, "_body": body}
+
+
+def test_module_completeness_flags_a_rule_never_cited(tmp_path):
+    from mfdoc.validate import module_completeness_problems
+
+    conn = _member_with_n_rules("TESTMOD", 3)
+    results = [_module_result("TESTMOD", "See TESTMOD:BR-001 and TESTMOD:BR-003 here.")]
+    problems = module_completeness_problems(conn, results)
+    assert len(problems) == 1
+    assert "TESTMOD" in problems[0]
+    assert "1/3" in problems[0]
+    assert "TESTMOD:BR-002" in problems[0]
+
+
+def test_module_completeness_accepts_full_coverage():
+    from mfdoc.validate import module_completeness_problems
+
+    conn = _member_with_n_rules("TESTMOD", 3)
+    results = [_module_result(
+        "TESTMOD", "TESTMOD:BR-001, TESTMOD:BR-002, and TESTMOD:BR-003 are all here."
+    )]
+    assert module_completeness_problems(conn, results) == []
+
+
+def test_module_completeness_unions_coverage_across_chunk_documents():
+    """A chunked member's rules are only ever complete in aggregate across
+    its several chunk documents -- one chunk covering BR-001/002 and another
+    covering BR-003 must not be flagged as incomplete."""
+    from mfdoc.validate import module_completeness_problems
+
+    conn = _member_with_n_rules("TESTMOD", 3)
+    results = [
+        _module_result("TESTMOD", "TESTMOD:BR-001 and TESTMOD:BR-002 are here."),
+        _module_result("TESTMOD", "TESTMOD:BR-003 is here."),
+    ]
+    assert module_completeness_problems(conn, results) == []
+
+
+def test_module_completeness_ignores_non_module_docs():
+    """A generated-test or register doc citing a subset of BR-ids must not
+    make a member look covered when no `doc_type: module` doc exists for it
+    at all -- absence of a module doc is a different problem this check
+    isn't meant to catch."""
+    from mfdoc.validate import module_completeness_problems
+
+    conn = _member_with_n_rules("TESTMOD", 3)
+    results = [{
+        "_fm": {"doc_type": "generated_test", "sources": ["TESTMOD"]},
+        "_body": "TESTMOD:BR-001",
+    }]
+    assert module_completeness_problems(conn, results) == []

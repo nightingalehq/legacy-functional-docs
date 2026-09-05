@@ -824,7 +824,15 @@ def cmd_validate(args) -> int:
             print(f"       - {p}")
     print(f"\n{res['documents_ok']}/{res['documents']} documents clean, "
           f"{res['invalid_citations']} invalid citations of {res['total_citations']}")
-    return 0 if res["invalid_citations"] == 0 and res["documents_ok"] == res["documents"] else 1
+    if res["completeness_problems"]:
+        print(f"\n{len(res['completeness_problems'])} member(s) with incomplete rule coverage:")
+        for p in res["completeness_problems"]:
+            print(f"  - {p}")
+    return 0 if (
+        res["invalid_citations"] == 0
+        and res["documents_ok"] == res["documents"]
+        and not res["completeness_problems"]
+    ) else 1
 
 
 def cmd_test_validate(args) -> int:
