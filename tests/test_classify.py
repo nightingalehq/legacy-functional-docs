@@ -71,9 +71,9 @@ def test_llm_fallback_reclassifies_structural_rows(indexed_db):
         return ModelResponse(text="posting", input_tokens=0, output_tokens=0)
 
     before = conn.execute("SELECT COUNT(*) FROM rule_theme WHERE source='structural'").fetchone()[0]
-    reclassified = classify.classify_rules_llm(conn, fake_caller)
+    result = classify.classify_rules_llm(conn, fake_caller)
     after_llm = conn.execute("SELECT COUNT(*) FROM rule_theme WHERE source='llm'").fetchone()[0]
-    assert reclassified == before
+    assert result["reclassified"] == before
     assert after_llm == before
 
 
@@ -89,8 +89,8 @@ def test_llm_empty_response_does_not_crash(indexed_db):
         from mfdoc.batch import ModelResponse
         return ModelResponse(text="   ", input_tokens=0, output_tokens=0)
 
-    reclassified = classify.classify_rules_llm(conn, empty_caller)
-    assert reclassified == 0
+    result = classify.classify_rules_llm(conn, empty_caller)
+    assert result["reclassified"] == 0
 
 
 def test_llm_refusal_is_not_stored_as_a_theme(indexed_db):
@@ -115,8 +115,8 @@ def test_llm_refusal_is_not_stored_as_a_theme(indexed_db):
     ).fetchall()
     assert before, "fixture must have at least one structural-sourced row to exercise this"
 
-    reclassified = classify.classify_rules_llm(conn, refusing_caller)
-    assert reclassified == 0
+    result = classify.classify_rules_llm(conn, refusing_caller)
+    assert result["reclassified"] == 0
 
     after = conn.execute(
         "SELECT rule_candidate_id, theme, source FROM rule_theme "
@@ -140,10 +140,10 @@ def test_llm_taxonomy_constrains_accepted_themes(indexed_db):
         from mfdoc.batch import ModelResponse
         return ModelResponse(text="some other theme", input_tokens=0, output_tokens=0)
 
-    reclassified = classify.classify_rules_llm(
+    result = classify.classify_rules_llm(
         conn, off_taxonomy_caller, taxonomy={"validation": ["invalid"], "posting": ["post"]}
     )
-    assert reclassified == 0
+    assert result["reclassified"] == 0
     still_structural = conn.execute(
         "SELECT COUNT(*) FROM rule_theme WHERE source='llm'"
     ).fetchone()[0]
@@ -153,10 +153,10 @@ def test_llm_taxonomy_constrains_accepted_themes(indexed_db):
         from mfdoc.batch import ModelResponse
         return ModelResponse(text="Validation", input_tokens=0, output_tokens=0)
 
-    reclassified = classify.classify_rules_llm(
+    result = classify.classify_rules_llm(
         conn, on_taxonomy_caller, taxonomy={"validation": ["invalid"], "posting": ["post"]}
     )
-    assert reclassified > 0
+    assert result["reclassified"] > 0
     llm_rows = conn.execute("SELECT theme FROM rule_theme WHERE source='llm'").fetchall()
     assert all(r["theme"] == "validation" for r in llm_rows)
 
@@ -218,3 +218,89 @@ def test_llm_fallback_never_touches_keyword_rows(indexed_db):
     still_keyword = conn.execute("SELECT COUNT(*) FROM rule_theme WHERE source='keyword'").fetchone()[0]
     total = conn.execute("SELECT COUNT(*) FROM rule_theme").fetchone()[0]
     assert still_keyword == total
+
+
+def test_llm_reports_token_totals(indexed_db):
+    """Finding 7: classify_rules_llm must accumulate input_tokens/output_tokens
+    from every ModelResponse it receives (previously discarded entirely) and
+    report them in its return dict alongside the reclassified count."""
+    conn = indexed_db
+    classify.classify_rules_deterministic(conn, taxonomy={})
+    structural_count = conn.execute(
+        "SELECT COUNT(*) FROM rule_theme WHERE source='structural'"
+    ).fetchone()[0]
+    assert structural_count >= 2, "fixture needs >=2 structural rows to exercise token accounting"
+
+    PER_CALL_IN, PER_CALL_OUT = 37, 11
+
+    def counting_caller(prompt: str):
+        from mfdoc.batch import ModelResponse
+        return ModelResponse(text="posting", input_tokens=PER_CALL_IN, output_tokens=PER_CALL_OUT)
+
+    result = classify.classify_rules_llm(conn, counting_caller)
+    assert result["reclassified"] == structural_count
+    assert result["input_tokens"] == structural_count * PER_CALL_IN
+    assert result["output_tokens"] == structural_count * PER_CALL_OUT
+
+
+def test_llm_limit_caps_rows_sent_to_model(indexed_db):
+    """Finding 7: --limit (wired through as classify_rules_llm's `limit` param)
+    must cap how many structural rows are actually sent to the model in one
+    run, even when more rows are eligible."""
+    conn = indexed_db
+    classify.classify_rules_deterministic(conn, taxonomy={})
+    structural_count = conn.execute(
+        "SELECT COUNT(*) FROM rule_theme WHERE source='structural'"
+    ).fetchone()[0]
+    assert structural_count > 2, "fixture needs >2 structural rows to exercise a limit of 2"
+
+    calls = {"n": 0}
+
+    def counting_caller(prompt: str):
+        from mfdoc.batch import ModelResponse
+        calls["n"] += 1
+        return ModelResponse(text="posting", input_tokens=0, output_tokens=0)
+
+    result = classify.classify_rules_llm(conn, counting_caller, limit=2)
+    assert calls["n"] == 2
+    assert result["reclassified"] == 2
+
+
+def test_llm_casing_matches_taxonomy_key_exactly(indexed_db):
+    """Finding 8: a capitalized taxonomy key (e.g. "Posting") must be stored
+    with its own exact casing when the model's (lowercased) response matches
+    it case-insensitively -- not the model's lowercased text, which would
+    otherwise split the same theme into two distinct groups (one from
+    classify_rules_deterministic's verbatim key, one lowercased here)."""
+    conn = indexed_db
+    classify.classify_rules_deterministic(conn, taxonomy={})
+
+    def posting_caller(prompt: str):
+        from mfdoc.batch import ModelResponse
+        return ModelResponse(text="posting", input_tokens=0, output_tokens=0)
+
+    result = classify.classify_rules_llm(conn, posting_caller, taxonomy={"Posting": ["post"]})
+    assert result["reclassified"] > 0
+    llm_rows = conn.execute("SELECT theme FROM rule_theme WHERE source='llm'").fetchall()
+    assert all(r["theme"] == "Posting" for r in llm_rows)
+
+
+def test_llm_matches_taxonomy_key_longer_than_40_chars(indexed_db):
+    """Finding 9: the taxonomy-key match must happen against the model's
+    *full* response, before any truncation -- truncating to 40 chars first
+    (as the old code did) would make a taxonomy key longer than 40 characters
+    unmatchable, silently falling back to 'structural' forever."""
+    conn = indexed_db
+    classify.classify_rules_deterministic(conn, taxonomy={})
+
+    long_key = "eligibility-determination-for-retirement-benefit-adjustments"
+    assert len(long_key) > 40
+
+    def long_key_caller(prompt: str):
+        from mfdoc.batch import ModelResponse
+        return ModelResponse(text=long_key, input_tokens=0, output_tokens=0)
+
+    result = classify.classify_rules_llm(conn, long_key_caller, taxonomy={long_key: ["x"]})
+    assert result["reclassified"] > 0
+    llm_rows = conn.execute("SELECT theme FROM rule_theme WHERE source='llm'").fetchall()
+    assert all(r["theme"] == long_key for r in llm_rows)

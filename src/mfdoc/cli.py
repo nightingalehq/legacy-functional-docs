@@ -362,8 +362,21 @@ def cmd_classify_rules(args) -> int:
         caller = _build_model_caller(args)
         if caller is None:
             return 1
-        n = classify.classify_rules_llm(conn, caller, redact=redact, taxonomy=taxonomy)
-        print(f"llm reclassified: {n}")
+        result = classify.classify_rules_llm(
+            conn, caller, redact=redact, taxonomy=taxonomy, limit=getattr(args, "limit", None),
+        )
+        print(f"llm reclassified: {result['reclassified']}")
+        narrative_opts = (cfg["options"] or {}).get("narrative") or {}
+        pricing = narrative_opts.get("pricing") or {}
+        cost_per_mtok_in = pricing.get("input_per_mtok")
+        cost_per_mtok_out = pricing.get("output_per_mtok")
+        print(f"tokens: {result['input_tokens']} in, {result['output_tokens']} out")
+        if cost_per_mtok_in is not None and cost_per_mtok_out is not None:
+            cost = (result["input_tokens"] / 1_000_000) * cost_per_mtok_in + \
+                   (result["output_tokens"] / 1_000_000) * cost_per_mtok_out
+            print(f"cost: ${cost:.4f}")
+        else:
+            print("cost: unknown -- set options.narrative.pricing.input_per_mtok/output_per_mtok in project.yml")
     return 0
 
 
@@ -1108,6 +1121,8 @@ def main(argv=None) -> int:
     p.add_argument("--config", required=True)
     p.add_argument("--llm-fallback", dest="llm_fallback", action="store_true", default=None,
                     help="override options.overview.themes.llm_fallback from --config")
+    p.add_argument("--limit", type=int, default=None,
+                    help="cap how many structural rows are sent to the LLM in this run")
     p.add_argument("--model", default=None)
     p.add_argument("--caller", choices=["anthropic", "fake-echo"], default="anthropic")
     p.add_argument("--provider", choices=["anthropic", "vertex", "claude-code"], default="anthropic")
