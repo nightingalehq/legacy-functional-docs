@@ -52,6 +52,23 @@ CITATION = re.compile(r"\[\[(?P<member>[A-Z0-9#@$&\-_.]+)(?::(?P<from>\d+)(?:-(?
 # the id being invisible to validation entirely.
 BR_REF = re.compile(r"(?<![A-Z0-9#@$&.\-_])(?P<member>[A-Z0-9#@$&\-_.]+):BR-(?P<n>\d+)\b", re.I)
 
+
+def _name_mentioned(text: str, name: str) -> bool:
+    """Whether `name` appears in `text` as a whole token, case-insensitive.
+
+    Reuses the same non-word-boundary trick `BR_REF` already uses instead of
+    `\\b`: a Natural/Mantis member, program, map, or file name can contain
+    `#@$&-_.`, all non-word characters that `\\b` would treat as a boundary
+    even mid-name -- e.g. `\\bPGMX02\\b` would happily match inside
+    `PGMX02-EXT`. `re.escape` is required since a target name may itself
+    contain regex-special characters (`.`, `$`).
+    """
+    pattern = re.compile(
+        rf"(?<![A-Z0-9#@$&.\-_]){re.escape(name)}(?![A-Z0-9#@$&.\-_])", re.I
+    )
+    return bool(pattern.search(text))
+
+
 REQUIRED_TEST_FRONTMATTER = ["language", "framework"]
 
 REQUIRED_FRONTMATTER = [

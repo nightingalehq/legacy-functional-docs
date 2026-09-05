@@ -462,3 +462,38 @@ def test_validator_reads_the_real_sentence_when_a_trailing_citation_is_split_int
     )
     result = validate_doc(conn, doc)
     assert not any("comparison direction may be reversed" in p for p in result["problems"]), result["problems"]
+
+
+def test_name_mentioned_finds_a_whole_token_match():
+    from mfdoc.validate import _name_mentioned
+
+    assert _name_mentioned("The program calls PGMX02 to continue.", "PGMX02")
+
+
+def test_name_mentioned_is_case_insensitive():
+    from mfdoc.validate import _name_mentioned
+
+    assert _name_mentioned("the program calls pgmx02 to continue.", "PGMX02")
+
+
+def test_name_mentioned_rejects_a_substring_match():
+    """PGMX02 must not match inside PGMX023 -- a longer identifier that
+    happens to share a prefix is not a real mention."""
+    from mfdoc.validate import _name_mentioned
+
+    assert not _name_mentioned("The program calls PGMX023 to continue.", "PGMX02")
+
+
+def test_name_mentioned_matches_a_name_containing_special_charset_characters():
+    """Member/program/file names legitimately contain #@$&-_. -- these are
+    non-word characters that a plain \\b boundary would mishandle."""
+    from mfdoc.validate import _name_mentioned
+
+    assert _name_mentioned("See #GS-WKAREA for the shared area.", "#GS-WKAREA")
+    assert not _name_mentioned("See #GS-WKAREA-EXT for the shared area.", "#GS-WKAREA")
+
+
+def test_name_mentioned_returns_false_when_absent():
+    from mfdoc.validate import _name_mentioned
+
+    assert not _name_mentioned("The program calls another routine.", "PGMX02")
