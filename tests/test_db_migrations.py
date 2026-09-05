@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
+
 from mfdoc import db as db_mod
 
 # A stand-in for a pre-migration rule_candidate/data_access shape -- just
@@ -81,3 +83,61 @@ def test_connect_migration_is_a_no_op_on_a_brand_new_database(tmp_path):
     conn2 = db_mod.connect(path)  # re-`connect()` to the same, already-migrated db
     cols = {r["name"] for r in conn2.execute("PRAGMA table_info(rule_candidate)").fetchall()}
     assert "pair_line_no" in cols
+
+
+def test_rule_theme_table_exists_with_expected_columns(tmp_path):
+    from mfdoc.db import connect
+
+    conn = connect(tmp_path / "index.db")
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(rule_theme)")}
+    assert cols == {"id", "rule_candidate_id", "theme", "source"}
+
+
+def test_rule_theme_unique_per_rule_candidate(tmp_path):
+    from mfdoc.db import connect
+
+    conn = connect(tmp_path / "index.db")
+    conn.execute(
+        "INSERT INTO member (id, name, dialect) VALUES (1, 'X', 'natural')"
+    )
+    conn.execute(
+        "INSERT INTO rule_candidate (id, member_id, line_no, construct, raw) "
+        "VALUES (1, 1, 10, 'IF', 'IF X')"
+    )
+    conn.execute(
+        "INSERT INTO rule_theme (rule_candidate_id, theme, source) VALUES (1, 'eligibility', 'keyword')"
+    )
+    conn.commit()
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO rule_theme (rule_candidate_id, theme, source) VALUES (1, 'posting', 'llm')"
+        )
+        conn.commit()
+
+
+def test_purge_member_facts_removes_orphaned_rule_theme_rows(tmp_path):
+    """Regression test: rule_theme carries no member_id of its own -- only
+    rule_candidate_id, a foreign key into a table purge_member_facts DOES
+    delete per-member. Without an explicit cleanup, deleting a member's
+    rule_candidate rows left their rule_theme rows behind, orphaned; if a
+    later re-ingest let SQLite reuse one of those freed rowids for an
+    unrelated new rule_candidate, the stale theme would silently reattach
+    to it."""
+    from mfdoc.db import connect, purge_member_facts
+
+    conn = connect(tmp_path / "index.db")
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'X', 'natural')")
+    conn.execute(
+        "INSERT INTO rule_candidate (id, member_id, line_no, construct, raw) "
+        "VALUES (1, 1, 10, 'IF', 'IF X')"
+    )
+    conn.execute(
+        "INSERT INTO rule_theme (rule_candidate_id, theme, source) VALUES (1, 'eligibility', 'keyword')"
+    )
+    conn.commit()
+
+    purge_member_facts(conn, 1)
+    conn.commit()
+
+    remaining = conn.execute("SELECT COUNT(*) FROM rule_theme").fetchone()[0]
+    assert remaining == 0, "rule_theme rows must not survive their rule_candidate's deletion"

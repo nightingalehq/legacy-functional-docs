@@ -65,3 +65,61 @@ def test_regeneration_is_byte_identical(indexed_db):
     regardless of when it's regenerated."""
     conn = indexed_db
     assert brief.rules_register(conn) == brief.rules_register(conn)
+
+
+def test_total_line_unchanged_when_no_ambiguous_names(indexed_db):
+    """The fixture's batchable members are all unambiguous -- the Total
+    line's wording must stay exactly what it was before this disclosure was
+    added, so unrelated fixtures (this repo's checked-in
+    examples/outputs/docs/rules-register.md included) keep regenerating
+    byte-identically."""
+    conn = indexed_db
+    out = brief.rules_register(conn)
+    total_line = next(line for line in out.splitlines() if line.startswith("Total:"))
+    assert re.fullmatch(r"Total: \d+ rule candidate\(s\) across \d+ batchable module\(s\)\.", total_line)
+
+
+def test_total_line_discloses_ambiguous_exclusion():
+    """An ambiguous-named member's rule_candidate rows are rendered as an
+    explicit `ambiguous` row (see the loop above) but never counted into
+    `total` -- the Total line must say so, mirroring the disclosure
+    `structural.thematic_rules_register()` already makes for the identical
+    case, rather than silently under-reporting the system's rule count."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+
+    conn.execute(
+        "INSERT INTO member (name, dialect, library, object_type) "
+        "VALUES ('DUPMOD', 'natural', 'LIBA', 'program')"
+    )
+    conn.execute(
+        "INSERT INTO member (name, dialect, library, object_type) "
+        "VALUES ('DUPMOD', 'natural', 'LIBB', 'program')"
+    )
+    mid_a = conn.execute("SELECT id FROM member WHERE library='LIBA'").fetchone()["id"]
+    mid_b = conn.execute("SELECT id FROM member WHERE library='LIBB'").fetchone()["id"]
+    conn.execute(
+        "INSERT INTO rule_candidate (member_id, line_no, depth, construct, raw, condition) "
+        "VALUES (?, 10, 1, 'IF', 'IF X', 'X > 1')", (mid_a,)
+    )
+    conn.execute(
+        "INSERT INTO rule_candidate (member_id, line_no, depth, construct, raw, condition) "
+        "VALUES (?, 20, 1, 'IF', 'IF Y', 'Y > 1')", (mid_b,)
+    )
+    conn.commit()
+
+    out = brief.rules_register(conn)
+    assert "DUPMOD" in out
+    total_line = next(line for line in out.splitlines() if line.startswith("Total:"))
+    assert "ambiguous" in total_line.lower()
+    # Both of DUPMOD's real rule_candidate rows must be counted as excluded,
+    # not just the module -- a bare "N ambiguous-named module(s)" count
+    # alone would hide how many rules that actually costs the register.
+    assert "2 rule candidate(s)" in total_line
+    assert "1 ambiguous-named module(s)" in total_line
+    assert "Total: 0 rule candidate(s) across 0 batchable module(s);" in total_line

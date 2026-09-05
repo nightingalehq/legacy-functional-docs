@@ -76,6 +76,15 @@ options:
   #   natural:
   #     - '^\*+\s*>{2,}\s*(?P<type>\w+)?\s*(?P<name>[A-Z0-9#\-_&$]{1,32})\s*<{2,}'
 
+  # mfdoc validate's reversed-condition check (conditions.py). Deliberately
+  # no default here beyond the built-in RETURN-CODE/RESPONSE-CODE/STATUS/
+  # STAT/FLAG/RC denylist -- set this only if this codebase's outcome fields
+  # (return/response/status codes, flags) use different naming conventions
+  # the built-in pattern doesn't cover; a supplied pattern replaces the
+  # built-in one rather than extending it.
+  validate: {}
+  #   outcome_field_pattern: '\bRESULT\b'
+
   # Thresholds that decide whether a run is fit to build narrative on. These are
   # starting points; tighten them once you have a baseline for the codebase.
   quality_gates:
@@ -148,3 +157,28 @@ options:
       - {language: mantis, framework: native}
       - {language: silkcentral, framework: testcase}
       - {language: uipath, framework: testcase}
+
+  # Structural overview extension configuration
+  overview:
+    themes:
+      # Call the LLM to classify unmatched rules, rather than stopping at the
+      # keyword taxonomy or structural fallback. Settable per-run with
+      # `mfdoc classify-rules --llm-fallback`.
+      llm_fallback: false
+      # Keyword/regex taxonomy for `mfdoc classify-rules` -- theme name maps
+      # to a list of regexes matched against rule conditions/literals. No
+      # built-in default; declare only the business themes present in your
+      # codebase.
+      taxonomy: {}
+    complexity:
+      # Metric for the complexity heatmap. rule_depth combines rule count
+      # and max nesting depth with call-graph degree to rank members by risk.
+      metric: rule_depth
+    diagrams:
+      # Cluster call-graph nodes by this dimension. module groups by
+      # member.library; subsystem groups by member.system. Ignored by data-flow.
+      cluster_by: module
+      # Above this many distinct nodes, `mfdoc call-graph` renders inline
+      # cluster summaries plus separate diagrams per cluster, rather than one
+      # large inline diagram.
+      max_nodes_inline: 40

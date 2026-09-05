@@ -19,9 +19,11 @@ from pathlib import Path
 
 import yaml
 
-from .brief import _rule_id, fetch_rule_candidate_rows
+from .brief import fetch_rule_candidate_rows
+from .citations import _rule_id
 from .conditions import (
     FAILURE_WORDS,
+    OUTCOME_FIELD,
     SUCCESS_WORDS,
     comparisons_in,
     invert,
@@ -298,21 +300,37 @@ def _statement_completeness_problems(
     return problems
 
 
-def _reversed_condition_problems(
-    conn, member: str, member_id: int, lf: int, lt: int | None, body: str, cite_start: int, cite_end: int
-) -> list[str]:
-    """Flag a citation whose surrounding sentence describes an equality
-    comparison in the opposite direction from the `rule_candidate` condition(s)
-    it cites.
+# polarity -> narrative wording, for building the finding message. Covers
+# every polarity `conditions.comparisons_in` can produce.
+_POLARITY_WORDS = {
+    "eq": "equals", "ne": "does not equal",
+    "gt": "is greater than", "lt": "is less than",
+    "ge": "is at least", "le": "is at most",
+}
 
-    Only fires for "outcome" fields (`conditions.OUTCOME_FIELD`) compared
-    against a literal -- the failure mode this exists for is a reversed
-    pass/fail interpretation, not general narration imprecision. A citation
-    range spanning an `IF` and its paired `ELSE` is resolved against whichever
-    branch the sentence's own wording (`SUCCESS_WORDS`/`FAILURE_WORDS`)
-    describes; with no such hint, only the `IF`'s own condition is checked --
-    guessing which branch an ambiguous sentence means is worse than not
-    checking it at all.
+
+def _reversed_condition_problems(
+    conn, member: str, member_id: int, lf: int, lt: int | None, body: str, cite_start: int, cite_end: int,
+    outcome_field=OUTCOME_FIELD,
+) -> list[str]:
+    """Flag a citation whose surrounding sentence describes a comparison in
+    the opposite direction from the `rule_candidate` condition(s) it cites.
+
+    Only fires for "outcome" fields (`outcome_field`, defaulting to
+    `conditions.OUTCOME_FIELD`) -- the failure mode this exists for is a
+    reversed pass/fail interpretation, not general narration imprecision. A
+    citation range spanning an `IF` and its paired `ELSE` is resolved against
+    whichever branch the sentence's own wording (`SUCCESS_WORDS`/
+    `FAILURE_WORDS`) describes; with no such hint, only the `IF`'s own
+    condition is checked -- guessing which branch an ambiguous sentence means
+    is worse than not checking it at all.
+
+    Two comparison shapes reach this far (see `conditions.comparisons_in`):
+    field-vs-literal (`c["literal"]` set) and field-vs-field
+    (`c["other_field"]` set, `c["literal"]` `None`). For field-vs-field, the
+    narrative claim is read off the *other field's own identifier* appearing
+    in the sentence (stripped of its sigil) rather than a literal value --
+    there is no concrete value to search prose for otherwise.
     """
     hi = lt or lf
     rows = conn.execute(
@@ -327,7 +345,9 @@ def _reversed_condition_problems(
     else_comparisons: list[tuple[int, dict]] = []
     for row in rows:
         if row["construct"] == "IF":
-            if_comparisons.extend((row["line_no"], c) for c in comparisons_in(row["condition"]))
+            if_comparisons.extend(
+                (row["line_no"], c) for c in comparisons_in(row["condition"], outcome_field=outcome_field)
+            )
         elif row["construct"] == "ELSE" and row["pair_line_no"] is not None:
             if_row = conn.execute(
                 "SELECT condition FROM rule_candidate WHERE member_id=? AND line_no=? AND construct='IF'",
@@ -336,7 +356,7 @@ def _reversed_condition_problems(
             if if_row is not None:
                 else_comparisons.extend(
                     (row["line_no"], {**c, "polarity": invert(c["polarity"])})
-                    for c in comparisons_in(if_row["condition"])
+                    for c in comparisons_in(if_row["condition"], outcome_field=outcome_field)
                 )
 
     if not if_comparisons and not else_comparisons:
@@ -364,24 +384,26 @@ def _reversed_condition_problems(
     problems = []
     seen = set()
     for line_no, c in candidates:
-        key = (line_no, c["field"], c["literal"])
+        key = (line_no, c["field"], c["literal"], c["other_field"])
         if key in seen:
             continue
-        claimed = prose_polarity(sentence, c["literal"])
+        target = c["literal"] if c["literal"] is not None else c["other_field"].lstrip("#@$&")
+        claimed = prose_polarity(sentence, target)
         if claimed is None or claimed == c["polarity"]:
             continue
         seen.add(key)
-        actual = "equals" if c["polarity"] == "eq" else "does not equal"
-        claimed_as = "equals" if claimed == "eq" else "does not equal"
+        actual = _POLARITY_WORDS[c["polarity"]]
+        claimed_as = _POLARITY_WORDS[claimed]
+        described = f"'{c['literal']}'" if c["literal"] is not None else c["other_field"]
         problems.append(
             f"comparison direction may be reversed near [[{member}:{line_no}]]: "
-            f"text reads as though {c['field']} {claimed_as} '{c['literal']}', "
-            f"but the source condition means {c['field']} {actual} '{c['literal']}'"
+            f"text reads as though {c['field']} {claimed_as} {described}, "
+            f"but the source condition means {c['field']} {actual} {described}"
         )
     return problems
 
 
-def validate_doc(conn, path: Path) -> dict:
+def validate_doc(conn, path: Path, outcome_field=OUTCOME_FIELD) -> dict:
     text = path.read_text(encoding="utf-8")
     problems: list[str] = []
     omitted_targets: list[str] = []
@@ -476,7 +498,8 @@ def validate_doc(conn, path: Path) -> dict:
             elif module_doc_checks:
                 problems.extend(
                     _reversed_condition_problems(
-                        conn, member, row["id"], lf, lt, body, m.start(), m.end()
+                        conn, member, row["id"], lf, lt, body, m.start(), m.end(),
+                        outcome_field=outcome_field,
                     )
                 )
                 omitted_targets.extend(
@@ -649,8 +672,130 @@ def module_completeness_problems(conn, results: list[dict]) -> list[str]:
     return problems
 
 
-def validate_tree(conn, root: Path) -> dict:
-    results = [validate_doc(conn, p) for p in sorted(root.rglob("*.md")) if _is_pipeline_doc(p)]
+# Row/line-count patterns used by `_artifact_consistency_problems` to
+# re-derive a cheap invariant from a `structural.py`-rendered artifact's own
+# markdown, without re-rendering (and diffing) the whole document.
+_GAP_SUMMARY_ROW = re.compile(r"^\|\s*`[^`|]*`\s*\|[^|]*\|\s*(\d+)\s*\|\s*$", re.M)
+_GLOSSARY_HEADING = re.compile(r"^### ", re.M)
+# A call-graph node declaration line, e.g. `    n_ABC123["NAME"]` (resolved)
+# or `    n_ABC123(["NAME (unresolved)"])` (unresolved) -- see
+# structural.call_graph_diagram's render(). Deliberately distinct from an
+# edge line (`    id --> id` / `    id -.->|unresolved| id`): after the node
+# id (always plain alnum/underscore, per structural._mermaid_id) an edge
+# line has a space next, never `[` or `(`, so this pattern never matches one.
+_CALL_GRAPH_NODE = re.compile(r'^ {4}\S+[\[(]', re.M)
+
+
+def _gap_summary_artifact_problems(conn, path: Path, body: str) -> list[str]:
+    """gap-summary.md's table is one row per (gap_kind, severity), each
+    carrying that group's `COUNT(*)`. Summing every row's count column must
+    equal the live `gap` table's total row count -- a stale hand-edited copy
+    (or one regenerated before a later `mfdoc derive`/`gap-summary` run) with
+    a wrong count would otherwise sail through the citation checks above,
+    since a `doc_type: register` doc like this carries no prose citations
+    for them to check at all."""
+    expected = conn.execute("SELECT COUNT(*) AS n FROM gap").fetchone()["n"]
+    actual = sum(int(m) for m in _GAP_SUMMARY_ROW.findall(body))
+    if actual != expected:
+        return [
+            f"{path.name}: table rows sum to {actual} gap(s), but the fact store "
+            f"currently has {expected} -- looks stale, regenerate with `mfdoc gap-summary`"
+        ]
+    return []
+
+
+def _glossary_artifact_problems(conn, path: Path, body: str) -> list[str]:
+    """glossary.md renders one `### ` heading per distinct (name, kind) pair
+    in `entity` (structural.glossary). A heading count that doesn't match
+    the live table means the glossary was hand-edited or regenerated
+    against an older fact store."""
+    expected = conn.execute(
+        "SELECT COUNT(*) AS n FROM (SELECT DISTINCT name, kind FROM entity)"
+    ).fetchone()["n"]
+    actual = len(_GLOSSARY_HEADING.findall(body))
+    if actual != expected:
+        return [
+            f"{path.name}: {actual} entity heading(s) found, but the fact store "
+            f"currently has {expected} distinct (name, kind) entit(y/ies) -- looks "
+            f"stale, regenerate with `mfdoc glossary`"
+        ]
+    return []
+
+
+def _call_graph_artifact_problems(conn, path: Path, body: str, fm: dict) -> list[str]:
+    """call-graph.md's node count should match the distinct set of nodes
+    `structural.build_call_graph` derives from `call_edge` (every caller,
+    plus every callee -- keyed by member id where `call_edge.callee_id` is
+    set, else by bare callee name, mirroring `call_graph_diagram`'s own
+    node identity rule (Finding 1): a name alone is not a stable node key.
+
+    Only checked when the diagram actually rendered every node inline --
+    once the graph exceeds `max_nodes_inline`, `call_graph_diagram` collapses
+    `call-graph.md` to one node per cluster instead (see its `title:
+    "Call graph (collapsed)"` front matter), which this invariant does not
+    apply to; the full per-cluster files it points at
+    (`call-graph-<cluster>.md`) are not checked here since a cluster's own
+    node set additionally depends on config (`cluster_by`), not just
+    `call_edge` -- too fragile a heuristic for the exact node count."""
+    if fm.get("title") == "Call graph (collapsed)":
+        return []
+    nodes: set[tuple[str, object]] = set()
+    for r in conn.execute("SELECT caller_id, callee_id, callee_name FROM call_edge"):
+        nodes.add(("id", r["caller_id"]))
+        nodes.add(("id", r["callee_id"]) if r["callee_id"] is not None else ("name", r["callee_name"]))
+    expected = len(nodes)
+    actual = len(_CALL_GRAPH_NODE.findall(body))
+    if actual != expected:
+        return [
+            f"{path.name}: {actual} node(s) drawn, but call_edge implies {expected} distinct "
+            f"node(s) -- looks stale, regenerate with `mfdoc call-graph`"
+        ]
+    return []
+
+
+def _artifact_consistency_problems(conn, results: list[dict]) -> list[str]:
+    """A cheap, doc_type-aware consistency check for the deterministic
+    structural artifacts (`structural.py`) that the citation/uncited-
+    assertion checks above are nearly a no-op against: each one is a
+    `doc_type: register` document with little to no prose, so a stale
+    hand-edited copy (or one left over from before a later `mfdoc derive`
+    run) can carry a wrong count and still validate clean by every check
+    upstream of this one.
+
+    There is no machine-readable tag naming *which* structural artifact a
+    given file is -- only `doc_type: register` in front matter, shared by
+    every one of them (and by other, unrelated register docs like
+    rules-register.md). This falls back to the filename convention
+    `structural.py`'s own CLI commands (`cmd_gap_summary`/`cmd_call_graph`/
+    `cmd_glossary` in cli.py) write to by default -- `gap-summary.md`,
+    `call-graph.md`, `glossary.md`. That is inherently a fragile match (a
+    project could name its output file anything via `--out`); it only
+    covers the default filenames, and silently skips a doc under any other
+    name rather than guessing. Gated the same way by construction: a docs
+    tree with none of these filenames contributes nothing here, so a project
+    not using the structural-overview extension validates exactly as
+    before."""
+    problems: list[str] = []
+    for r in results:
+        fm = r.get("_fm")
+        if not fm or fm.get("doc_type") != "register":
+            continue
+        path = Path(r["path"])
+        body = r.get("_body") or ""
+        if path.name == "gap-summary.md":
+            problems.extend(_gap_summary_artifact_problems(conn, path, body))
+        elif path.name == "glossary.md":
+            problems.extend(_glossary_artifact_problems(conn, path, body))
+        elif path.name == "call-graph.md":
+            problems.extend(_call_graph_artifact_problems(conn, path, body, fm))
+    return problems
+
+
+def validate_tree(conn, root: Path, outcome_field=OUTCOME_FIELD) -> dict:
+    results = [
+        validate_doc(conn, p, outcome_field=outcome_field)
+        for p in sorted(root.rglob("*.md")) if _is_pipeline_doc(p)
+    ]
     return {
         "documents": len(results),
         "documents_ok": sum(1 for r in results if r["ok"]),
@@ -658,6 +803,7 @@ def validate_tree(conn, root: Path) -> dict:
         "invalid_citations": sum(r["invalid_citations"] for r in results),
         "results": results,
         "completeness_problems": module_completeness_problems(conn, results),
+        "artifact_problems": _artifact_consistency_problems(conn, results),
         # Advisory only (see _statement_completeness_problems) -- never
         # subtracted from documents_ok and never affects a caller's exit code.
         #

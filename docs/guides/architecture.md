@@ -157,6 +157,50 @@ when sensitive values would already have reached a prompt. See
 [security-and-compliance.md](security-and-compliance.md) for what this does
 and does not cover.
 
+### Structural overview (`classify.py`, `structural.py`, `mfdoc classify-rules` + friends)
+
+A second, optional layer of deterministic output sits between derive and
+narrate, split across two modules for the same reason `brief.py` and the
+narrate stage stay separate: one of them may call a model, the rest never
+do.
+
+- **`classify.py`** — the only piece of this layer that can touch an LLM.
+  `mfdoc classify-rules` assigns each `rule_candidate` a business theme in
+  three layers, run in order, never as independent passes: a project-defined
+  keyword/regex taxonomy (`options.overview.themes.taxonomy`, deterministic,
+  always runs first); an optional LLM pass over whatever the taxonomy didn't
+  match (`classify_rules_llm`, gated on `options.overview.themes.llm_fallback`
+  or `--llm-fallback`); a structural fallback — the rule's own member's
+  library, or `uncategorized` — for anything still unclassified once the
+  first two layers have run. Every rule ends up classified; nothing is
+  silently dropped. Classifications land in the `rule_theme` table
+  (`rule_candidate_id`, `theme`, `source`), `UNIQUE` on `rule_candidate_id`
+  so re-running after a taxonomy edit upserts rather than duplicating —
+  `source` is one of `keyword`, `llm`, or `structural`, recording which
+  layer actually classified that row.
+- **`structural.py`** — everything downstream of classification is a pure,
+  deterministic renderer over the fact store: `gap_summary`,
+  `data_flow_diagram`, `build_call_graph`/`call_graph_diagram`,
+  `complexity_heatmap`, `thematic_rules_register`, and `glossary`. Same
+  contract as `brief.rules_register()` — pure extraction, no judgement call,
+  byte-identical output on unchanged source. If a doc needs synthesis or
+  prose instead of extraction, it belongs in `brief.py`, not here.
+
+This changes the pipeline order for a project that uses it: `mfdoc derive`
+→ `mfdoc classify-rules` (new, optional — only needed if you want themed
+output or the LLM fallback; the only structural-overview step that writes
+to the fact store, populating `rule_theme`) → `mfdoc call-graph`/`data-flow`/
+`complexity`/`rules-theme-register`/`gap-summary`/`glossary` (new, all
+deterministic, no ordering dependency between them or with anything after
+`derive` — they're pure renderers, reading the fact store but never
+writing to it) → `mfdoc batch` (existing, per-module, unchanged) → the
+interactive executive-summary narrative (new; depends only on
+`classify-rules` having already populated `rule_theme` for its "Top rules"
+section — its "Risk" section reads the same underlying complexity data
+`mfdoc complexity` renders, directly from the fact store, so running that
+or any other renderer first has no effect on `brief.executive_brief()`'s
+output).
+
 ### 3 — Narrate (two paths, by design — see the plan doc's "Option C")
 
 High-volume, formulaic documents (one per program) and low-volume,
@@ -288,12 +332,17 @@ map directly to it. It is:
 ## Where a model can and can't reach
 
 The only code paths that make a network call are `mfdoc batch`,
-`mfdoc test-gen`/`mfdoc test-batch`, `mfdoc test-overlay-draft`, and
-`anthropic_caller.py` underneath all three. Everything else — `ingest`,
+`mfdoc test-gen`/`mfdoc test-batch`, `mfdoc test-overlay-draft`,
+`mfdoc classify-rules` (only when its LLM fallback is enabled — via
+`options.overview.themes.llm_fallback` or `--llm-fallback`; with it off,
+`classify-rules` is deterministic like everything else in this list), and
+`anthropic_caller.py` underneath all four. Everything else — `ingest`,
 `derive`, `coverage`, `gate`, `calibrate`, `brief`, `validate`, `export`,
-`test-plan`, `test-advisory`, `test-validate` — is local Python with no
-egress, which is why the README states "no network access, nothing leaves
-the machine" as the default posture with those named exceptions.
+`test-plan`, `test-advisory`, `test-validate`, `gap-summary`, `data-flow`,
+`call-graph`, `complexity`, `rules-theme-register`, `glossary` — is local
+Python with no egress, which is why the README states "no network access,
+nothing leaves the machine" as the default posture with those named
+exceptions.
 
 The interactive path (writing docs from a brief inside a Claude Code chat
 session, per `SKILL.md`) also sends brief content to a model, just via

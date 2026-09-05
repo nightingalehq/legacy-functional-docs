@@ -179,6 +179,35 @@ mfdoc rules-register --config project.yml --out docs/functional/rules-register.m
 # without already knowing which module doc it lives in; regenerate any time,
 # byte-identical output against unchanged source
 
+# optional structural overview reports -- all deterministic (no network call),
+# all configured under options.overview in project.yml, see below:
+mfdoc classify-rules --config project.yml
+# assigns each rule_candidate a business theme: keyword taxonomy first
+# (options.overview.themes.taxonomy), then an optional LLM fallback for
+# anything unmatched (--llm-fallback, or options.overview.themes.llm_fallback),
+# then a structural fallback (the rule's own member's library). Run this
+# before rules-theme-register or executive-summary docs, or every rule
+# reads as uncategorized.
+mfdoc gap-summary --config project.yml --out docs/functional/gap-summary.md
+# gap counts by kind and severity, for the top of system-overview.md
+mfdoc data-flow --config project.yml --out docs/functional/data-flow.md
+# entity read/write relationships as a diagram, from the CRUD matrix
+mfdoc call-graph --config project.yml --out docs/functional/call-graph
+# who-calls-whom, as a diagram; writes call-graph*.md files into the given
+# directory (or prints the inline diagram to stdout if --out is omitted)
+mfdoc complexity --config project.yml --out docs/functional/complexity.md
+# a per-member risk/complexity heatmap (options.overview.complexity.metric)
+mfdoc rules-theme-register --config project.yml --out docs/functional/rules-theme-register.md
+# the rules register, rolled up by business theme instead of by module --
+# needs `mfdoc classify-rules` run first, or every rule lands under "uncategorized"
+mfdoc glossary --config project.yml --out docs/functional/glossary.md
+# one entry per entity, with its fields nested underneath, from entity/field
+# descriptions already recorded in the fact store
+
+# Note: unlike the other structural overview commands above (gap-summary, data-flow,
+# complexity, rules-theme-register, glossary), call-graph's --out must be a directory
+# path, not a file path; it generates multiple files (one per cluster if needed).
+
 mfdoc validate --config project.yml --docs docs/functional
 
 # smoke-test against the bundled fixtures and worked examples:
@@ -187,6 +216,39 @@ mfdoc validate --config project.yml --docs examples/outputs
 
 `mfdoc export --config project.yml --json out/index.json` dumps the whole
 fact store for downstream tooling.
+
+The structural overview reports above are configured under `options.overview`
+in `project.yml`:
+
+```yaml
+options:
+  overview:
+    themes:
+      # keyword/regex taxonomy for `mfdoc classify-rules` -- theme name to a
+      # list of regexes matched against each rule_candidate's condition/
+      # literals; no built-in taxonomy, same "declare it, don't guess it"
+      # policy as options.redact/options.testgen above
+      taxonomy: {}
+      # let classify-rules fall back to an LLM pass for anything the
+      # taxonomy above didn't match, instead of leaving it to the
+      # structural (member-library) fallback; also settable per-run with
+      # `mfdoc classify-rules --llm-fallback`
+      llm_fallback: false
+    complexity:
+      # only rule_depth is implemented today (rule count + max nesting
+      # depth, combined with call-graph in/out-degree); cyclomatic is a
+      # documented-but-unimplemented future option
+      metric: rule_depth
+    diagrams:
+      # how `mfdoc call-graph` clusters nodes ("module" -> member.library,
+      # "subsystem" -> member.system); data-flow always renders one diagram
+      # and ignores this
+      cluster_by: module
+      # above this many distinct nodes, `mfdoc call-graph` renders a
+      # collapsed cluster-level diagram inline plus one full diagram per
+      # cluster on disk, instead of one large inline diagram
+      max_nodes_inline: 40
+```
 
 Optional: draft tests from the same fact store (see
 [`docs/guides/testing-strategies-for-mainframes-and-4gl.md`](docs/guides/testing-strategies-for-mainframes-and-4gl.md)).
