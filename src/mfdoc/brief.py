@@ -719,6 +719,80 @@ def system_brief(conn, redact: Redactor = NULL_REDACTOR) -> str:
     return "\n".join(out) + "\n"
 
 
+def executive_brief(conn, member_name: str, redact: Redactor = NULL_REDACTOR, top_n: int = 10) -> str:
+    """Cited-facts brief for one program's executive summary: purpose/
+    entry data, top rules by theme, I/O, external dependents, risk score.
+    Same contract as module_brief/system_brief -- the narrative pass may
+    only assert what this brief hands it, and every claim must carry a
+    [[MEMBER:line]] citation back to source."""
+    from . import structural
+
+    member = conn.execute(
+        "SELECT id, name, library, object_type FROM member WHERE UPPER(name)=?",
+        (member_name.upper(),),
+    ).fetchone()
+    if member is None:
+        raise ValueError(f"unknown member {member_name!r}")
+
+    out = [f"# Executive brief: {member['name']}", "",
+           f"- library: `{member['library'] or 'unknown'}`",
+           f"- object_type: `{member['object_type'] or 'unknown'}`", ""]
+
+    out.append("## Top rules")
+    rows = conn.execute(
+        """
+        SELECT rc.id, rc.line_no, rc.condition, COALESCE(rt.theme, 'uncategorized') AS theme
+          FROM rule_candidate rc
+          LEFT JOIN rule_theme rt ON rt.rule_candidate_id = rc.id
+         WHERE rc.member_id = ?
+         ORDER BY rc.depth DESC, rc.line_no
+         LIMIT ?
+        """,
+        (member["id"], top_n),
+    ).fetchall()
+    if not rows:
+        out.append("- no rule candidates recorded for this member")
+    for r in rows:
+        cond = redact(r["condition"]) if r["condition"] else "(no condition text)"
+        out.append(f"- [{r['theme']}] {cond} {_cite(member['name'], r['line_no'])}")
+    out.append("")
+
+    out.append("## I/O")
+    crud_rows = [row for row in structural.graph.crud_matrix(conn) if row["module"] == member["name"]]
+    if not crud_rows:
+        out.append("- no data access recorded for this member")
+    for row in crud_rows:
+        out.append(f"- `{row['entity']}`: {row['crud']} {_cite(member['name'], row['first_line'])}")
+    out.append("")
+
+    out.append("## External dependents")
+    graph_data = structural.build_call_graph(conn)
+    callers = [name for name, entry in graph_data.items()
+               if any(c["callee"].upper() == member["name"].upper() for c in entry["calls"])]
+    if not callers:
+        out.append("- no known callers recorded for this member")
+    for caller in callers:
+        out.append(f"- called by `{caller}`")
+    out.append("")
+
+    out.append("## Risk")
+    heatmap_rows = [
+        line for line in structural.complexity_heatmap(conn).splitlines()
+        if line.startswith(f"| `{member['name']}`")
+    ]
+    if not heatmap_rows:
+        out.append("- no rule candidates recorded for this member")
+    elif "| ambiguous:" in heatmap_rows[0]:
+        out.append(
+            f"- risk score unavailable: `{member['name']}` is ambiguous across "
+            "libraries -- re-run against a library-qualified export"
+        )
+    else:
+        out.extend(heatmap_rows)
+    out.append("")
+    return "\n".join(out) + "\n"
+
+
 def rules_register(conn, redact: Redactor = NULL_REDACTOR) -> str:
     """A flat, system-wide index of every `MEMBER:BR-nnn` rule ID, generated
     straight from the fact store so it can never drift from what the module
