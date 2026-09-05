@@ -148,3 +148,14 @@ options:
       - {language: mantis, framework: native}
       - {language: silkcentral, framework: testcase}
       - {language: uipath, framework: testcase}
+
+  # Structural overview extension configuration
+  overview:
+    themes:
+      llm_fallback: false
+      taxonomy: {}
+    complexity:
+      metric: rule_depth
+    diagrams:
+      cluster_by: module
+      max_nodes_inline: 40
