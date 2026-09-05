@@ -724,15 +724,29 @@ def executive_brief(conn, member_name: str, redact: Redactor = NULL_REDACTOR, to
     entry data, top rules by theme, I/O, external dependents, risk score.
     Same contract as module_brief/system_brief -- the narrative pass may
     only assert what this brief hands it, and every claim must carry a
-    [[MEMBER:line]] citation back to source."""
-    from . import structural
+    [[MEMBER:line]] citation back to source.
 
-    member = conn.execute(
-        "SELECT id, name, library, object_type FROM member WHERE UPPER(name)=?",
-        (member_name.upper(),),
-    ).fetchone()
-    if member is None:
-        raise ValueError(f"unknown member {member_name!r}")
+    Resolves `member_name` the same way module_brief/entity_brief do -- via
+    db.resolve_member_by_name -- and returns the same kind of graceful
+    "no such member"/"ambiguous across libraries" markdown they return,
+    rather than raising, for the identical reason: a bare name is only
+    unique together with library+dialect (see the `UNIQUE(name, library,
+    dialect)` constraint in db.py), so blending facts from two distinct
+    members that happen to share a name under one member's identity would
+    be a citation-integrity bug, not just an edge case."""
+    from . import structural  # local: avoids a circular import at load time (structural imports from this module)
+    from .db import resolve_member_by_name
+
+    matches, ambiguous_libs = resolve_member_by_name(conn, member_name)
+    if ambiguous_libs:
+        libs = ", ".join(ambiguous_libs)
+        return (
+            f"# Executive brief: {member_name}\n\nMember name is ambiguous across libraries ({libs}). "
+            f"Re-run with a library-qualified name.\n"
+        )
+    if not matches:
+        return f"# Executive brief: {member_name}\n\nNo such member in the index.\n"
+    member = matches[0]
 
     out = [f"# Executive brief: {member['name']}", "",
            f"- library: `{member['library'] or 'unknown'}`",
@@ -766,13 +780,30 @@ def executive_brief(conn, member_name: str, redact: Redactor = NULL_REDACTOR, to
     out.append("")
 
     out.append("## External dependents")
-    graph_data = structural.build_call_graph(conn)
-    callers = [name for name, entry in graph_data.items()
-               if any(c["callee"].upper() == member["name"].upper() for c in entry["calls"])]
-    if not callers:
+    # build_call_graph()'s per-call dict deliberately carries no line_no (see
+    # Tasks 6/7/8, which depend on its exact current shape) -- so this queries
+    # call_edge directly for the citation instead of reusing that structure.
+    # Matched by callee_name (not callee_id): graph.resolve() sets callee_id
+    # via an unqualified UPPER(name) lookup with its own LIMIT 1, so comparing
+    # names here mirrors exactly which edges build_call_graph would consider a
+    # match for this member, resolved or not. Safe from the ambiguous-name
+    # blending Critical 2 above describes: this member's name is already
+    # confirmed unique across the whole member table by the resolve_member_by_name
+    # call above, so no other member could also match this same callee_name.
+    caller_rows = conn.execute(
+        """
+        SELECT m.name AS caller, MIN(ce.line_no) AS first_line
+          FROM call_edge ce JOIN member m ON m.id = ce.caller_id
+         WHERE UPPER(ce.callee_name) = UPPER(?)
+         GROUP BY m.name
+         ORDER BY m.name
+        """,
+        (member["name"],),
+    ).fetchall()
+    if not caller_rows:
         out.append("- no known callers recorded for this member")
-    for caller in callers:
-        out.append(f"- called by `{caller}`")
+    for row in caller_rows:
+        out.append(f"- called by `{row['caller']}` {_cite(row['caller'], row['first_line'])}")
     out.append("")
 
     out.append("## Risk")
@@ -783,6 +814,12 @@ def executive_brief(conn, member_name: str, redact: Redactor = NULL_REDACTOR, to
     if not heatmap_rows:
         out.append("- no rule candidates recorded for this member")
     elif "| ambiguous:" in heatmap_rows[0]:
+        # Defence-in-depth only: unreachable via this function's own
+        # resolve_member_by_name guard above (which already refuses any name
+        # matching more than one member row before we ever get here), but
+        # complexity_heatmap's own ambiguity check is scoped only to members
+        # with rule_candidate rows, a narrower condition than
+        # resolve_member_by_name's -- kept in case that ever diverges.
         out.append(
             f"- risk score unavailable: `{member['name']}` is ambiguous across "
             "libraries -- re-run against a library-qualified export"

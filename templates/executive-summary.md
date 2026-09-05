@@ -3,6 +3,16 @@ title: "Executive summary — {MEMBER}"
 doc_type: executive_summary
 system: "{SYSTEM}"
 module: "{MEMBER}"
+generated_by: legacy-functional-docs 0.1.0
+generated_at: "{YYYY-MM-DD}"
+review_status: draft
+reviewers: []
+confidence_summary:
+  verified: 0
+  inferred: 0
+  unresolved: 0
+sources: []
+sme_questions: []
 ---
 
 # {MEMBER} — executive summary
