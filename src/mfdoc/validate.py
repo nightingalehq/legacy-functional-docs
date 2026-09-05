@@ -249,33 +249,53 @@ def _containing_sentence(body: str, start: int, end: int) -> str:
 _STATEMENT_SOURCES = [
     ("callee_name", "call_kind",
      "SELECT line_no, call_kind, callee_name FROM call_edge "
-     "WHERE caller_id=? AND line_no BETWEEN ? AND ? AND dynamic=0 "
-     "AND callee_name IS NOT NULL AND callee_name != ''"),
+     "WHERE caller_id=? AND dynamic=0 AND callee_name IS NOT NULL AND callee_name != ''"),
     ("target", "kind",
      "SELECT line_no, kind, target FROM interaction "
-     "WHERE member_id=? AND line_no BETWEEN ? AND ? AND dynamic=0 "
-     "AND target IS NOT NULL AND target != ''"),
+     "WHERE member_id=? AND dynamic=0 AND target IS NOT NULL AND target != ''"),
     ("entity_name", "verb",
      "SELECT line_no, verb, entity_name FROM data_access "
-     "WHERE member_id=? AND line_no BETWEEN ? AND ? "
-     "AND entity_name IS NOT NULL AND entity_name != ''"),
+     "WHERE member_id=? AND entity_name IS NOT NULL AND entity_name != ''"),
 ]
 
 
+def _fetch_statement_rows(conn, member_id: int) -> list[tuple[str, str, object]]:
+    """Every `call_edge`/`interaction`/`data_access` row for `member_id`,
+    across all three tables, as `(target_col, kind_col, row)` triples.
+
+    Fetched once per member rather than once per citation:
+    `_statement_completeness_problems` used to re-run all three queries,
+    each re-filtered by line range, for every citation of a member -- a doc
+    citing the same member several times (the common case) paid for the
+    same three queries again each time. The caller (`validate_doc`) caches
+    this per member_id across a document's whole citation loop; the
+    per-citation line-range filter now happens in memory in
+    `_statement_completeness_problems` instead of in SQL.
+    """
+    rows = []
+    for target_col, kind_col, sql in _STATEMENT_SOURCES:
+        for row in conn.execute(sql, (member_id,)).fetchall():
+            rows.append((target_col, kind_col, row))
+    return rows
+
+
 def _statement_completeness_problems(
-    conn, member: str, member_id: int, lf: int, lt: int | None, body: str, cite_start: int, cite_end: int
+    rows: list[tuple[str, str, object]], member: str, lf: int, lt: int | None,
+    body: str, cite_start: int, cite_end: int,
 ) -> list[str]:
-    """Flag a `call_edge`/`interaction`/`data_access` row inside a cited
-    range whose target name never appears anywhere in the paragraph citing
-    that range.
+    """Flag a `call_edge`/`interaction`/`data_access` row (from `rows`,
+    `_fetch_statement_rows`'s output for this citation's member) inside the
+    `lf`..`lt` range whose target name never appears anywhere in the
+    paragraph citing that range.
 
     Deliberately paragraph-scoped, not sentence-scoped (unlike
     `_reversed_condition_problems`): a branch's narration legitimately spans
     several sentences in one paragraph (a setup sentence, then one sentence
     per statement), and a target named two sentences after the citation is
-    still a real mention. `dynamic=1` call_edge rows are excluded at the SQL
-    level -- their target is a variable, not a literal name, so there is
-    nothing meaningful to search prose for.
+    still a real mention. `dynamic=1` call_edge/interaction rows are
+    excluded before `rows` is even built (see `_STATEMENT_SOURCES`) --
+    their target is a variable, not a literal name, so there is nothing
+    meaningful to search prose for.
 
     Advisory only: the caller must not add these to `problems`. This is a
     deliberately different shape of check from the ones already built (see
@@ -287,16 +307,17 @@ def _statement_completeness_problems(
 
     range_str = f"{lf}{'-' + str(lt) if lt and lt != lf else ''}"
     problems = []
-    for target_col, kind_col, sql in _STATEMENT_SOURCES:
-        for row in conn.execute(sql, (member_id, lf, hi)).fetchall():
-            target = row[target_col]
-            if _name_mentioned(para, target):
-                continue
-            problems.append(
-                f"statement inside [[{member}:{range_str}]] targets '{target}' "
-                f"({row[kind_col]} at line {row['line_no']}) but '{target}' is not "
-                f"named anywhere in the citing paragraph"
-            )
+    for target_col, kind_col, row in rows:
+        if not (lf <= row["line_no"] <= hi):
+            continue
+        target = row[target_col]
+        if _name_mentioned(para, target):
+            continue
+        problems.append(
+            f"statement inside [[{member}:{range_str}]] targets '{target}' "
+            f"({row[kind_col]} at line {row['line_no']}) but '{target}' is not "
+            f"named anywhere in the citing paragraph"
+        )
     return problems
 
 
@@ -407,6 +428,11 @@ def validate_doc(conn, path: Path, outcome_field=OUTCOME_FIELD) -> dict:
     text = path.read_text(encoding="utf-8")
     problems: list[str] = []
     omitted_targets: list[str] = []
+    # Cache of _fetch_statement_rows(conn, member_id) results, keyed by
+    # member_id -- a document commonly cites the same member several times
+    # (different line ranges each time), and this avoids re-running all
+    # three _STATEMENT_SOURCES queries for every one of those citations.
+    statement_rows_cache: dict[int, list] = {}
     fm, body, fm_err = _split_frontmatter(text)
     if fm_err:
         problems.append(fm_err)
@@ -502,9 +528,11 @@ def validate_doc(conn, path: Path, outcome_field=OUTCOME_FIELD) -> dict:
                         outcome_field=outcome_field,
                     )
                 )
+                if row["id"] not in statement_rows_cache:
+                    statement_rows_cache[row["id"]] = _fetch_statement_rows(conn, row["id"])
                 omitted_targets.extend(
                     _statement_completeness_problems(
-                        conn, member, row["id"], lf, lt, body, m.start(), m.end()
+                        statement_rows_cache[row["id"]], member, lf, lt, body, m.start(), m.end()
                     )
                 )
         insert(conn, "doc_claim", doc_path=str(path), confidence="verified",

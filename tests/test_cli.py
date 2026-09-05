@@ -41,7 +41,10 @@ def test_cmd_validate_reports_omitted_statement_targets_without_failing(indexed_
 
     cfg = cli.load_config(args.config)
     conn = connect(Path(args.config).parent / cfg["index_db"])
-    res = validate_tree(conn, Path(docs))
+    try:
+        res = validate_tree(conn, Path(docs))
+    finally:
+        conn.close()
 
     exit_code = cli.cmd_validate(args)
     captured = capsys.readouterr()
