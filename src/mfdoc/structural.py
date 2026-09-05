@@ -150,7 +150,7 @@ def build_call_graph(conn, cluster_by: str = "module") -> dict[int, dict]:
           FROM call_edge ce
           JOIN member m ON m.id = ce.caller_id
           LEFT JOIN member cm ON cm.id = ce.callee_id
-         ORDER BY m.name, ce.line_no, ce.callee_name
+         ORDER BY m.name, m.id, ce.line_no, ce.callee_name
         """
     ).fetchall()
 

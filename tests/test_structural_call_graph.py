@@ -240,6 +240,48 @@ def test_ambiguous_member_name_renders_as_two_distinct_nodes():
     )
 
 
+def test_ambiguous_caller_row_order_has_a_stable_tiebreaker():
+    """build_call_graph()'s ORDER BY previously sorted only by m.name, so
+    two rows for same-named callers in different libraries had no
+    tie-breaker -- their relative order (and so the rendered diagram's
+    node emission order) was implementation-defined rather than
+    reproducible run-to-run. Adding m.id as a tie-breaker makes it
+    deterministic: insert LIBZ's DUPCALLER first (lower id) and LIBA's
+    second (higher id) -- alphabetically LIBA < LIBZ, so a library- or
+    name-text-only tiebreaker would put LIBA first, but the id-ordered
+    tiebreaker must put the lower-id LIBZ row first regardless."""
+    conn = _conn()
+    conn.execute("INSERT INTO member (name, dialect, library) VALUES ('SHAREDCALLEE', 'natural', 'LIBX')")
+    conn.execute("INSERT INTO member (name, dialect, library) VALUES ('DUPCALLER', 'natural', 'LIBZ')")
+    conn.execute("INSERT INTO member (name, dialect, library) VALUES ('DUPCALLER', 'natural', 'LIBA')")
+
+    def mid(name, library):
+        return conn.execute(
+            "SELECT id FROM member WHERE name=? AND library=?", (name, library)
+        ).fetchone()["id"]
+
+    callee = mid("SHAREDCALLEE", "LIBX")
+    dup_z, dup_a = mid("DUPCALLER", "LIBZ"), mid("DUPCALLER", "LIBA")
+    assert dup_z < dup_a, "LIBZ must have been assigned the lower id for this test to be meaningful"
+
+    conn.execute(
+        "INSERT INTO call_edge (caller_id, callee_name, callee_id, call_kind, line_no, resolved) "
+        "VALUES (?, 'SHAREDCALLEE', ?, 'CALLNAT', 1, 1)", (dup_z, callee),
+    )
+    conn.execute(
+        "INSERT INTO call_edge (caller_id, callee_name, callee_id, call_kind, line_no, resolved) "
+        "VALUES (?, 'SHAREDCALLEE', ?, 'CALLNAT', 1, 1)", (dup_a, callee),
+    )
+    conn.commit()
+
+    graph_data = structural.build_call_graph(conn)
+    caller_order = [cid for cid in graph_data if cid in (dup_z, dup_a)]
+    assert caller_order == [dup_z, dup_a], (
+        "caller rows must be ordered by member id when their names tie, "
+        f"not by library/name text; got {caller_order}"
+    )
+
+
 def test_node_ids_stable_across_member_id_renumbering():
     """Regression for the call-graph node-id-churn follow-up finding:
     mermaid node ids must be derived from the content-stable
