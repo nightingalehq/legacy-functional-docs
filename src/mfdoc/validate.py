@@ -14,10 +14,12 @@ rest. Hence: check all of them, every build.
 from __future__ import annotations
 
 import re
+from collections import defaultdict
 from pathlib import Path
 
 import yaml
 
+from .brief import _rule_id, fetch_rule_candidate_rows
 from .conditions import (
     FAILURE_WORDS,
     SUCCESS_WORDS,
@@ -442,6 +444,55 @@ def validate_tests_tree(conn, root: Path) -> dict:
     }
 
 
+def module_completeness_problems(conn, results: list[dict]) -> list[str]:
+    """A member's `rule_candidate` that never shows up in any `doc_type:
+    module` document's body -- across *all* of `results`, not one file at a
+    time, since a chunked member's rules are only ever complete in
+    aggregate across its several chunk documents.
+
+    Chunking (batch.py) prevents one unbounded completion from silently
+    dropping most of a large member's rules, but nothing before this
+    checked that the *union* of what every chunk (or a single, unchunked
+    doc) actually produced still covers the full set a member's brief
+    handed the model -- a doc that trails off just short of its own
+    assigned range, or a chunk whose model call plain never ran, still
+    validates individually as long as what *is* there cites cleanly. This
+    is the aggregate check that catches that: it reuses `fetch_rule_candidate_rows`
+    (the same row set and ordering `_rule_id` numbers `BR-nnn` from) as the
+    ground truth for what a member's full rule set actually is, so a gap
+    reported here always names a real, stably-numbered missing rule.
+    """
+    cited: dict[str, set[int]] = defaultdict(set)
+    members: set[str] = set()
+    for r in results:
+        fm = r.get("_fm")
+        if not fm or fm.get("doc_type") != "module":
+            continue
+        for src in fm.get("sources") or []:
+            members.add(src)
+        for m in BR_REF.finditer(r.get("_body") or ""):
+            cited[m.group("member").upper()].add(int(m.group("n")))
+
+    problems = []
+    for member in sorted(members):
+        rows, ambiguous_libs = fetch_rule_candidate_rows(conn, member)
+        if ambiguous_libs or not rows:
+            continue
+        total = len(rows)
+        have = cited.get(member.upper(), set())
+        missing = [n for n in range(1, total + 1) if n not in have]
+        if not missing:
+            continue
+        span = _rule_id(member, missing[0])
+        if len(missing) > 1:
+            span += f"..{_rule_id(member, missing[-1])}"
+        problems.append(
+            f"{member}: {len(missing)}/{total} rule_candidate(s) never cited in any "
+            f"generated module document (missing {span})"
+        )
+    return problems
+
+
 def validate_tree(conn, root: Path) -> dict:
     results = [validate_doc(conn, p) for p in sorted(root.rglob("*.md")) if _is_pipeline_doc(p)]
     return {
@@ -450,4 +501,5 @@ def validate_tree(conn, root: Path) -> dict:
         "total_citations": sum(r["citations"] for r in results),
         "invalid_citations": sum(r["invalid_citations"] for r in results),
         "results": results,
+        "completeness_problems": module_completeness_problems(conn, results),
     }
