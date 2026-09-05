@@ -92,6 +92,16 @@ mfdoc rules-register --config project.yml --out docs/functional/rules-register.m
 mfdoc validate  --config project.yml --docs docs/functional
 mfdoc export    --config project.yml --json out/index.json
 
+# optional structural overview reports, all deterministic, configured under
+# options.overview in project.yml:
+mfdoc classify-rules       --config project.yml    # populates rule_theme; run before the two below
+mfdoc gap-summary          --config project.yml --out docs/functional/gap-summary.md
+mfdoc data-flow            --config project.yml --out docs/functional/data-flow.md
+mfdoc call-graph           --config project.yml --out docs/functional/call-graph
+mfdoc complexity           --config project.yml --out docs/functional/complexity.md
+mfdoc rules-theme-register --config project.yml --out docs/functional/rules-theme-register.md
+mfdoc glossary             --config project.yml --out docs/functional/glossary.md
+
 # optional: draft tests from the same fact store, in the source dialect or a
 # destination language -- see docs/guides/testing-strategies-for-mainframes-and-4gl.md
 # --overlay/--language/--framework/--out below default to options.testgen in
@@ -158,13 +168,24 @@ source ─▶ [0 Ingest: normalise.py] ─▶ [1 Extract: dialects/*.py] ─▶ 
 - **Brief generation** (`brief.py`): the only input the narrative stage
   sees — plain text, every line already cited. `redact.py` runs here, before
   anything is written to a file or sent anywhere.
+- **Structural overview** (`classify.py`, `structural.py`): optional layer
+  between derive and narrate, split the same way as brief/narrate — one
+  module that can call a model, the rest deterministic. `classify.py`'s
+  `mfdoc classify-rules` assigns each `rule_candidate` a theme into the
+  `rule_theme` table (`source` column: `keyword` | `llm` | `structural`,
+  in fallback order); `structural.py`'s renderers (`gap_summary`,
+  `data_flow_diagram`, `call_graph_diagram`, `complexity_heatmap`,
+  `thematic_rules_register`, `glossary`) are pure extraction like
+  `brief.rules_register()`, never model calls.
 - **Narrate**: two deliberately separate paths — `mfdoc batch` (`batch.py`)
   for high-volume formulaic module docs via a swappable `ModelCaller`
   (`anthropic_caller.py` for real calls, a `fake-echo` caller for
   network-free tests); the interactive Claude Code path (`SKILL.md`) for
-  system overview, entity docs, process flows, and the gap register, where
-  judgement about grouping benefits from a session holding the whole system
-  in mind.
+  system overview, entity docs, process flows, the gap register, and
+  (once `classify-rules`/`call-graph`/`complexity` have populated the
+  facts it reads) the executive-summary doc via `brief.executive_brief()`
+  — where judgement about grouping benefits from a session holding the
+  whole system in mind.
 - **Validate** (`validate.py`): the only stage that reads generated
   documents back in. Resolves every `[[MEMBER:LINE]]` citation against the
   fact store and enforces that every assertive sentence is either cited or
