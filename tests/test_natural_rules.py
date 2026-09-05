@@ -341,3 +341,44 @@ def test_boolean_literal_match_does_not_fire_inside_an_unrelated_identifier():
     ).fetchone()
     assert row is not None
     assert row["literals"] == "1"
+
+
+def test_input_using_map_literal_is_not_dynamic():
+    """`INPUT USING MAP 'MMM0200'` (a quoted literal) is the static, common
+    case -- both the interaction row and its paired INCLUDE call_edge must
+    record dynamic=0, and no dynamic_target gap should be raised."""
+    conn = _extract("INPUT USING MAP 'MMM0200'\n")
+    row = conn.execute(
+        "SELECT target, dynamic FROM interaction WHERE kind='INPUT' AND line_no=1"
+    ).fetchone()
+    assert row is not None
+    assert row["target"] == "MMM0200"
+    assert row["dynamic"] == 0
+    edge = conn.execute(
+        "SELECT dynamic FROM call_edge WHERE callee_name='MMM0200' AND call_kind='INCLUDE'"
+    ).fetchone()
+    assert edge["dynamic"] == 0
+    assert conn.execute("SELECT 1 FROM gap WHERE gap_kind='dynamic_target'").fetchone() is None
+
+
+def test_input_using_map_variable_target_is_dynamic():
+    """`INPUT USING MAP #MAP-NAME` holds the map name in a field, not a
+    literal -- the exact case `_clean_target` already distinguishes for
+    CALLNAT/PERFORM/FETCH targets (issue: interaction had no equivalent).
+    Both the interaction row and its INCLUDE call_edge must record
+    dynamic=1, and a dynamic_target gap must be raised."""
+    conn = _extract("INPUT USING MAP #MAP-NAME\n")
+    row = conn.execute(
+        "SELECT target, dynamic FROM interaction WHERE kind='INPUT' AND line_no=1"
+    ).fetchone()
+    assert row is not None
+    assert row["dynamic"] == 1
+    edge = conn.execute(
+        "SELECT dynamic FROM call_edge WHERE call_kind='INCLUDE' AND line_no=1"
+    ).fetchone()
+    assert edge["dynamic"] == 1
+    gap = conn.execute(
+        "SELECT detail FROM gap WHERE gap_kind='dynamic_target'"
+    ).fetchone()
+    assert gap is not None
+    assert "#MAP-NAME" in gap["detail"]

@@ -604,6 +604,20 @@ def test_validator_never_flags_a_dynamic_call_target(tmp_path):
     assert result["omitted_statement_targets"] == []
 
 
+def test_validator_never_flags_a_dynamic_interaction_target(tmp_path):
+    """Mirrors the call_edge dynamic case above: an interaction row whose
+    target is a variable, not a literal, must never be flagged regardless
+    of prose -- there is no literal name to search for."""
+    conn = _member_with_statements(interaction={"dynamic": 1})
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        STMT_FRONTMATTER
+        + "\nThe branch exits the transaction [[TESTSTMT:691-693]].\n"
+    )
+    result = validate_doc(conn, doc)
+    assert result["omitted_statement_targets"] == []
+
+
 def test_validator_flags_an_omitted_interaction_target(tmp_path):
     conn = _member_with_statements(interaction={})
     doc = tmp_path / "doc.md"

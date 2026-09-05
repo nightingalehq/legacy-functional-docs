@@ -272,15 +272,33 @@ data gathered since the non-goals section above was written:
   omission, per the motivating case) — that's a data-driven decision issue
   #59 itself leaves open, not one to guess at here. The bundled-fixture
   baseline above is a first data point, not a resolution.
-- `interaction` has no index on `member_id`, so the new per-citation query
-  (`WHERE member_id=? AND line_no BETWEEN ? AND ?`) does an unindexed scan.
-  Invisible on these small fixtures; worth revisiting if this check runs
-  against an engagement with many more members. No schema change made here
-  — out of scope for this change.
-- `interaction` has no `dynamic` column (unlike `call_edge`), so a
-  variable-driven `CONVERSE`/`SHOW` target (e.g. a map name held in a
-  variable rather than written as a literal) is always flagged as omitted,
-  even though its target isn't a fixed name to search prose for in the
-  first place — the same false-positive class `call_edge`'s `dynamic=1`
-  filter exists to avoid, just with no equivalent column on `interaction`
-  to filter on. No schema change made here — out of scope for this change.
+
+## Addendum: `interaction` index and `dynamic` column (implemented in a follow-up change)
+
+The two schema-related follow-ups this spec originally deferred (no index on
+`interaction.member_id`; no `dynamic` column on `interaction`, unlike
+`call_edge`) have since been implemented:
+
+- `ix_interaction_member` added on `interaction(member_id)` — the same
+  unindexed-scan concern the original follow-up named, now closed the same
+  way `data_access`/`call_edge` are already indexed.
+- `interaction.dynamic INTEGER NOT NULL DEFAULT 0` added, and wired into
+  `_STATEMENT_SOURCES`' interaction query (`AND dynamic=0`), mirroring
+  `call_edge`. **Only Natural's `INPUT USING MAP` populates it meaningfully**
+  (reusing `_clean_target`, the same quoted-literal-vs-`#VAR` test
+  `_match_calls` already used for CALLNAT/PERFORM/FETCH targets — a
+  `USING MAP #MAP-NAME` is exactly as indeterminate as a dynamic CALLNAT
+  target). **Mantis's `CONVERSE`/`SHOW`/`PROMPT` deliberately leaves
+  `dynamic` at its schema default of 0 for every row** — RE_CALL's own
+  "not quoted, and not a known `views` entry" heuristic doesn't transfer to
+  a screen target (`views` tracks record views, not screen names), and
+  every checked-in Mantis fixture (`ORDENQ.mantis`, `SCRNENT.mantis`) writes
+  the screen name bare (`CONVERSE ORDSCR1`) — reusing RE_CALL's "unquoted =
+  dynamic" rule for screens would misflag the dialect's normal case, not
+  catch a real one. So the false-positive class this addendum's second bullet
+  named is now closed for Natural and remains open for Mantis, pending a
+  real way to tell a declared Mantis variable from a literal screen
+  identifier (nothing in the current `variable`/`views` facts distinguishes
+  them). Verified against the bundled fixtures: `gaps_total`/`gaps_high` and
+  the 20-finding baseline above are unchanged before/after this addendum —
+  no new false positives or false negatives introduced on this sample.

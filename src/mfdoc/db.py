@@ -198,8 +198,10 @@ CREATE TABLE IF NOT EXISTS interaction (
     line_no       INTEGER NOT NULL,
     kind          TEXT NOT NULL,          -- INPUT | CONVERSE | SHOW | WRITE | DISPLAY | PRINT | REINPUT
     target        TEXT,                   -- map/view name
+    dynamic       INTEGER NOT NULL DEFAULT 0,  -- 1 when target is a variable, not a literal
     fields        TEXT
 );
+CREATE INDEX IF NOT EXISTS ix_interaction_member ON interaction(member_id);
 
 -- Internal subroutine/paragraph boundaries: Natural's DEFINE SUBROUTINE /
 -- END-SUBROUTINE, Mantis's ENTRY name / EXIT. Every other per-line fact

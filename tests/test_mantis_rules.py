@@ -241,3 +241,30 @@ def test_screen_binding_records_the_real_target_name():
     ).fetchone()
     assert row is not None
     assert row["view_of"] == "REALSCRN"
+
+
+def test_converse_with_a_bare_unquoted_screen_name_is_not_dynamic():
+    """Every checked-in fixture (ORDENQ.mantis, SCRNENT.mantis) writes a
+    screen name bare (`CONVERSE ORDSCR1`) -- this is the dialect's normal,
+    static case, not a variable holding a screen name at runtime. Unlike
+    RE_CALL's program targets (where an unquoted name really can be a
+    variable, cross-checked against declared `views`), there is no
+    equivalent signal for a screen target, so `dynamic` must stay 0 here
+    rather than reusing RE_CALL's "not quoted" heuristic, which would
+    misflag this ordinary case."""
+    conn = _extract(
+        'PROGRAM "TESTMOD"\n'
+        "ENTRY MAIN\n"
+        "  CONVERSE ORDSCR1\n"
+        "EXIT\n"
+    )
+    row = conn.execute(
+        "SELECT target, dynamic FROM interaction WHERE kind='CONVERSE' AND line_no=3"
+    ).fetchone()
+    assert row is not None
+    assert row["target"] == "ORDSCR1"
+    assert row["dynamic"] == 0
+    edge = conn.execute(
+        "SELECT dynamic FROM call_edge WHERE callee_name='ORDSCR1' AND call_kind='INCLUDE'"
+    ).fetchone()
+    assert edge["dynamic"] == 0

@@ -251,7 +251,7 @@ _STATEMENT_SOURCES = [
      "AND callee_name IS NOT NULL AND callee_name != ''"),
     ("target", "kind",
      "SELECT line_no, kind, target FROM interaction "
-     "WHERE member_id=? AND line_no BETWEEN ? AND ? "
+     "WHERE member_id=? AND line_no BETWEEN ? AND ? AND dynamic=0 "
      "AND target IS NOT NULL AND target != ''"),
     ("entity_name", "verb",
      "SELECT line_no, verb, entity_name FROM data_access "
