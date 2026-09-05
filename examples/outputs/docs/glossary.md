@@ -5,7 +5,7 @@ doc_type: register
 
 # Glossary
 
-Every known entity (Adabas file, DDM, table, dataset, ...) and its fields, deduplicated across the whole system. Regenerate with `mfdoc glossary` after any source change; do not hand-edit.
+Every known entity (Adabas file, DDM, table, dataset, ...) and its fields, deduplicated across the whole system. A name shared by more than one kind (e.g. a DDM and its underlying Adabas file) gets one heading per kind, labelled accordingly. Regenerate with `mfdoc glossary` after any source change; do not hand-edit.
 
 ### GRADE_MASTER
 
@@ -20,7 +20,7 @@ Every known entity (Adabas file, DDM, table, dataset, ...) and its fields, dedup
 
 - kind: `ddm`
 
-### MILL-ORDER
+### MILL-ORDER (adabas_file)
 
 - kind: `adabas_file`
 
@@ -38,6 +38,26 @@ Every known entity (Adabas file, DDM, table, dataset, ...) and its fields, dedup
 | `AJ` | A | 6 |  |
 | `AK` | P | 4 |  |
 | `S1` |  |  |  |
+
+### MILL-ORDER (ddm)
+
+- kind: `ddm`
+- notes: default sequence: AA
+
+| field | format | length | remark |
+|---|---|---|---|
+| `CUSTOMER-NO` | A | 8 | N D |
+| `DEL-DATE` | D | 6 |  |
+| `DEL-QTY` | P | 7.3 |  |
+| `DELIVERY` |  |  |  |
+| `DUE-DATE` | D | 6 | D |
+| `GRADE-CODE` | A | 6 | D |
+| `ORDER-CUST-KEY` |  |  |  |
+| `ORDER-DETAIL` |  |  |  |
+| `ORDER-NO` | A | 10 | D primary order key |
+| `ORDER-STATUS` | A | 4 | N |
+| `ORDER-WEIGHT` | P | 9.3 |  |
+| `ROUTE-STEP` | A | 12 | N |
 
 ### MILL_CERT
 
@@ -91,7 +111,7 @@ Every known entity (Adabas file, DDM, table, dataset, ...) and its fields, dedup
 
 - kind: `ddm`
 
-### TEST-COUPLE
+### TEST-COUPLE (adabas_file)
 
 - kind: `adabas_file`
 
@@ -100,4 +120,15 @@ Every known entity (Adabas file, DDM, table, dataset, ...) and its fields, dedup
 | `AA` | A | 10 |  |
 | `AB` | A | 8 |  |
 | `AC` | A | 8 |  |
+
+### TEST-COUPLE (ddm)
+
+- kind: `ddm`
+- notes: default sequence: AA
+
+| field | format | length | remark |
+|---|---|---|---|
+| `AMBIGUOUS-NOTE` | A | 8 | N   coupling used here, no target given |
+| `COUPLE-KEY` | A | 10 | D primary key |
+| `CROSS-REF` | A | 8 | N   coupled to file 045 |
 
