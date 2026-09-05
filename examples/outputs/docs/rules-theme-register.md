@@ -9,6 +9,8 @@ Every candidate business rule, grouped by business theme instead of by module. S
 
 ## MILLPROD
 
+31 rule(s) (31 structural)
+
 | BR-ID | member | line | depth | construct | condition | literals |
 |---|---|---|---|---|---|---|
 | **MMC0100:BR-001** | `MMC0100` | [[MMC0100:2]] | 0 | `IF` | `#GRADE-CODE = 'X9'` | `X9` |
@@ -44,6 +46,8 @@ Every candidate business rule, grouped by business theme instead of by module. S
 | **MMP9800:BR-002** | `MMP9800` | [[MMP9800:18]] | 0 | `COMPRESS` | `COMPRESS 'A' 'B' INTO #MESSAGE` | `A,B` |
 
 ## STEELLIB
+
+13 rule(s) (13 structural)
 
 | BR-ID | member | line | depth | construct | condition | literals |
 |---|---|---|---|---|---|---|

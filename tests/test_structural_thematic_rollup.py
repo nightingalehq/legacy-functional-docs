@@ -91,6 +91,55 @@ def test_ambiguous_member_not_silently_omitted():
     assert "ambiguous" in total_line.lower()
 
 
+def test_theme_section_shows_provenance_breakdown():
+    """Finding 4: thematic_rules_register() classifies each rule via
+    rule_theme.source (keyword/llm/structural) but used to never surface
+    that provenance anywhere in the rendered output. Three rules under one
+    theme, one classified via each source, must produce a per-theme
+    summary line naming all three sources and their counts."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+
+    conn.execute(
+        "INSERT INTO member (name, dialect, library, object_type) "
+        "VALUES ('PROVMOD', 'natural', 'LIBA', 'program')"
+    )
+    mid = conn.execute("SELECT id FROM member WHERE name='PROVMOD'").fetchone()["id"]
+
+    rc_ids = []
+    for line_no in (10, 20, 30):
+        conn.execute(
+            "INSERT INTO rule_candidate (member_id, line_no, depth, construct, raw, condition) "
+            "VALUES (?, ?, 1, 'IF', 'IF X', 'X > 1')",
+            (mid, line_no),
+        )
+        rc_ids.append(
+            conn.execute(
+                "SELECT id FROM rule_candidate WHERE member_id=? AND line_no=?", (mid, line_no)
+            ).fetchone()["id"]
+        )
+
+    for rc_id, source in zip(rc_ids, ("keyword", "llm", "structural")):
+        conn.execute(
+            "INSERT INTO rule_theme (rule_candidate_id, theme, source) VALUES (?, 'posting', ?)",
+            (rc_id, source),
+        )
+    conn.commit()
+
+    out = structural.thematic_rules_register(conn)
+    section = out.split("## posting", 1)[1].split("## ", 1)[0]
+    summary_line = next(line for line in section.splitlines() if "rule(s)" in line)
+    assert "3 rule(s)" in summary_line
+    assert "1 keyword" in summary_line
+    assert "1 llm" in summary_line
+    assert "1 structural" in summary_line
+
+
 def test_rules_theme_register_cli(cli_args, derive_result):
     from types import SimpleNamespace
     from mfdoc import cli

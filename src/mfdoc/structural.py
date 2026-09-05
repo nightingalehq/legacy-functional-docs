@@ -472,6 +472,11 @@ def thematic_rules_register(conn, redact: Redactor = NULL_REDACTOR) -> str:
     one explicit row -- in the same format rules_register() renders for
     the identical case -- under a trailing `## (ambiguous)` section,
     rather than silently vanishing from the document.
+
+    Each `## {theme}` section opens with a one-line count breakdown by
+    `rule_theme.source` (e.g. `9 rule(s) (7 keyword, 2 structural)`) --
+    provenance is surfaced once per theme rather than as a per-row column,
+    since the row table is already seven columns wide.
     """
     from .batch import select_batch_members  # local: avoids a circular import at load time
 
@@ -497,7 +502,8 @@ def thematic_rules_register(conn, redact: Redactor = NULL_REDACTOR) -> str:
     rule_rows = (
         conn.execute(
             f"""
-            SELECT rc.*, COALESCE(rt.theme, 'uncategorized') AS theme
+            SELECT rc.*, COALESCE(rt.theme, 'uncategorized') AS theme,
+                   COALESCE(rt.source, 'uncategorized') AS theme_source
               FROM rule_candidate rc
               LEFT JOIN rule_theme rt ON rt.rule_candidate_id = rc.id
              WHERE rc.member_id IN ({id_placeholders})
@@ -514,6 +520,7 @@ def thematic_rules_register(conn, redact: Redactor = NULL_REDACTOR) -> str:
     # in the second pass below, after every rule_id is already fixed.
     per_member_seq: dict[int, int] = {}
     by_theme: dict[str, list[str]] = {}
+    source_counts_by_theme: dict[str, dict[str, int]] = {}
     total = 0
     for r in rule_rows:
         member_name = id_to_name[r["member_id"]]
@@ -525,6 +532,8 @@ def thematic_rules_register(conn, redact: Redactor = NULL_REDACTOR) -> str:
             f"| **{rule_id}** | `{member_name}` | {_cite(member_name, r['line_no'])} | "
             f"{r['depth']} | `{r['construct']}` | `{cond}` | `{lits}` |"
         )
+        theme_counts = source_counts_by_theme.setdefault(r["theme"], {})
+        theme_counts[r["theme_source"]] = theme_counts.get(r["theme_source"], 0) + 1
         total += 1
 
     out = ["---", 'title: "Rules register — by theme"', "doc_type: register", "---", "",
@@ -534,8 +543,17 @@ def thematic_rules_register(conn, redact: Redactor = NULL_REDACTOR) -> str:
         "`mfdoc rules-register`. Regenerate with `mfdoc rules-theme-register` "
         "after any source or taxonomy change; do not hand-edit."
     ), ""]
+    _SOURCE_ORDER = ("keyword", "llm", "structural", "uncategorized")
     for theme in sorted(by_theme):
         out.append(f"## {theme}")
+        out.append("")
+        theme_counts = source_counts_by_theme[theme]
+        breakdown = ", ".join(
+            f"{theme_counts[source]} {source}"
+            for source in _SOURCE_ORDER
+            if theme_counts.get(source)
+        )
+        out.append(f"{len(by_theme[theme])} rule(s) ({breakdown})")
         out.append("")
         out.append("| BR-ID | member | line | depth | construct | condition | literals |")
         out.append("|---|---|---|---|---|---|---|")
