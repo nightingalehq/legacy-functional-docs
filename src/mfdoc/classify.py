@@ -193,9 +193,9 @@ def classify_rules_llm(
                 continue
             theme = taxonomy_lookup[full_theme]
         else:
-            theme = full_theme[:40]
-            if _looks_like_a_refusal_or_non_answer(theme):
+            if _looks_like_a_refusal_or_non_answer(full_theme):
                 continue
+            theme = full_theme[:40]
         conn.execute(
             "UPDATE rule_theme SET theme=?, source='llm' WHERE rule_candidate_id=?",
             (theme, row["id"]),

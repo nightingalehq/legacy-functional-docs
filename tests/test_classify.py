@@ -128,6 +128,41 @@ def test_llm_refusal_is_not_stored_as_a_theme(indexed_db):
         assert "cannot" not in row["theme"]
 
 
+def test_llm_refusal_check_runs_on_untruncated_response(indexed_db):
+    """Regression test: the refusal/non-answer check must run on the FULL
+    model response, not on the string already truncated to 40 chars for
+    storage. A refusal whose tell-tale marker word falls past character 40
+    would otherwise slip through the (now-truncated) check and get stored
+    as if it were a real theme."""
+    conn = indexed_db
+    classify.classify_rules_deterministic(conn, taxonomy={})
+
+    long_prefix = "posting adjustment reconciliation workflow "
+    assert len(long_prefix) > 40, "prefix must itself exceed the 40-char truncation point"
+    refusal_text = long_prefix + "i cannot classify this rule with confidence"
+
+    def refusing_caller(prompt: str):
+        from mfdoc.batch import ModelResponse
+        return ModelResponse(text=refusal_text, input_tokens=0, output_tokens=0)
+
+    before = conn.execute(
+        "SELECT rule_candidate_id FROM rule_theme WHERE source='structural'"
+    ).fetchall()
+    assert before, "fixture must have at least one structural-sourced row to exercise this"
+
+    result = classify.classify_rules_llm(conn, refusing_caller)
+    assert result["reclassified"] == 0
+
+    after = conn.execute(
+        "SELECT source, theme FROM rule_theme WHERE rule_candidate_id IN ({})".format(
+            ",".join("?" * len(before))
+        ),
+        [r["rule_candidate_id"] for r in before],
+    ).fetchall()
+    for row in after:
+        assert row["source"] == "structural"
+
+
 def test_llm_taxonomy_constrains_accepted_themes(indexed_db):
     """When a taxonomy is passed, only a theme matching one of its own
     keys (case-insensitively) may be accepted -- free-form model text
