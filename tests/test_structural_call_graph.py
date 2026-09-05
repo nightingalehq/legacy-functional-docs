@@ -364,6 +364,63 @@ def test_call_graph_cli_sanitizes_unsafe_cluster_names(cli_args, derive_result, 
     # Nothing must have been written outside out_dir.
     assert not (tmp_path / "etc").exists()
     assert not (tmp_path.parent / "etc").exists()
+    # The label written inside call-graph.md's collapsed view must name the
+    # SAME (sanitized) filename actually written to disk -- both must go
+    # through structural.safe_cluster_filename, or the label can point at
+    # a name that was never written (or, before this fix, a raw unsafe one).
+    from mfdoc import structural
+
+    expected_file = f"call-graph-{structural.safe_cluster_filename(escape_attempt)}.md"
+    assert expected_file == escaped_name
+
+
+def test_call_graph_diagram_collapsed_label_matches_cli_filename(indexed_db, monkeypatch):
+    """The collapsed cluster-view label (call_graph_diagram, structural.py)
+    and cmd_call_graph's actual per-cluster file write (cli.py) must derive
+    the referenced filename from the same sanitizer -- otherwise a cluster
+    name with unsafe characters produces a label pointing at a filename
+    that was never actually written."""
+    conn = indexed_db
+    unsafe_cluster = "../weird/cluster"
+
+    def fake_build_call_graph(conn, cluster_by="module"):
+        return {
+            1: {"name": "SOMEPGM", "library": unsafe_cluster, "dialect": "natural",
+                "cluster": unsafe_cluster, "calls": []},
+        }
+
+    monkeypatch.setattr(structural, "build_call_graph", fake_build_call_graph)
+    out = structural.call_graph_diagram(conn, max_nodes_inline=0)
+    expected_file = structural.safe_cluster_filename(unsafe_cluster)
+    # The label may show the real cluster name for a human reader (it's
+    # display text, not a filesystem path) -- but the filename it
+    # references in parentheses must be the sanitized one, matching what
+    # cli.py actually writes to disk.
+    assert f"(see call-graph-{expected_file}.md)" in out["inline"]
+    assert f"call-graph-{unsafe_cluster}.md" not in out["inline"], (
+        "the filename reference must be sanitized, not the raw cluster name"
+    )
+
+
+def test_call_graph_cli_refuses_to_write_through_a_symlink(cli_args, derive_result, tmp_path):
+    """write_text() follows symlinks -- a pre-existing symlink at
+    call-graph.md's exact target path pointing outside --out would
+    otherwise let this command silently write through it to wherever the
+    symlink leads."""
+    import pytest
+    from types import SimpleNamespace
+
+    from mfdoc import cli
+
+    out_dir = tmp_path / "cg-out"
+    out_dir.mkdir()
+    escape_target = tmp_path / "escaped.md"
+    (out_dir / "call-graph.md").symlink_to(escape_target)
+
+    args = SimpleNamespace(config=cli_args.config, out=str(out_dir))
+    with pytest.raises(ValueError, match="symlink"):
+        cli.cmd_call_graph(args)
+    assert not escape_target.exists()
 
 
 def test_call_graph_cli_stdout(cli_args, derive_result, capsys):

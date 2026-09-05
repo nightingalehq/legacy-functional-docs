@@ -296,13 +296,18 @@ def cmd_data_flow(args) -> int:
     return 0
 
 
-def _safe_cluster_filename(name: str) -> str:
-    """Sanitize a cluster name (fact-store data: member.library/system, not
-    trusted input) before using it in an output filename -- a cluster name
-    containing path separators or a ".." segment must not be able to write
-    outside the intended --out directory."""
-    sanitized = "".join(c if (c.isalnum() or c in "-_") else "_" for c in name)
-    return sanitized or "_"
+def _write_contained(target: Path, content: str, resolved_out_dir: Path) -> None:
+    """Write `content` to `target`, refusing anything that would land or
+    write outside `resolved_out_dir` -- whether via an unsafe path
+    component (caller's job to have already sanitized that) or via
+    `target` itself already existing as a symlink pointing elsewhere
+    (write_text follows symlinks, so a pre-planted one at this exact
+    filename would otherwise silently escape --out on write)."""
+    if target.is_symlink():
+        raise ValueError(f"refusing to write through an existing symlink: {target}")
+    if resolved_out_dir not in target.resolve().parents:
+        raise ValueError(f"refusing to write outside --out directory: {target}")
+    target.write_text(content, encoding="utf-8")
 
 
 def cmd_call_graph(args) -> int:
@@ -320,16 +325,16 @@ def cmd_call_graph(args) -> int:
         return 0
     out_dir.mkdir(parents=True, exist_ok=True)
     resolved_out_dir = out_dir.resolve()
-    (out_dir / "call-graph.md").write_text(diagrams["inline"], encoding="utf-8")
+    _write_contained(out_dir / "call-graph.md", diagrams["inline"], resolved_out_dir)
     for name, content in diagrams.items():
         if name == "inline":
             continue
-        target = out_dir / f"call-graph-{_safe_cluster_filename(name)}.md"
-        # Defense in depth on top of the sanitizer above: refuse to write
-        # anywhere the resolved path doesn't land inside out_dir.
-        if resolved_out_dir not in target.resolve().parents:
-            raise ValueError(f"refusing to write outside --out directory: {target}")
-        target.write_text(content, encoding="utf-8")
+        # structural.safe_cluster_filename is also what call_graph_diagram
+        # itself uses when it labels this file in the collapsed view's
+        # node text -- using anything else here would desync the label
+        # from the file actually written.
+        target = out_dir / f"call-graph-{structural.safe_cluster_filename(name)}.md"
+        _write_contained(target, content, resolved_out_dir)
     print(f"wrote {len(diagrams)} file(s) to {out_dir}")
     return 0
 

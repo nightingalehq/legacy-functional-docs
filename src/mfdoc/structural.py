@@ -66,6 +66,17 @@ def _mermaid_id(name: str) -> str:
     return f"n_{sanitized}_{suffix}"
 
 
+def safe_cluster_filename(name: str) -> str:
+    """Sanitize a cluster name (fact-store data: member.library/system, not
+    trusted input) for safe use as a filename component. The single source
+    of truth for this: both the collapsed call-graph view's label (this
+    module, below) and cli.py's actual per-cluster file writes must call
+    this, or the two can desync -- a label pointing at one filename while
+    the file on disk got sanitized differently (or not at all)."""
+    sanitized = "".join(c if (c.isalnum() or c in "-_") else "_" for c in name)
+    return sanitized or "_"
+
+
 def data_flow_diagram(conn) -> str:
     """Which modules read/write which entities -- a thin Mermaid wrapper
     over graph.crud_matrix(), which already does the join; no new
@@ -313,7 +324,8 @@ def call_graph_diagram(conn, cluster_by: str = "module", max_nodes_inline: int =
 
     collapsed_lines = ["```mermaid", "graph TD"]
     for cluster_name in clusters:
-        cluster_label = f"{cluster_name} (see call-graph-{cluster_name}.md)".replace('"', '\\"')
+        cluster_file = safe_cluster_filename(cluster_name)
+        cluster_label = f"{cluster_name} (see call-graph-{cluster_file}.md)".replace('"', '\\"')
         collapsed_lines.append(f'    {_mermaid_id(cluster_name)}["{cluster_label}"]')
     collapsed_lines.append("```")
     result = {
