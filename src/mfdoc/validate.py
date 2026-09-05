@@ -54,6 +54,38 @@ CITATION = re.compile(r"\[\[(?P<member>[A-Z0-9#@$&\-_.]+)(?::(?P<from>\d+)(?:-(?
 # the id being invisible to validation entirely.
 BR_REF = re.compile(r"(?<![A-Z0-9#@$&.\-_])(?P<member>[A-Z0-9#@$&\-_.]+):BR-(?P<n>\d+)\b", re.I)
 
+
+def _name_mentioned(text: str, name: str) -> bool:
+    """Whether `name` appears in `text` as a whole token, case-insensitive.
+
+    Reuses the same non-word-boundary trick `BR_REF` already uses instead of
+    `\\b`: a Natural/Mantis member, program, map, or file name can contain
+    `#@$&-_.`, all non-word characters that `\\b` would treat as a boundary
+    even mid-name -- e.g. `\\bPGMX02\\b` would happily match inside
+    `PGMX02-EXT`. `re.escape` is required since a target name may itself
+    contain regex-special characters (`.`, `$`).
+
+    A trailing `.` only counts as a same-name continuation (blocking the
+    match, as in `PGMX02.EXT`) when another name-charset character follows
+    it -- a bare `.` immediately after the name is ordinary sentence-ending
+    punctuation (`"...calls PGMX02. It then..."`), not part of the name, and
+    must not hide a real mention. The lookbehind mirrors this symmetrically
+    on the leading side (a bare `.` immediately before the name doesn't
+    block the match; `.` preceded by another name-charset character does,
+    as in `EXT.PGMX02`) even though, unlike the trailing case, this side has
+    no realistic motivating example in prose -- a sentence never opens
+    mid-name the way it closes one -- so it's kept consistent with the
+    trailing side on principle rather than because a real case forced it.
+    """
+    pattern = re.compile(
+        rf"(?<![A-Z0-9#@$&\-_])(?<![A-Z0-9#@$&\-_]\.)"
+        rf"{re.escape(name)}"
+        rf"(?![A-Z0-9#@$&\-_]|\.[A-Z0-9#@$&\-_])",
+        re.I,
+    )
+    return bool(pattern.search(text))
+
+
 REQUIRED_TEST_FRONTMATTER = ["language", "framework"]
 
 REQUIRED_FRONTMATTER = [
@@ -169,8 +201,24 @@ def _split_frontmatter(text: str) -> tuple[dict | None, str, str | None]:
 _LEADING_CITATION_RUN = re.compile(r"^(?:\[\[[^\]]+\]\]\s*)+")
 
 
+def _containing_paragraph(body: str, start: int, end: int) -> tuple[str, int]:
+    """The paragraph in `body` that spans character offset `start`..`end`, and
+    `start`'s offset relative to that paragraph's own start.
+
+    Factored out of `_containing_sentence` so a caller that needs the whole
+    paragraph (e.g. `_statement_completeness_problems`, which tolerates a
+    target named anywhere in the paragraph, not just the citing sentence)
+    doesn't duplicate this boundary-finding.
+    """
+    para_start = body.rfind("\n\n", 0, start)
+    para_start = 0 if para_start == -1 else para_start + 2
+    para_end = body.find("\n\n", end)
+    para_end = len(body) if para_end == -1 else para_end
+    return body[para_start:para_end], start - para_start
+
+
 def _containing_sentence(body: str, start: int, end: int) -> str:
-    """The sentence in `body` that spans byte offset `start`..`end`.
+    """The sentence in `body` that spans character offset `start`..`end`.
 
     Reuses `SENTENCE_SPLIT` (the same boundary `_logical_units` splits on) so
     a citation's surrounding claim is read the same way whether checked for
@@ -188,13 +236,7 @@ def _containing_sentence(body: str, start: int, end: int) -> str:
     the located unit is nothing but a leading run of citations, merge in the
     unit before it instead of returning the citation alone.
     """
-    para_start = body.rfind("\n\n", 0, start)
-    para_start = 0 if para_start == -1 else para_start + 2
-    para_end = body.find("\n\n", end)
-    para_end = len(body) if para_end == -1 else para_end
-    para = body[para_start:para_end]
-    rel_start = start - para_start
-
+    para, rel_start = _containing_paragraph(body, start, end)
     bounds = [0] + [m.start() for m in SENTENCE_SPLIT.finditer(para)] + [len(para)]
     for i, (lo, hi) in enumerate(zip(bounds, bounds[1:])):
         if lo <= rel_start < hi:
@@ -202,6 +244,81 @@ def _containing_sentence(body: str, start: int, end: int) -> str:
                 lo = bounds[i - 1]
             return para[lo:hi]
     return para
+
+
+_STATEMENT_SOURCES = [
+    ("callee_name", "call_kind",
+     "SELECT line_no, call_kind, callee_name FROM call_edge "
+     "WHERE caller_id=? AND dynamic=0 AND callee_name IS NOT NULL AND callee_name != ''"),
+    ("target", "kind",
+     "SELECT line_no, kind, target FROM interaction "
+     "WHERE member_id=? AND dynamic=0 AND target IS NOT NULL AND target != ''"),
+    ("entity_name", "verb",
+     "SELECT line_no, verb, entity_name FROM data_access "
+     "WHERE member_id=? AND entity_name IS NOT NULL AND entity_name != ''"),
+]
+
+
+def _fetch_statement_rows(conn, member_id: int) -> list[tuple[str, str, object]]:
+    """Every `call_edge`/`interaction`/`data_access` row for `member_id`,
+    across all three tables, as `(target_col, kind_col, row)` triples.
+
+    Fetched once per member rather than once per citation:
+    `_statement_completeness_problems` used to re-run all three queries,
+    each re-filtered by line range, for every citation of a member -- a doc
+    citing the same member several times (the common case) paid for the
+    same three queries again each time. The caller (`validate_doc`) caches
+    this per member_id across a document's whole citation loop; the
+    per-citation line-range filter now happens in memory in
+    `_statement_completeness_problems` instead of in SQL.
+    """
+    rows = []
+    for target_col, kind_col, sql in _STATEMENT_SOURCES:
+        for row in conn.execute(sql, (member_id,)).fetchall():
+            rows.append((target_col, kind_col, row))
+    return rows
+
+
+def _statement_completeness_problems(
+    rows: list[tuple[str, str, object]], member: str, lf: int, lt: int | None,
+    body: str, cite_start: int, cite_end: int,
+) -> list[str]:
+    """Flag a `call_edge`/`interaction`/`data_access` row (from `rows`,
+    `_fetch_statement_rows`'s output for this citation's member) inside the
+    `lf`..`lt` range whose target name never appears anywhere in the
+    paragraph citing that range.
+
+    Deliberately paragraph-scoped, not sentence-scoped (unlike
+    `_reversed_condition_problems`): a branch's narration legitimately spans
+    several sentences in one paragraph (a setup sentence, then one sentence
+    per statement), and a target named two sentences after the citation is
+    still a real mention. `dynamic=1` call_edge/interaction rows are
+    excluded before `rows` is even built (see `_STATEMENT_SOURCES`) --
+    their target is a variable, not a literal name, so there is nothing
+    meaningful to search prose for.
+
+    Advisory only: the caller must not add these to `problems`. This is a
+    deliberately different shape of check from the ones already built (see
+    issue #59) and its false-positive rate against real generated docs is
+    not yet known.
+    """
+    hi = lt or lf
+    para, _ = _containing_paragraph(body, cite_start, cite_end)
+
+    range_str = f"{lf}{'-' + str(lt) if lt and lt != lf else ''}"
+    problems = []
+    for target_col, kind_col, row in rows:
+        if not (lf <= row["line_no"] <= hi):
+            continue
+        target = row[target_col]
+        if _name_mentioned(para, target):
+            continue
+        problems.append(
+            f"statement inside [[{member}:{range_str}]] targets '{target}' "
+            f"({row[kind_col]} at line {row['line_no']}) but '{target}' is not "
+            f"named anywhere in the citing paragraph"
+        )
+    return problems
 
 
 # polarity -> narrative wording, for building the finding message. Covers
@@ -310,6 +427,12 @@ def _reversed_condition_problems(
 def validate_doc(conn, path: Path, outcome_field=OUTCOME_FIELD) -> dict:
     text = path.read_text(encoding="utf-8")
     problems: list[str] = []
+    omitted_targets: list[str] = []
+    # Cache of _fetch_statement_rows(conn, member_id) results, keyed by
+    # member_id -- a document commonly cites the same member several times
+    # (different line ranges each time), and this avoids re-running all
+    # three _STATEMENT_SOURCES queries for every one of those citations.
+    statement_rows_cache: dict[int, list] = {}
     fm, body, fm_err = _split_frontmatter(text)
     if fm_err:
         problems.append(fm_err)
@@ -348,7 +471,8 @@ def validate_doc(conn, path: Path, outcome_field=OUTCOME_FIELD) -> dict:
     # each time (a precondition, a Given, a When), which defeats the
     # single-nearest-occurrence assumption this check relies on and would
     # make it noise rather than signal outside the doc type it was built for.
-    check_reversed_conditions = fm is not None and fm.get("doc_type") == "module"
+    # (Gates `_statement_completeness_problems` below too, for the same reason.)
+    module_doc_checks = fm is not None and fm.get("doc_type") == "module"
 
     conn.execute("DELETE FROM doc_claim WHERE doc_path=?", (str(path),))
 
@@ -397,11 +521,18 @@ def validate_doc(conn, path: Path, outcome_field=OUTCOME_FIELD) -> dict:
             maxline = row["maxline"] or 0
             if lf < 1 or lf > maxline or (lt and lt > maxline):
                 valid, note = 0, f"line {lf}{'-' + str(lt) if lt and lt != lf else ''} outside 1..{maxline}"
-            elif check_reversed_conditions:
+            elif module_doc_checks:
                 problems.extend(
                     _reversed_condition_problems(
                         conn, member, row["id"], lf, lt, body, m.start(), m.end(),
                         outcome_field=outcome_field,
+                    )
+                )
+                if row["id"] not in statement_rows_cache:
+                    statement_rows_cache[row["id"]] = _fetch_statement_rows(conn, row["id"])
+                omitted_targets.extend(
+                    _statement_completeness_problems(
+                        statement_rows_cache[row["id"]], member, lf, lt, body, m.start(), m.end()
                     )
                 )
         insert(conn, "doc_claim", doc_path=str(path), confidence="verified",
@@ -424,6 +555,7 @@ def validate_doc(conn, path: Path, outcome_field=OUTCOME_FIELD) -> dict:
         "valid_citations": good,
         "invalid_citations": bad,
         "uncited_assertions": uncited,
+        "omitted_statement_targets": omitted_targets,
         "problems": problems,
         "ok": not problems,
         # Front matter/body this call already parsed, for a caller (e.g.
@@ -700,4 +832,18 @@ def validate_tree(conn, root: Path, outcome_field=OUTCOME_FIELD) -> dict:
         "results": results,
         "completeness_problems": module_completeness_problems(conn, results),
         "artifact_problems": _artifact_consistency_problems(conn, results),
+        # Advisory only (see _statement_completeness_problems) -- never
+        # subtracted from documents_ok and never affects a caller's exit code.
+        #
+        # Deduplicated across the whole tree: `_statement_completeness_problems`
+        # runs once per citation with no dedup of its own, so the same
+        # statement is reported once per citation whose range covers its
+        # line (e.g. two overlapping-range citations of the same member both
+        # covering one omitted FETCH target produce the same message twice).
+        # The message string already encodes member/line/target uniquely, so
+        # deduping on it is sufficient; `dict.fromkeys` preserves first-seen
+        # order.
+        "omitted_statement_targets": list(dict.fromkeys(
+            p for r in results for p in r.get("omitted_statement_targets", [])
+        )),
     }

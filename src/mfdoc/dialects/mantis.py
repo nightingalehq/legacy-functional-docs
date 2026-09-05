@@ -530,6 +530,15 @@ def extract(conn, member_id: int, lines, member_name: str = "?") -> dict:
             for pat, kind in ((RE_CONVERSE, "CONVERSE"), (RE_SHOW, "SHOW"), (RE_PROMPT, "PROMPT")):
                 if (m := pat.match(stmt)):
                     screen = m.group("screen").strip('"').upper()
+                    # `dynamic` left at its schema default (0) here, unlike
+                    # RE_CALL below -- that rule ("not quoted and not a
+                    # known view") relies on cross-referencing `views`,
+                    # which tracks record views, not screen names, so it
+                    # doesn't transfer to a screen target. Every checked-in
+                    # fixture (ORDENQ.mantis, SCRNENT.mantis) writes the
+                    # screen name bare (`CONVERSE ORDSCR1`), so treating an
+                    # unquoted screen as dynamic the way RE_CALL treats an
+                    # unquoted program name would misflag the normal case.
                     insert(conn, "interaction", member_id=member_id, line_no=line_no,
                            kind=kind, target=screen, fields=(m.group("rest") or "").strip()[:300] or None)
                     insert(conn, "call_edge", caller_id=member_id, callee_name=screen,

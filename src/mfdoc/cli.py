@@ -945,6 +945,19 @@ def cmd_gate(args) -> int:
     return 1
 
 
+def _print_problem_list(items: list, header: str) -> None:
+    """Print `header` (a `str.format`-style template taking the item count)
+    followed by one indented bullet per item in `items` -- shared by every
+    report section in `cmd_validate` that's just a count-and-bullets summary,
+    so a third such section (after `completeness_problems`,
+    `omitted_statement_targets`) never needs to reinvent this shape."""
+    if not items:
+        return
+    print(f"\n{header.format(len(items))}")
+    for p in items:
+        print(f"  - {p}")
+
+
 def cmd_validate(args) -> int:
     from .conditions import outcome_field_from_options
     from .validate import validate_tree
@@ -958,14 +971,16 @@ def cmd_validate(args) -> int:
             print(f"       - {p}")
     print(f"\n{res['documents_ok']}/{res['documents']} documents clean, "
           f"{res['invalid_citations']} invalid citations of {res['total_citations']}")
-    if res["completeness_problems"]:
-        print(f"\n{len(res['completeness_problems'])} member(s) with incomplete rule coverage:")
-        for p in res["completeness_problems"]:
-            print(f"  - {p}")
-    if res["artifact_problems"]:
-        print(f"\n{len(res['artifact_problems'])} structural artifact(s) inconsistent with the fact store:")
-        for p in res["artifact_problems"]:
-            print(f"  - {p}")
+    _print_problem_list(res["completeness_problems"], "{} member(s) with incomplete rule coverage:")
+    _print_problem_list(
+        res["artifact_problems"],
+        "{} structural artifact(s) inconsistent with the fact store:",
+    )
+    _print_problem_list(
+        res["omitted_statement_targets"],
+        "{} statement(s) referenced in cited ranges but not named in surrounding prose "
+        "(advisory, does not fail validation):",
+    )
     return 0 if (
         res["invalid_citations"] == 0
         and res["documents_ok"] == res["documents"]

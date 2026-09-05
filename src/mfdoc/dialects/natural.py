@@ -914,13 +914,28 @@ def _match_interaction(conn, member_id, line_no, stmt, masked) -> bool:
     if (m := RE_INPUT.match(masked)):
         rest = m.group("rest") or ""
         mp = RE_USING_MAP.search(stmt)
+        # Reuses _clean_target (the same quoted-literal-vs-#VAR test
+        # _match_calls uses for CALLNAT/PERFORM/FETCH/etc targets) rather
+        # than the old strip-and-upper: a `USING MAP #MAP-NAME` (the map
+        # held in a field, not written literally) is exactly as
+        # indeterminate from source as a dynamic CALLNAT target, and was
+        # previously indistinguishable here from `USING MAP MAP01`.
+        map_name, map_dynamic = _clean_target(mp.group("map")) if mp else (None, False)
         insert(conn, "interaction", member_id=member_id, line_no=line_no, kind="INPUT",
-               target=(mp.group("map").strip("'\"").upper() if mp else None),
+               target=(map_name.upper() if mp else None),
+               dynamic=1 if (mp and map_dynamic) else 0,
                fields=rest.strip()[:300] or None)
         if mp:
             insert(conn, "call_edge", caller_id=member_id,
-                   callee_name=mp.group("map").strip("'\"").upper(),
-                   call_kind="INCLUDE", line_no=line_no, args="USING MAP")
+                   callee_name=map_name.upper(),
+                   call_kind="INCLUDE", dynamic=1 if map_dynamic else 0,
+                   line_no=line_no, args="USING MAP")
+            if map_dynamic:
+                add_gap(conn, "dynamic_target",
+                        f"INPUT USING MAP target is a variable ({map_name}); the map "
+                        f"actually displayed cannot be determined from source alone.",
+                        member_id=member_id, line_no=line_no, severity="high",
+                        raw=stmt.strip()[:300])
         return True
     if (m := RE_WRITE.match(masked)):
         insert(conn, "interaction", member_id=member_id, line_no=line_no,

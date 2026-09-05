@@ -32,6 +32,19 @@ sources:
 """
 
 
+def test_containing_paragraph_returns_the_full_paragraph_and_relative_offset():
+    from mfdoc.validate import _containing_paragraph
+
+    body = "First paragraph, one sentence.\n\nSecond paragraph. It has [[X:1]] a citation. And more text.\n\nThird paragraph."
+    cite_start = body.index("[[X:1]]")
+    cite_end = cite_start + len("[[X:1]]")
+
+    para, rel_start = _containing_paragraph(body, cite_start, cite_end)
+
+    assert para == "Second paragraph. It has [[X:1]] a citation. And more text."
+    assert para[rel_start:rel_start + len("[[X:1]]")] == "[[X:1]]"
+
+
 def test_validator_rejects_out_of_range_line(indexed_db, tmp_path):
     doc = tmp_path / "doc.md"
     doc.write_text(GOOD_FRONTMATTER + "\nThe program moves the field [[MMP0100:999999]].\n")
@@ -694,3 +707,236 @@ def test_validator_reads_the_real_sentence_when_a_trailing_citation_is_split_int
     )
     result = validate_doc(conn, doc)
     assert not any("comparison direction may be reversed" in p for p in result["problems"]), result["problems"]
+
+
+def test_name_mentioned_finds_a_whole_token_match():
+    from mfdoc.validate import _name_mentioned
+
+    assert _name_mentioned("The program calls PGMX02 to continue.", "PGMX02")
+
+
+def test_name_mentioned_is_case_insensitive():
+    from mfdoc.validate import _name_mentioned
+
+    assert _name_mentioned("the program calls pgmx02 to continue.", "PGMX02")
+
+
+def test_name_mentioned_rejects_a_substring_match():
+    """PGMX02 must not match inside PGMX023 -- a longer identifier that
+    happens to share a prefix is not a real mention."""
+    from mfdoc.validate import _name_mentioned
+
+    assert not _name_mentioned("The program calls PGMX023 to continue.", "PGMX02")
+
+
+def test_name_mentioned_matches_a_name_containing_special_charset_characters():
+    """Member/program/file names legitimately contain #@$&-_. -- these are
+    non-word characters that a plain \\b boundary would mishandle."""
+    from mfdoc.validate import _name_mentioned
+
+    assert _name_mentioned("See #GS-WKAREA for the shared area.", "#GS-WKAREA")
+    assert not _name_mentioned("See #GS-WKAREA-EXT for the shared area.", "#GS-WKAREA")
+
+
+def test_name_mentioned_returns_false_when_absent():
+    from mfdoc.validate import _name_mentioned
+
+    assert not _name_mentioned("The program calls another routine.", "PGMX02")
+
+
+def test_name_mentioned_allows_a_bare_trailing_sentence_period():
+    """A `.` immediately after the name that ends a sentence is ordinary
+    punctuation, not a same-name continuation -- must not block the match
+    (regression guard for commit 0c53bf8)."""
+    from mfdoc.validate import _name_mentioned
+
+    assert _name_mentioned("The program calls PGMX02. It then returns.", "PGMX02")
+
+
+def test_name_mentioned_still_rejects_trailing_period_plus_extension():
+    """A `.` immediately followed by another name-charset character is a
+    same-name continuation (e.g. a qualified/extended name) and must still
+    block the match -- unchanged by the trailing-period fix above."""
+    from mfdoc.validate import _name_mentioned
+
+    assert not _name_mentioned("The program calls PGMX02.EXT for details.", "PGMX02")
+
+
+def _member_with_statements(**extra_rows):
+    """A minimal in-memory index with one member (TESTSTMT) and, per
+    `extra_rows`, a `call_edge`/`interaction`/`data_access` row at line 692
+    inside a 691-693 source range -- mirrors the real DECIDE/FETCH/ESCAPE
+    case from issue #59 without needing the dialect scanner to parse it.
+
+    `extra_rows` keys: "call_edge", "interaction", "data_access", each a
+    dict of column overrides merged onto a minimal valid row for that table.
+    """
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    mid = insert(conn, "member", name="TESTSTMT", dialect="natural", object_type="subprogram")
+    for line_no in range(691, 694):
+        conn.execute(
+            "INSERT INTO source_line (member_id, line_no, text) VALUES (?, ?, ?)",
+            (mid, line_no, f"line {line_no}"),
+        )
+    if "call_edge" in extra_rows:
+        row = {"caller_id": mid, "callee_name": "PGMX02", "call_kind": "FETCH",
+               "dynamic": 0, "line_no": 692}
+        row.update(extra_rows["call_edge"])
+        insert(conn, "call_edge", **row)
+    if "interaction" in extra_rows:
+        row = {"member_id": mid, "target": "MAPX02", "kind": "CONVERSE", "line_no": 692}
+        row.update(extra_rows["interaction"])
+        insert(conn, "interaction", **row)
+    if "data_access" in extra_rows:
+        row = {"member_id": mid, "entity_name": "CUSTOMER-FILE", "verb": "READ",
+               "crud": "R", "raw": "READ CUSTOMER-FILE", "line_no": 692}
+        row.update(extra_rows["data_access"])
+        insert(conn, "data_access", **row)
+    conn.commit()
+    return conn
+
+
+STMT_FRONTMATTER = """---
+title: Test doc
+doc_type: module
+system: MOM
+generated_by: legacy-functional-docs 0.1.0
+generated_at: "2026-01-01T00:00:00"
+review_status: draft
+confidence_summary:
+  verified: 1
+sources:
+  - TESTSTMT
+---
+# Test doc
+"""
+
+
+def test_validator_flags_an_omitted_call_target(tmp_path):
+    conn = _member_with_statements(call_edge={})
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        STMT_FRONTMATTER
+        + "\nThe branch exits the transaction [[TESTSTMT:691-693]].\n"
+    )
+    result = validate_doc(conn, doc)
+    assert result["ok"], result["problems"]  # non-blocking: must not fail the doc
+    assert any("PGMX02" in p and "FETCH" in p for p in result["omitted_statement_targets"])
+
+
+def test_validator_ignores_a_call_target_named_elsewhere_in_the_paragraph(tmp_path):
+    conn = _member_with_statements(call_edge={})
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        STMT_FRONTMATTER
+        + "\nThe branch first transfers control to PGMX02. "
+          "It then exits the transaction [[TESTSTMT:691-693]].\n"
+    )
+    result = validate_doc(conn, doc)
+    assert result["omitted_statement_targets"] == []
+
+
+def test_validator_never_flags_a_dynamic_call_target(tmp_path):
+    conn = _member_with_statements(call_edge={"dynamic": 1, "callee_name": "*PGM-NAME"})
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        STMT_FRONTMATTER
+        + "\nThe branch exits the transaction [[TESTSTMT:691-693]].\n"
+    )
+    result = validate_doc(conn, doc)
+    assert result["omitted_statement_targets"] == []
+
+
+def test_validator_never_flags_a_dynamic_interaction_target(tmp_path):
+    """Mirrors the call_edge dynamic case above: an interaction row whose
+    target is a variable, not a literal, must never be flagged regardless
+    of prose -- there is no literal name to search for."""
+    conn = _member_with_statements(interaction={"dynamic": 1})
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        STMT_FRONTMATTER
+        + "\nThe branch exits the transaction [[TESTSTMT:691-693]].\n"
+    )
+    result = validate_doc(conn, doc)
+    assert result["omitted_statement_targets"] == []
+
+
+def test_validator_flags_an_omitted_interaction_target(tmp_path):
+    conn = _member_with_statements(interaction={})
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        STMT_FRONTMATTER
+        + "\nThe branch exits the transaction [[TESTSTMT:691-693]].\n"
+    )
+    result = validate_doc(conn, doc)
+    assert any("MAPX02" in p and "CONVERSE" in p for p in result["omitted_statement_targets"])
+
+
+def test_validator_flags_an_omitted_data_access_target(tmp_path):
+    conn = _member_with_statements(data_access={})
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        STMT_FRONTMATTER
+        + "\nThe branch exits the transaction [[TESTSTMT:691-693]].\n"
+    )
+    result = validate_doc(conn, doc)
+    assert any("CUSTOMER-FILE" in p and "READ" in p for p in result["omitted_statement_targets"])
+
+
+def test_validator_scopes_statement_completeness_to_module_docs(tmp_path):
+    """A register doc echoes source syntax/field-inventory phrasing verbatim
+    -- same reasoning as why the reversed-condition check is module-only."""
+    conn = _member_with_statements(call_edge={})
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        "---\ntitle: Register\ndoc_type: register\n---\n"
+        "# Register\n\nThe branch exits the transaction [[TESTSTMT:691-693]].\n"
+    )
+    result = validate_doc(conn, doc)
+    assert result["omitted_statement_targets"] == []
+
+
+def test_validate_tree_aggregates_omitted_statement_targets_across_documents(tmp_path):
+    """Each document's own (distinct) contribution must still be counted --
+    doc2 flags a different target (PGMX03, line 694) from doc1's (PGMX02,
+    line 691-693) so this doesn't collide with the dedup-by-message fix
+    covered separately below."""
+    conn = _member_with_statements(call_edge={})
+    mid = conn.execute("SELECT id FROM member WHERE name='TESTSTMT'").fetchone()["id"]
+    conn.execute(
+        "INSERT INTO source_line (member_id, line_no, text) VALUES (?, 694, 'line 694')",
+        (mid,),
+    )
+    insert(conn, "call_edge", caller_id=mid, callee_name="PGMX03", call_kind="FETCH",
+           dynamic=0, line_no=694)
+    conn.commit()
+    (tmp_path / "doc1.md").write_text(
+        STMT_FRONTMATTER + "\nThe branch exits the transaction [[TESTSTMT:691-693]].\n"
+    )
+    (tmp_path / "doc2.md").write_text(
+        STMT_FRONTMATTER + "\nThe branch exits the transaction [[TESTSTMT:694]].\n"
+    )
+    res = validate_tree(conn, tmp_path)
+    assert len(res["omitted_statement_targets"]) == 2
+    assert any("PGMX02" in p for p in res["omitted_statement_targets"])
+    assert any("PGMX03" in p for p in res["omitted_statement_targets"])
+    # Advisory only -- must never affect pass/fail.
+    assert res["documents_ok"] == res["documents"] == 2
+
+
+def test_validate_tree_dedups_identical_omitted_statement_messages(tmp_path):
+    """The same omission message must be reported once, not once per
+    citation that produces it -- e.g. two paragraphs in the same document
+    both citing the same range and both omitting the same target."""
+    conn = _member_with_statements(call_edge={})
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        STMT_FRONTMATTER
+        + "\nThe branch exits the transaction [[TESTSTMT:691-693]].\n\n"
+          "The branch exits the transaction [[TESTSTMT:691-693]].\n"
+    )
+    res = validate_tree(conn, tmp_path)
+    assert len(res["omitted_statement_targets"]) == 1
+    assert "PGMX02" in res["omitted_statement_targets"][0]
