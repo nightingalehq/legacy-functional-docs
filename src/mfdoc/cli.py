@@ -33,6 +33,7 @@ import yaml
 from . import brief as brief_mod
 from . import classify
 from . import graph, normalise
+from . import structural
 from . import testadvisor as testadvisor_mod
 from . import testplan as testplan_mod
 from .db import add_gap, connect, insert, purge_member, purge_member_facts, set_metric, upsert_member
@@ -272,6 +273,14 @@ def cmd_rules_register(args) -> int:
     conn = connect(Path(args.config).parent / cfg["index_db"])
     redact = Redactor.from_options(cfg["options"])
     out = brief_mod.rules_register(conn, redact=redact)
+    _write_or_print(out, args.out)
+    return 0
+
+
+def cmd_gap_summary(args) -> int:
+    cfg = load_config(args.config)
+    conn = connect(Path(args.config).parent / cfg["index_db"])
+    out = structural.gap_summary(conn)
     _write_or_print(out, args.out)
     return 0
 
@@ -1001,6 +1010,11 @@ def main(argv=None) -> int:
     p.add_argument("--config", required=True)
     p.add_argument("--out", help="write to this path instead of stdout")
     p.set_defaults(func=cmd_rules_register)
+
+    p = sub.add_parser("gap-summary")
+    p.add_argument("--config", required=True)
+    p.add_argument("--out", help="write to this path instead of stdout")
+    p.set_defaults(func=cmd_gap_summary)
 
     p = sub.add_parser("classify-rules")
     p.add_argument("--config", required=True)
