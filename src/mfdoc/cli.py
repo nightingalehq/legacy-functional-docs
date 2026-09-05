@@ -293,6 +293,29 @@ def cmd_data_flow(args) -> int:
     return 0
 
 
+def cmd_call_graph(args) -> int:
+    cfg = load_config(args.config)
+    conn = connect(Path(args.config).parent / cfg["index_db"])
+    diagrams_cfg = ((cfg["options"] or {}).get("overview") or {}).get("diagrams") or {}
+    diagrams = structural.call_graph_diagram(
+        conn,
+        cluster_by=diagrams_cfg.get("cluster_by", "module"),
+        max_nodes_inline=diagrams_cfg.get("max_nodes_inline", 40),
+    )
+    out_dir = Path(args.out) if args.out else None
+    if out_dir is None:
+        print(diagrams["inline"])
+        return 0
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "call-graph.md").write_text(diagrams["inline"], encoding="utf-8")
+    for name, content in diagrams.items():
+        if name == "inline":
+            continue
+        (out_dir / f"call-graph-{name}.md").write_text(content, encoding="utf-8")
+    print(f"wrote {len(diagrams)} file(s) to {out_dir}")
+    return 0
+
+
 def cmd_classify_rules(args) -> int:
     cfg = load_config(args.config)
     conn = connect(Path(args.config).parent / cfg["index_db"])
@@ -1028,6 +1051,11 @@ def main(argv=None) -> int:
     p.add_argument("--config", required=True)
     p.add_argument("--out", help="write to this path instead of stdout")
     p.set_defaults(func=cmd_data_flow)
+
+    p = sub.add_parser("call-graph")
+    p.add_argument("--config", required=True)
+    p.add_argument("--out", help="directory to write call-graph*.md files into; omit to print the inline diagram to stdout")
+    p.set_defaults(func=cmd_call_graph)
 
     p = sub.add_parser("classify-rules")
     p.add_argument("--config", required=True)

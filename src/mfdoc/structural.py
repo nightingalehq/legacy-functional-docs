@@ -80,3 +80,93 @@ def data_flow_diagram(conn) -> str:
     out.append("```")
     out.append("")
     return "\n".join(out) + "\n"
+
+
+def build_call_graph(conn) -> dict[str, dict]:
+    """Every member with at least one call edge (as caller or callee),
+    with its outgoing calls and cluster label. cluster is the member's
+    own library -- clustering by subsystem/module happens at render
+    time in call_graph_diagram, this just carries the raw fact."""
+    rows = conn.execute(
+        """
+        SELECT m.name AS caller, m.library AS caller_library,
+               ce.callee_name, ce.resolved
+          FROM call_edge ce JOIN member m ON m.id = ce.caller_id
+        """
+    ).fetchall()
+
+    graph_data: dict[str, dict] = {}
+    for r in rows:
+        entry = graph_data.setdefault(
+            r["caller"], {"cluster": r["caller_library"] or "unknown", "calls": []}
+        )
+        entry["calls"].append({"callee": r["callee_name"], "resolved": bool(r["resolved"])})
+    return graph_data
+
+
+def call_graph_diagram(conn, cluster_by: str = "module", max_nodes_inline: int = 40) -> dict[str, str]:
+    """Mermaid call-graph DAG. If total distinct nodes <= max_nodes_inline,
+    returns {"inline": <one diagram for system-overview.md>}. Otherwise
+    returns {"inline": <collapsed cluster-level view>, <cluster_name>:
+    <that cluster's full diagram>, ...} -- callers write "inline" into
+    system-overview.md and every other key to call-graph-<cluster>.md.
+
+    Unresolved calls render as dashed edges into a single shared
+    "unresolved" sink node, so gaps are visible in the diagram instead
+    of silently dropped."""
+    graph_data = build_call_graph(conn)
+    nodes = set(graph_data) | {c["callee"] for e in graph_data.values() for c in e["calls"]}
+
+    def render(callers: dict[str, dict], title: str) -> str:
+        lines = ["```mermaid", "graph TD"]
+        seen: set[str] = set()
+        has_unresolved = False
+        for caller, entry in callers.items():
+            caller_id = _mermaid_id(caller)
+            if caller_id not in seen:
+                caller_label = caller.replace('"', '\\"')
+                lines.append(f'    {caller_id}["{caller_label}"]')
+                seen.add(caller_id)
+            for call in entry["calls"]:
+                callee_id = _mermaid_id(call["callee"])
+                if call["resolved"]:
+                    if callee_id not in seen:
+                        callee_label = call["callee"].replace('"', '\\"')
+                        lines.append(f'    {callee_id}["{callee_label}"]')
+                        seen.add(callee_id)
+                    lines.append(f"    {caller_id} --> {callee_id}")
+                else:
+                    has_unresolved = True
+                    lines.append(f"    {caller_id} -.->|unresolved| unresolved_sink")
+        if has_unresolved:
+            lines.append('    unresolved_sink["external / unresolved"]')
+        lines.append("```")
+        return (
+            f'---\ntitle: "{title}"\ndoc_type: register\n---\n\n'
+            f"# {title}\n\n" + "\n".join(lines) + "\n"
+        )
+
+    if len(nodes) <= max_nodes_inline:
+        return {"inline": render(graph_data, "Call graph")}
+
+    clusters: dict[str, dict] = {}
+    for caller, entry in graph_data.items():
+        clusters.setdefault(entry["cluster"], {})[caller] = entry
+
+    collapsed_lines = ["```mermaid", "graph TD"]
+    for cluster_name in clusters:
+        cluster_label = f"{cluster_name} (see call-graph-{cluster_name}.md)".replace('"', '\\"')
+        collapsed_lines.append(f'    {_mermaid_id(cluster_name)}["{cluster_label}"]')
+    collapsed_lines.append("```")
+    result = {
+        "inline": (
+            '---\ntitle: "Call graph (collapsed)"\ndoc_type: register\n---\n\n'
+            "# Call graph (collapsed)\n\n"
+            "Too many nodes for one inline diagram -- one node per cluster below; "
+            "see the standalone file for each cluster's full graph.\n\n"
+            + "\n".join(collapsed_lines) + "\n"
+        )
+    }
+    for cluster_name, members in clusters.items():
+        result[cluster_name] = render(members, f"Call graph — {cluster_name}")
+    return result
