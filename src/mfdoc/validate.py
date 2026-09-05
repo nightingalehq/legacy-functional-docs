@@ -651,4 +651,9 @@ def validate_tree(conn, root: Path) -> dict:
         "invalid_citations": sum(r["invalid_citations"] for r in results),
         "results": results,
         "completeness_problems": module_completeness_problems(conn, results),
+        # Advisory only (see _statement_completeness_problems) -- never
+        # subtracted from documents_ok and never affects a caller's exit code.
+        "omitted_statement_targets": [
+            p for r in results for p in r.get("omitted_statement_targets", [])
+        ],
     }

@@ -619,3 +619,17 @@ def test_validator_scopes_statement_completeness_to_module_docs(tmp_path):
     )
     result = validate_doc(conn, doc)
     assert result["omitted_statement_targets"] == []
+
+
+def test_validate_tree_aggregates_omitted_statement_targets_across_documents(tmp_path):
+    conn = _member_with_statements(call_edge={})
+    (tmp_path / "doc1.md").write_text(
+        STMT_FRONTMATTER + "\nThe branch exits the transaction [[TESTSTMT:691-693]].\n"
+    )
+    (tmp_path / "doc2.md").write_text(
+        STMT_FRONTMATTER + "\nThe branch exits the transaction [[TESTSTMT:691-693]].\n"
+    )
+    res = validate_tree(conn, tmp_path)
+    assert len(res["omitted_statement_targets"]) == 2
+    # Advisory only -- must never affect pass/fail.
+    assert res["documents_ok"] == res["documents"] == 2

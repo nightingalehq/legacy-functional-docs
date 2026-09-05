@@ -828,6 +828,11 @@ def cmd_validate(args) -> int:
         print(f"\n{len(res['completeness_problems'])} member(s) with incomplete rule coverage:")
         for p in res["completeness_problems"]:
             print(f"  - {p}")
+    if res["omitted_statement_targets"]:
+        print(f"\n{len(res['omitted_statement_targets'])} statement(s) referenced in cited ranges "
+              f"but not named in surrounding prose (advisory, does not fail validation):")
+        for p in res["omitted_statement_targets"]:
+            print(f"  - {p}")
     return 0 if (
         res["invalid_citations"] == 0
         and res["documents_ok"] == res["documents"]
