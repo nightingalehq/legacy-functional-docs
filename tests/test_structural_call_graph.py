@@ -70,6 +70,42 @@ def test_unresolved_edge_renders_dashed():
     conn.commit()
     out = structural.call_graph_diagram(conn, cluster_by="module", max_nodes_inline=10_000)
     assert "-.->|unresolved|" in out["inline"]
+    assert "GHOSTPROG" in out["inline"], "the missing callee's name must be visible, not collapsed into an anonymous sink"
+
+
+def test_repeated_unresolved_calls_to_same_callee_produce_one_edge():
+    conn = _conn()
+    conn.execute(
+        "INSERT INTO member (name, dialect) VALUES ('CGTEST3', 'natural')"
+    )
+    member_id = conn.execute("SELECT id FROM member WHERE name='CGTEST3'").fetchone()["id"]
+    for line in (5, 9, 14):
+        conn.execute(
+            "INSERT INTO call_edge (caller_id, callee_name, callee_id, call_kind, line_no, resolved) "
+            "VALUES (?, 'GHOSTPROG', NULL, 'CALLNAT', ?, 0)", (member_id, line)
+        )
+    conn.commit()
+    out = structural.call_graph_diagram(conn, cluster_by="module", max_nodes_inline=10_000)
+    inline = out["inline"]
+    assert inline.count("-.->|unresolved|") == 1, "three calls to the same missing callee must collapse to one edge"
+    assert inline.count("(unresolved)") == 1, "the GHOSTPROG node must be declared once, not once per call site"
+
+
+def test_repeated_resolved_calls_to_same_callee_produce_one_edge():
+    conn = _conn()
+    conn.execute("INSERT INTO member (name, dialect) VALUES ('CGTEST4', 'natural')")
+    conn.execute("INSERT INTO member (name, dialect) VALUES ('CGTARGET', 'natural')")
+    caller_id = conn.execute("SELECT id FROM member WHERE name='CGTEST4'").fetchone()["id"]
+    callee_id = conn.execute("SELECT id FROM member WHERE name='CGTARGET'").fetchone()["id"]
+    for line in (5, 9):
+        conn.execute(
+            "INSERT INTO call_edge (caller_id, callee_name, callee_id, call_kind, line_no, resolved) "
+            "VALUES (?, 'CGTARGET', ?, 'CALLNAT', ?, 1)", (caller_id, callee_id, line)
+        )
+    conn.commit()
+    out = structural.call_graph_diagram(conn, cluster_by="module", max_nodes_inline=10_000)
+    edge_lines = [l for l in out["inline"].splitlines() if "-->" in l]
+    assert len(edge_lines) == 1, "two calls to the same resolved callee must collapse to one edge"
 
 
 def test_cluster_by_subsystem_changes_clustering():

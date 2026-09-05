@@ -140,16 +140,19 @@ def call_graph_diagram(conn, cluster_by: str = "module", max_nodes_inline: int =
     <that cluster's full diagram>, ...} -- callers write "inline" into
     system-overview.md and every other key to call-graph-<cluster>.md.
 
-    Unresolved calls render as dashed edges into a single shared
-    "unresolved" sink node, so gaps are visible in the diagram instead
-    of silently dropped."""
+    Unresolved calls render as dashed edges to their own node, labeled
+    with the missing callee's name (not a single anonymous shared sink)
+    -- so a reader can see *which* program is missing, not just that
+    something is. Both resolved and unresolved edges are deduped per
+    (caller, callee) pair -- a caller invoking the same callee from
+    multiple lines produces one edge, not one per call site."""
     graph_data = build_call_graph(conn, cluster_by=cluster_by)
     nodes = set(graph_data) | {c["callee"] for e in graph_data.values() for c in e["calls"]}
 
     def render(callers: dict[str, dict], title: str) -> str:
         lines = ["```mermaid", "graph TD"]
         seen: set[str] = set()
-        has_unresolved = False
+        seen_edges: set[tuple[str, str, bool]] = set()
         for caller, entry in callers.items():
             caller_id = _mermaid_id(caller)
             if caller_id not in seen:
@@ -158,6 +161,10 @@ def call_graph_diagram(conn, cluster_by: str = "module", max_nodes_inline: int =
                 seen.add(caller_id)
             for call in entry["calls"]:
                 callee_id = _mermaid_id(call["callee"])
+                edge_key = (caller_id, callee_id, call["resolved"])
+                if edge_key in seen_edges:
+                    continue
+                seen_edges.add(edge_key)
                 if call["resolved"]:
                     if callee_id not in seen:
                         callee_label = call["callee"].replace('"', '\\"')
@@ -165,10 +172,11 @@ def call_graph_diagram(conn, cluster_by: str = "module", max_nodes_inline: int =
                         seen.add(callee_id)
                     lines.append(f"    {caller_id} --> {callee_id}")
                 else:
-                    has_unresolved = True
-                    lines.append(f"    {caller_id} -.->|unresolved| unresolved_sink")
-        if has_unresolved:
-            lines.append('    unresolved_sink["external / unresolved"]')
+                    if callee_id not in seen:
+                        callee_label = call["callee"].replace('"', '\\"')
+                        lines.append(f'    {callee_id}(["{callee_label} (unresolved)"])')
+                        seen.add(callee_id)
+                    lines.append(f"    {caller_id} -.->|unresolved| {callee_id}")
         lines.append("```")
         return (
             f'---\ntitle: "{title}"\ndoc_type: register\n---\n\n'
