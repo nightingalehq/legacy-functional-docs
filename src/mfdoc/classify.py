@@ -134,7 +134,15 @@ def classify_rules_llm(
 
     `limit`, if given, caps how many eligible rows are sent to the model
     in this call -- useful for bounding a first run against an unknown
-    project's rule count. Every `_PROGRESS_INTERVAL`th row (and the last
+    project's rule count. The underlying query is `ORDER BY rc.member_id,
+    rc.line_no` (matching the ordering convention used elsewhere for
+    rule_candidate, e.g. structural.py's rule sequence-numbering query)
+    specifically so `limit`'s row selection is deterministic and
+    reproducible run-to-run -- an unordered SELECT sliced by `[:limit]`
+    would otherwise cap an implementation-defined subset that could
+    differ between runs with no source change.
+
+    Every `_PROGRESS_INTERVAL`th row (and the last
     row) invokes `progress_callback(i, total)` if one is given -- this
     module is library code, not the CLI, so it never prints directly
     (see batch.py/structural.py for the same convention); `cmd_classify_
@@ -153,6 +161,7 @@ def classify_rules_llm(
           JOIN member m ON m.id = rc.member_id
           JOIN rule_theme rt ON rt.rule_candidate_id = rc.id
          WHERE rt.source = 'structural'
+         ORDER BY rc.member_id, rc.line_no
         """
     ).fetchall()
     if limit is not None:

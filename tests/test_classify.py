@@ -266,6 +266,66 @@ def test_llm_limit_caps_rows_sent_to_model(indexed_db):
     assert result["reclassified"] == 2
 
 
+def test_llm_limit_selection_is_deterministic_across_runs():
+    """Follow-up finding 4: the query feeding classify_rules_llm's loop
+    had no ORDER BY, so `--limit N` capped an implementation-defined
+    subset of eligible rows -- not necessarily the same subset from one
+    run to the next. Rows are inserted here in an order scrambled
+    relative to (member_id, line_no) specifically so an unordered SELECT
+    would be likely to return them differently across runs; the query's
+    `ORDER BY rc.member_id, rc.line_no` must make `limit=2` always pick
+    the same two lowest-(member_id, line_no) rows, run after run."""
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    def build_conn():
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(SCHEMA)
+        conn.execute("INSERT INTO member (name, dialect) VALUES ('LIMTEST', 'natural')")
+        member_id = conn.execute("SELECT id FROM member WHERE name='LIMTEST'").fetchone()["id"]
+        # Inserted out of (member_id, line_no) order: line_no 30, then 10,
+        # then 20 -- rowid/insertion order disagrees with line_no order.
+        for line_no in (30, 10, 20):
+            conn.execute(
+                "INSERT INTO rule_candidate (member_id, line_no, construct, condition, raw) "
+                "VALUES (?, ?, 'IF', 'cond', 'raw')",
+                (member_id, line_no),
+            )
+        for rc_id, in conn.execute("SELECT id FROM rule_candidate").fetchall():
+            conn.execute(
+                "INSERT INTO rule_theme (rule_candidate_id, theme, source) VALUES (?, 'unknown', 'structural')",
+                (rc_id,),
+            )
+        conn.commit()
+        return conn
+
+    def run_once():
+        conn = build_conn()
+
+        def fake_caller(prompt: str):
+            from mfdoc.batch import ModelResponse
+            return ModelResponse(text="posting", input_tokens=0, output_tokens=0)
+
+        classify.classify_rules_llm(conn, fake_caller, limit=2)
+        reclassified_lines = {
+            r["line_no"]
+            for r in conn.execute(
+                "SELECT rc.line_no FROM rule_candidate rc "
+                "JOIN rule_theme rt ON rt.rule_candidate_id = rc.id "
+                "WHERE rt.source = 'llm'"
+            ).fetchall()
+        }
+        return reclassified_lines
+
+    first_run = run_once()
+    second_run = run_once()
+    # The two lowest line_no values (10, 20) must be the ones selected --
+    # not line_no 30, which would win under plain insertion/rowid order.
+    assert first_run == {10, 20}
+    assert second_run == {10, 20}
+
+
 def test_llm_progress_callback_receives_row_and_total(indexed_db, monkeypatch):
     """classify_rules_llm must never print directly (library-code/CLI
     print-only-in-cli.py convention, see batch.py/structural.py) -- an
