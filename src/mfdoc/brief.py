@@ -808,24 +808,36 @@ def executive_brief(conn, member_name: str, redact: Redactor = NULL_REDACTOR, to
     # Matched by callee_name (not callee_id): graph.resolve() sets callee_id
     # via an unqualified UPPER(name) lookup with its own LIMIT 1, so comparing
     # names here mirrors exactly which edges build_call_graph would consider a
-    # match for this member, resolved or not. Safe from the ambiguous-name
-    # blending Critical 2 above describes: this member's name is already
-    # confirmed unique across the whole member table by the resolve_member_by_name
-    # call above, so no other member could also match this same callee_name.
+    # match for this member, resolved or not. This member's own name is
+    # already confirmed unique across the whole member table by the
+    # resolve_member_by_name call above, so no other member could also match
+    # this same callee_name. The CALLERS are not similarly guaranteed unique,
+    # though -- two distinct caller members can share a bare name across
+    # libraries (member uniqueness is (name, library, dialect)) -- so this
+    # groups by the caller's member id, not its bare name, and disambiguates
+    # any name collision with a library label rather than collapsing two
+    # distinct callers into one row and losing one's citation.
     caller_rows = conn.execute(
         """
-        SELECT m.name AS caller, MIN(ce.line_no) AS first_line
+        SELECT m.id AS caller_id, m.name AS caller, m.library AS caller_library,
+               MIN(ce.line_no) AS first_line
           FROM call_edge ce JOIN member m ON m.id = ce.caller_id
          WHERE UPPER(ce.callee_name) = UPPER(?)
-         GROUP BY m.name
-         ORDER BY m.name
+         GROUP BY m.id
+         ORDER BY m.name, m.library
         """,
         (member["name"],),
     ).fetchall()
     if not caller_rows:
         out.append("- no known callers recorded for this member")
+    name_counts: dict[str, int] = {}
     for row in caller_rows:
-        out.append(f"- called by `{row['caller']}` {_cite(row['caller'], row['first_line'])}")
+        name_counts[row["caller"]] = name_counts.get(row["caller"], 0) + 1
+    for row in caller_rows:
+        label = row["caller"]
+        if name_counts[label] > 1:
+            label = f"{row['caller']} ({row['caller_library'] or 'unknown'})"
+        out.append(f"- called by `{label}` {_cite(row['caller'], row['first_line'])}")
     out.append("")
 
     out.append("## Risk")

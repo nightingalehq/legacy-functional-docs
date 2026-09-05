@@ -297,6 +297,39 @@ def test_executive_brief_entry_point_cics_transaction():
     assert "no entry-point fact was found" not in out
 
 
+def test_executive_brief_external_dependents_distinguishes_same_named_callers():
+    """Regression test: two distinct callers sharing a bare name across
+    libraries must not be collapsed into one row -- the old query grouped
+    by caller name (GROUP BY m.name), so one caller's citation silently
+    replaced the other's under a single merged row. Both callers must
+    appear, each labeled with its own library and citing its own line."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'SHAREDTGT', 'natural')")
+    conn.execute("INSERT INTO member (id, name, library, dialect) VALUES (2, 'DUPCALLER', 'LIBA', 'natural')")
+    conn.execute("INSERT INTO member (id, name, library, dialect) VALUES (3, 'DUPCALLER', 'LIBB', 'natural')")
+    conn.execute(
+        "INSERT INTO call_edge (caller_id, callee_name, call_kind, line_no) "
+        "VALUES (2, 'SHAREDTGT', 'CALLNAT', 10)"
+    )
+    conn.execute(
+        "INSERT INTO call_edge (caller_id, callee_name, call_kind, line_no) "
+        "VALUES (3, 'SHAREDTGT', 'CALLNAT', 20)"
+    )
+    conn.commit()
+
+    out = brief.executive_brief(conn, "SHAREDTGT")
+    assert "`DUPCALLER (LIBA)`" in out
+    assert "`DUPCALLER (LIBB)`" in out
+    assert "[[DUPCALLER:10]]" in out
+    assert "[[DUPCALLER:20]]" in out
+
+
 def test_executive_brief_risk_section_uses_labeled_bullets_not_raw_table_row(indexed_db):
     """Finding 10: the Risk section used to drop in a raw headerless
     markdown-table-row fragment (`| \\`NAME\\` | 17 | 1 | 1 | 4 | 100.0 |`)
