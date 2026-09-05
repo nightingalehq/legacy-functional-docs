@@ -219,3 +219,17 @@ def test_executive_brief_handles_ambiguous_heatmap_row_defensively(indexed_db):
         for rid in inserted_ids:
             conn.execute("DELETE FROM rule_candidate WHERE id=?", (rid,))
         conn.commit()
+
+
+def test_cli_brief_executive_flag(cli_args, derive_result, capsys):
+    from types import SimpleNamespace
+
+    from mfdoc import cli
+
+    args = SimpleNamespace(
+        config=cli_args.config, module=None, entity=None, system=False,
+        executive="MMP0100", out=None,
+    )
+    assert cli.cmd_brief(args) == 0
+    out = capsys.readouterr().out
+    assert "# Executive brief: MMP0100" in out

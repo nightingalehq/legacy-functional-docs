@@ -262,8 +262,10 @@ def cmd_brief(args) -> int:
         out = brief_mod.module_brief(conn, args.module, redact=redact, lexicon=lexicon)
     elif args.entity:
         out = brief_mod.entity_brief(conn, args.entity, redact=redact, lexicon=lexicon)
+    elif args.executive:
+        out = brief_mod.executive_brief(conn, args.executive, redact=redact)
     else:
-        print("specify --module, --entity or --system", file=sys.stderr)
+        print("specify --module, --entity, --system or --executive", file=sys.stderr)
         return 2
     _write_or_print(out, args.out)
     return 0
@@ -1062,6 +1064,8 @@ def main(argv=None) -> int:
     p.add_argument("--module")
     p.add_argument("--entity")
     p.add_argument("--system", action="store_true")
+    p.add_argument("--executive", help="member name; emits the cited-facts brief for the "
+                                        "executive-summary narrative template (templates/executive-summary.md)")
     p.add_argument("--out")
     p.set_defaults(func=cmd_brief)
 
