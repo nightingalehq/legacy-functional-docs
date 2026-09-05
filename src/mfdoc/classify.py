@@ -154,18 +154,21 @@ def classify_rules_llm(
     the same way `mfdoc batch` does.
     """
     taxonomy_lookup = {theme.lower(): theme for theme in taxonomy} if taxonomy else None
-    rows = conn.execute(
-        """
+    query = """
         SELECT rc.id, rc.condition, rc.literals, m.name AS member_name
           FROM rule_candidate rc
           JOIN member m ON m.id = rc.member_id
           JOIN rule_theme rt ON rt.rule_candidate_id = rc.id
          WHERE rt.source = 'structural'
          ORDER BY rc.member_id, rc.line_no
-        """
-    ).fetchall()
+    """
     if limit is not None:
-        rows = rows[:limit]
+        # Pushed into SQL rather than fetching every eligible row and
+        # slicing in Python -- a large project's full structural-sourced
+        # set shouldn't be loaded into memory just to honor a small cap.
+        rows = conn.execute(query + " LIMIT ?", (limit,)).fetchall()
+    else:
+        rows = conn.execute(query).fetchall()
 
     reclassified = 0
     input_tokens = 0

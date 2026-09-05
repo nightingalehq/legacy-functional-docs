@@ -255,6 +255,37 @@ def test_llm_fallback_never_touches_keyword_rows(indexed_db):
     assert still_keyword == total
 
 
+def test_llm_limit_is_pushed_into_sql_not_sliced_in_python(indexed_db):
+    """--limit previously fetched every eligible row and sliced in Python
+    -- fine for correctness but wasteful for a large project's full
+    structural-sourced set. The query itself must now carry a SQL LIMIT
+    so the database only returns the requested number of rows."""
+    conn = indexed_db
+    classify.classify_rules_deterministic(conn, taxonomy={})
+    eligible = conn.execute(
+        "SELECT COUNT(*) FROM rule_theme WHERE source='structural'"
+    ).fetchone()[0]
+    assert eligible >= 2, "fixture needs >=2 eligible rows for this test to be meaningful"
+
+    executed_sql = []
+    conn.set_trace_callback(executed_sql.append)
+    try:
+        def fake_caller(prompt: str):
+            from mfdoc.batch import ModelResponse
+            return ModelResponse(text="posting", input_tokens=0, output_tokens=0)
+
+        classify.classify_rules_llm(conn, fake_caller, limit=1)
+    finally:
+        conn.set_trace_callback(None)
+
+    select_statements = [sql for sql in executed_sql if "FROM rule_candidate rc" in sql]
+    assert select_statements, "expected the eligible-rows query to run"
+    assert "LIMIT" in select_statements[0], (
+        "limit must be pushed into the SQL query, not applied by slicing "
+        "the fetched rows in Python"
+    )
+
+
 def test_llm_reports_token_totals(indexed_db):
     """Finding 7: classify_rules_llm must accumulate input_tokens/output_tokens
     from every ModelResponse it receives (previously discarded entirely) and
