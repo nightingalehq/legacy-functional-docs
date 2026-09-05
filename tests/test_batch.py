@@ -508,3 +508,137 @@ def test_retry_prompt_carries_a_specific_hint_for_a_self_narrating_opening(index
     assert caller.calls == 2
     assert "Do not narrate what you are about to do" in caller.prompts[1]
     assert summary.ok == 1
+
+
+def _counting_caller(caller):
+    """Wraps any ModelCaller to also expose a `.calls` count -- used to
+    prove a resumed chunk generation makes zero (or exactly the expected
+    number of) model calls, not just that it produces the right output."""
+    def counted(prompt: str) -> batch_mod.ModelResponse:
+        counted.calls += 1
+        return caller(prompt)
+    counted.calls = 0
+    return counted
+
+
+def test_chunk_resume_makes_no_model_calls_when_every_chunk_brief_is_unchanged(tmp_path):
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_rules(conn, 5)
+
+    out_path = tmp_path / "FAKEMOD.md"
+    first_caller = _counting_caller(_chunk_aware_module_caller())
+    first = batch_mod.generate_module_doc(
+        conn, "FAKEMOD", out_path, first_caller,
+        "writing rules text", "template text", max_rules_per_call=2,
+    )
+    assert first.ok is True
+    assert first_caller.calls == 3
+    assert first.chunk_state is not None and set(first.chunk_state) == {"1", "2", "3"}
+
+    def exploding_caller(prompt: str) -> batch_mod.ModelResponse:
+        raise AssertionError("must not call the model for an unchanged chunk")
+
+    second = batch_mod.generate_module_doc(
+        conn, "FAKEMOD", out_path, exploding_caller,
+        "writing rules text", "template text", max_rules_per_call=2,
+        prior_chunks=first.chunk_state,
+    )
+    assert second.ok is True
+    assert second.chunk_state == first.chunk_state
+
+
+def test_chunk_resume_only_regenerates_the_chunk_whose_own_brief_changed(tmp_path):
+    """Changing one rule_candidate's condition text only changes the brief
+    -- and so only the model call -- for the chunk whose range that rule
+    falls in; the other chunks must be reused untouched."""
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_rules(conn, 5)
+
+    out_path = tmp_path / "FAKEMOD.md"
+    first_caller = _counting_caller(_chunk_aware_module_caller())
+    first = batch_mod.generate_module_doc(
+        conn, "FAKEMOD", out_path, first_caller,
+        "writing rules text", "template text", max_rules_per_call=2,
+    )
+    assert first_caller.calls == 3
+    chunk1_before = (tmp_path / "FAKEMOD.chunk1.md").read_text(encoding="utf-8")
+
+    # Rule 3 (line 3) falls in chunk 2's range (rules 3-4) -- change its
+    # condition text so only that chunk's brief hash changes.
+    conn.execute("UPDATE rule_candidate SET condition='COND-3-CHANGED' WHERE line_no=3")
+    conn.commit()
+
+    second_caller = _counting_caller(_chunk_aware_module_caller())
+    second = batch_mod.generate_module_doc(
+        conn, "FAKEMOD", out_path, second_caller,
+        "writing rules text", "template text", max_rules_per_call=2,
+        prior_chunks=first.chunk_state,
+    )
+    assert second.ok is True
+    assert second_caller.calls == 1, "only the chunk covering the changed rule should re-render"
+    assert (tmp_path / "FAKEMOD.chunk1.md").read_text(encoding="utf-8") == chunk1_before
+
+
+def test_chunk_resume_falls_back_to_regenerating_a_chunk_whose_cached_file_is_gone(tmp_path):
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_rules(conn, 5)
+
+    out_path = tmp_path / "FAKEMOD.md"
+    first = batch_mod.generate_module_doc(
+        conn, "FAKEMOD", out_path, _chunk_aware_module_caller(),
+        "writing rules text", "template text", max_rules_per_call=2,
+    )
+    (tmp_path / "FAKEMOD.chunk2.md").unlink()
+
+    second_caller = _counting_caller(_chunk_aware_module_caller())
+    second = batch_mod.generate_module_doc(
+        conn, "FAKEMOD", out_path, second_caller,
+        "writing rules text", "template text", max_rules_per_call=2,
+        prior_chunks=first.chunk_state,
+    )
+    assert second.ok is True
+    assert second_caller.calls == 1
+    assert (tmp_path / "FAKEMOD.chunk2.md").exists()
+
+
+def test_run_batch_persists_chunk_state_and_reuses_it_across_calls(indexed_db, tmp_path):
+    """End-to-end through run_batch's own state file, not just the lower-
+    level generate_module_doc -- a second run against unchanged facts must
+    make zero model calls for the already-chunked member's chunks."""
+    members = ["MMP0100"]
+    state_path = tmp_path / "state.json"
+    first_caller = FakeCaller()
+    summary1 = batch_mod.run_batch(
+        indexed_db, members, tmp_path / "out", first_caller, "rules", "template",
+        max_rules_per_call=1, state_path=state_path,
+    )
+    assert summary1.failed == 0
+    saved = json.loads(state_path.read_text())
+    subdir = batch_mod._output_subdir(indexed_db, "MMP0100")
+    state_key = f"{subdir.as_posix()}/MMP0100"
+    assert "chunks" in saved[state_key]
+    chunk_count_first_run = first_caller.calls
+
+    second_caller = FakeCaller()
+    summary2 = batch_mod.run_batch(
+        indexed_db, members, tmp_path / "out", second_caller, "rules", "template",
+        max_rules_per_call=1, state_path=state_path,
+    )
+    assert summary2.failed == 0
+    assert second_caller.calls == 0, "every chunk should be reused, not re-rendered"
+    assert chunk_count_first_run > 0
