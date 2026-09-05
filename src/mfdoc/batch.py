@@ -482,6 +482,22 @@ def _save_state(state_path: Path, state: dict) -> None:
     state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
 
+def estimate_cost(
+    input_tokens: int, output_tokens: int,
+    cost_per_mtok_in: float | None, cost_per_mtok_out: float | None,
+) -> float | None:
+    """Dollar cost for `input_tokens`/`output_tokens` at the given
+    per-million-token rates, or None if pricing isn't configured (either
+    rate missing) -- the shared "unknown" sentinel every caller printing
+    a cost line checks for (see run_batch below and cli.py's
+    cmd_classify_rules/cmd_batch), so the formula and its unknown-pricing
+    behavior live in exactly one place instead of being retyped at each
+    call site."""
+    if cost_per_mtok_in is None or cost_per_mtok_out is None:
+        return None
+    return (input_tokens / 1_000_000) * cost_per_mtok_in + (output_tokens / 1_000_000) * cost_per_mtok_out
+
+
 def _skip_result(name: str, out_path: Path, prior: dict) -> DocResult:
     """A prior successful run's result, reused as-is without regenerating anything."""
     return DocResult(name, str(out_path), True, prior.get("attempts", 1), 0, 0, [], skipped=True)
@@ -640,9 +656,7 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
 
     total_in = sum(r.input_tokens for r in results)
     total_out = sum(r.output_tokens for r in results)
-    cost = None
-    if cost_per_mtok_in is not None and cost_per_mtok_out is not None:
-        cost = (total_in / 1_000_000) * cost_per_mtok_in + (total_out / 1_000_000) * cost_per_mtok_out
+    cost = estimate_cost(total_in, total_out, cost_per_mtok_in, cost_per_mtok_out)
 
     return BatchSummary(
         results=sorted(results, key=lambda r: r.member),

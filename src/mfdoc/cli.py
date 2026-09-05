@@ -358,6 +358,8 @@ def cmd_classify_rules(args) -> int:
     else:
         use_llm = args.llm_fallback
     if use_llm:
+        from . import batch as batch_mod
+
         redact = Redactor.from_options(cfg["options"])
         caller = _build_model_caller(args)
         if caller is None:
@@ -375,9 +377,10 @@ def cmd_classify_rules(args) -> int:
         cost_per_mtok_in = pricing.get("input_per_mtok")
         cost_per_mtok_out = pricing.get("output_per_mtok")
         print(f"tokens: {result['input_tokens']} in, {result['output_tokens']} out")
-        if cost_per_mtok_in is not None and cost_per_mtok_out is not None:
-            cost = (result["input_tokens"] / 1_000_000) * cost_per_mtok_in + \
-                   (result["output_tokens"] / 1_000_000) * cost_per_mtok_out
+        cost = batch_mod.estimate_cost(
+            result["input_tokens"], result["output_tokens"], cost_per_mtok_in, cost_per_mtok_out
+        )
+        if cost is not None:
             print(f"cost: ${cost:.4f}")
         else:
             print("cost: unknown -- set options.narrative.pricing.input_per_mtok/output_per_mtok in project.yml")

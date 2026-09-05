@@ -106,6 +106,24 @@ def test_batch_generates_valid_docs_for_all_batchable_members(indexed_db, tmp_pa
         assert (tmp_path / "out" / subdir / f"{member}.md").exists()
 
 
+def test_estimate_cost_computes_dollar_amount_when_pricing_configured():
+    """estimate_cost is the single shared formula behind run_batch's own
+    cost_usd (see test_batch_reports_cost_only_when_pricing_configured
+    below) and cmd_classify_rules's cost line in cli.py -- both must reuse
+    it rather than retyping the arithmetic inline."""
+    cost = batch_mod.estimate_cost(1400, 2800, cost_per_mtok_in=3.0, cost_per_mtok_out=15.0)
+    expected = (1400 / 1_000_000) * 3.0 + (2800 / 1_000_000) * 15.0
+    assert cost == expected
+
+
+def test_estimate_cost_returns_none_when_pricing_not_configured():
+    """Either rate missing (not just both) must produce the shared
+    "unknown" sentinel (None), not a partial/garbage dollar figure."""
+    assert batch_mod.estimate_cost(1400, 2800, None, None) is None
+    assert batch_mod.estimate_cost(1400, 2800, cost_per_mtok_in=3.0, cost_per_mtok_out=None) is None
+    assert batch_mod.estimate_cost(1400, 2800, cost_per_mtok_in=None, cost_per_mtok_out=15.0) is None
+
+
 def test_batch_reports_cost_only_when_pricing_configured(indexed_db, tmp_path):
     members = batch_mod.select_batch_members(indexed_db)
     caller = FakeCaller()
