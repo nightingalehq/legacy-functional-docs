@@ -113,3 +113,36 @@ def test_shadowed_assignments_adds_a_gap_and_is_purged_on_rerun():
         "SELECT * FROM gap WHERE gap_kind='shadowed_assignment'"
     ).fetchall()
     assert len(gaps_again) == 1
+
+
+def test_natural_boolean_flag_shadowed_by_an_unconditional_reset_is_caught():
+    """End-to-end regression for the motivating real case: a hardcoded-ID
+    branch sets a debug flag one way per user via bare TRUE/FALSE (not a
+    quoted string or number), then an unconditional reset immediately
+    follows before anything reads the flag -- this only works now that
+    natural.py recognises bare TRUE/FALSE as a literal value at all."""
+    from mfdoc.dialects import natural
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    insert(conn, "member", name="TESTPROG", dialect="natural", object_type="subprogram")
+    mid = conn.execute("SELECT id FROM member WHERE name='TESTPROG'").fetchone()["id"]
+    src = (
+        "IF *USER = 'T#21T'\n"
+        "  #DEBUG := TRUE\n"
+        "ELSE\n"
+        "  #DEBUG := FALSE\n"
+        "END-IF\n"
+        "#DEBUG := FALSE\n"
+    )
+    lines = [(i + 1, None, t) for i, t in enumerate(src.splitlines())]
+    natural.extract(conn, mid, lines, "TESTPROG")
+    conn.commit()
+
+    findings = graph.shadowed_assignments_for_member(conn, mid)
+    lines_found = {f["line_no"] for f in findings}
+    assert lines_found == {2, 4}
+    for f in findings:
+        assert f["field"] == "DEBUG"
+        assert f["override_line"] == 6
