@@ -150,6 +150,40 @@ def build_prompt(brief: str, writing_rules: str, template: str, retry_note: str 
     return "\n\n---\n\n".join(parts)
 
 
+# Corrective hints keyed by a substring of a validate_doc problem -- appended
+# to the generic bullet list a retry prompt already carries, for failure
+# shapes seen recurring in real chunked-generation runs where the plain
+# problem text alone wasn't directive enough to get a clean second attempt.
+# Matched with `in`, not equality: validate_doc's exact wording for these
+# varies by which specific check produced it (missing vs malformed front
+# matter, for instance), but the shared substring is stable.
+_RETRY_HINTS: tuple[tuple[str, str], ...] = (
+    ("front matter", (
+        "Your response must begin with the literal `---` front-matter delimiter "
+        "as its very first characters -- no preamble, no restating these "
+        "instructions, no explanation before it."
+    )),
+    ("does not open with a top-level", (
+        "Do not narrate what you are about to do. Output only the finished "
+        "document, starting with its front matter and then its top-level "
+        "`# ` heading -- nothing else before either."
+    )),
+)
+
+
+def _retry_note(problems: list[str]) -> str:
+    """The generic per-problem bullet list `validate_doc` produced, plus any
+    hint from `_RETRY_HINTS` whose failure shape actually occurred -- so a
+    retry gets both the specific facts (what resolved wrong) and, for shapes
+    a plain problem description hasn't reliably fixed on retry before, an
+    explicit corrective instruction."""
+    bullets = "\n".join(f"- {p}" for p in problems)
+    hints = [hint for substr, hint in _RETRY_HINTS if any(substr in p for p in problems)]
+    if not hints:
+        return bullets
+    return bullets + "\n\n" + "\n".join(hints)
+
+
 @dataclass
 class DocResult:
     member: str
@@ -189,7 +223,7 @@ def _generate_module_doc_from_brief(conn, member_name: str, brief: str, out_path
         if result["ok"]:
             return DocResult(member_name, str(out_path), True, attempt, input_tokens, output_tokens, [])
         problems = result["problems"]
-        retry_note = "\n".join(f"- {p}" for p in problems)
+        retry_note = _retry_note(problems)
     return DocResult(member_name, str(out_path), False, attempt, input_tokens, output_tokens, problems)
 
 
@@ -576,7 +610,7 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
             validation = validate_doc(conn, out_path)
             attempts = 1
             if not validation["ok"]:
-                retry_note = "\n".join(f"- {p}" for p in validation["problems"])
+                retry_note = _retry_note(validation["problems"])
                 retry_prompt = build_prompt(briefs[state_key], writing_rules, template, retry_note)
                 retry_response = caller(retry_prompt)
                 input_tokens += retry_response.input_tokens

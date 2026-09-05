@@ -27,6 +27,7 @@ confidence_summary:
 sources:
   - MMP0100
 ---
+# Test doc
 """
 
 
@@ -204,6 +205,7 @@ confidence_summary:
 sources:
   - TESTCOND
 ---
+# Test doc
 """
 
 
@@ -378,3 +380,33 @@ def test_validator_still_rejects_a_genuinely_uncited_assertion_before_a_cited_on
     result = validate_doc(indexed_db, doc)
     assert not result["ok"]
     assert any("no citation" in p for p in result["problems"])
+
+
+def test_validator_rejects_module_doc_not_opening_with_a_heading(indexed_db, tmp_path):
+    """A response that narrates commentary (e.g. restating its own scope)
+    before the actual document content, rather than opening with the
+    template's required top-level heading, must be caught even when its
+    front matter is otherwise well-formed -- this is the self-narrating-
+    response failure shape, distinct from a dropped front-matter block."""
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        GOOD_FRONTMATTER.replace("# Test doc\n", "")
+        + "\nI'll now document the module as instructed.\n\n"
+          "The program resets the return code [[MMP0100:31]].\n"
+    )
+    result = validate_doc(indexed_db, doc)
+    assert not result["ok"]
+    assert any("does not open with a top-level" in p for p in result["problems"])
+
+
+def test_validator_accepts_a_lower_level_heading_as_the_opening_line(indexed_db, tmp_path):
+    """The check only requires *a* markdown heading to open the body, not
+    specifically an H1 -- a stricter level requirement isn't what this
+    guards against."""
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        GOOD_FRONTMATTER.replace("# Test doc\n", "")
+        + "\n## A section heading\n\nThe program resets the return code [[MMP0100:31]].\n"
+    )
+    result = validate_doc(indexed_db, doc)
+    assert not any("does not open with a top-level" in p for p in result["problems"])
