@@ -164,6 +164,9 @@ def _split_frontmatter(text: str) -> tuple[dict | None, str, str | None]:
     return fm, parts[2], None
 
 
+_LEADING_CITATION_RUN = re.compile(r"^(?:\[\[[^\]]+\]\]\s*)+")
+
+
 def _containing_sentence(body: str, start: int, end: int) -> str:
     """The sentence in `body` that spans byte offset `start`..`end`.
 
@@ -172,6 +175,16 @@ def _containing_sentence(body: str, start: int, end: int) -> str:
     an uncited assertion or for a reversed comparison. Falls back to the
     whole enclosing paragraph if no sentence boundary is found, which is
     always at least as much text as the citation itself sits in.
+
+    `SENTENCE_SPLIT` treats a citation as a valid sentence-starter, so a
+    citation placed right after the period ending the claim it actually
+    supports gets split into its own, mostly-empty unit -- unlike
+    `_uncited_assertions` (which can afford to just credit the *next* unit's
+    leading citation without moving anything, since both units keep their
+    own text), a reversed-condition check needs the real preceding prose to
+    read polarity from, not a fragment that's just the citation itself. When
+    the located unit is nothing but a leading run of citations, merge in the
+    unit before it instead of returning the citation alone.
     """
     para_start = body.rfind("\n\n", 0, start)
     para_start = 0 if para_start == -1 else para_start + 2
@@ -181,8 +194,10 @@ def _containing_sentence(body: str, start: int, end: int) -> str:
     rel_start = start - para_start
 
     bounds = [0] + [m.start() for m in SENTENCE_SPLIT.finditer(para)] + [len(para)]
-    for lo, hi in zip(bounds, bounds[1:]):
+    for i, (lo, hi) in enumerate(zip(bounds, bounds[1:])):
         if lo <= rel_start < hi:
+            if i > 0 and _LEADING_CITATION_RUN.match(para[lo:hi].lstrip()):
+                lo = bounds[i - 1]
             return para[lo:hi]
     return para
 
@@ -232,6 +247,14 @@ def _reversed_condition_problems(
         return []
 
     sentence = _containing_sentence(body, cite_start, cite_end)
+    if len(CITATION.findall(sentence)) > 1:
+        # A sentence citing more than one location is commonly contrasting
+        # or cross-referencing them (an SME question comparing two checks
+        # that read the same literal in opposite senses is exactly this
+        # shape, and is itself a correct, valuable finding to leave alone,
+        # not a reversed narration to flag) -- too ambiguous to anchor a
+        # single-field polarity reading to just one of the citations in it.
+        return []
     success_hint = bool(SUCCESS_WORDS.search(sentence)) and not FAILURE_WORDS.search(sentence)
     failure_hint = bool(FAILURE_WORDS.search(sentence)) and not SUCCESS_WORDS.search(sentence)
 
