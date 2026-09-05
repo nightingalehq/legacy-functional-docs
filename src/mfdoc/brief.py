@@ -905,9 +905,13 @@ def rules_register(conn, redact: Redactor = NULL_REDACTOR) -> str:
 
     total = 0
     modules_included = 0
+    ambiguous_names: list[str] = []
+    ambiguous_ids: list[int] = []
     for member_name in names:
         matches = rows_by_name.get(member_name, [])
         if len(matches) != 1:
+            ambiguous_names.append(member_name)
+            ambiguous_ids.extend(m["id"] for m in matches)
             libs = ", ".join(sorted({m["library"] or "unknown" for m in matches})) or "none found"
             out.append(
                 f"| — | `{member_name}` | — | — | ambiguous | name is ambiguous across "
@@ -931,7 +935,35 @@ def rules_register(conn, redact: Redactor = NULL_REDACTOR) -> str:
                 f"`{cond}` | `{lits}` |"
             )
     out.append("")
-    out.append(f"Total: {total} rule candidate(s) across {modules_included} batchable module(s).")
+
+    if ambiguous_names:
+        # Same disclosure `structural.thematic_rules_register()` makes for its
+        # own ambiguous-name exclusion -- a rule count silently missing from
+        # `total` (because an ambiguous member's rules can't be assigned a
+        # `MEMBER:BR-nnn` ID without guessing which library it belongs to)
+        # would otherwise read as if the system simply had no more rules,
+        # rather than as an explicit, counted exclusion. The excluded
+        # candidates aren't rendered as rows here (unlike the resolved ones
+        # above) -- only their count -- since there's no single member to
+        # attribute a `line`/`construct`/`condition` to; the ambiguous rows
+        # already appended above name which modules they belong to.
+        ambiguous_placeholders = ",".join("?" * len(ambiguous_ids))
+        excluded_total = (
+            conn.execute(
+                f"SELECT COUNT(*) AS n FROM rule_candidate WHERE member_id IN ({ambiguous_placeholders})",
+                ambiguous_ids,
+            ).fetchone()["n"]
+            if ambiguous_ids
+            else 0
+        )
+        out.append(
+            f"Total: {total} rule candidate(s) across {modules_included} batchable "
+            f"module(s); {excluded_total} rule candidate(s) belonging to "
+            f"{len(ambiguous_names)} ambiguous-named module(s) are listed under "
+            '"ambiguous" above and excluded from this count.'
+        )
+    else:
+        out.append(f"Total: {total} rule candidate(s) across {modules_included} batchable module(s).")
     out.append("")
     return "\n".join(out) + "\n"
 
