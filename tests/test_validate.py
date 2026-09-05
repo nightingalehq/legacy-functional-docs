@@ -349,3 +349,32 @@ def test_module_completeness_ignores_non_module_docs():
         "_body": "TESTMOD:BR-001",
     }]
     assert module_completeness_problems(conn, results) == []
+
+
+def test_validator_accepts_a_citation_placed_after_the_sentence_ending_period(indexed_db, tmp_path):
+    """A citation placed right after the period that ends the claim it
+    supports -- rather than before it, inside the same sentence -- must not
+    make that claim look uncited just because the sentence-boundary regex
+    treats a citation as a valid next-sentence opener."""
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        GOOD_FRONTMATTER
+        + "\nThe program resets the return code at the top of processing. "
+          "[[MMP0100:31]] A second, unrelated sentence follows.\n"
+    )
+    result = validate_doc(indexed_db, doc)
+    assert not any("no citation" in p for p in result["problems"]), result["problems"]
+
+
+def test_validator_still_rejects_a_genuinely_uncited_assertion_before_a_cited_one(indexed_db, tmp_path):
+    """The rescue above must not swallow every uncited assertion -- only one
+    immediately followed by a unit that opens with a citation."""
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        GOOD_FRONTMATTER
+        + "\nThe program validates the order status before release. "
+          "A second sentence with nothing to do with a citation follows.\n"
+    )
+    result = validate_doc(indexed_db, doc)
+    assert not result["ok"]
+    assert any("no citation" in p for p in result["problems"])
