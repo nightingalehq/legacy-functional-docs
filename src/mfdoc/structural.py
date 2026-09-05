@@ -352,3 +352,44 @@ def thematic_rules_register(conn, redact: Redactor = NULL_REDACTOR) -> str:
     out.append(f"Total: {total} rule candidate(s) across {len(by_theme)} theme(s).")
     out.append("")
     return "\n".join(out) + "\n"
+
+
+def glossary(conn, redact: Redactor = NULL_REDACTOR) -> str:
+    """One entry per entity with its fields nested underneath -- reads
+    directly from entity.notes / entity_field.remark, which already carry
+    description text at extraction time. Deliberately does not parse
+    already-generated data-entity.md prose: the DB is the source of
+    truth and this stays independent of doc-generation order."""
+    entities = conn.execute(
+        "SELECT id, name, kind, notes FROM entity ORDER BY name"
+    ).fetchall()
+
+    out = ["---", 'title: "Glossary"', "doc_type: register", "---", "",
+           "# Glossary", "", (
+        "Every known entity (Adabas file, DDM, table, dataset, ...) and "
+        "its fields, deduplicated across the whole system. Regenerate "
+        "with `mfdoc glossary` after any source change; do not hand-edit."
+    ), ""]
+    seen_names: set[str] = set()
+    for e in entities:
+        if e['name'] in seen_names:
+            continue
+        seen_names.add(e['name'])
+        out.append(f"### {e['name']}")
+        out.append("")
+        out.append(f"- kind: `{e['kind']}`")
+        if e["notes"]:
+            out.append(f"- notes: {redact(e['notes'])}")
+        fields = conn.execute(
+            "SELECT name, format, length, remark FROM entity_field WHERE entity_id=? ORDER BY name",
+            (e["id"],),
+        ).fetchall()
+        if fields:
+            out.append("")
+            out.append("| field | format | length | remark |")
+            out.append("|---|---|---|---|")
+            for f in fields:
+                remark = redact(f["remark"]).replace("|", "\\|") if f["remark"] else ""
+                out.append(f"| `{f['name']}` | {f['format'] or ''} | {f['length'] or ''} | {remark} |")
+        out.append("")
+    return "\n".join(out) + "\n"

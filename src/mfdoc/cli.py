@@ -335,6 +335,15 @@ def cmd_rules_theme_register(args) -> int:
     return 0
 
 
+def cmd_glossary(args) -> int:
+    cfg = load_config(args.config)
+    conn = connect(Path(args.config).parent / cfg["index_db"])
+    redact = Redactor.from_options(cfg["options"])
+    out = structural.glossary(conn, redact=redact)
+    _write_or_print(out, args.out)
+    return 0
+
+
 def cmd_classify_rules(args) -> int:
     cfg = load_config(args.config)
     conn = connect(Path(args.config).parent / cfg["index_db"])
@@ -1085,6 +1094,11 @@ def main(argv=None) -> int:
     p.add_argument("--config", required=True)
     p.add_argument("--out", help="write to this path instead of stdout")
     p.set_defaults(func=cmd_rules_theme_register)
+
+    p = sub.add_parser("glossary")
+    p.add_argument("--config", required=True)
+    p.add_argument("--out", help="write to this path instead of stdout")
+    p.set_defaults(func=cmd_glossary)
 
     p = sub.add_parser("classify-rules")
     p.add_argument("--config", required=True)
