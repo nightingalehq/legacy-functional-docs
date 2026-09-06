@@ -48,8 +48,65 @@ def test_crud_matrix_never_merges_two_different_members_sharing_a_name():
     # distinguishable.
     out = structural.data_flow_diagram(conn)
     assert f"n_member_{mid_a}[" in out and f"n_member_{mid_b}[" in out
-    assert "SHARED (LIBA)" in out
-    assert "SHARED (LIBB)" in out
+    assert "SHARED (LIBA/natural)" in out
+    assert "SHARED (LIBB/mantis)" in out
+
+
+def test_data_flow_diagram_disambiguates_same_library_different_dialect():
+    """member.name is only unique together with *both* library and dialect
+    -- two members can share a name and a library but differ by dialect.
+    Library alone would produce two identical labels; the qualifier must
+    include dialect too."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    insert(conn, "member", name="SHARED", dialect="natural", library="LIBA")
+    insert(conn, "member", name="SHARED", dialect="mantis", library="LIBA")
+    mid_natural = conn.execute(
+        "SELECT id FROM member WHERE dialect='natural'"
+    ).fetchone()["id"]
+    mid_mantis = conn.execute(
+        "SELECT id FROM member WHERE dialect='mantis'"
+    ).fetchone()["id"]
+    insert(conn, "data_access", member_id=mid_natural, line_no=10, verb="READ",
+           crud="R", entity_name="ENTITY-X", raw="READ ENTITY-X")
+    insert(conn, "data_access", member_id=mid_mantis, line_no=20, verb="STORE",
+           crud="C", entity_name="ENTITY-X", raw="STORE ENTITY-X")
+    conn.commit()
+
+    out = structural.data_flow_diagram(conn)
+    assert "SHARED (LIBA/natural)" in out
+    assert "SHARED (LIBA/mantis)" in out
+
+
+def test_data_flow_diagram_disambiguates_when_library_is_missing():
+    """library can be NULL (e.g. a DDM/FDT-only dialect) -- the qualifier
+    must still produce distinguishable labels rather than "no library"
+    twice for two members that also share a dialect (SQLite's UNIQUE
+    constraint treats two NULL librarys as distinct, so this is a real,
+    reachable case, not just a defensive one)."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    mid_1 = insert(conn, "member", name="SHARED", dialect="ddm", library=None)
+    mid_2 = insert(conn, "member", name="SHARED", dialect="ddm", library=None)
+    insert(conn, "data_access", member_id=mid_1, line_no=10, verb="READ",
+           crud="R", entity_name="ENTITY-X", raw="READ ENTITY-X")
+    insert(conn, "data_access", member_id=mid_2, line_no=20, verb="STORE",
+           crud="C", entity_name="ENTITY-X", raw="STORE ENTITY-X")
+    conn.commit()
+
+    out = structural.data_flow_diagram(conn)
+    assert f"SHARED (no library/ddm, id {mid_1})" in out
+    assert f"SHARED (no library/ddm, id {mid_2})" in out
 
 
 def test_data_flow_diagram_does_not_disambiguate_an_unambiguous_module_name():

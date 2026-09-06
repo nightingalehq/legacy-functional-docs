@@ -102,13 +102,54 @@ def data_flow_diagram(conn) -> str:
     # own docstring and build_call_graph's "Finding 1" note), and keying the
     # diagram's nodes by name would silently re-collapse two different
     # members sharing a name back into one node, undoing that fix. A name
-    # that turns out to belong to more than one distinct member_id gets its
-    # library appended to the label so the two remain visually
-    # distinguishable; a name with only one member_id keeps a plain label.
+    # that turns out to belong to more than one distinct member_id gets a
+    # library/dialect qualifier appended to its label so the two remain
+    # visually distinguishable; a name with only one member_id keeps a
+    # plain label.
+    #
+    # Library alone isn't always enough: member.name is only guaranteed
+    # unique together with *both* library and dialect (two members can
+    # share a name and a library but differ by dialect), and library can
+    # be NULL (SQLite's UNIQUE constraint treats two NULLs as distinct, so
+    # even (name, dialect) alone isn't watertight when library is missing
+    # on both sides too). Qualifying with library *and* dialect handles
+    # every realistic case; on the rare residual collision where that
+    # still isn't unique (two members sharing name, library and dialect --
+    # only reachable when library is NULL on both, since real duplicates
+    # otherwise violate member's own UNIQUE constraint), the member_id
+    # itself is appended too. Every member_id's label is decided in one
+    # up-front pass (not incrementally while rendering) so this stays
+    # symmetric: every member sharing an ambiguous (name, qualifier) pair
+    # gets the same treatment, not just whichever one happened to render
+    # second.
+    names_by_member: dict[int, str] = {}
+    library_by_member: dict[int, str | None] = {}
+    dialect_by_member: dict[int, str] = {}
     member_ids_by_name: dict[str, set[int]] = defaultdict(set)
     for row in rows:
-        member_ids_by_name[row["module"]].add(row["member_id"])
-    ambiguous_names = {name for name, ids in member_ids_by_name.items() if len(ids) > 1}
+        mid = row["member_id"]
+        names_by_member[mid] = row["module"]
+        library_by_member[mid] = row["library"]
+        dialect_by_member[mid] = row["dialect"]
+        member_ids_by_name[row["module"]].add(mid)
+
+    label_by_member: dict[int, str] = {}
+    for name, member_ids in member_ids_by_name.items():
+        if len(member_ids) == 1:
+            label_by_member[next(iter(member_ids))] = name
+            continue
+        qualifier_by_member = {
+            mid: f"{library_by_member[mid] or 'no library'}/{dialect_by_member[mid]}"
+            for mid in member_ids
+        }
+        qualifier_counts: dict[str, int] = defaultdict(int)
+        for q in qualifier_by_member.values():
+            qualifier_counts[q] += 1
+        for mid in member_ids:
+            q = qualifier_by_member[mid]
+            label_by_member[mid] = (
+                f"{name} ({q}, id {mid})" if qualifier_counts[q] > 1 else f"{name} ({q})"
+            )
 
     out.append("```mermaid")
     out.append("graph LR")
@@ -116,10 +157,7 @@ def data_flow_diagram(conn) -> str:
     for row in rows:
         mod_id, ent_id = f"n_member_{row['member_id']}", _mermaid_id(row["entity"])
         if mod_id not in seen_nodes:
-            mod_name = row["module"]
-            if mod_name in ambiguous_names and row["library"]:
-                mod_name = f"{mod_name} ({row['library']})"
-            mod_label = mod_name.replace('"', '\\"')
+            mod_label = label_by_member[row["member_id"]].replace('"', '\\"')
             out.append(f'    {mod_id}["{mod_label}"]')
             seen_nodes.add(mod_id)
         if ent_id not in seen_nodes:
