@@ -131,6 +131,43 @@ def test_batch_generates_valid_docs_for_all_batchable_members(indexed_db, tmp_pa
         assert (tmp_path / "out" / subdir / f"{member}.md").exists()
 
 
+def test_written_doc_gets_the_installed_version_not_whatever_the_model_wrote(indexed_db, tmp_path):
+    """FakeCaller's GOOD_FRONTMATTER hardcodes "legacy-functional-docs 0.1.0"
+    (a stand-in for a model echoing reference/writing-rules.md's own worked
+    example verbatim, since nothing in the prompt tells it what the real
+    installed version is) -- the file actually written to disk must carry
+    the real installed version regardless, or the staleness check would
+    immediately flag every freshly generated document."""
+    from mfdoc import __version__
+
+    out_path = tmp_path / "MMP0100.md"
+    result = batch_mod.generate_module_doc(
+        indexed_db, "MMP0100", out_path, FakeCaller(), "cite everything", "module template",
+    )
+    assert result.ok, result.problems
+    text = out_path.read_text(encoding="utf-8")
+    assert f"generated_by: legacy-functional-docs {__version__}" in text
+
+
+def test_fix_generated_by_version_replaces_regardless_of_what_the_model_wrote():
+    from mfdoc import __version__
+
+    text = "---\ntitle: X\ngenerated_by: legacy-functional-docs 0.1.0\n---\nbody\n"
+    fixed = batch_mod._fix_generated_by_version(text)
+    assert fixed == f"---\ntitle: X\ngenerated_by: legacy-functional-docs {__version__}\n---\nbody\n"
+
+
+def test_fix_generated_by_version_is_a_no_op_when_the_line_is_missing_or_different_tool():
+    """Never invents a generated_by line that isn't there, and never touches
+    a different tool's own generated_by (this repo's only writer is itself,
+    but the function shouldn't assume that)."""
+    no_line = "---\ntitle: X\n---\nbody\n"
+    assert batch_mod._fix_generated_by_version(no_line) == no_line
+
+    other_tool = "---\ntitle: X\ngenerated_by: some-other-tool 3.0\n---\nbody\n"
+    assert batch_mod._fix_generated_by_version(other_tool) == other_tool
+
+
 def test_estimate_cost_computes_dollar_amount_when_pricing_configured():
     """estimate_cost is the single shared formula behind run_batch's own
     cost_usd (see test_batch_reports_cost_only_when_pricing_configured
@@ -476,6 +513,103 @@ def test_generate_module_doc_reports_failure_when_one_chunk_fails(tmp_path):
 
     index_text = out_path.read_text(encoding="utf-8")
     assert "narrative synthesis was skipped" in index_text.lower()
+
+
+def test_chunked_brief_names_the_chunk_a_routine_in_another_chunk_is_documented_in(tmp_path):
+    """A routine whose rules fall in a *different* chunk than the one being
+    narrated must be annotated in that chunk's own brief with its concrete
+    chunk number -- this is what lets the model write "documented in chunk
+    2" instead of the vague, unresolved "covered by a later chunk" real
+    generated docs have been observed producing. A routine in the *same*
+    chunk gets no such annotation (nothing to forward-reference)."""
+    import sqlite3
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_rules(conn, 4)
+    insert(conn, "routine", member_id=1, name="ROUTINE-A", kind="natural_subroutine",
+           start_line=1, end_line=2)
+    insert(conn, "routine", member_id=1, name="ROUTINE-B", kind="natural_subroutine",
+           start_line=3, end_line=4)
+    conn.commit()
+
+    briefs: dict[int, str] = {}
+
+    def recording_caller(prompt: str) -> batch_mod.ModelResponse:
+        import re as _re
+        match = _re.search(r"chunk (\d+) of", prompt)
+        if match is not None:
+            briefs[int(match.group(1))] = prompt
+        return _chunk_aware_module_caller()(prompt)
+
+    out_path = tmp_path / "FAKEMOD.md"
+    result = batch_mod.generate_module_doc(
+        conn, "FAKEMOD", out_path, recording_caller,
+        "writing rules text", "template text", max_rules_per_call=2,
+    )
+    assert result.ok is True, result.problems
+    assert set(briefs) == {1, 2}
+
+    # Chunk 1 covers ROUTINE-A's own rules (lines 1-2) -- no self-reference.
+    assert "`ROUTINE-A` (natural_subroutine)" in briefs[1]
+    assert "`ROUTINE-A` (natural_subroutine) [[FAKEMOD:1-2]] **[documented" not in briefs[1]
+    # ROUTINE-B's rules fall in chunk 2 -- chunk 1's brief must name it concretely.
+    assert "[documented in chunk 2]" in briefs[1]
+    # Chunk 2's own brief must likewise point back at chunk 1 for ROUTINE-A
+    # (documented there, not here) -- but not at itself for ROUTINE-B.
+    assert "[documented in chunk 1]" in briefs[2]
+    assert "[documented in chunk 2]" not in briefs[2]
+
+
+def test_chunk_map_is_correct_when_rule_candidate_rows_share_a_line_no(tmp_path):
+    """rule_candidate.line_no has no uniqueness constraint -- two rows can
+    legitimately share one (e.g. a compound condition split into several
+    rows at the same source line). The routine -> chunk lookup must key off
+    each row's own position in the ordered rule_rows list, not a line_no ->
+    ordinal dict (which would silently collapse same-line rows to whichever
+    is last and could pick the wrong one)."""
+    import sqlite3
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
+    # Two rule_candidate rows share line_no=1, both inside ROUTINE-A's span.
+    for n in (1, 2):
+        insert(conn, "rule_candidate", member_id=1, line_no=1, construct="IF",
+               condition=f"COND-{n}", raw=f"IF COND-{n}")
+    insert(conn, "rule_candidate", member_id=1, line_no=2, construct="IF",
+           condition="COND-3", raw="IF COND-3")
+    insert(conn, "routine", member_id=1, name="ROUTINE-A", kind="natural_subroutine",
+           start_line=1, end_line=1)
+    insert(conn, "routine", member_id=1, name="ROUTINE-B", kind="natural_subroutine",
+           start_line=2, end_line=2)
+    conn.commit()
+
+    briefs: dict[int, str] = {}
+
+    def recording_caller(prompt: str) -> batch_mod.ModelResponse:
+        import re as _re
+        match = _re.search(r"chunk (\d+) of", prompt)
+        if match is not None:
+            briefs[int(match.group(1))] = prompt
+        return _chunk_aware_module_caller()(prompt)
+
+    out_path = tmp_path / "FAKEMOD.md"
+    result = batch_mod.generate_module_doc(
+        conn, "FAKEMOD", out_path, recording_caller,
+        "writing rules text", "template text", max_rules_per_call=2,
+    )
+    assert result.ok is True, result.problems
+    assert set(briefs) == {1, 2}
+    # ROUTINE-A's two same-line rules must both land in chunk 1, and
+    # ROUTINE-B's own rule in chunk 2 -- not the reverse.
+    assert "[documented in chunk 2]" in briefs[1]
+    assert "[documented in chunk 1]" in briefs[2]
 
 
 def test_run_batch_chunks_a_large_member_and_still_batches_small_ones(indexed_db, tmp_path):
