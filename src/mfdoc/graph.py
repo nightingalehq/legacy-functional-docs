@@ -265,7 +265,10 @@ def unparsed_line_shapes(conn, dialect: str) -> list[dict]:
     keyword, counted, with one sample line each -- shared by `mfdoc
     calibrate` (cli.cmd_calibrate) and the language-guide appendix
     (structural.language_guide), so the two can never drift out of sync.
-    Sorted by count descending, keyword ascending."""
+    Sorted by count descending; ties keep first-seen order (a plain stable
+    sort on `-count` alone, deliberately no secondary key) so this is a
+    pure refactor of cmd_calibrate's prior inline logic -- output unchanged
+    for any existing dialect/gap set, not just equivalent."""
     rows = conn.execute(
         """
         SELECT g.raw FROM gap g JOIN member m ON m.id = g.member_id
@@ -281,7 +284,7 @@ def unparsed_line_shapes(conn, dialect: str) -> list[dict]:
         kw = raw.split()[0].upper()
         entry = shapes.setdefault(kw, {"keyword": kw, "count": 0, "sample": raw})
         entry["count"] += 1
-    return sorted(shapes.values(), key=lambda e: (-e["count"], e["keyword"]))
+    return sorted(shapes.values(), key=lambda e: -e["count"])
 
 
 def referenced_entities(conn, member_id: int) -> list[dict]:
