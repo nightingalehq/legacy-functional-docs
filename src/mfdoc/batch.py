@@ -30,6 +30,7 @@ from .brief import (
     routine_for_line,
 )
 from .citations import _cite, _rule_id
+from .db import GAP_SEVERITY_ORDER_SQL
 from .redact import NULL_REDACTOR, Redactor
 from .validate import CITATION, _split_frontmatter, validate_doc
 
@@ -380,22 +381,28 @@ def _consolidated_gap_lines(conn, member_name: str, member_id: int,
                              ok_chunk_paths: list[Path]) -> list[str]:
     """Every `gap` table row recorded for this member (same query and
     ordering module_brief's own "Known gaps for this module" section
-    already runs -- including that section's own citation, so a gap's free-
-    text `detail` that happens to read as an assertive claim doesn't trip
-    validate_doc's uncited-assertion check here any more than it does
-    there), plus every ok chunk's own `sme_questions` front-matter entries --
-    both are already-recorded facts (a gap row from `derive`, an
-    sme_questions string a chunk's own generation already validated), just
-    scattered one-per-chunk today. Gap rows come first, in severity order,
-    since they're the ground-truth record; sme_questions only add text not
-    already covered by a gap row's own detail.
+    already runs -- both order by `db.GAP_SEVERITY_ORDER_SQL`, a real
+    high/medium/low priority rather than `severity`'s own TEXT lexicographic
+    order, and share that one constant so the two can't drift apart again --
+    including that section's own citation, so a gap's free-text `detail`
+    that happens to read as an assertive claim doesn't trip validate_doc's
+    uncited-assertion check here any more than it does there), plus every ok
+    chunk's own `sme_questions` front-matter entries -- both are
+    already-recorded facts (a gap row from `derive`, an sme_questions string
+    a chunk's own generation already validated), just scattered one-per-chunk
+    today. Gap rows come first, in real severity-priority order, since
+    they're the ground-truth record; sme_questions only add text not already
+    covered by a gap row's own detail.
 
     Two different dedup keys, deliberately not "exact text" for both: gap
     *rows* dedupe against each other on `(gap_kind, line_no, first
     sentence)` (see `seen_gap_identity` below -- several distinct gap rows
     commonly share identical `detail` text, so text alone would silently
-    collapse them); `sme_questions` dedupe on exact text, against both
-    other questions and each gap row's own first sentence (`seen_content`)."""
+    collapse them); `sme_questions` dedupe on exact text, against both other
+    questions and *every* sentence of each gap row's own detail
+    (`seen_content` -- not just the first sentence, so an sme_question that
+    duplicates a gap's second-or-later sentence, or its full multi-sentence
+    detail, still gets recognised as already covered)."""
     # Two dedup keys, deliberately different: `seen_gap_identity` dedupes
     # gap *rows* against each other -- (gap_kind, line_no, first_sentence),
     # not first_sentence alone, since several distinct gap rows commonly
@@ -413,7 +420,8 @@ def _consolidated_gap_lines(conn, member_name: str, member_id: int,
     seen_content: set[str] = set()
     lines: list[str] = []
     for r in conn.execute(
-        "SELECT gap_kind, detail, severity, line_no FROM gap WHERE member_id=? ORDER BY severity DESC, line_no",
+        f"SELECT gap_kind, detail, severity, line_no FROM gap WHERE member_id=? "
+        f"ORDER BY {GAP_SEVERITY_ORDER_SQL}, line_no",
         (member_id,),
     ).fetchall():
         # A gap's `detail` is free text meant for a fact brief (module_brief's
@@ -435,7 +443,7 @@ def _consolidated_gap_lines(conn, member_name: str, member_id: int,
         if identity in seen_gap_identity:
             continue
         seen_gap_identity.add(identity)
-        seen_content.add(first_sentence)
+        seen_content.update(sentences or [first_sentence])
         loc = _cite(member_name, r["line_no"])
         detail_text = " ".join(f"{loc} {s}" for s in sentences) if sentences else f"{loc} {r['detail'].strip()}"
         lines.append(f"[{r['severity']}] {r['gap_kind']}: {detail_text}")
@@ -683,7 +691,7 @@ def _render_module_index_doc(member_name: str, system: str | None,
     lines_chunks = []
     br_lines = []
     seq_lines = []
-    for (index, (start, end), path, result), label in zip(chunk_entries, routine_labels):
+    for (index, (start, end), path, result), label in zip(chunk_entries, routine_labels, strict=True):
         status = "OK" if result.ok else "FAILED: " + "; ".join(result.problems)[:200]
         lines_chunks.append(
             f"- [{path.name}](./{path.name}) -- rules {start}-{end} -- {status}"

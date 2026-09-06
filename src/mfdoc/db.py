@@ -465,6 +465,18 @@ def insert(conn, table, **kw):
     return conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
 
 
+# `gap.severity` is TEXT ('low'|'medium'|'high', see the `gap` table's
+# schema comment above) -- `ORDER BY severity DESC` sorts lexicographically
+# (medium, low, high), not by real priority. Every gap-listing query that
+# wants highest-severity-first must order by this CASE expression instead,
+# not the bare column -- shared here so batch.py's and brief.py's own gap
+# listings can't drift out of sync with each other again. An unexpected
+# future severity value sorts last (ELSE) rather than raising, so a schema
+# change that adds a new severity degrades gracefully instead of breaking
+# every query that orders by this.
+GAP_SEVERITY_ORDER_SQL = "CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 ELSE 3 END"
+
+
 def add_gap(conn, gap_kind, detail, member_id=None, line_no=None, severity="medium", raw=None):
     return insert(
         conn, "gap", gap_kind=gap_kind, detail=detail, member_id=member_id,

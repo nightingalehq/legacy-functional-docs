@@ -14,6 +14,9 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
+
+import pytest
 
 from mfdoc import batch as batch_mod
 from mfdoc.redact import NULL_REDACTOR, Redactor
@@ -932,10 +935,10 @@ def test_chunk_processing_labels_names_routines_and_falls_back_to_main_body():
 
 
 def test_consolidated_gap_lines_dedupes_gap_rows_and_chunk_sme_questions(tmp_path):
-    """Gap-register rows (severity DESC) come first; a chunk's own
-    sme_questions add text not already present, and an exact duplicate --
-    whether between two chunks or of a gap row's own text -- appears only
-    once."""
+    """Gap-register rows (highest real severity first) come first; a
+    chunk's own sme_questions add text not already present, and an exact
+    duplicate -- whether between two chunks or of a gap row's own text --
+    appears only once."""
     import sqlite3
     from mfdoc.db import SCHEMA, insert
 
@@ -965,11 +968,11 @@ def test_consolidated_gap_lines_dedupes_gap_rows_and_chunk_sme_questions(tmp_pat
 
     lines = batch_mod._consolidated_gap_lines(conn, "FAKEMOD", 1, [chunk1, chunk2])
 
-    # Same "ORDER BY severity DESC" as module_brief's own "Known gaps"
-    # section -- a plain text sort, not a severity-priority one, so "low"
-    # sorts ahead of "high" (both are gap rows either way, still first).
-    assert lines[0].startswith("[low]") and "unused_field" in lines[0]
-    assert lines[1].startswith("[high]") and "orphan_module" in lines[1]
+    # Real severity priority (db.GAP_SEVERITY_ORDER_SQL), shared with
+    # module_brief's own "Known gaps" section -- "high" sorts first, not
+    # "low" (TEXT lexicographic order would put "low" ahead of "high").
+    assert lines[0].startswith("[high]") and "orphan_module" in lines[0]
+    assert lines[1].startswith("[low]") and "unused_field" in lines[1]
     assert lines.count("Is X still used by any downstream job?") == 1
     assert not any(line == "No caller found for FAKEMOD." for line in lines[2:])
     assert len(lines) == 3  # 2 gap rows + 1 genuinely new sme_question
@@ -1119,6 +1122,70 @@ def test_generate_module_index_narrative_fails_after_max_attempts(tmp_path):
     assert ok is False
     assert attempts == 2
     assert problems
+
+
+def test_render_module_index_doc_raises_on_chunk_entries_routine_labels_mismatch():
+    """chunk_entries and routine_labels must be the same length -- a plain
+    zip() would silently truncate to the shorter list (dropping trailing
+    chunks from the rendered index) instead of surfacing the mismatch."""
+    result = batch_mod.DocResult("FAKEMOD", "FAKEMOD.chunk01.md", True, 1, 1, 1, [])
+    chunk_entries = [
+        (1, (1, 1), Path("FAKEMOD.chunk01.md"), result),
+        (2, (2, 2), Path("FAKEMOD.chunk02.md"), result),
+    ]
+    sections = {h: "text [[FAKEMOD:1]]." for h in batch_mod.NARRATIVE_SECTIONS}
+    with pytest.raises(ValueError):
+        batch_mod._render_module_index_doc(
+            "FAKEMOD", "MOM", chunk_entries, {"verified": 1, "inferred": 0, "unresolved": 0},
+            ["label only for chunk 1"], [], sections,
+        )
+
+
+def test_consolidated_gap_lines_orders_by_real_severity_priority(tmp_path):
+    """Gap rows must sort by real severity priority (high, medium, low), not
+    gap.severity's own TEXT/lexicographic order (which would put medium,
+    low, high in that order)."""
+    import sqlite3
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    insert(conn, "gap", member_id=1, gap_kind="k1", severity="medium", detail="Medium one.", line_no=1)
+    insert(conn, "gap", member_id=1, gap_kind="k2", severity="low", detail="Low one.", line_no=2)
+    insert(conn, "gap", member_id=1, gap_kind="k3", severity="high", detail="High one.", line_no=3)
+    conn.commit()
+
+    lines = batch_mod._consolidated_gap_lines(conn, "FAKEMOD", 1, [])
+    assert [l.split("]")[0] + "]" for l in lines] == ["[high]", "[medium]", "[low]"]
+
+
+def test_consolidated_gap_lines_dedupes_sme_question_against_a_later_gap_sentence(tmp_path):
+    """seen_content must track every sentence of a gap's detail, not just
+    the first -- an sme_question duplicating a later sentence (or the full
+    multi-sentence detail) must still be recognised as already covered."""
+    import sqlite3
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    insert(
+        conn, "gap", member_id=1, gap_kind="orphan_module", severity="high", line_no=5,
+        detail="No caller found for FAKEMOD. The module may still be invoked via JCL not ingested here.",
+    )
+    conn.commit()
+
+    chunk = tmp_path / "FAKEMOD.chunk01.md"
+    chunk.write_text(
+        '---\nsme_questions:\n  - "The module may still be invoked via JCL not ingested here."\n---\n',
+        encoding="utf-8",
+    )
+
+    lines = batch_mod._consolidated_gap_lines(conn, "FAKEMOD", 1, [chunk])
+    assert len(lines) == 1, "the sme_question duplicates the gap's own second sentence and must be dropped"
 
 
 def test_consolidated_gap_lines_keeps_distinct_gaps_with_identical_detail_text(tmp_path):
