@@ -477,6 +477,69 @@ def call_closure(conn, root_name: str, max_depth: int = 12) -> dict:
     return seen
 
 
+def connected_components(conn) -> list[set[int]]:
+    """Weakly-connected components of the call graph, member ids only.
+
+    `call_edge` is directed (caller_id -> callee_id), but for the purpose of
+    grouping "which members belong on the same diagram together" direction
+    doesn't matter -- a caller and a callee it invokes belong in the same
+    component regardless of which one calls the other. Union-find over every
+    (caller_id, callee_id) pair where callee_id is a real member (resolved to
+    an ingested member by graph.resolve()), pure Python, no model call.
+
+    A caller with only unresolved/dynamic calls (callee_id IS NULL) still
+    gets its own singleton component -- it has no member id to union with,
+    but it must not be dropped from the result, since
+    structural.call_graph_diagram()'s node universe includes every caller
+    that appears in call_edge at all, resolved or not.
+
+    Deliberately does not consider two callers connected merely because they
+    each have an unresolved call to the same missing callee *name* -- an
+    unresolved target has no member id, so two callers referencing the same
+    missing name in otherwise-unrelated parts of the codebase are not
+    evidence they belong together (a coincidental or common utility name
+    would otherwise silently merge unrelated components back together,
+    defeating the point of splitting by connectivity in the first place).
+    Each caller's own unresolved-callee node is rendered locally within
+    whichever component that caller ends up in.
+
+    Returns one set of member ids per component, in no particular order --
+    callers are responsible for imposing whatever deterministic ordering
+    they need (structural.call_graph_diagram sorts by a content-stable key,
+    not by these sets' iteration order).
+    """
+    parent: dict[int, int] = {}
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    rows = conn.execute(
+        "SELECT DISTINCT caller_id, callee_id FROM call_edge"
+    ).fetchall()
+    for r in rows:
+        caller_id = r["caller_id"]
+        if caller_id not in parent:
+            parent[caller_id] = caller_id
+        callee_id = r["callee_id"]
+        if callee_id is not None:
+            if callee_id not in parent:
+                parent[callee_id] = callee_id
+            union(caller_id, callee_id)
+
+    groups: dict[int, set[int]] = defaultdict(set)
+    for node in parent:
+        groups[find(node)].add(node)
+    return list(groups.values())
+
+
 def coverage(conn) -> dict:
     def scalar(sql, *args):
         return conn.execute(sql, args).fetchone()[0]
