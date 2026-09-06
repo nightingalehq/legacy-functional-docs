@@ -206,9 +206,9 @@ def call_graph_diagram(
     When the whole call graph is a single connected component (the common
     case for a small-to-medium codebase), behaviour is unchanged from
     before this split was added: if total distinct nodes <= max_nodes_inline,
-    returns {"inline": <one diagram for system-overview.md>}; otherwise
-    {"inline": <collapsed cluster-level view>, <cluster_name>: <that
-    cluster's full diagram>, ...}.
+    returns {"inline": <one diagram, written by cli.cmd_call_graph to
+    call-graph.md>}; otherwise {"inline": <collapsed cluster-level view>,
+    <cluster_name>: <that cluster's full diagram>, ...}.
 
     When there are 2+ connected components, every component gets its own
     diagram (regardless of the *combined* node count -- two small but
@@ -222,19 +222,19 @@ def call_graph_diagram(
     collapsed cluster-level view>, <component_name>-<cluster_name>: <that
     cluster's full diagram>, ...}.
 
-    Every key other than "inline" is written by callers to
-    call-graph-<key>.md (via safe_cluster_filename) -- callers write
-    "inline" into system-overview.md.
+    Every key other than "inline" is written by cli.cmd_call_graph to
+    call-graph-<safe_cluster_filename(key)>.md -- "inline" is written to
+    call-graph.md.
 
     Component naming: a component whose caller members all share one
     cluster_by grouping is named after that cluster (e.g. "PAYROLL",
     matching the existing per-cluster file convention) since that's the
     most useful label a reader can act on; a component spanning more than
-    one cluster, or two components that happen to share the same dominant
-    cluster name (the exact "same library, never call each other" case this
-    split exists to fix), gets a numeric "component-<n>" name instead --
-    "-<n>" is also appended to a repeated dominant name to keep filenames
-    unique. Numbering is assigned in a content-stable order (sorted by the
+    one cluster gets a numeric "component-<n>" name instead, and two
+    components that happen to share the same dominant cluster name (the
+    exact "same library, never call each other" case this split exists to
+    fix) get "-<n>" appended to that dominant name to keep filenames unique.
+    Numbering is assigned in a content-stable order (sorted by the
     lexicographically-smallest (library, name, dialect) triple among each
     component's members -- the same content-derived stability principle
     mermaid_node_id() uses below) so component numbers don't churn between
