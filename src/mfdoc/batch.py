@@ -300,8 +300,19 @@ def _prune_stale_chunk_files(out_path: Path, expected_names: set[str]) -> None:
         return
     pattern = re.compile(rf"^{re.escape(out_path.stem)}\.chunk\d+{re.escape(out_path.suffix)}$")
     for candidate in out_path.parent.iterdir():
-        if pattern.match(candidate.name) and candidate.name not in expected_names:
+        if not candidate.is_file() or candidate.name in expected_names:
+            continue
+        if not pattern.match(candidate.name):
+            continue
+        try:
             candidate.unlink()
+        except OSError:
+            # Best-effort: a stale file some other process is holding open
+            # (or that vanished between the iterdir() listing and this
+            # unlink) must not abort the whole batch run over cosmetic
+            # cleanup -- the new, correctly-named chunk still gets written
+            # either way.
+            pass
 
 
 def _render_module_chunk_index(member_name: str, system: str | None,

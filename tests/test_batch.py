@@ -615,6 +615,23 @@ def test_run_batch_chunking_prunes_stale_legacy_chunk_files(indexed_db, tmp_path
     assert (out_dir / "MMP0100.chunk01.md").exists()
 
 
+def test_prune_stale_chunk_files_skips_directories_and_ignores_unlink_errors(tmp_path):
+    """A directory (or any entry that can't be removed) that happens to
+    match the chunk-file naming pattern must not abort pruning -- best
+    effort cleanup, never a hard failure over cosmetic tidiness."""
+    out_path = tmp_path / "FAKEMOD.md"
+    tmp_path.mkdir(exist_ok=True)
+    stale_dir = tmp_path / "FAKEMOD.chunk1.md"
+    stale_dir.mkdir()
+    stale_file = tmp_path / "FAKEMOD.chunk2.md"
+    stale_file.write_text("stale", encoding="utf-8")
+
+    batch_mod._prune_stale_chunk_files(out_path, {"FAKEMOD.chunk01.md"})
+
+    assert stale_dir.is_dir()  # untouched, not raised on
+    assert not stale_file.exists()
+
+
 def test_resolve_max_rules_per_call():
     from mfdoc.batch import DEFAULT_MAX_RULES_PER_CALL, _resolve_max_rules_per_call
 
