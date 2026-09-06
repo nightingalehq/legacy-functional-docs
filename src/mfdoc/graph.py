@@ -160,6 +160,12 @@ def crud_matrix(conn) -> list[dict]:
     `m.library`) a true function of the group -- deterministic, not an
     arbitrary pick among the merged rows' values, which is what GROUP BY
     a column absent from the grouping key produces on SQLite.
+
+    Each row also carries that grouping key as `member_id`, so a caller
+    that needs to tell two same-named members' rows apart unambiguously
+    (rather than reconstructing an identity from module/library/dialect)
+    has a real foreign key to do it with -- the same posture
+    build_call_graph already takes for its own rows.
     """
     # Iterate the cursor directly -- consumed exactly once, right here, and
     # a large codebase's whole data_access table (joined against member) is
@@ -169,7 +175,8 @@ def crud_matrix(conn) -> list[dict]:
     return [
         dict(r) for r in conn.execute(
             """
-            SELECT m.name AS module, m.library, m.dialect, da.entity_name AS entity,
+            SELECT m.id AS member_id, m.name AS module, m.library, m.dialect,
+                   da.entity_name AS entity,
                    GROUP_CONCAT(DISTINCT da.crud) AS crud,
                    COUNT(*) AS hits,
                    MIN(da.line_no) AS first_line,

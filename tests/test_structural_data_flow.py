@@ -37,8 +37,10 @@ def test_crud_matrix_never_merges_two_different_members_sharing_a_name():
     by_library = {r["library"]: r for r in rows}
     assert by_library["LIBA"]["dialect"] == "natural"
     assert by_library["LIBA"]["crud"] == "R"
+    assert by_library["LIBA"]["member_id"] == mid_a
     assert by_library["LIBB"]["dialect"] == "mantis"
     assert by_library["LIBB"]["crud"] == "C"
+    assert by_library["LIBB"]["member_id"] == mid_b
 
 
 def test_every_crud_matrix_row_becomes_an_edge(indexed_db):
