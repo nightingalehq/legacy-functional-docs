@@ -164,6 +164,136 @@ def crud_matrix(conn) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+_LANGUAGE_PROFILE_SECTIONS = {
+    # section: (table, keyword column, column that joins back to member.id --
+    # call_edge is the one table here that names it caller_id, not member_id)
+    "structure": ("variable", "format", "member_id"),
+    "control_flow": ("rule_candidate", "construct", "member_id"),
+    "data_access": ("data_access", "verb", "member_id"),
+    "screen_interaction": ("interaction", "kind", "member_id"),
+    "transactions": ("transaction_marker", "marker", "member_id"),
+    "calling_conventions": ("call_edge", "call_kind", "caller_id"),
+}
+
+
+def _aggregate_profile_rows(rows) -> list[dict]:
+    """Group rows (each carrying "keyword"/"example_member"/"example_line"/
+    "example_text") by keyword, counting occurrences and keeping the first
+    example encountered -- rows must already be ordered by keyword then by
+    (member, line) so "first" is deterministic rather than dependent on
+    incidental row order. Sorted by count descending, keyword ascending as
+    a deterministic tie-break, so re-running against unchanged source
+    reproduces byte-identical output."""
+    grouped: dict[str, dict] = {}
+    for r in rows:
+        kw = r["keyword"]
+        entry = grouped.get(kw)
+        if entry is None:
+            entry = {
+                "keyword": kw,
+                "count": 0,
+                "example_member": r["example_member"],
+                "example_line": r["example_line"],
+                "example_text": (r["example_text"] or "").strip(),
+            }
+            grouped[kw] = entry
+        entry["count"] += 1
+    return sorted(grouped.values(), key=lambda e: (-e["count"], e["keyword"]))
+
+
+def language_profile(conn, dialect: str) -> dict[str, list[dict]]:
+    """Group every already-populated "recognised construct" column by
+    keyword, for one dialect -- the data behind `mfdoc lang-guide` /
+    `structural.language_guide`. See docs/superpowers/specs/
+    2026-09-06-language-guide-doctype-design.md for the section-to-column
+    mapping and why `entity_relationships` is handled separately below.
+
+    Dialect-neutral by construction: the aggregation SQL/Python here is
+    identical regardless of which dialect is requested, since every
+    dialect's extract() populates these columns the same way -- only the
+    *values* that show up (which keywords exist at all, how often) differ
+    per project. Never special-case a specific dialect's keywords here;
+    that's for callers/tests to assert on, not for this function to know.
+
+    Returns one list per section key (`structure`, `control_flow`,
+    `data_access`, `entity_relationships`, `screen_interaction`,
+    `transactions`, `calling_conventions`), each entry `{"keyword",
+    "count", "example_member", "example_line", "example_text"}`. A dialect
+    with no matching rows for a section gets an empty list for that
+    section, not a missing key."""
+    profile: dict[str, list[dict]] = {}
+    for section, (table, col, member_fk) in _LANGUAGE_PROFILE_SECTIONS.items():
+        rows = conn.execute(
+            f"""
+            SELECT t.{col} AS keyword, m.name AS example_member, t.line_no AS example_line,
+                   sl.text AS example_text
+              FROM {table} t
+              JOIN member m ON m.id = t.{member_fk}
+              LEFT JOIN source_line sl ON sl.member_id = t.{member_fk} AND sl.line_no = t.line_no
+             WHERE m.dialect = ? AND t.{col} IS NOT NULL AND t.{col} <> ''
+             ORDER BY t.{col}, m.name, t.line_no
+            """,
+            (dialect,),
+        ).fetchall()
+        profile[section] = _aggregate_profile_rows(rows)
+
+    # entity_link has no member_id/line_no of its own -- via_member/via_line
+    # are both nullable, since a link can be declared purely at the
+    # data-definition layer (Adabas coupling, a Supra linkpath) with no
+    # source line at all. Only rows with a real via_member are in scope
+    # for a per-dialect *language* guide (a data-definition-only link isn't
+    # part of what this dialect's source code looks like -- that's
+    # glossary()'s domain, dialect-agnostic, already covering every
+    # entity_link row); the INNER JOIN to member below excludes NULL
+    # via_member rows by construction.
+    entity_rows = conn.execute(
+        """
+        SELECT el.link_kind AS keyword, m.name AS example_member, el.via_line AS example_line,
+               sl.text AS example_text
+          FROM entity_link el
+          JOIN member m ON m.id = el.via_member
+          LEFT JOIN source_line sl ON sl.member_id = el.via_member AND sl.line_no = el.via_line
+         WHERE m.dialect = ? AND el.link_kind IS NOT NULL AND el.link_kind <> ''
+         ORDER BY el.link_kind, m.name, el.via_line
+        """,
+        (dialect,),
+    ).fetchall()
+    profile["entity_relationships"] = _aggregate_profile_rows(entity_rows)
+    return profile
+
+
+def unparsed_line_shapes(conn, dialect: str) -> list[dict]:
+    """Group gap(gap_kind='unparsed_line') rows for one dialect by leading
+    keyword, counted, with one sample line each -- shared by `mfdoc
+    calibrate` (cli.cmd_calibrate) and the language-guide appendix
+    (structural.language_guide), so the two can never drift out of sync.
+    Sorted by count descending; ties keep first-seen order (a plain stable
+    sort on `-count` alone, deliberately no secondary key) so this is a
+    pure refactor of cmd_calibrate's prior inline logic -- output unchanged
+    for any existing dialect/gap set, not just equivalent. "First-seen" is
+    defined by `ORDER BY g.id` (gap insertion order) explicitly -- SQLite's
+    row order is otherwise unspecified for a query with no ORDER BY, which
+    would make tie order vary across runs/query plans even on unchanged
+    data despite this function's own determinism guarantee."""
+    rows = conn.execute(
+        """
+        SELECT g.raw FROM gap g JOIN member m ON m.id = g.member_id
+         WHERE g.gap_kind='unparsed_line' AND g.raw IS NOT NULL AND m.dialect=?
+         ORDER BY g.id
+        """,
+        (dialect,),
+    ).fetchall()
+    shapes: dict[str, dict] = {}
+    for r in rows:
+        raw = (r["raw"] or "").strip()
+        if not raw:
+            continue
+        kw = raw.split()[0].upper()
+        entry = shapes.setdefault(kw, {"keyword": kw, "count": 0, "sample": raw})
+        entry["count"] += 1
+    return sorted(shapes.values(), key=lambda e: -e["count"])
+
+
 def referenced_entities(conn, member_id: int) -> list[dict]:
     """Every entity (Adabas file, Supra dataset, Mantis screen/map, ...)
     this member is known to touch: read/written via data_access, declared

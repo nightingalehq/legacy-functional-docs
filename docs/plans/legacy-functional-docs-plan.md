@@ -13,6 +13,29 @@ GitHub org.
   flows and the gap register, where judgement matters most.
 
 **Progress (2026-09-06):**
+- Implemented issue #64: an eighth document type, `language-guide`, that
+  reports which Natural/Mantis/Supra constructs a codebase actually uses —
+  Mantis/Supra especially have no public documentation, and this falls
+  entirely out of facts already in the fact store, no dialect-scanner
+  change required. `graph.language_profile(conn, dialect)` groups seven
+  already-populated columns (`variable.format`, `rule_candidate.construct`,
+  `data_access.verb`, `entity_link.link_kind`, `interaction.kind`,
+  `transaction_marker.marker`, `call_edge.call_kind`) by keyword, with a
+  count and one cited example each. `graph.unparsed_line_shapes` was
+  extracted out of `cmd_calibrate` (pure refactor, output unchanged) so
+  the language-guide appendix and `mfdoc calibrate` share one
+  implementation instead of two. Basic tier: `mfdoc lang-guide --config
+  project.yml --dialect <dialect> --out <path>` (`structural.language_guide`, `doc_type:
+  register`, no model call). Narrative tier: `templates/language-guide.md`,
+  written interactively per `SKILL.md`'s updated suggested document set,
+  taking the basic tier's output as its cited fact source — no new
+  `brief.py` function needed, since the basic tier already is the
+  complete fact summary. Design spec and implementation plan at
+  `docs/superpowers/specs/2026-09-06-language-guide-doctype-design.md` and
+  `docs/superpowers/plans/2026-09-06-language-guide-doctype.md`. No
+  `validate.py` change was needed — confirmed with tests, not just
+  asserted, since `doc_type: register` and the "any other doc_type" branch
+  both already covered the new shapes.
 - Done: chunk file names (`_generate_module_doc_chunked` in `batch.py`,
   `testbatch.py`'s test-generation counterpart) now zero-pad the chunk
   index to the width of the member's total chunk count, so a 17-chunk

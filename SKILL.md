@@ -141,7 +141,19 @@ Suggested document set, in this order (each builds vocabulary the next needs):
 4. `processes/<process>.md` — batch job or online transaction end-to-end
 5. `gap-register.md` — every unresolved item, as SME questions
 6. `coverage-report.md` — the numbers, unspun
-7. `executive-summary.md` — one page per program, for a reviewer who
+7. `reference/language-guide.md` — what this dialect's source actually
+   looks like in this codebase, useful for Mantis/Supra especially since
+   they have no public documentation. Run the basic (deterministic) tier
+   first: `mfdoc lang-guide --config project.yml --dialect mantis --out
+   docs/functional/reference/language-guide.md` — every keyword, count,
+   and cited example, no model call. Then, optionally, write the
+   narrative tier from `templates/language-guide.md`: take that basic
+   output as the cited fact source and add a short paragraph of
+   connective prose per section about how constructs combine into
+   idioms in this codebase — same citation discipline as
+   `system-overview.md`, never asserting a pattern the basic tier's
+   table doesn't already cite.
+8. `executive-summary.md` — one page per program, for a reviewer who
    won't read the per-module docs. From `mfdoc brief --executive NAME`
    (or `brief.executive_brief()` directly — same fact-brief-then-write
    pattern as the others) against `templates/executive-summary.md`.

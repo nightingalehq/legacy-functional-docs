@@ -102,6 +102,7 @@ mfdoc complexity           --config project.yml --out docs/functional/complexity
 mfdoc rules-theme-register --config project.yml --out docs/functional/rules-theme-register.md
 mfdoc glossary             --config project.yml --out docs/functional/glossary.md
 mfdoc dispatch-map         --config project.yml --out docs/functional/dispatch-map.md
+mfdoc lang-guide           --config project.yml --dialect mantis --out docs/functional/reference/language-guide.md
 
 # optional: draft tests from the same fact store, in the source dialect or a
 # destination language -- see docs/guides/testing-strategies-for-mainframes-and-4gl.md
@@ -176,8 +177,13 @@ source ─▶ [0 Ingest: normalise.py] ─▶ [1 Extract: dialects/*.py] ─▶ 
   `rule_theme` table (`source` column: `keyword` | `llm` | `structural`,
   in fallback order); `structural.py`'s renderers (`gap_summary`,
   `data_flow_diagram`, `call_graph_diagram`, `complexity_heatmap`,
-  `thematic_rules_register`, `glossary`) are pure extraction like
-  `brief.rules_register()`, never model calls.
+  `thematic_rules_register`, `glossary`, `language_guide`) are pure
+  extraction like `brief.rules_register()`, never model calls.
+  `language_guide` (`mfdoc lang-guide`) is the basic tier of the
+  `language-guide` document type — every recognised construct in a
+  dialect's source, grouped by keyword via `graph.language_profile()`;
+  `templates/language-guide.md` is its narrative tier, written
+  interactively per `SKILL.md`.
 - **Narrate**: two deliberately separate paths — `mfdoc batch` (`batch.py`)
   for high-volume formulaic module docs via a swappable `ModelCaller`
   (`anthropic_caller.py` for real calls, a `fake-echo` caller for
