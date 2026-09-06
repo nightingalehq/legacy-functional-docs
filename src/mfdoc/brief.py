@@ -1068,5 +1068,10 @@ def json_index(conn) -> str:
     for table in ("member", "entity", "entity_field", "entity_link", "data_access",
                   "call_edge", "transaction_marker", "interaction", "rule_candidate",
                   "message_ref", "job_step", "job_dd", "cics_resource", "gap", "metric"):
-        payload[table] = [dict(r) for r in conn.execute(f"SELECT * FROM {table}").fetchall()]
+        # Iterate the cursor directly rather than .fetchall() -- this is a
+        # full dump of every fact-store table (the largest ones, call_edge
+        # and rule_candidate, scale with the whole ingested codebase), each
+        # consumed exactly once right here, same reasoning as
+        # graph.connected_components().
+        payload[table] = [dict(r) for r in conn.execute(f"SELECT * FROM {table}")]
     return json.dumps(payload, indent=2)

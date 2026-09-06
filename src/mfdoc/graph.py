@@ -148,20 +148,26 @@ def resolve(conn) -> dict:
 
 
 def crud_matrix(conn) -> list[dict]:
-    rows = conn.execute(
-        """
-        SELECT m.name AS module, m.dialect, da.entity_name AS entity,
-               GROUP_CONCAT(DISTINCT da.crud) AS crud,
-               COUNT(*) AS hits,
-               MIN(da.line_no) AS first_line,
-               GROUP_CONCAT(DISTINCT da.verb) AS verbs
-          FROM data_access da JOIN member m ON m.id = da.member_id
-         WHERE da.entity_name IS NOT NULL
-         GROUP BY m.name, da.entity_name
-         ORDER BY m.name, da.entity_name
-        """
-    ).fetchall()
-    return [dict(r) for r in rows]
+    # Iterate the cursor directly -- consumed exactly once, right here, and
+    # a large codebase's whole data_access table (joined against member) is
+    # exactly the kind of whole-system scan not worth holding twice over
+    # (once as the driver's own Row list, again as this function's own
+    # dict list) -- same reasoning as graph.connected_components().
+    return [
+        dict(r) for r in conn.execute(
+            """
+            SELECT m.name AS module, m.dialect, da.entity_name AS entity,
+                   GROUP_CONCAT(DISTINCT da.crud) AS crud,
+                   COUNT(*) AS hits,
+                   MIN(da.line_no) AS first_line,
+                   GROUP_CONCAT(DISTINCT da.verb) AS verbs
+              FROM data_access da JOIN member m ON m.id = da.member_id
+             WHERE da.entity_name IS NOT NULL
+             GROUP BY m.name, da.entity_name
+             ORDER BY m.name, da.entity_name
+            """
+        )
+    ]
 
 
 def referenced_entities(conn, member_id: int) -> list[dict]:

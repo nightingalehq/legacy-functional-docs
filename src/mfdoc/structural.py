@@ -154,7 +154,12 @@ def build_call_graph(conn, cluster_by: str = "module") -> dict[int, dict]:
             f"unsupported cluster_by {cluster_by!r}; expected one of {sorted(valid_cluster_by)}"
         )
     cluster_column = "system" if cluster_by == "subsystem" else "library"
-    rows = conn.execute(
+    # Iterated once, in order, immediately below -- iterate the cursor
+    # directly rather than materializing every call_edge row (joined twice
+    # against member) into a list first, same reasoning as
+    # graph.connected_components().
+    graph_data: dict[int, dict] = {}
+    for r in conn.execute(
         f"""
         SELECT m.id AS caller_id, m.name AS caller, m.library AS caller_library,
                m.dialect AS caller_dialect, m.{cluster_column} AS caller_cluster,
@@ -165,10 +170,7 @@ def build_call_graph(conn, cluster_by: str = "module") -> dict[int, dict]:
           LEFT JOIN member cm ON cm.id = ce.callee_id
          ORDER BY m.name, m.id, ce.line_no, ce.callee_name
         """
-    ).fetchall()
-
-    graph_data: dict[int, dict] = {}
-    for r in rows:
+    ):
         entry = graph_data.setdefault(
             r["caller_id"],
             {
