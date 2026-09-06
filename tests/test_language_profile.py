@@ -177,3 +177,27 @@ def test_unparsed_line_shapes_groups_by_leading_keyword_ranked_by_frequency():
     assert shapes[0] == {"keyword": "FOO", "count": 2, "sample": "FOO ARG1 ARG2"}
     assert shapes[1] == {"keyword": "BAR", "count": 1, "sample": "BAR ARG4"}
     assert graph.unparsed_line_shapes(conn, "natural") == []
+
+
+def test_unparsed_line_shapes_tie_order_is_explicit_gap_insertion_order():
+    """Two equal-count keywords must keep first-seen order defined by
+    `ORDER BY g.id` (gap insertion order) -- not whatever order SQLite's
+    query planner happens to return with no ORDER BY at all, which is
+    unspecified and could vary across runs on unchanged data."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA, add_gap
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'mantis')")
+    # ZEBRA inserted (and thus gets a lower gap.id) before ALPHA -- if tie
+    # order came from anything but g.id, an alphabetical or name-derived
+    # order would put ALPHA first instead.
+    add_gap(conn, "unparsed_line", "unparsed", member_id=1, raw="ZEBRA X")
+    add_gap(conn, "unparsed_line", "unparsed", member_id=1, raw="ALPHA Y")
+    conn.commit()
+
+    shapes = graph.unparsed_line_shapes(conn, "mantis")
+    assert [s["keyword"] for s in shapes] == ["ZEBRA", "ALPHA"]

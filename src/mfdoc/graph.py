@@ -270,11 +270,16 @@ def unparsed_line_shapes(conn, dialect: str) -> list[dict]:
     Sorted by count descending; ties keep first-seen order (a plain stable
     sort on `-count` alone, deliberately no secondary key) so this is a
     pure refactor of cmd_calibrate's prior inline logic -- output unchanged
-    for any existing dialect/gap set, not just equivalent."""
+    for any existing dialect/gap set, not just equivalent. "First-seen" is
+    defined by `ORDER BY g.id` (gap insertion order) explicitly -- SQLite's
+    row order is otherwise unspecified for a query with no ORDER BY, which
+    would make tie order vary across runs/query plans even on unchanged
+    data despite this function's own determinism guarantee."""
     rows = conn.execute(
         """
         SELECT g.raw FROM gap g JOIN member m ON m.id = g.member_id
          WHERE g.gap_kind='unparsed_line' AND g.raw IS NOT NULL AND m.dialect=?
+         ORDER BY g.id
         """,
         (dialect,),
     ).fetchall()
