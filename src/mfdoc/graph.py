@@ -9,6 +9,7 @@ narrative stage and marked `inferred`.
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 
 from .db import add_gap, set_metric
@@ -27,6 +28,7 @@ ENTRY_KINDS = {"EXEC_PGM"}
 DERIVED_GAP_KINDS = (
     "ambiguous_adabas_file", "no_ddl_for_entity", "unresolved_call",
     "orphan_module", "sme_question", "unused_field", "shadowed_assignment",
+    "label_control_mismatch",
 )
 
 
@@ -322,7 +324,7 @@ def shadowed_assignments_for_member(conn, member_id: int) -> list[dict]:
     """
     rows = conn.execute(
         "SELECT id, line_no, construct, depth, fields_used, literals "
-        "FROM rule_candidate WHERE member_id=? ORDER BY line_no", (member_id,)
+        "FROM rule_candidate WHERE member_id=? ORDER BY line_no, id", (member_id,)
     ).fetchall()
 
     by_field: dict[str, list[dict]] = defaultdict(list)
@@ -378,6 +380,145 @@ def shadowed_assignments(conn) -> list[dict]:
                 f"value can never be observed at runtime. Confirm whether this is dormant/"
                 f"dead logic or the override is itself conditional in a way not captured here.",
                 member_id=m["id"], line_no=f["line_no"], severity="medium",
+            )
+    return out
+
+
+# Field-name shapes `label_control_pairs_for_member` looks for: a
+# "presentation" field whose literal value is shown to a user (an on-screen
+# label/caption/title, e.g. a PF-key's displayed text) versus a "control"
+# field whose literal value drives what actually happens (an option/mode/
+# command code). Deliberately conservative and narrow -- these are common
+# 4GL/Natural naming shapes, not an attempt to be exhaustive; a project with
+# different naming conventions gets no matches rather than wrong ones.
+LABEL_FIELD = re.compile(r"(LABEL|CAPTION|TITLE)\b", re.I)
+CONTROL_FIELD = re.compile(r"(OPTION|MODE|ACTION|FUNC|COMMAND|CMD)\b", re.I)
+
+
+def _normalize_literal(literal: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "", literal.upper())
+
+
+def _literals_agree(label_literal: str, control_literal: str) -> bool:
+    """Whether the two literals plausibly describe the same thing, loosely:
+    one's normalized form contains the other's (handles e.g. `'REPLACE'` vs
+    `'REPLACE-REC'`, or matching but differently-cased/hyphenated wording).
+    Not equality -- a label and a control code legitimately use different
+    exact wording for the same real action, and this only needs to rule out
+    the *obviously* consistent cases, not certify agreement. Everything this
+    returns False for is a genuine "worth asking a human" case, never
+    asserted here as wrong."""
+    a, b = _normalize_literal(label_literal), _normalize_literal(control_literal)
+    if not a or not b:
+        return True  # nothing meaningful to compare -- not this check's problem to raise
+    return a in b or b in a
+
+
+def label_control_pairs_for_member(conn, member_id: int) -> list[dict]:
+    """Every (label-field literal assign, control-field literal assign) pair
+    inside the same straight-line block whose literals don't obviously agree
+    (`_literals_agree`) -- the shape of finding a reviewer flagged in a real
+    verification report: a PF-key documented by its on-screen label text
+    ("Send") while the field actually driving what happens is set to a
+    different word ("AMEND") in the very same branch, with nothing in the
+    source connecting the two by name.
+
+    This never claims the two are *wrong* -- unlike
+    `_reversed_condition_problems` in validate.py (which has a formal ground
+    truth: the comparison operator itself), there is no way to know from
+    field names alone whether a label and a control code are *supposed* to
+    match. Every result here is a question for a human, surfaced as an
+    `sme_question`-shaped gap (see `label_control_mismatches` below), not a
+    documented defect.
+
+    "Same straight-line block" is tracked via `rule_candidate.depth`: a
+    label literal recorded at some depth is invalidated the moment a row at
+    a *shallower* depth is seen (leaving the branch it was set in), so a
+    label set in one branch can never pair with a control field set after
+    that branch has already ended -- only ever with a control field in the
+    same branch (same depth, no intervening branch exit) or a nested one
+    entered from it.
+
+    Depth alone cannot tell a THEN branch apart from its own ELSE: both
+    dialects' extractors record an `ELSE` row at the *same* depth as its own
+    branch body (an `ELSE` doesn't decrement depth the way leaving the whole
+    `IF` does), so a label set in the THEN branch would otherwise still look
+    "pending" once execution reaches the ELSE branch at that identical
+    depth. An `ELSE` row explicitly clears whatever label is pending at its
+    own depth for exactly this reason -- entering the ELSE branch is still
+    "leaving" the THEN branch, even though the depth number doesn't change.
+    """
+    rows = conn.execute(
+        "SELECT line_no, construct, depth, fields_used, literals "
+        "FROM rule_candidate WHERE member_id=? ORDER BY line_no, id", (member_id,)
+    ).fetchall()
+
+    pending_by_depth: dict[int, dict] = {}
+    out: list[dict] = []
+    for r in rows:
+        depth = r["depth"] or 0
+        for d in [k for k in pending_by_depth if k > depth]:
+            del pending_by_depth[d]
+        if r["construct"] == "ELSE":
+            pending_by_depth.pop(depth, None)
+            continue
+        if r["construct"] != "ASSIGN" or not (r["literals"] or ""):
+            continue
+        fields = [f for f in (r["fields_used"] or "").split(",") if f]
+        if len(fields) != 1:
+            continue  # narrow on purpose, same reasoning as shadowed_assignments
+        field = fields[0]
+        literal = (r["literals"] or "").split(",")[0]
+        if LABEL_FIELD.search(field):
+            pending_by_depth[depth] = {"field": field, "literal": literal, "line_no": r["line_no"]}
+        elif CONTROL_FIELD.search(field):
+            # The nearest enclosing pending label -- the highest recorded
+            # depth that is still <= this control assign's own depth, not
+            # only an exact depth match. A control field one level deeper
+            # than where the label was set (a nested IF entered from the
+            # same branch the label opened) is still "the same branch" as
+            # far as this check is concerned; requiring an exact depth match
+            # would silently miss that documented nested case.
+            candidate_depths = [d for d in pending_by_depth if d <= depth]
+            if not candidate_depths:
+                continue
+            label = pending_by_depth[max(candidate_depths)]
+            if _literals_agree(label["literal"], literal):
+                continue
+            out.append({
+                "label_field": label["field"], "label_literal": label["literal"],
+                "label_line": label["line_no"],
+                "control_field": field, "control_literal": literal, "control_line": r["line_no"],
+            })
+    return out
+
+
+def label_control_mismatches(conn) -> list[dict]:
+    """label_control_pairs_for_member, across every Natural/Mantis member,
+    each result also recording which member it was found in -- and adds one
+    `label_control_mismatch` gap per finding. Called from run_all(); see
+    DERIVED_GAP_KINDS for why prior findings are cleared before this
+    reruns."""
+    out: list[dict] = []
+    members = conn.execute(
+        "SELECT id, name FROM member WHERE dialect IN ('natural','mantis')"
+    ).fetchall()
+    for m in members:
+        for f in label_control_pairs_for_member(conn, m["id"]):
+            f = {**f, "member_id": m["id"], "member_name": m["name"]}
+            out.append(f)
+            add_gap(
+                conn, "label_control_mismatch",
+                # label_literal/control_literal already carry their own source
+                # quoting verbatim (e.g. "'Send'") -- wrapping them in another
+                # layer of quotes here would render as "''Send''".
+                f"{f['label_field']} is set to {f['label_literal']} at line "
+                f"{f['label_line']} while {f['control_field']} is set to "
+                f"{f['control_literal']} at line {f['control_line']}, in what looks "
+                f"like the same branch. Confirm whether the displayed label and the "
+                f"actual action taken genuinely agree, or whether the label overstates/"
+                f"misstates what this branch does.",
+                member_id=m["id"], line_no=f["control_line"], severity="medium",
             )
     return out
 
@@ -554,14 +695,17 @@ def run_all(conn) -> dict:
     scopes = transaction_scopes(conn)
     unused_fields = unused_entity_fields(conn)
     shadowed = shadowed_assignments(conn)
+    label_mismatches = label_control_mismatches(conn)
     cov = coverage(conn)
     set_metric(conn, "global", "derived.orphan_modules", [o["name"] for o in orph])
     set_metric(conn, "global", "derived.transaction_scopes", len(scopes))
     set_metric(conn, "global", "derived.unused_entity_fields", len(unused_fields))
     set_metric(conn, "global", "derived.shadowed_assignments", len(shadowed))
+    set_metric(conn, "global", "derived.label_control_mismatches", len(label_mismatches))
     conn.commit()
     return {
         **res, "orphans": len(orph), "transaction_scopes": len(scopes),
         "unused_entity_fields": len(unused_fields), "shadowed_assignments": len(shadowed),
+        "label_control_mismatches": len(label_mismatches),
         "coverage": cov,
     }
