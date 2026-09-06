@@ -1217,3 +1217,48 @@ def test_generate_module_index_narrative_rejects_a_citation_not_in_any_excerpt(t
     assert ok is False
     assert sections is None
     assert any("not present in any given chunk excerpt" in p for p in problems)
+
+
+def test_generate_module_index_narrative_retry_prompt_carries_provenance_problem(tmp_path):
+    """A rejected attempt whose only failure is a provenance violation
+    (validate_doc itself finds nothing wrong -- the citation resolves)
+    must still put that problem in the next attempt's retry_note, or the
+    model gets no signal and just repeats the same invented citation."""
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 2, 'irrelevant')")
+    conn.commit()
+
+    prompts: list[str] = []
+
+    def caller(prompt):
+        prompts.append(prompt)
+        return batch_mod.ModelResponse(
+            text=_valid_narrative_response("[[FAKEMOD:2]]"), input_tokens=1, output_tokens=1,
+        )
+
+    out_path = tmp_path / "FAKEMOD.md"
+
+    def assemble(sections):
+        body = "\n".join(f"## {h}\n\n{sections[h]}\n" for h in batch_mod.NARRATIVE_SECTIONS)
+        return (
+            "---\ntitle: \"FAKEMOD\"\ndoc_type: module_index\nsystem: MOM\n"
+            "generated_by: legacy-functional-docs 0.1.0\ngenerated_at: \"2026-01-01\"\n"
+            "review_status: draft\nconfidence_summary:\n  verified: 1\nsources: [\"FAKEMOD\"]\n---\n"
+            f"\n# FAKEMOD\n\n{body}"
+        )
+
+    batch_mod._generate_module_index_narrative(
+        conn, "FAKEMOD", [(1, "## Purpose\n\nSomething [[FAKEMOD:1]].")], caller,
+        "writing rules", None, out_path, assemble, max_attempts=2,
+    )
+
+    assert len(prompts) == 2
+    assert "Previous attempt failed validation" in prompts[1]
+    assert "not present in any given chunk excerpt" in prompts[1]

@@ -383,13 +383,19 @@ def _consolidated_gap_lines(conn, member_name: str, member_id: int,
     already runs -- including that section's own citation, so a gap's free-
     text `detail` that happens to read as an assertive claim doesn't trip
     validate_doc's uncited-assertion check here any more than it does
-    there), plus every ok chunk's own `sme_questions` front-matter entries,
-    deduplicated by exact text -- both are already-recorded facts (a gap
-    row from `derive`, an sme_questions string a chunk's own generation
-    already validated), just scattered one-per-chunk today. Gap rows come
-    first, in severity order, since they're the ground-truth record;
-    sme_questions only add text not already covered by a gap row's own
-    detail."""
+    there), plus every ok chunk's own `sme_questions` front-matter entries --
+    both are already-recorded facts (a gap row from `derive`, an
+    sme_questions string a chunk's own generation already validated), just
+    scattered one-per-chunk today. Gap rows come first, in severity order,
+    since they're the ground-truth record; sme_questions only add text not
+    already covered by a gap row's own detail.
+
+    Two different dedup keys, deliberately not "exact text" for both: gap
+    *rows* dedupe against each other on `(gap_kind, line_no, first
+    sentence)` (see `seen_gap_identity` below -- several distinct gap rows
+    commonly share identical `detail` text, so text alone would silently
+    collapse them); `sme_questions` dedupe on exact text, against both
+    other questions and each gap row's own first sentence (`seen_content`)."""
     # Two dedup keys, deliberately different: `seen_gap_identity` dedupes
     # gap *rows* against each other -- (gap_kind, line_no, first_sentence),
     # not first_sentence alone, since several distinct gap rows commonly
@@ -626,7 +632,12 @@ def _generate_module_index_narrative(conn, member_name: str, chunk_bodies: list[
         if not problems:
             return True, attempt, input_tokens, output_tokens, [], sections
 
-        note = _retry_note(result["problems"]) if result["problems"] else ""
+        # `problems` (not just result["problems"]) -- a rejected attempt
+        # whose only failure is a provenance violation (an invented-but-
+        # resolvable citation `validate_doc` alone can't see) must still
+        # tell the model what to fix, or an empty retry_note repeats the
+        # exact same invalid citation next attempt.
+        note = _retry_note(problems) if problems else ""
         if missing:
             note = (
                 "Your response must include all five required sections, each headed "
