@@ -24,7 +24,14 @@ from pathlib import Path
 from . import __version__
 from .batch import ModelCaller, DocResult
 from .batch import _corpus_signature as _base_corpus_signature
-from .batch import _fix_generated_by_version, _load_state, _output_subdir, _save_state, _skip_result
+from .batch import (
+    _fix_generated_by_version,
+    _load_state,
+    _output_subdir,
+    _prune_stale_chunk_files,
+    _save_state,
+    _skip_result,
+)
 from .brief import fetch_routines, routine_aware_chunk_ranges
 from .redact import NULL_REDACTOR, Redactor
 from .testlang import sidecar_path_for
@@ -297,9 +304,14 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
     chunk_entries: list[tuple[int, Path, DocResult]] = []
     problems: list[str] = []
 
+    chunk_width = len(str(chunk_count))
+    expected_chunk_names = {
+        f"{out_path.stem}.chunk{n:0{chunk_width}d}{out_path.suffix}" for n in range(1, chunk_count + 1)
+    }
+    _prune_stale_chunk_files(out_path, expected_chunk_names)
     for i, (start, end) in enumerate(ranges, start=1):
         chunk_rows = rows[start - 1:end]
-        chunk_path = out_path.with_name(f"{out_path.stem}.chunk{i}{out_path.suffix}")
+        chunk_path = out_path.with_name(f"{out_path.stem}.chunk{i:0{chunk_width}d}{out_path.suffix}")
         brief = test_case_brief_chunk(
             member_name, system, chunk_rows, i, chunk_count, redact=redact, routines=routines,
         )
