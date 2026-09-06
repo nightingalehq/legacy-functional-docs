@@ -190,7 +190,8 @@ def fetch_rule_candidate_rows(conn, member_name: str):
 def module_brief(conn, member_name: str, excerpt_rules: bool = True,
                   redact: Redactor = NULL_REDACTOR, lexicon: dict[str, str] | None = None,
                   rule_range: tuple[int, int] | None = None,
-                  chunk_info: tuple[int, int] | None = None) -> str:
+                  chunk_info: tuple[int, int] | None = None,
+                  chunk_map: dict[str, int] | None = None) -> str:
     """`rule_range` (1-based, inclusive, over this member's own rule_candidate
     rows in the same order they're numbered in) restricts the "Candidate
     business rules" section to that slice -- everything else in the brief
@@ -202,7 +203,22 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
 
     `chunk_info` is `(this_chunk, chunk_count)` when `rule_range` is set, used
     only to phrase the "this is a partial brief" note -- see batch.py's
-    chunked module-doc path for what calls this with both set."""
+    chunked module-doc path for what calls this with both set.
+
+    `chunk_map` (routine name, upper-cased -> 1-based chunk index) is also
+    only meaningful when `rule_range` is set. Without it, a chunk whose own
+    rule range dispatches to a routine documented in a *different* chunk
+    (e.g. a PF-key branch that PERFORMs a subroutine whose own rules fall
+    outside this chunk's range) has no way to say anything more specific
+    than "covered elsewhere" -- the writing-rules instruction not to
+    "skip ahead" into another chunk's rule range leaves it nothing concrete
+    to point at. Since `_generate_module_doc_chunked` computes every chunk's
+    rule range up front, before any chunk is narrated, the full routine ->
+    chunk mapping is already known the whole time and costs nothing to hand
+    over: the "Internal routines" section below annotates each routine with
+    its chunk number when given, so the model can write "documented in
+    chunk 15" instead of leaving a dangling forward reference for nothing to
+    ever resolve."""
     from .db import resolve_member_by_name
 
     matches, ambiguous_libs = resolve_member_by_name(conn, member_name)
@@ -238,7 +254,10 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
             "member's full rule set. Write the complete document template "
             "(every section) for this chunk, but only for that rule range -- "
             "do not invent, skip ahead to, or apologise for rules outside "
-            "it; the other chunks cover them independently."
+            "it; the other chunks cover them independently. When this chunk's "
+            "own rules dispatch to a routine documented in another chunk (see "
+            "the \"Internal routines\" list below for its chunk number), name "
+            "that chunk instead of a vague \"covered elsewhere\"."
         )
     add("")
     vocab_insert_at = len(out)
@@ -304,10 +323,29 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
             "reader trying to find everything one routine does should not "
             "have to read the whole document."
         )
+        if chunk_map:
+            add(
+                "This document is one chunk of several covering this member. "
+                "Where a routine below is annotated **[documented in chunk N]**, "
+                "that is a different chunk than this one -- if a rule in *this* "
+                "chunk's range dispatches to it (e.g. a branch that PERFORMs/"
+                "CALLs it) without itself explaining what it does, say so "
+                "concretely (\"documented in chunk N\"), not with a vague "
+                "\"covered elsewhere\"/\"covered by a later chunk\"."
+            )
+        current_chunk = chunk_info[0] if chunk_info else None
         for r in routines:
             span = _cite(name, r["start_line"], r["end_line"]) if r["end_line"] else \
                 f"{_cite(name, r['start_line'])} **[no matching end found -- extent unresolved]**"
-            add(f"- `{r['name']}` ({r['kind']}) {span}")
+            chunk_note = ""
+            if chunk_map is not None:
+                idx = chunk_map.get(r["name"].upper())
+                # Only worth pointing out when it's a *different* chunk than
+                # this one -- a routine documented in the chunk currently
+                # being written needs no forward reference to itself.
+                if idx and idx != current_chunk:
+                    chunk_note = f" **[documented in chunk {idx}]**"
+            add(f"- `{r['name']}` ({r['kind']}) {span}{chunk_note}")
         add("")
 
     # --- data access

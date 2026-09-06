@@ -203,10 +203,16 @@ mfdoc rules-theme-register --config project.yml --out docs/functional/rules-them
 mfdoc glossary --config project.yml --out docs/functional/glossary.md
 # one entry per entity, with its fields nested underneath, from entity/field
 # descriptions already recorded in the fact store
+mfdoc dispatch-map --config project.yml --out docs/functional/dispatch-map.md
+# for every branch that compares a configurable dispatch field (default:
+# Natural's *PF-KEY) against a literal, the routines it calls and the fields
+# it sets in that same branch -- override options.overview.dispatch_field_pattern
+# for a different dialect's own dispatch idiom (e.g. a Mantis menu/transfer
+# option field) or a Natural codebase that wraps *PF-KEY in its own field
 
 # Note: unlike the other structural overview commands above (gap-summary, data-flow,
-# complexity, rules-theme-register, glossary), call-graph's --out must be a directory
-# path, not a file path; it generates multiple files (one per cluster if needed).
+# complexity, rules-theme-register, glossary, dispatch-map), call-graph's --out must be
+# a directory path, not a file path; it generates multiple files (one per cluster if needed).
 
 mfdoc validate --config project.yml --docs docs/functional
 
@@ -248,6 +254,14 @@ options:
       # collapsed cluster-level diagram inline plus one full diagram per
       # cluster on disk, instead of one large inline diagram
       max_nodes_inline: 40
+    # the field `mfdoc dispatch-map` looks for on the left/right of an IF
+    # condition; default (unset) is Natural's built-in *PF-KEY. Replaces
+    # rather than merges with the built-in pattern -- same convention
+    # options.validate.outcome_field_pattern uses (conditions.py) -- so a
+    # Mantis project (no fixed dispatch-field name) or a Natural codebase
+    # that wraps *PF-KEY in its own field supplies its own complete
+    # pattern here
+    dispatch_field_pattern: null
 ```
 
 Optional: draft tests from the same fact store (see

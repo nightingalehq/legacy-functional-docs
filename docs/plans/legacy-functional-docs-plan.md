@@ -21,6 +21,22 @@ GitHub org.
   ...` in a plain lexicographic directory listing. Internal bookkeeping
   (resume-state dict keys, `chunk_map` values, prose like "chunk 3 of 16")
   stays unpadded/numeric; only the on-disk filename changed. Issue #72.
+- Done: connectivity-aware call-graph splitting and LR-by-default layout
+  (#68). `mfdoc call-graph` now defaults to `graph LR` (matching
+  `data-flow.md`'s existing convention; still overridable back to `TD` via
+  `options.overview.diagrams.direction`), and `structural.call_graph_diagram`
+  now computes the call graph's connected components
+  (`graph.connected_components`, pure union-find over `call_edge`, no model
+  call) and renders one diagram per independent component instead of
+  applying `max_nodes_inline` to the combined node count across the whole
+  graph. A component still over threshold falls back to today's
+  `cluster_by` collapse-then-per-cluster behaviour, scoped to just that
+  component. The repo's own bundled `examples/` fixtures already split into
+  six components under this logic — previously all silently flattened into
+  one diagram. See `docs/superpowers/specs/2026-09-06-call-graph-lr-components-design.md`
+  for the naming convention chosen for per-component files and the
+  deliberate decision not to let a shared unresolved-callee name bridge two
+  otherwise-disconnected components.
 
 **Progress (2026-08-04):**
 - Done: 1.1 (pytest suite, 12 defect classes + coverage snapshot), 1.2
@@ -388,6 +404,73 @@ GitHub org.
   nor the config key is present. `mfdoc test-plan --config project.yml`
   (no flags) now works standalone once `options.testgen.overlay_path` is
   set.
+- 2026-09-06: follow-up from an external verification report reviewed on a
+  client engagement (a third-party review of first-cut module docs for two
+  Natural programs), generalized into pipeline fixes rather than one-off
+  patches where the underlying gap was dialect-neutral. Opened as PR #67:
+  - **Dangling cross-chunk references (fixed at the source, not just
+    detected)**: `_generate_module_doc_chunked` (`batch.py`) now computes
+    the full routine -> chunk-number mapping before narrating any chunk and
+    hands it to every chunk's own brief (`module_brief`'s new `chunk_map`
+    param) -- a chunk whose own rules dispatch to a routine documented in a
+    *different* chunk can now write "documented in chunk 15" instead of an
+    unresolved "covered by a later chunk". `validate.py`'s new
+    `_deferred_reference_problems` (advisory) catches a regression back to
+    the vague phrasing, for any dialect.
+  - **Stale-regeneration check**: `validate.py`'s new `_staleness_problem`
+    (advisory) flags a document whose `generated_by` version differs from
+    the `mfdoc` version installed now -- same version-bump-only caveat
+    `_corpus_signature` already documents.
+  - **`label_control_mismatch` gap kind** (`graph.py`): a same-branch
+    on-screen label literal and internal control-field literal (e.g. a
+    PF-key labelled "Send" that actually sets an internal option field to
+    "AMEND") that don't obviously agree, surfaced as an `sme_question` for
+    a human to confirm -- deliberately never asserts the two are wrong
+    (unlike the existing reversed-condition check, there's no formal ground
+    truth for whether a label and a control code are *supposed* to match).
+    Dialect-neutral (runs over `rule_candidate`, same as `natural`/`mantis`
+    both populate it).
+  - **New `mfdoc dispatch-map` command** (`structural.py`): for every
+    branch comparing a configurable dispatch field (default Natural's
+    `*PF-KEY`) against a literal, the routines it calls and fields it sets
+    within that branch -- a "what does dispatching on this value actually
+    do" table. New `options.overview.dispatch_field_pattern` config key
+    (replace-not-merge, same convention as `outcome_field_pattern`) is the
+    generalization seam for Mantis/Supra or any other dialect's own
+    dispatch idiom, since there's no single fixed field name to default to
+    the way Natural has `*PF-KEY`.
+  - Documented the existing `unresolved_call`/`no_ddl_for_entity` gap kinds
+    plus `mfdoc gate`'s `max_high_severity_gaps` as the pre-flight missing-
+    dependency workflow (`docs/guides/architecture.md`) -- this already
+    existed; it just wasn't written down as a named workflow anywhere.
+  - Added a "Planning an improvement or bug fix" section to `CLAUDE.md`:
+    generalize first, add explicit per-dialect variants only where general
+    truly isn't possible, update docs as part of the same change -- codifying
+    the approach taken in this entry itself.
+  - **New known gap found while regenerating a chunked member against
+    these fixes, not yet fixed**: bumping `__version__` alone did not force a chunked
+    member's regeneration. `run_batch`'s per-member resume check (`batch.py`)
+    hashes a bare, unchunked `module_brief()` call that never receives
+    `chunk_map` -- so when a code change (like this one) only affects what
+    `_generate_module_doc_chunked` builds per-chunk, that top-level
+    fingerprint is byte-identical to before the change even though the
+    actual per-chunk briefs (and `_generate_module_doc_chunked`'s own,
+    separately-correct `prior_chunks` skip logic) would differ. The
+    version-bump-in-`_corpus_signature` mechanism only short-circuits the
+    *whole-batch* fast path; it doesn't make the per-member fallback check
+    version-aware. Worked around this round with `--state ""` (full,
+    deliberate regeneration, no resume) rather than fixing the fingerprint
+    itself -- a real fix would need the top-level per-member check for a
+    to-be-chunked member to defer to `_generate_module_doc_chunked`'s own
+    (already-correct) per-chunk hashing instead of short-circuiting on a
+    coarser whole-member hash first. Dialect-neutral; not specific to this
+    round's fixes -- would recur for *any* future change with the same
+    shape (chunked-path-only behavior change with no effect on the bare,
+    unchunked brief text).
+  - Not attempted this round: retroactively regenerating already-published
+    module docs for other engagements to pick up these fixes -- each
+    project's own team re-runs `mfdoc batch` when ready, per the existing
+    corpus-signature/resume model.
 
 ## Purpose of this document
 

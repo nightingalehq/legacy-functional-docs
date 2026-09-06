@@ -29,6 +29,27 @@ from .brief import fetch_routines, fetch_rule_candidate_rows, module_brief, rout
 from .redact import NULL_REDACTOR, Redactor
 from .validate import BR_REF, _split_frontmatter, validate_doc
 
+# The example `generated_by` value in reference/writing-rules.md's worked
+# example and templates/module.md's front matter block is a literal,
+# unchanging string ("legacy-functional-docs 0.1.0") -- neither document
+# tells the model what the real, currently-installed version is, so a model
+# has no way to write it correctly and, worse, tends to just echo the
+# worked example's literal value verbatim run after run. Rather than fix
+# this by telling the model the real version (one more fact that could be
+# stated wrong or go stale in the prompt itself), the version is corrected
+# deterministically here, the same way `_render_module_chunk_index` already
+# builds it directly rather than asking a model for it.
+_GENERATED_BY_LINE = re.compile(r"(?m)^generated_by:\s*legacy-functional-docs\s+\S+\s*$")
+
+
+def _fix_generated_by_version(text: str) -> str:
+    """`text` with its `generated_by:` line's version corrected to the
+    actually-installed `__version__`, regardless of what the model wrote.
+    A no-op if the line isn't present in the expected `legacy-functional-docs
+    <version>` shape (e.g. missing front matter entirely) -- validate_doc's
+    own front-matter check reports that case, not this function's job to."""
+    return _GENERATED_BY_LINE.sub(f"generated_by: legacy-functional-docs {__version__}", text, count=1)
+
 # Object types that get the batch treatment: one module, one program's worth
 # of judgement-light narrative. Data stores, system overview, process flows
 # and the gap register stay in the CLI path.
@@ -227,7 +248,7 @@ def _generate_module_doc_from_brief(conn, member_name: str, brief: str, out_path
         input_tokens += response.input_tokens
         output_tokens += response.output_tokens
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(response.text, encoding="utf-8")
+        out_path.write_text(_fix_generated_by_version(response.text), encoding="utf-8")
         result = validate_doc(conn, out_path)
         if result["ok"]:
             return DocResult(member_name, str(out_path), True, attempt, input_tokens, output_tokens, [])
@@ -370,10 +391,45 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
     combined brief hash is unchanged) or re-render all of them. This is
     what makes a fix affecting only one routine's worth of source cheap to
     pick up: only the chunk(s) whose own brief actually changed re-render."""
+    routines = fetch_routines(conn, rule_rows[0]["member_id"])
     ranges = routine_aware_chunk_ranges(
-        [r["line_no"] for r in rule_rows], fetch_routines(conn, rule_rows[0]["member_id"]), chunk_size,
+        [r["line_no"] for r in rule_rows], routines, chunk_size,
     )
     chunk_count = len(ranges)
+    # Routine name (upper) -> 1-based chunk index whose rule range contains
+    # that routine's own rules -- known in full before any chunk is
+    # narrated, since `ranges` is already fixed above. Handed to every
+    # chunk's own brief (see module_brief's `chunk_map` param) so a chunk
+    # whose own rules dispatch to a routine documented elsewhere can name
+    # the specific chunk instead of leaving a dangling "covered elsewhere".
+    #
+    # `ranges` is in rule-ordinal space (1-based position within `rule_rows`,
+    # not raw source line numbers -- see routine_aware_chunk_ranges), so a
+    # routine's chunk is found by scanning `rule_rows` directly (not via a
+    # line_no-keyed dict: `rule_candidate.line_no` is not guaranteed unique
+    # per member, and a dict built that way silently collapses same-line
+    # rows to whichever is last, discarding the rest) for the first row
+    # whose line falls inside the routine's own span, using that row's
+    # position (its index in `rule_rows`, 1-based) as the ordinal.
+    # routine_aware_chunk_ranges already keeps a routine's rules as one
+    # contiguous, unsplit run, so any one of its rows' ordinals lands in the
+    # same chunk as every other rule belonging to that routine. A routine
+    # with no rule_candidate rows of its own (nothing to key off) is simply
+    # left out of the map.
+    chunk_map: dict[str, int] = {}
+    for routine in routines:
+        end_line = routine["end_line"] if routine["end_line"] is not None else routine["start_line"]
+        ordinal = next(
+            (pos for pos, r in enumerate(rule_rows, start=1)
+             if routine["start_line"] <= r["line_no"] <= end_line),
+            None,
+        )
+        if ordinal is None:
+            continue
+        for idx, (start, end) in enumerate(ranges, start=1):
+            if start <= ordinal <= end:
+                chunk_map[routine["name"].upper()] = idx
+                break
     input_tokens = output_tokens = 0
     chunk_entries: list[tuple[int, tuple[int, int], Path, DocResult]] = []
     problems: list[str] = []
@@ -388,7 +444,7 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
         chunk_path = out_path.with_name(f"{out_path.stem}.chunk{i:0{chunk_width}d}{out_path.suffix}")
         brief = module_brief(
             conn, member_name, redact=redact, lexicon=lexicon,
-            rule_range=(start, end), chunk_info=(i, chunk_count),
+            rule_range=(start, end), chunk_info=(i, chunk_count), chunk_map=chunk_map,
         )
         brief_hash = hashlib.sha256(brief.encode("utf-8")).hexdigest()
         prior_chunk = (prior_chunks or {}).get(str(i))
@@ -684,7 +740,7 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
             input_tokens, output_tokens = response.input_tokens, response.output_tokens
 
             out_path.parent.mkdir(parents=True, exist_ok=True)
-            out_path.write_text(response.text, encoding="utf-8")
+            out_path.write_text(_fix_generated_by_version(response.text), encoding="utf-8")
             validation = validate_doc(conn, out_path)
             attempts = 1
             if not validation["ok"]:
@@ -693,7 +749,7 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
                 retry_response = caller(retry_prompt)
                 input_tokens += retry_response.input_tokens
                 output_tokens += retry_response.output_tokens
-                out_path.write_text(retry_response.text, encoding="utf-8")
+                out_path.write_text(_fix_generated_by_version(retry_response.text), encoding="utf-8")
                 validation = validate_doc(conn, out_path)
                 attempts = 2
 
