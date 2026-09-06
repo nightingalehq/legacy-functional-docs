@@ -20,6 +20,7 @@ import pytest
 
 from mfdoc import batch as batch_mod
 from mfdoc.redact import NULL_REDACTOR, Redactor
+from mfdoc.validate import CITATION
 
 
 def _track_module_brief_calls(monkeypatch) -> list[str]:
@@ -63,9 +64,13 @@ def _fake_reconciliation_response(prompt: str, input_tokens: int = 10,
     per-member/per-chunk prompt by not carrying a "# Fact brief:" heading.
     Reuses whichever `[[MEMBER:LINE]]` citation the prompt's own per-chunk
     excerpts already carry, so the reconciled sections cite forward exactly
-    as the real feature is meant to, rather than inventing one."""
-    m = re.search(r"\[\[(\w[\w#@$&.\-]*):(\d+)\]\]", prompt)
-    cite = f"[[{m.group(1)}:{m.group(2)}]]" if m else "[[UNKNOWN:1]]"
+    as the real feature is meant to, rather than inventing one. Matches via
+    validate.CITATION itself (not a bespoke regex) so this fake can't fall
+    back to a fabricated [[UNKNOWN:1]] for a real citation whose member name
+    uses a character validate.py's own pattern allows but a narrower ad hoc
+    regex here wouldn't (e.g. a leading `#`/`@`/`$`/`&`)."""
+    m = CITATION.search(prompt)
+    cite = f"[[{m.group('member')}:{m.group('from')}]]" if m and m.group("from") else "[[UNKNOWN:1]]"
     text = "\n\n".join(
         f"## {h}\n\nReconciled across chunks {cite}." for h in batch_mod.NARRATIVE_SECTIONS
     )
@@ -984,6 +989,32 @@ def test_extract_section_finds_named_heading_and_returns_none_when_absent_or_bla
     assert batch_mod._extract_section(body, "Outputs and effects") == "More text."
     assert batch_mod._extract_section(body, "Inputs") is None  # present but blank
     assert batch_mod._extract_section(body, "Data used") is None  # absent entirely
+
+
+def test_extract_section_is_fence_aware_and_ignores_a_hash_hash_line_inside_a_code_block():
+    """A `##`-prefixed line inside a fenced code block (a Mermaid comment, an
+    example markdown snippet quoted in the section's own prose) must never
+    be mistaken for the next section's heading -- a regex-only scan over
+    the whole body can't tell the difference and would truncate early."""
+    body = (
+        "# Doc\n\n"
+        "## Purpose\n\n"
+        "Explains the flow, with an example:\n\n"
+        "```\n"
+        "## This looks like a heading but is inside a fence\n"
+        "```\n\n"
+        "Still part of Purpose.\n\n"
+        "## Inputs\n\n"
+        "Real next section.\n"
+    )
+    assert batch_mod._extract_section(body, "Purpose") == (
+        "Explains the flow, with an example:\n\n"
+        "```\n"
+        "## This looks like a heading but is inside a fence\n"
+        "```\n\n"
+        "Still part of Purpose."
+    )
+    assert batch_mod._extract_section(body, "Inputs") == "Real next section."
 
 
 def test_split_reconciled_sections_reports_missing_headings():

@@ -338,18 +338,39 @@ def _extract_section(body: str, heading: str) -> str | None:
     to pull an already-validated chunk's own narrative sections (feeding
     _generate_module_index_narrative's prompt) and to parse a reconciliation
     response back into per-heading text (_split_reconciled_sections) --
-    the same "find a named `## ` section" operation either way."""
-    pattern = _SECTION_HEADING_RE_CACHE.get(heading)
-    if pattern is None:
-        pattern = re.compile(
-            rf"^##\s+{re.escape(heading)}\s*$(.*?)(?=^##\s+|\Z)",
-            re.MULTILINE | re.DOTALL,
-        )
-        _SECTION_HEADING_RE_CACHE[heading] = pattern
-    m = pattern.search(body)
-    if not m:
+    the same "find a named `## ` section" operation either way.
+
+    Fence-aware: scans line by line, tracking whether each line is inside a
+    ``` fenced code block, so a line starting with `##` *inside* a fence
+    (e.g. a Mermaid diagram's own comment syntax, or an example markdown
+    snippet quoted in a section's own prose) is never mistaken for the next
+    section's heading -- the same failure mode validate.py's _logical_units
+    already guards its own line scan against. A regex-only approach (a
+    single `re.search` over the whole body) can't make that distinction and
+    would silently truncate a section at the first such line."""
+    heading_re = _SECTION_HEADING_RE_CACHE.get(heading)
+    if heading_re is None:
+        heading_re = re.compile(rf"^##\s+{re.escape(heading)}\s*$")
+        _SECTION_HEADING_RE_CACHE[heading] = heading_re
+    in_fence = False
+    collecting = False
+    collected: list[str] = []
+    for line in body.splitlines():
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            if collecting:
+                collected.append(line)
+            continue
+        if not in_fence and re.match(r"^##\s", line):
+            if collecting:
+                break  # a real (fence-external) heading ends this section
+            collecting = heading_re.match(line) is not None
+            continue
+        if collecting:
+            collected.append(line)
+    if not collecting:
         return None
-    text = m.group(1).strip("\n").strip()
+    text = "\n".join(collected).strip("\n").strip()
     return text or None
 
 
