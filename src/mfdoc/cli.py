@@ -764,6 +764,12 @@ def cmd_batch(args) -> int:
 
     writing_rules = (base / "reference" / "writing-rules.md").read_text(encoding="utf-8")
     template = (base / "templates" / "module.md").read_text(encoding="utf-8")
+    # Optional: only used to enrich the whole-module-overview reconciliation
+    # prompt for a chunked member (see batch.py's build_reconciliation_prompt) --
+    # a project without this file (e.g. one predating this feature) still
+    # gets that call, just without the section-naming contract folded in.
+    index_template_path = base / "templates" / "module-index.md"
+    index_template = index_template_path.read_text(encoding="utf-8") if index_template_path.exists() else None
 
     caller = _build_model_caller(args)
     if caller is None:
@@ -776,6 +782,7 @@ def cmd_batch(args) -> int:
         conn, members, base / args.out, caller, writing_rules, template, redact=redact,
         concurrency=args.concurrency,
         state_path=(base / args.state) if args.state else None,
+        index_template=index_template,
         cost_per_mtok_in=pricing.get("input_per_mtok"),
         cost_per_mtok_out=pricing.get("output_per_mtok"),
         lexicon=lexicon,
