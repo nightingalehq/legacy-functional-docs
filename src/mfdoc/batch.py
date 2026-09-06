@@ -384,22 +384,26 @@ def _consolidated_gap_lines(conn, member_name: str, member_id: int,
         # A gap's `detail` is free text meant for a fact brief (module_brief's
         # own "Known gaps" section pastes it verbatim the same way) -- fine
         # there, since a brief is never itself validated. Pasted whole into a
-        # document validate_doc *does* check, a `detail` with more than one
-        # sentence risks its second sentence (typically elaboration/an
+        # document validate_doc *does* check, and a `detail` with more than
+        # one sentence risks its second sentence (typically elaboration/an
         # instruction to confirm, not the citable fact itself) reading as an
         # uncited assertive claim on its own, since validate_doc checks each
-        # sentence independently. Keeping only the first sentence -- the
-        # actual finding -- avoids that without inventing or dropping the
-        # finding itself; the full detail is still one query away in the
-        # fact store for anyone who wants it.
-        first_sentence = r["detail"].split(". ", 1)[0].rstrip(". ") + "."
+        # sentence independently. Rather than dropping every sentence after
+        # the first (losing real context a reviewer may need), repeat the
+        # same citation before every sentence -- a citation immediately
+        # preceding a claim satisfies validate_doc's check for that claim
+        # (see CITATION.search(u) in _uncited_assertions), so this keeps the
+        # full detail while citing each sentence in it individually.
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", r["detail"].strip()) if s.strip()]
+        first_sentence = sentences[0] if sentences else r["detail"].strip()
         identity = (r["gap_kind"], r["line_no"], first_sentence)
         if identity in seen_gap_identity:
             continue
         seen_gap_identity.add(identity)
         seen_content.add(first_sentence)
         loc = _cite(member_name, r["line_no"])
-        lines.append(f"[{r['severity']}] {loc} {r['gap_kind']}: {first_sentence}")
+        detail_text = " ".join(f"{loc} {s}" for s in sentences) if sentences else f"{loc} {r['detail'].strip()}"
+        lines.append(f"[{r['severity']}] {r['gap_kind']}: {detail_text}")
     for path in ok_chunk_paths:
         if not path.exists():
             continue

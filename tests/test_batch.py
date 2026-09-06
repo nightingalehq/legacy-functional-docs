@@ -1097,6 +1097,35 @@ def test_consolidated_gap_lines_keeps_distinct_gaps_with_identical_detail_text(t
     assert any(":20]]" in line for line in lines)
 
 
+def test_consolidated_gap_lines_cites_every_sentence_in_a_multi_sentence_detail():
+    """A gap `detail` with more than one sentence must keep every sentence
+    (not just the first) -- but each one still needs its own citation
+    immediately before it, or validate_doc's uncited-assertion check would
+    flag a later sentence that happens to open with an assertive phrase."""
+    import sqlite3
+    from mfdoc.db import SCHEMA, insert
+    from mfdoc.validate import _uncited_assertions
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    insert(
+        conn, "gap", member_id=1, gap_kind="orphan_module", severity="high", line_no=5,
+        detail="No caller found for FAKEMOD. The module may still be invoked via JCL not ingested here.",
+    )
+    conn.commit()
+
+    lines = batch_mod._consolidated_gap_lines(conn, "FAKEMOD", 1, [])
+    assert len(lines) == 1
+    line = lines[0]
+    assert "No caller found for FAKEMOD." in line
+    assert "The module may still be invoked via JCL not ingested here." in line
+    # Both sentences must carry their own citation, not just the first.
+    assert line.count("[[FAKEMOD:5]]") == 2
+    assert _uncited_assertions(line) == []
+
+
 def test_generate_module_index_narrative_rejects_a_citation_not_in_any_excerpt(tmp_path):
     """A reconciled section citing a real, resolvable line that never
     appeared in any given chunk excerpt must be rejected -- validate_doc's
