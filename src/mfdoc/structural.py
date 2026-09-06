@@ -196,7 +196,7 @@ def call_graph_diagram(
     max_nodes_inline: int = 40,
     direction: str = "LR",
 ) -> dict[str, str]:
-    """Mermaid call-graph DAG, one diagram per connected component of the
+    """Mermaid call-graph diagram, one per connected component of the
     call graph (see graph.connected_components() -- direction is treated as
     irrelevant for grouping, only whether a caller/callee pair are linked at
     all). This is a strictly better default split than cluster_by's module/

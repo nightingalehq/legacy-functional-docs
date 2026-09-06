@@ -662,10 +662,11 @@ def connected_components(conn) -> list[set[int]]:
         if ra != rb:
             parent[ra] = rb
 
-    rows = conn.execute(
-        "SELECT DISTINCT caller_id, callee_id FROM call_edge"
-    ).fetchall()
-    for r in rows:
+    # Iterate the cursor directly rather than .fetchall() -- a large call
+    # graph's edge count is exactly the case union-find scales to easily,
+    # and there's no reason to also hold every row in a Python list at once
+    # just to walk it once in order.
+    for r in conn.execute("SELECT DISTINCT caller_id, callee_id FROM call_edge"):
         caller_id = r["caller_id"]
         if caller_id not in parent:
             parent[caller_id] = caller_id
