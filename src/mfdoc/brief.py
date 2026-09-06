@@ -16,6 +16,7 @@ import json
 import re
 
 from .citations import _cite, _rule_id
+from .db import GAP_SEVERITY_ORDER_SQL
 from .redact import NULL_REDACTOR, Redactor
 
 
@@ -544,7 +545,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
         add("")
 
     gaps = conn.execute(
-        "SELECT * FROM gap WHERE member_id=? ORDER BY severity DESC, line_no", (mid,)
+        f"SELECT * FROM gap WHERE member_id=? ORDER BY {GAP_SEVERITY_ORDER_SQL}, line_no", (mid,)
     ).fetchall()
     if gaps:
         add("## Known gaps for this module")

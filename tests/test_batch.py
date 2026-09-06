@@ -13,9 +13,14 @@ deliberately routes to the CLI path instead, not module docs.
 from __future__ import annotations
 
 import json
+import re
+from pathlib import Path
+
+import pytest
 
 from mfdoc import batch as batch_mod
 from mfdoc.redact import NULL_REDACTOR, Redactor
+from mfdoc.validate import CITATION
 
 
 def _track_module_brief_calls(monkeypatch) -> list[str]:
@@ -52,6 +57,26 @@ sme_questions: []
 """
 
 
+def _fake_reconciliation_response(prompt: str, input_tokens: int = 10,
+                                   output_tokens: int = 20) -> "batch_mod.ModelResponse":
+    """A valid response to batch.py's whole-module narrative-synthesis
+    prompt (build_reconciliation_prompt) -- distinguished from an ordinary
+    per-member/per-chunk prompt by not carrying a "# Fact brief:" heading.
+    Reuses whichever `[[MEMBER:LINE]]` citation the prompt's own per-chunk
+    excerpts already carry, so the reconciled sections cite forward exactly
+    as the real feature is meant to, rather than inventing one. Matches via
+    validate.CITATION itself (not a bespoke regex) so this fake can't fall
+    back to a fabricated [[UNKNOWN:1]] for a real citation whose member name
+    uses a character validate.py's own pattern allows but a narrower ad hoc
+    regex here wouldn't (e.g. a leading `#`/`@`/`$`/`&`)."""
+    m = CITATION.search(prompt)
+    cite = f"[[{m.group('member')}:{m.group('from')}]]" if m and m.group("from") else "[[UNKNOWN:1]]"
+    text = "\n\n".join(
+        f"## {h}\n\nReconciled across chunks {cite}." for h in batch_mod.NARRATIVE_SECTIONS
+    )
+    return batch_mod.ModelResponse(text=text, input_tokens=input_tokens, output_tokens=output_tokens)
+
+
 class FakeCaller:
     """Returns a valid doc for every prompt; records prompts it was called with."""
 
@@ -63,6 +88,10 @@ class FakeCaller:
     def __call__(self, prompt: str) -> batch_mod.ModelResponse:
         self.calls += 1
         self.prompts.append(prompt)
+        if "# Fact brief:" not in prompt:
+            # The one-per-chunked-member narrative-synthesis call, not an
+            # ordinary member/chunk brief -- see _fake_reconciliation_response.
+            return _fake_reconciliation_response(prompt)
         # A retry prompt carries the "Previous attempt failed" section.
         is_retry = "Previous attempt failed validation" in prompt
         if self.fail_first and not is_retry:
@@ -72,9 +101,13 @@ class FakeCaller:
             # heading line ("# Fact brief: NAME") so the fake response is valid
             # for whichever member it was generated for.
             member = prompt.split("# Fact brief:")[1].splitlines()[0].strip()
+            sections = "\n\n".join(
+                f"## {h}\n\nThis module does something [[{member}:1]]."
+                for h in batch_mod.NARRATIVE_SECTIONS
+            )
             text = (
                 GOOD_FRONTMATTER.format(member=member)
-                + f"\n# {member}\n\nThis module does something [[{member}:1]].\n"
+                + f"\n# {member}\n\n{sections}\n"
             )
         return batch_mod.ModelResponse(text=text, input_tokens=100, output_tokens=200)
 
@@ -350,14 +383,23 @@ def _chunk_aware_module_caller():
     """A fake caller that returns a fully valid single-chunk module doc,
     citing exactly the FAKEMOD:BR-nnn ids present in the prompt it was
     sent -- mirrors what a real model does for one chunk's brief, without a
-    real call. Mirrors test_test_batch.py's _chunk_aware_caller."""
-    import re as _re
+    real call. Mirrors test_test_batch.py's _chunk_aware_caller.
 
-    ids_re = _re.compile(r"FAKEMOD:BR-\d+")
+    Also answers the one-per-chunked-member narrative-synthesis call
+    (distinguished by the absence of "# Fact brief:", the per-chunk brief's
+    own heading) with a valid five-section reconciliation, so tests
+    exercising the full chunked path (chunk generation *and* the whole-
+    module overview it now produces) don't need two different fakes."""
+    ids_re = re.compile(r"FAKEMOD:BR-\d+")
 
     def caller(prompt: str) -> batch_mod.ModelResponse:
+        if "# Fact brief:" not in prompt:
+            return _fake_reconciliation_response(prompt, input_tokens=1, output_tokens=2)
         ids = sorted(set(ids_re.findall(prompt)))
         rule_lines = "\n".join(f"1. **{i}** [[FAKEMOD:1]] rule text." for i in ids)
+        sections = "\n\n".join(
+            f"## {h}\n\nCovers the module as a whole [[FAKEMOD:1]]." for h in batch_mod.NARRATIVE_SECTIONS[:4]
+        )
         text = f"""---
 title: "FAKEMOD — module documentation"
 doc_type: module
@@ -377,13 +419,15 @@ sme_questions: []
 
 # FAKEMOD
 
-## Purpose
-
-Covers the module as a whole [[FAKEMOD:1]].
+{sections}
 
 ## Business rules
 
 {rule_lines}
+
+## Outputs and effects
+
+Nothing beyond what's cited above [[FAKEMOD:1]].
 """
         return batch_mod.ModelResponse(text=text, input_tokens=1, output_tokens=2)
     return caller
@@ -420,10 +464,18 @@ def test_generate_module_doc_chunks_a_member_with_many_rules(tmp_path):
         assert validate_doc(conn, chunk_path)["ok"]
 
     index_text = out_path.read_text(encoding="utf-8")
-    assert "doc_type: module" in index_text
+    assert "doc_type: module_index" in index_text
     assert "verified: 5" in index_text, "confidence_summary must aggregate all 5 chunked rules"
-    for n in range(1, 6):
-        assert f"FAKEMOD:BR-{n:03d}" in index_text
+    # Ranges, not a flat per-id enumeration -- one range per chunk, covering
+    # the member's full BR-001..BR-005 span between them.
+    assert "`FAKEMOD:BR-001`..`FAKEMOD:BR-002`" in index_text
+    assert "`FAKEMOD:BR-003`..`FAKEMOD:BR-004`" in index_text
+    assert "`FAKEMOD:BR-005`..`FAKEMOD:BR-005`" in index_text
+    # The whole-module narrative synthesis ran (every chunk was ok) and its
+    # reconciled sections made it into the assembled document.
+    assert "Reconciled across chunks" in index_text
+    assert "## Gaps and questions for review" in index_text
+    assert "## Chunk files" in index_text
 
     revalidated = validate_doc(conn, out_path)
     assert revalidated["ok"], revalidated["problems"]
@@ -443,8 +495,11 @@ def test_generate_module_doc_reports_failure_when_one_chunk_fails(tmp_path):
     _seed_fakemod_rules(conn, 4)
 
     good_caller = _chunk_aware_module_caller()
+    reconciliation_calls = []
 
     def flaky_caller(prompt: str) -> batch_mod.ModelResponse:
+        if "# Fact brief:" not in prompt:
+            reconciliation_calls.append(prompt)
         if "BR-003" in prompt:
             return batch_mod.ModelResponse(text="not a valid document", input_tokens=1, output_tokens=1)
         return good_caller(prompt)
@@ -456,9 +511,16 @@ def test_generate_module_doc_reports_failure_when_one_chunk_fails(tmp_path):
     )
     assert result.ok is False
     assert any("chunk 2" in p for p in result.problems)
+    assert any("narrative synthesis: skipped" in p for p in result.problems)
+    assert not reconciliation_calls, (
+        "narrative synthesis must never be attempted when a chunk failed"
+    )
 
     assert (tmp_path / "FAKEMOD.chunk1.md").exists()
     assert validate_doc(conn, tmp_path / "FAKEMOD.chunk1.md")["ok"]
+
+    index_text = out_path.read_text(encoding="utf-8")
+    assert "narrative synthesis was skipped" in index_text.lower()
 
 
 def test_chunked_brief_names_the_chunk_a_routine_in_another_chunk_is_documented_in(tmp_path):
@@ -485,8 +547,9 @@ def test_chunked_brief_names_the_chunk_a_routine_in_another_chunk_is_documented_
 
     def recording_caller(prompt: str) -> batch_mod.ModelResponse:
         import re as _re
-        chunk_no = int(_re.search(r"chunk (\d+) of", prompt).group(1))
-        briefs[chunk_no] = prompt
+        match = _re.search(r"chunk (\d+) of", prompt)
+        if match is not None:
+            briefs[int(match.group(1))] = prompt
         return _chunk_aware_module_caller()(prompt)
 
     out_path = tmp_path / "FAKEMOD.md"
@@ -539,8 +602,9 @@ def test_chunk_map_is_correct_when_rule_candidate_rows_share_a_line_no(tmp_path)
 
     def recording_caller(prompt: str) -> batch_mod.ModelResponse:
         import re as _re
-        chunk_no = int(_re.search(r"chunk (\d+) of", prompt).group(1))
-        briefs[chunk_no] = prompt
+        match = _re.search(r"chunk (\d+) of", prompt)
+        if match is not None:
+            briefs[int(match.group(1))] = prompt
         return _chunk_aware_module_caller()(prompt)
 
     out_path = tmp_path / "FAKEMOD.md"
@@ -737,8 +801,8 @@ def test_chunk_resume_makes_no_model_calls_when_every_chunk_brief_is_unchanged(t
         "writing rules text", "template text", max_rules_per_call=2,
     )
     assert first.ok is True
-    assert first_caller.calls == 3
-    assert first.chunk_state is not None and set(first.chunk_state) == {"1", "2", "3"}
+    assert first_caller.calls == 4  # 3 chunks + 1 whole-module narrative synthesis
+    assert first.chunk_state is not None and set(first.chunk_state) == {"1", "2", "3", "_narrative"}
 
     def exploding_caller(prompt: str) -> batch_mod.ModelResponse:
         raise AssertionError("must not call the model for an unchanged chunk")
@@ -770,7 +834,7 @@ def test_chunk_resume_only_regenerates_the_chunk_whose_own_brief_changed(tmp_pat
         conn, "FAKEMOD", out_path, first_caller,
         "writing rules text", "template text", max_rules_per_call=2,
     )
-    assert first_caller.calls == 3
+    assert first_caller.calls == 4  # 3 chunks + 1 whole-module narrative synthesis
     chunk1_before = (tmp_path / "FAKEMOD.chunk1.md").read_text(encoding="utf-8")
 
     # Rule 3 (line 3) falls in chunk 2's range (rules 3-4) -- change its
@@ -785,6 +849,12 @@ def test_chunk_resume_only_regenerates_the_chunk_whose_own_brief_changed(tmp_pat
         prior_chunks=first.chunk_state,
     )
     assert second.ok is True
+    # Only chunk 2 re-renders (its own brief hash changed); chunks 1 and 3
+    # are reused untouched. The whole-module narrative synthesis is reused
+    # too here -- _chunk_aware_module_caller's response only depends on
+    # which BR ids are in a chunk's prompt, not the (changed) condition
+    # text, so chunk 2's regenerated body is byte-identical to before and
+    # the reconciliation's own input hash is unaffected.
     assert second_caller.calls == 1, "only the chunk covering the changed rule should re-render"
     assert (tmp_path / "FAKEMOD.chunk1.md").read_text(encoding="utf-8") == chunk1_before
 
@@ -842,3 +912,451 @@ def test_run_batch_persists_chunk_state_and_reuses_it_across_calls(indexed_db, t
     assert summary2.failed == 0
     assert second_caller.calls == 0, "every chunk should be reused, not re-rendered"
     assert chunk_count_first_run > 0
+
+
+def test_chunk_processing_labels_names_routines_and_falls_back_to_main_body():
+    """One label per (start, end) range, naming the routine(s) whose rules
+    fall in it (first-seen order, backtick-quoted), or the plain
+    main-body fallback when a range's rules belong to no routine at all."""
+    rule_rows = [
+        {"line_no": 10},  # in ROUTINE-A
+        {"line_no": 11},  # in ROUTINE-A
+        {"line_no": 30},  # in ROUTINE-B
+        {"line_no": 50},  # main body -- no routine
+    ]
+    routines = [
+        {"name": "ROUTINE-A", "start_line": 5, "end_line": 20},
+        {"name": "ROUTINE-B", "start_line": 25, "end_line": 40},
+    ]
+    ranges = [(1, 2), (3, 3), (4, 4)]
+
+    labels = batch_mod._chunk_processing_labels(rule_rows, routines, ranges)
+
+    assert labels == [
+        "`ROUTINE-A`",
+        "`ROUTINE-B`",
+        "member main body (no internal routine)",
+    ]
+
+
+def test_consolidated_gap_lines_dedupes_gap_rows_and_chunk_sme_questions(tmp_path):
+    """Gap-register rows (highest real severity first) come first; a
+    chunk's own sme_questions add text not already present, and an exact
+    duplicate -- whether between two chunks or of a gap row's own text --
+    appears only once."""
+    import sqlite3
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    insert(conn, "gap", member_id=1, gap_kind="orphan_module", severity="high",
+           detail="No caller found for FAKEMOD. Confirm whether this is dead code.", line_no=None)
+    insert(conn, "gap", member_id=1, gap_kind="unused_field", severity="low",
+           detail="Field X is never referenced.", line_no=7)
+    conn.commit()
+
+    def _chunk_with_questions(path, questions):
+        fm_lines = ["---", "sme_questions:"]
+        fm_lines += [f'  - "{q}"' for q in questions]
+        fm_lines.append("---\n")
+        path.write_text("\n".join(fm_lines), encoding="utf-8")
+
+    chunk1 = tmp_path / "FAKEMOD.chunk1.md"
+    chunk2 = tmp_path / "FAKEMOD.chunk2.md"
+    _chunk_with_questions(chunk1, ["Is X still used by any downstream job?"])
+    _chunk_with_questions(chunk2, [
+        "Is X still used by any downstream job?",  # duplicate of chunk1's own
+        "No caller found for FAKEMOD.",  # duplicate of a gap row's own first sentence
+    ])
+
+    lines = batch_mod._consolidated_gap_lines(conn, "FAKEMOD", 1, [chunk1, chunk2])
+
+    # Real severity priority (db.GAP_SEVERITY_ORDER_SQL), shared with
+    # module_brief's own "Known gaps" section -- "high" sorts first, not
+    # "low" (TEXT lexicographic order would put "low" ahead of "high").
+    assert lines[0].startswith("[high]") and "orphan_module" in lines[0]
+    assert lines[1].startswith("[low]") and "unused_field" in lines[1]
+    assert lines.count("Is X still used by any downstream job?") == 1
+    assert not any(line == "No caller found for FAKEMOD." for line in lines[2:])
+    assert len(lines) == 3  # 2 gap rows + 1 genuinely new sme_question
+
+
+def test_extract_section_finds_named_heading_and_returns_none_when_absent_or_blank():
+    body = "# Doc\n\n## Purpose\n\nSome text here.\n\n## Inputs\n\n\n\n## Outputs and effects\n\nMore text.\n"
+    assert batch_mod._extract_section(body, "Purpose") == "Some text here."
+    assert batch_mod._extract_section(body, "Outputs and effects") == "More text."
+    assert batch_mod._extract_section(body, "Inputs") is None  # present but blank
+    assert batch_mod._extract_section(body, "Data used") is None  # absent entirely
+
+
+def test_extract_section_is_fence_aware_and_ignores_a_hash_hash_line_inside_a_code_block():
+    """A `##`-prefixed line inside a fenced code block (a Mermaid comment, an
+    example markdown snippet quoted in the section's own prose) must never
+    be mistaken for the next section's heading -- a regex-only scan over
+    the whole body can't tell the difference and would truncate early."""
+    body = (
+        "# Doc\n\n"
+        "## Purpose\n\n"
+        "Explains the flow, with an example:\n\n"
+        "```\n"
+        "## This looks like a heading but is inside a fence\n"
+        "```\n\n"
+        "Still part of Purpose.\n\n"
+        "## Inputs\n\n"
+        "Real next section.\n"
+    )
+    assert batch_mod._extract_section(body, "Purpose") == (
+        "Explains the flow, with an example:\n\n"
+        "```\n"
+        "## This looks like a heading but is inside a fence\n"
+        "```\n\n"
+        "Still part of Purpose."
+    )
+    assert batch_mod._extract_section(body, "Inputs") == "Real next section."
+
+
+def test_split_reconciled_sections_reports_missing_headings():
+    text = "\n\n".join(
+        f"## {h}\n\nfilled in." for h in batch_mod.NARRATIVE_SECTIONS if h != "Inputs"
+    )
+    sections, missing = batch_mod._split_reconciled_sections(text)
+    assert missing == ["Inputs"]
+    assert set(sections) == set(batch_mod.NARRATIVE_SECTIONS) - {"Inputs"}
+
+
+def _valid_narrative_response(cite: str) -> str:
+    return "\n\n".join(f"## {h}\n\nReconciled {cite}." for h in batch_mod.NARRATIVE_SECTIONS)
+
+
+def test_generate_module_index_narrative_succeeds_first_try(tmp_path):
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
+    conn.commit()
+
+    calls = []
+
+    def caller(prompt):
+        calls.append(prompt)
+        return batch_mod.ModelResponse(text=_valid_narrative_response("[[FAKEMOD:1]]"), input_tokens=5, output_tokens=6)
+
+    out_path = tmp_path / "FAKEMOD.md"
+
+    def assemble(sections):
+        body = "\n".join(f"## {h}\n\n{sections[h]}\n" for h in batch_mod.NARRATIVE_SECTIONS)
+        return (
+            "---\ntitle: \"FAKEMOD\"\ndoc_type: module_index\nsystem: MOM\n"
+            "generated_by: legacy-functional-docs 0.1.0\ngenerated_at: \"2026-01-01\"\n"
+            "review_status: draft\nconfidence_summary:\n  verified: 1\nsources: [\"FAKEMOD\"]\n---\n"
+            f"\n# FAKEMOD\n\n{body}"
+        )
+
+    ok, attempts, in_tok, out_tok, problems, sections = batch_mod._generate_module_index_narrative(
+        conn, "FAKEMOD", [(1, "## Purpose\n\nSomething [[FAKEMOD:1]].")], caller,
+        "writing rules", None, out_path, assemble, max_attempts=2,
+    )
+    assert ok is True
+    assert attempts == 1
+    assert len(calls) == 1
+    assert in_tok == 5 and out_tok == 6
+    assert problems == []
+
+
+def test_generate_module_index_narrative_retries_once_on_missing_section(tmp_path):
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
+    conn.commit()
+
+    responses = [
+        "\n\n".join(
+            f"## {h}\n\nReconciled [[FAKEMOD:1]]." for h in batch_mod.NARRATIVE_SECTIONS if h != "Inputs"
+        ),
+        _valid_narrative_response("[[FAKEMOD:1]]"),
+    ]
+    calls = []
+
+    def caller(prompt):
+        calls.append(prompt)
+        text = responses[len(calls) - 1]
+        return batch_mod.ModelResponse(text=text, input_tokens=1, output_tokens=1)
+
+    out_path = tmp_path / "FAKEMOD.md"
+
+    def assemble(sections):
+        body = "\n".join(f"## {h}\n\n{sections[h]}\n" for h in batch_mod.NARRATIVE_SECTIONS)
+        return (
+            "---\ntitle: \"FAKEMOD\"\ndoc_type: module_index\nsystem: MOM\n"
+            "generated_by: legacy-functional-docs 0.1.0\ngenerated_at: \"2026-01-01\"\n"
+            "review_status: draft\nconfidence_summary:\n  verified: 1\nsources: [\"FAKEMOD\"]\n---\n"
+            f"\n# FAKEMOD\n\n{body}"
+        )
+
+    ok, attempts, in_tok, out_tok, problems, sections = batch_mod._generate_module_index_narrative(
+        conn, "FAKEMOD", [(1, "## Purpose\n\nSomething [[FAKEMOD:1]].")], caller,
+        "writing rules", None, out_path, assemble, max_attempts=2,
+    )
+    assert ok is True
+    assert attempts == 2
+    assert len(calls) == 2
+    assert "missing" in calls[1].lower() or "Inputs" in calls[1]
+
+
+def test_generate_module_index_narrative_fails_after_max_attempts(tmp_path):
+    """A reconciliation response that never carries a real citation keeps
+    failing validate_doc's own citation-resolution check -- ok=False after
+    both attempts, problems non-empty."""
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
+    conn.commit()
+
+    def caller(prompt):
+        text = "\n\n".join(
+            f"## {h}\n\nThe module does something with no citation at all."
+            for h in batch_mod.NARRATIVE_SECTIONS
+        )
+        return batch_mod.ModelResponse(text=text, input_tokens=1, output_tokens=1)
+
+    out_path = tmp_path / "FAKEMOD.md"
+
+    def assemble(sections):
+        body = "\n".join(f"## {h}\n\n{sections[h]}\n" for h in batch_mod.NARRATIVE_SECTIONS)
+        return (
+            "---\ntitle: \"FAKEMOD\"\ndoc_type: module_index\nsystem: MOM\n"
+            "generated_by: legacy-functional-docs 0.1.0\ngenerated_at: \"2026-01-01\"\n"
+            "review_status: draft\nconfidence_summary:\n  verified: 1\nsources: [\"FAKEMOD\"]\n---\n"
+            f"\n# FAKEMOD\n\n{body}"
+        )
+
+    ok, attempts, in_tok, out_tok, problems, sections = batch_mod._generate_module_index_narrative(
+        conn, "FAKEMOD", [(1, "## Purpose\n\nSomething [[FAKEMOD:1]].")], caller,
+        "writing rules", None, out_path, assemble, max_attempts=2,
+    )
+    assert ok is False
+    assert attempts == 2
+    assert problems
+
+
+def test_render_module_index_doc_raises_on_chunk_entries_routine_labels_mismatch():
+    """chunk_entries and routine_labels must be the same length -- a plain
+    zip() would silently truncate to the shorter list (dropping trailing
+    chunks from the rendered index) instead of surfacing the mismatch."""
+    result = batch_mod.DocResult("FAKEMOD", "FAKEMOD.chunk01.md", True, 1, 1, 1, [])
+    chunk_entries = [
+        (1, (1, 1), Path("FAKEMOD.chunk01.md"), result),
+        (2, (2, 2), Path("FAKEMOD.chunk02.md"), result),
+    ]
+    sections = {h: "text [[FAKEMOD:1]]." for h in batch_mod.NARRATIVE_SECTIONS}
+    with pytest.raises(ValueError):
+        batch_mod._render_module_index_doc(
+            "FAKEMOD", "MOM", chunk_entries, {"verified": 1, "inferred": 0, "unresolved": 0},
+            ["label only for chunk 1"], [], sections,
+        )
+
+
+def test_consolidated_gap_lines_orders_by_real_severity_priority(tmp_path):
+    """Gap rows must sort by real severity priority (high, medium, low), not
+    gap.severity's own TEXT/lexicographic order (which would put medium,
+    low, high in that order)."""
+    import sqlite3
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    insert(conn, "gap", member_id=1, gap_kind="k1", severity="medium", detail="Medium one.", line_no=1)
+    insert(conn, "gap", member_id=1, gap_kind="k2", severity="low", detail="Low one.", line_no=2)
+    insert(conn, "gap", member_id=1, gap_kind="k3", severity="high", detail="High one.", line_no=3)
+    conn.commit()
+
+    lines = batch_mod._consolidated_gap_lines(conn, "FAKEMOD", 1, [])
+    assert [l.split("]")[0] + "]" for l in lines] == ["[high]", "[medium]", "[low]"]
+
+
+def test_consolidated_gap_lines_dedupes_sme_question_against_a_later_gap_sentence(tmp_path):
+    """seen_content must track every sentence of a gap's detail, not just
+    the first -- an sme_question duplicating a later sentence (or the full
+    multi-sentence detail) must still be recognised as already covered."""
+    import sqlite3
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    insert(
+        conn, "gap", member_id=1, gap_kind="orphan_module", severity="high", line_no=5,
+        detail="No caller found for FAKEMOD. The module may still be invoked via JCL not ingested here.",
+    )
+    conn.commit()
+
+    chunk = tmp_path / "FAKEMOD.chunk01.md"
+    chunk.write_text(
+        '---\nsme_questions:\n  - "The module may still be invoked via JCL not ingested here."\n---\n',
+        encoding="utf-8",
+    )
+
+    lines = batch_mod._consolidated_gap_lines(conn, "FAKEMOD", 1, [chunk])
+    assert len(lines) == 1, "the sme_question duplicates the gap's own second sentence and must be dropped"
+
+
+def test_consolidated_gap_lines_keeps_distinct_gaps_with_identical_detail_text(tmp_path):
+    """Several gap rows commonly share identical `detail` text (e.g. every
+    unparsed_line gap for a member reads the same templated sentence,
+    differing only by line_no) -- deduping on text alone would collapse
+    them down to one and silently drop the rest. Dedup must be keyed on
+    (gap_kind, line_no, text), not text alone."""
+    import sqlite3
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    same_detail = "Statement not recognised by the Natural scanner in FAKEMOD."
+    insert(conn, "gap", member_id=1, gap_kind="unparsed_line", severity="low",
+           detail=same_detail, line_no=10)
+    insert(conn, "gap", member_id=1, gap_kind="unparsed_line", severity="low",
+           detail=same_detail, line_no=20)
+    conn.commit()
+
+    lines = batch_mod._consolidated_gap_lines(conn, "FAKEMOD", 1, [])
+    assert len(lines) == 2, "both gap rows must survive dedup, not just one"
+    assert any(":10]]" in line for line in lines)
+    assert any(":20]]" in line for line in lines)
+
+
+def test_consolidated_gap_lines_cites_every_sentence_in_a_multi_sentence_detail():
+    """A gap `detail` with more than one sentence must keep every sentence
+    (not just the first) -- but each one still needs its own citation
+    immediately before it, or validate_doc's uncited-assertion check would
+    flag a later sentence that happens to open with an assertive phrase."""
+    import sqlite3
+    from mfdoc.db import SCHEMA, insert
+    from mfdoc.validate import _uncited_assertions
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    insert(
+        conn, "gap", member_id=1, gap_kind="orphan_module", severity="high", line_no=5,
+        detail="No caller found for FAKEMOD. The module may still be invoked via JCL not ingested here.",
+    )
+    conn.commit()
+
+    lines = batch_mod._consolidated_gap_lines(conn, "FAKEMOD", 1, [])
+    assert len(lines) == 1
+    line = lines[0]
+    assert "No caller found for FAKEMOD." in line
+    assert "The module may still be invoked via JCL not ingested here." in line
+    # Both sentences must carry their own citation, not just the first.
+    assert line.count("[[FAKEMOD:5]]") == 2
+    assert _uncited_assertions(line) == []
+
+
+def test_generate_module_index_narrative_rejects_a_citation_not_in_any_excerpt(tmp_path):
+    """A reconciled section citing a real, resolvable line that never
+    appeared in any given chunk excerpt must be rejected -- validate_doc's
+    citation-resolution check alone can't catch this (the citation *does*
+    resolve), so this is the deterministic check that must."""
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 2, 'irrelevant')")
+    conn.commit()
+
+    def caller(prompt):
+        # Cites [[FAKEMOD:2]] -- a real, resolvable line, but never given in
+        # any chunk excerpt (only [[FAKEMOD:1]] was).
+        return batch_mod.ModelResponse(
+            text=_valid_narrative_response("[[FAKEMOD:2]]"), input_tokens=1, output_tokens=1,
+        )
+
+    out_path = tmp_path / "FAKEMOD.md"
+
+    def assemble(sections):
+        body = "\n".join(f"## {h}\n\n{sections[h]}\n" for h in batch_mod.NARRATIVE_SECTIONS)
+        return (
+            "---\ntitle: \"FAKEMOD\"\ndoc_type: module_index\nsystem: MOM\n"
+            "generated_by: legacy-functional-docs 0.1.0\ngenerated_at: \"2026-01-01\"\n"
+            "review_status: draft\nconfidence_summary:\n  verified: 1\nsources: [\"FAKEMOD\"]\n---\n"
+            f"\n# FAKEMOD\n\n{body}"
+        )
+
+    ok, attempts, in_tok, out_tok, problems, sections = batch_mod._generate_module_index_narrative(
+        conn, "FAKEMOD", [(1, "## Purpose\n\nSomething [[FAKEMOD:1]].")], caller,
+        "writing rules", None, out_path, assemble, max_attempts=2,
+    )
+    assert ok is False
+    assert sections is None
+    assert any("not present in any given chunk excerpt" in p for p in problems)
+
+
+def test_generate_module_index_narrative_retry_prompt_carries_provenance_problem(tmp_path):
+    """A rejected attempt whose only failure is a provenance violation
+    (validate_doc itself finds nothing wrong -- the citation resolves)
+    must still put that problem in the next attempt's retry_note, or the
+    model gets no signal and just repeats the same invented citation."""
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 2, 'irrelevant')")
+    conn.commit()
+
+    prompts: list[str] = []
+
+    def caller(prompt):
+        prompts.append(prompt)
+        return batch_mod.ModelResponse(
+            text=_valid_narrative_response("[[FAKEMOD:2]]"), input_tokens=1, output_tokens=1,
+        )
+
+    out_path = tmp_path / "FAKEMOD.md"
+
+    def assemble(sections):
+        body = "\n".join(f"## {h}\n\n{sections[h]}\n" for h in batch_mod.NARRATIVE_SECTIONS)
+        return (
+            "---\ntitle: \"FAKEMOD\"\ndoc_type: module_index\nsystem: MOM\n"
+            "generated_by: legacy-functional-docs 0.1.0\ngenerated_at: \"2026-01-01\"\n"
+            "review_status: draft\nconfidence_summary:\n  verified: 1\nsources: [\"FAKEMOD\"]\n---\n"
+            f"\n# FAKEMOD\n\n{body}"
+        )
+
+    batch_mod._generate_module_index_narrative(
+        conn, "FAKEMOD", [(1, "## Purpose\n\nSomething [[FAKEMOD:1]].")], caller,
+        "writing rules", None, out_path, assemble, max_attempts=2,
+    )
+
+    assert len(prompts) == 2
+    assert "Previous attempt failed validation" in prompts[1]
+    assert "not present in any given chunk excerpt" in prompts[1]

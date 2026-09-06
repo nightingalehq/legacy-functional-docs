@@ -599,7 +599,7 @@ def validate_doc(conn, path: Path, outcome_field=OUTCOME_FIELD) -> dict:
         else:
             problems.append("confidence_summary should be a mapping of confidence level to count")
 
-        if fm.get("doc_type") == "module":
+        if fm.get("doc_type") in ("module", "module_index"):
             first_line = next((ln for ln in body.splitlines() if ln.strip()), "")
             if not first_line.lstrip().startswith("#"):
                 problems.append(
@@ -608,15 +608,20 @@ def validate_doc(conn, path: Path, outcome_field=OUTCOME_FIELD) -> dict:
                     "before the actual document content instead of starting with it"
                 )
 
-    # Scoped to narrative module docs only. A generated-test doc or a flat
-    # register echoes source syntax and field-inventory phrasing verbatim,
+    # Scoped to narrative module docs only -- both a member's own chunk
+    # documents (doc_type: module) and a chunked member's whole-module
+    # overview (doc_type: module_index, batch.py's _render_module_index_doc),
+    # since the latter's five reconciled sections carry citations copied
+    # forward from already-validated chunks and are exactly as meaningful to
+    # check here. A generated-test doc or a flat register echoes source
+    # syntax and field-inventory phrasing verbatim,
     # sentence-per-YAML-field rather than sentence-per-claim -- the same
     # literal recurs across several adjacent lines with different framing
     # each time (a precondition, a Given, a When), which defeats the
     # single-nearest-occurrence assumption this check relies on and would
     # make it noise rather than signal outside the doc type it was built for.
     # (Gates `_statement_completeness_problems` below too, for the same reason.)
-    module_doc_checks = fm is not None and fm.get("doc_type") == "module"
+    module_doc_checks = fm is not None and fm.get("doc_type") in ("module", "module_index")
 
     if module_doc_checks:
         deferred_references.extend(_deferred_reference_problems(body))

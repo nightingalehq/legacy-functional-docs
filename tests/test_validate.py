@@ -498,6 +498,42 @@ def test_module_completeness_unions_coverage_across_chunk_documents():
     assert module_completeness_problems(conn, results) == []
 
 
+def test_module_index_doc_type_gets_module_style_checks(indexed_db, tmp_path):
+    """`doc_type: module_index` (a chunked member's whole-module overview,
+    batch.py's _render_module_index_doc) must get the same first-line-
+    heading and uncited-assertion checks a doc_type: module document gets --
+    its reconciled sections carry citations copied forward from
+    already-validated chunks, so they're exactly as checkable."""
+    fm = GOOD_FRONTMATTER.replace("doc_type: module\n", "doc_type: module_index\n")
+    doc = tmp_path / "doc.md"
+    doc.write_text(fm + "\nThe program validates the order status before release.\n")
+    result = validate_doc(indexed_db, doc)
+    assert not result["ok"]
+    assert result["uncited_assertions"]
+
+
+def test_module_completeness_ignores_module_index_docs():
+    """A member's `doc_type: module_index` overview is deliberately excluded
+    from the BR-id completeness union -- it's already fully satisfied by
+    the member's own doc_type: module chunks, and the index's range-based
+    summary doesn't (and shouldn't need to) enumerate every individual id."""
+    from mfdoc.validate import module_completeness_problems
+
+    conn = _member_with_n_rules("TESTMOD", 3)
+    results = [
+        _module_result("TESTMOD", "TESTMOD:BR-001 and TESTMOD:BR-002 are here."),
+        {
+            "_fm": {"doc_type": "module_index", "sources": ["TESTMOD"]},
+            "_body": "TESTMOD:BR-001..TESTMOD:BR-003, covering every rule.",
+        },
+    ]
+    # The module_index doc alone mentions BR-003, but it must not count --
+    # only the doc_type: module chunk does, and that chunk is missing it.
+    problems = module_completeness_problems(conn, results)
+    assert len(problems) == 1
+    assert "TESTMOD:BR-003" in problems[0]
+
+
 def test_module_completeness_ignores_non_module_docs():
     """A generated-test or register doc citing a subset of BR-ids must not
     make a member look covered when no `doc_type: module` doc exists for it
