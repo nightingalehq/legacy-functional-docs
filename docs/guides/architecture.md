@@ -219,7 +219,22 @@ judgement-heavy documents are deliberately routed differently:
   CLI instead of an API key) are the real implementations, each isolated in
   its own module so its dependency (`anthropic` package, GCP credentials, or
   the `claude` binary) stays optional. A `fake-echo` caller exists for
-  CI/dry-run smoke tests with no network call.
+  CI/dry-run smoke tests with no network call. A member large enough to
+  chunk (its own rule_candidate count above `options.narrative.max_rules_per_call`)
+  gets one more, automatic step once every one of its chunks validates ok:
+  a single bounded reconciliation call per chunked member (never per chunk)
+  that folds each chunk's own already-validated Purpose/How-invoked/Inputs/
+  Data-used/Outputs-and-effects sections into one whole-module statement per
+  section — its only input is that already-cited prose, never source or a
+  fresh `module_brief()`, so it can't reintroduce the silent-truncation risk
+  chunking exists to guard against. The result lands, alongside deterministic
+  BR-id ranges, a chunk-derived processing-sequence skeleton, and consolidated
+  gap-register/`sme_questions` entries, in a `doc_type: module_index` document
+  at the member's normal `out_path` (`templates/module-index.md`,
+  `batch._render_module_index_doc`) — a whole-module overview to start from,
+  distinct from each chunk's own per-rule `doc_type: module` detail. A chunk
+  failure skips the reconciliation call entirely and reports it as a plain
+  skipped note instead.
 - **Interactive, via Claude Code (`SKILL.md`)** — for system overview, data
   entity docs, process flows and the gap register, where grouping and
   narrative structure benefit from a human (or a chat session) holding the

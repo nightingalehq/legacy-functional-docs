@@ -379,6 +379,37 @@ GitHub org.
   (no flags) now works standalone once `options.testgen.overlay_path` is
   set.
 
+**Progress (2026-09-06):** Implemented #69 (whole-module overview for a
+chunked member's index document). `_render_module_chunk_index` (batch.py)
+was a mechanical index only -- a chunk file list plus a flat `BR-nnn`
+enumeration -- with no single document to start reading a large module
+from. It's now `_render_module_index_doc`, producing a new `doc_type:
+module_index` document (`templates/module-index.md`) with: deterministic
+BR-id ranges and a chunk-derived processing-sequence skeleton (both
+computed from facts already recorded when the chunks were built --
+`fetch_routines`/`routine_for_line`, no model call), consolidated/
+deduplicated gap-register entries and `sme_questions` across every chunk,
+plus one reconciled Purpose/How-invoked/Inputs/Data-used/Outputs-and-effects
+narrative from a single bounded model call per chunked member (never per
+chunk) -- `_generate_module_index_narrative`, wired automatically into
+`_generate_module_doc_chunked` right after every chunk validates ok, reusing
+the same call/validate/retry-once machinery every other model call in
+`batch.py` already uses. The call's only input is each ok chunk's own
+already-validated, already-cited sections -- never source, never a fresh
+`module_brief()` -- so it can't reintroduce the silent-truncation risk
+chunking exists to guard against; a chunk failure skips it entirely. It's
+also resumable the same way per-chunk generation is: a state-file entry
+keyed `_narrative` skips the call when every ok chunk's body is unchanged
+from the prior run. `validate.py`'s `doc_type == "module"` special-cases
+(first-line-heading check, the reversed-condition/statement-completeness
+gate) now also cover `module_index`; `module_completeness_problems`
+deliberately does not, since chunks alone already satisfy it. Design spec:
+`docs/superpowers/specs/2026-09-06-chunked-module-index-overview-design.md`.
+Tested with the repo's existing fake-caller pattern (no live API key used);
+a real `mfdoc batch` run against `ANTHROPIC_API_KEY` to eyeball actual model
+output quality for the reconciliation call is a documented follow-up, not a
+blocker.
+
 ## Purpose of this document
 
 Turn a working prototype into a maintainable asset. Phases below are sized to become
