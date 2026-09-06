@@ -438,6 +438,15 @@ def label_control_pairs_for_member(conn, member_id: int) -> list[dict]:
     that branch has already ended -- only ever with a control field in the
     same branch (same depth, no intervening branch exit) or a nested one
     entered from it.
+
+    Depth alone cannot tell a THEN branch apart from its own ELSE: both
+    dialects' extractors record an `ELSE` row at the *same* depth as its own
+    branch body (an `ELSE` doesn't decrement depth the way leaving the whole
+    `IF` does), so a label set in the THEN branch would otherwise still look
+    "pending" once execution reaches the ELSE branch at that identical
+    depth. An `ELSE` row explicitly clears whatever label is pending at its
+    own depth for exactly this reason -- entering the ELSE branch is still
+    "leaving" the THEN branch, even though the depth number doesn't change.
     """
     rows = conn.execute(
         "SELECT line_no, construct, depth, fields_used, literals "
@@ -450,6 +459,9 @@ def label_control_pairs_for_member(conn, member_id: int) -> list[dict]:
         depth = r["depth"] or 0
         for d in [k for k in pending_by_depth if k > depth]:
             del pending_by_depth[d]
+        if r["construct"] == "ELSE":
+            pending_by_depth.pop(depth, None)
+            continue
         if r["construct"] != "ASSIGN" or not (r["literals"] or ""):
             continue
         fields = [f for f in (r["fields_used"] or "").split(",") if f]

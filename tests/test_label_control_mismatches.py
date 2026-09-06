@@ -97,6 +97,22 @@ def test_a_label_pairs_with_a_control_field_one_level_deeper_in_a_nested_block()
     assert findings[0]["control_line"] == 13
 
 
+def test_a_label_in_the_then_branch_never_pairs_with_a_control_field_in_the_else_branch():
+    """natural.py/mantis.py record an ELSE row at the *same* depth as its own
+    branch body (entering ELSE doesn't decrement depth the way leaving the
+    whole IF does), so depth alone can't tell THEN and ELSE apart -- an
+    ELSE row must explicitly clear whatever label is still pending at that
+    depth, or a label from the THEN branch would wrongly look reachable
+    from inside the ELSE branch too."""
+    conn = _conn()
+    _rc(conn, 10, "IF", depth=0)
+    _rc(conn, 11, "ASSIGN", fields_used="PF-LABEL", literals="'Send'", depth=1)
+    _rc(conn, 12, "ELSE", depth=1)
+    _rc(conn, 13, "ASSIGN", fields_used="#SEND-MODE", literals="'UPDATE'", depth=1)
+
+    assert graph.label_control_pairs_for_member(conn, 1) == []
+
+
 def test_multi_field_assign_rows_are_skipped_entirely():
     conn = _conn()
     _rc(conn, 10, "IF", depth=0)

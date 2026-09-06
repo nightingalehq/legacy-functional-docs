@@ -24,11 +24,12 @@ def _conn():
 
 
 def _rc(conn, line_no, construct, condition=None, fields_used=None, literals=None,
-        depth=0, end_line=None):
+        depth=0, end_line=None, pair_line_no=None):
     return insert(
         conn, "rule_candidate", member_id=1, line_no=line_no, construct=construct,
         condition=condition, raw=condition or construct, depth=depth,
         fields_used=fields_used, literals=literals, end_line=end_line,
+        pair_line_no=pair_line_no,
     )
 
 
@@ -91,6 +92,26 @@ def test_a_call_or_assign_outside_the_branch_is_not_included():
     names = {c["callee_name"] for c in edges[0]["calls"]}
     assert names == {"MENUSEL"}
     assert edges[0]["assigns"] == []
+
+
+def test_a_call_on_the_else_branch_is_not_attributed_to_the_if_s_own_trigger():
+    """The IF row's end_line spans both THEN and ELSE, but this function is
+    THEN-only -- a paired ELSE row must clamp the range so a call/assign
+    that only happens on the ELSE branch isn't wrongly attributed to the
+    IF condition's own literal dispatch value."""
+    conn = _conn()
+    _rc(conn, 10, "IF", condition="*PF-KEY = 'PF3'", depth=0, end_line=14)
+    insert(conn, "call_edge", caller_id=1, callee_name="MENUSEL", call_kind="FETCH",
+           dynamic=0, line_no=11)
+    _rc(conn, 12, "ELSE", depth=0, pair_line_no=10)
+    insert(conn, "call_edge", caller_id=1, callee_name="OTHERPGM", call_kind="FETCH",
+           dynamic=0, line_no=13)
+
+    edges = structural.dispatch_edges_for_member(conn, 1)
+    assert len(edges) == 1
+    names = {c["callee_name"] for c in edges[0]["calls"]}
+    assert names == {"MENUSEL"}
+    assert edges[0]["end_line"] == 11
 
 
 def test_an_unresolved_end_line_falls_back_to_the_if_s_own_line():

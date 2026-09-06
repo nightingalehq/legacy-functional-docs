@@ -707,13 +707,23 @@ def dispatch_edges_for_member(conn, member_id: int, dispatch_field=DISPATCH_FIEL
     `IF`'s own line, same as `routine_for_line`'s posture for an unresolved
     routine end elsewhere in this codebase: conservative rather than a guess.
 
+    That `end_line` spans the *whole* `IF` construct, THEN and ELSE branches
+    both -- but this function is deliberately THEN-only (see above), so a
+    paired `ELSE` row (`pair_line_no` pointing back at this `IF`'s own line,
+    the same link `validate.py`'s reversed-condition check follows) clamps
+    the range down to just before the ELSE starts, when one exists. Without
+    this, a call or field assignment that only happens on the ELSE branch
+    would be wrongly attributed to the IF condition's own literal dispatch
+    trigger.
+
     Reuses `conditions.comparisons_in` -- the same deterministic condition
     parser `validate.py`'s reversed-condition check is built on -- rather
     than a second, bespoke parser for "does this condition compare field X
     to a literal".
     """
     rows = conn.execute(
-        "SELECT id, line_no, construct, depth, condition, end_line, fields_used, literals "
+        "SELECT id, line_no, construct, depth, condition, end_line, pair_line_no, "
+        "fields_used, literals "
         "FROM rule_candidate WHERE member_id=? ORDER BY line_no, id", (member_id,)
     ).fetchall()
 
@@ -727,6 +737,14 @@ def dispatch_edges_for_member(conn, member_id: int, dispatch_field=DISPATCH_FIEL
             continue
         start_line = row["line_no"]
         end_line = row["end_line"] if row["end_line"] is not None else start_line
+
+        else_row = next(
+            (r2 for r2 in rows[i + 1:]
+             if r2["construct"] == "ELSE" and r2["pair_line_no"] == start_line),
+            None,
+        )
+        if else_row is not None and start_line < else_row["line_no"] <= end_line:
+            end_line = else_row["line_no"] - 1
 
         calls = conn.execute(
             "SELECT callee_name, call_kind, MIN(line_no) AS line_no FROM call_edge "
