@@ -36,8 +36,14 @@ not by any Python code. No dialect-scanner or `validate.py` change.
   client, codename, or business term — invented Natural- and Mantis-shaped
   fixtures only (`CLAUDE.md`).
 - Byte-identical regeneration on unchanged source: every list this produces
-  must be sorted deterministically (count desc, keyword asc — ties broken
-  by keyword, never by incidental row/insert order).
+  must be sorted deterministically, never by incidental row/insert order.
+  `language_profile`'s sections (`_aggregate_profile_rows`) sort count desc,
+  keyword asc — ties broken by keyword. `unparsed_line_shapes` is the one
+  deliberate exception: count desc only, ties keeping first-seen order (a
+  plain stable sort, no secondary key), because it's a pure extraction of
+  `cmd_calibrate`'s prior inline sort and must reproduce that sort's exact
+  tie behavior, not a new one — see Task 1 and the "no-op refactor"
+  constraint below.
 - `example_text` goes through `Redactor` before it reaches the rendered
   document, same as `glossary`/`thematic_rules_register`.
 - `mfdoc calibrate`'s printed output must be byte-identical before and
