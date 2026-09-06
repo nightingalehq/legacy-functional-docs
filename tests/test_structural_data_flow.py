@@ -42,6 +42,36 @@ def test_crud_matrix_never_merges_two_different_members_sharing_a_name():
     assert by_library["LIBB"]["crud"] == "C"
     assert by_library["LIBB"]["member_id"] == mid_b
 
+    # End-to-end: the rendered diagram must not re-collapse what
+    # crud_matrix just split apart -- two distinct Mermaid nodes, one per
+    # member_id, each labelled with its own library so they stay visually
+    # distinguishable.
+    out = structural.data_flow_diagram(conn)
+    assert f"n_member_{mid_a}[" in out and f"n_member_{mid_b}[" in out
+    assert "SHARED (LIBA)" in out
+    assert "SHARED (LIBB)" in out
+
+
+def test_data_flow_diagram_does_not_disambiguate_an_unambiguous_module_name():
+    """A module name with only one member_id keeps a plain label -- the
+    library-qualified label is only for names that actually collide."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    insert(conn, "member", name="LONER", dialect="natural", library="LIBA")
+    mid = conn.execute("SELECT id FROM member").fetchone()["id"]
+    insert(conn, "data_access", member_id=mid, line_no=10, verb="READ",
+           crud="R", entity_name="ENTITY-X", raw="READ ENTITY-X")
+    conn.commit()
+
+    out = structural.data_flow_diagram(conn)
+    assert '["LONER"]' in out
+    assert "LONER (LIBA)" not in out
+
 
 def test_every_crud_matrix_row_becomes_an_edge(indexed_db):
     from mfdoc import graph
@@ -51,7 +81,7 @@ def test_every_crud_matrix_row_becomes_an_edge(indexed_db):
     out = structural.data_flow_diagram(conn)
     assert "```mermaid" in out and "graph LR" in out
     for row in rows:
-        mod_id = structural._mermaid_id(row["module"])
+        mod_id = f"n_member_{row['member_id']}"
         ent_id = structural._mermaid_id(row["entity"])
         assert f'{mod_id}[' in out and f'{ent_id}[' in out
 

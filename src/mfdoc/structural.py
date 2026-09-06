@@ -96,13 +96,30 @@ def data_flow_diagram(conn) -> str:
         out.append("")
         return "\n".join(out) + "\n"
 
+    # Module nodes are keyed by member_id, not the bare name -- crud_matrix
+    # already groups by member_id specifically because member.name isn't
+    # unique on its own (only unique together with library+dialect; see its
+    # own docstring and build_call_graph's "Finding 1" note), and keying the
+    # diagram's nodes by name would silently re-collapse two different
+    # members sharing a name back into one node, undoing that fix. A name
+    # that turns out to belong to more than one distinct member_id gets its
+    # library appended to the label so the two remain visually
+    # distinguishable; a name with only one member_id keeps a plain label.
+    member_ids_by_name: dict[str, set[int]] = defaultdict(set)
+    for row in rows:
+        member_ids_by_name[row["module"]].add(row["member_id"])
+    ambiguous_names = {name for name, ids in member_ids_by_name.items() if len(ids) > 1}
+
     out.append("```mermaid")
     out.append("graph LR")
     seen_nodes: set[str] = set()
     for row in rows:
-        mod_id, ent_id = _mermaid_id(row["module"]), _mermaid_id(row["entity"])
+        mod_id, ent_id = f"n_member_{row['member_id']}", _mermaid_id(row["entity"])
         if mod_id not in seen_nodes:
-            mod_label = row["module"].replace('"', '\\"')
+            mod_name = row["module"]
+            if mod_name in ambiguous_names and row["library"]:
+                mod_name = f"{mod_name} ({row['library']})"
+            mod_label = mod_name.replace('"', '\\"')
             out.append(f'    {mod_id}["{mod_label}"]')
             seen_nodes.add(mod_id)
         if ent_id not in seen_nodes:
