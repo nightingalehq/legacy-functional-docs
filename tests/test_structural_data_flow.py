@@ -3,6 +3,162 @@ from __future__ import annotations
 from mfdoc import structural
 
 
+def test_crud_matrix_sorts_crud_and_verbs_deterministically():
+    """GROUP_CONCAT(DISTINCT ...) doesn't guarantee element order in
+    SQLite without an explicit ordering step -- crud/verbs must be sorted
+    in Python after fetching so a member touching the same entity with
+    multiple CRUD letters/verbs renders the same string every run,
+    regardless of insertion order or SQLite's internal row order."""
+    import sqlite3
+
+    from mfdoc import graph
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    mid = insert(conn, "member", name="MULTIOP", dialect="natural", library="LIBA")
+    # Inserted deliberately out of C/R/U/D order.
+    insert(conn, "data_access", member_id=mid, line_no=30, verb="DELETE",
+           crud="D", entity_name="ENTITY-X", raw="DELETE ENTITY-X")
+    insert(conn, "data_access", member_id=mid, line_no=10, verb="READ",
+           crud="R", entity_name="ENTITY-X", raw="READ ENTITY-X")
+    insert(conn, "data_access", member_id=mid, line_no=20, verb="UPDATE",
+           crud="U", entity_name="ENTITY-X", raw="UPDATE ENTITY-X")
+    conn.commit()
+
+    row = graph.crud_matrix(conn)[0]
+    assert row["crud"] == "D,R,U"
+    assert row["verbs"] == "DELETE,READ,UPDATE"
+
+
+def test_crud_matrix_never_merges_two_different_members_sharing_a_name():
+    """member.name is only unique together with (library, dialect) -- two
+    distinct members can share a bare name across libraries. Grouping by
+    name alone would silently merge their CRUD stats into one row (and
+    make the selected dialect/library an arbitrary pick among the merged
+    rows); grouping by member id must keep them as two separate rows with
+    their own, correct dialect/library."""
+    import sqlite3
+
+    from mfdoc import graph
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    insert(conn, "member", name="SHARED", dialect="natural", library="LIBA")
+    insert(conn, "member", name="SHARED", dialect="mantis", library="LIBB")
+    mid_a = conn.execute(
+        "SELECT id FROM member WHERE library='LIBA'"
+    ).fetchone()["id"]
+    mid_b = conn.execute(
+        "SELECT id FROM member WHERE library='LIBB'"
+    ).fetchone()["id"]
+    insert(conn, "data_access", member_id=mid_a, line_no=10, verb="READ",
+           crud="R", entity_name="ENTITY-X", raw="READ ENTITY-X")
+    insert(conn, "data_access", member_id=mid_b, line_no=20, verb="STORE",
+           crud="C", entity_name="ENTITY-X", raw="STORE ENTITY-X")
+    conn.commit()
+
+    rows = graph.crud_matrix(conn)
+    assert len(rows) == 2
+    by_library = {r["library"]: r for r in rows}
+    assert by_library["LIBA"]["dialect"] == "natural"
+    assert by_library["LIBA"]["crud"] == "R"
+    assert by_library["LIBA"]["member_id"] == mid_a
+    assert by_library["LIBB"]["dialect"] == "mantis"
+    assert by_library["LIBB"]["crud"] == "C"
+    assert by_library["LIBB"]["member_id"] == mid_b
+
+    # End-to-end: the rendered diagram must not re-collapse what
+    # crud_matrix just split apart -- two distinct Mermaid nodes, one per
+    # member_id, each labelled with its own library so they stay visually
+    # distinguishable.
+    out = structural.data_flow_diagram(conn)
+    assert f"n_member_{mid_a}[" in out and f"n_member_{mid_b}[" in out
+    assert "SHARED (LIBA/natural)" in out
+    assert "SHARED (LIBB/mantis)" in out
+
+
+def test_data_flow_diagram_disambiguates_same_library_different_dialect():
+    """member.name is only unique together with *both* library and dialect
+    -- two members can share a name and a library but differ by dialect.
+    Library alone would produce two identical labels; the qualifier must
+    include dialect too."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    insert(conn, "member", name="SHARED", dialect="natural", library="LIBA")
+    insert(conn, "member", name="SHARED", dialect="mantis", library="LIBA")
+    mid_natural = conn.execute(
+        "SELECT id FROM member WHERE dialect='natural'"
+    ).fetchone()["id"]
+    mid_mantis = conn.execute(
+        "SELECT id FROM member WHERE dialect='mantis'"
+    ).fetchone()["id"]
+    insert(conn, "data_access", member_id=mid_natural, line_no=10, verb="READ",
+           crud="R", entity_name="ENTITY-X", raw="READ ENTITY-X")
+    insert(conn, "data_access", member_id=mid_mantis, line_no=20, verb="STORE",
+           crud="C", entity_name="ENTITY-X", raw="STORE ENTITY-X")
+    conn.commit()
+
+    out = structural.data_flow_diagram(conn)
+    assert "SHARED (LIBA/natural)" in out
+    assert "SHARED (LIBA/mantis)" in out
+
+
+def test_data_flow_diagram_disambiguates_when_library_is_missing():
+    """library can be NULL (e.g. a DDM/FDT-only dialect) -- the qualifier
+    must still produce distinguishable labels rather than "no library"
+    twice for two members that also share a dialect (SQLite's UNIQUE
+    constraint treats two NULL librarys as distinct, so this is a real,
+    reachable case, not just a defensive one)."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    mid_1 = insert(conn, "member", name="SHARED", dialect="ddm", library=None)
+    mid_2 = insert(conn, "member", name="SHARED", dialect="ddm", library=None)
+    insert(conn, "data_access", member_id=mid_1, line_no=10, verb="READ",
+           crud="R", entity_name="ENTITY-X", raw="READ ENTITY-X")
+    insert(conn, "data_access", member_id=mid_2, line_no=20, verb="STORE",
+           crud="C", entity_name="ENTITY-X", raw="STORE ENTITY-X")
+    conn.commit()
+
+    out = structural.data_flow_diagram(conn)
+    assert f"SHARED (no library/ddm, id {mid_1})" in out
+    assert f"SHARED (no library/ddm, id {mid_2})" in out
+
+
+def test_data_flow_diagram_does_not_disambiguate_an_unambiguous_module_name():
+    """A module name with only one member_id keeps a plain label -- the
+    library-qualified label is only for names that actually collide."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    insert(conn, "member", name="LONER", dialect="natural", library="LIBA")
+    mid = conn.execute("SELECT id FROM member").fetchone()["id"]
+    insert(conn, "data_access", member_id=mid, line_no=10, verb="READ",
+           crud="R", entity_name="ENTITY-X", raw="READ ENTITY-X")
+    conn.commit()
+
+    out = structural.data_flow_diagram(conn)
+    assert '["LONER"]' in out
+    assert "LONER (LIBA)" not in out
+
+
 def test_every_crud_matrix_row_becomes_an_edge(indexed_db):
     from mfdoc import graph
 
@@ -11,7 +167,7 @@ def test_every_crud_matrix_row_becomes_an_edge(indexed_db):
     out = structural.data_flow_diagram(conn)
     assert "```mermaid" in out and "graph LR" in out
     for row in rows:
-        mod_id = structural._mermaid_id(row["module"])
+        mod_id = f"n_member_{row['member_id']}"
         ent_id = structural._mermaid_id(row["entity"])
         assert f'{mod_id}[' in out and f'{ent_id}[' in out
 

@@ -148,20 +148,58 @@ def resolve(conn) -> dict:
 
 
 def crud_matrix(conn) -> list[dict]:
-    rows = conn.execute(
-        """
-        SELECT m.name AS module, m.dialect, da.entity_name AS entity,
-               GROUP_CONCAT(DISTINCT da.crud) AS crud,
-               COUNT(*) AS hits,
-               MIN(da.line_no) AS first_line,
-               GROUP_CONCAT(DISTINCT da.verb) AS verbs
-          FROM data_access da JOIN member m ON m.id = da.member_id
-         WHERE da.entity_name IS NOT NULL
-         GROUP BY m.name, da.entity_name
-         ORDER BY m.name, da.entity_name
-        """
-    ).fetchall()
-    return [dict(r) for r in rows]
+    """One row per (member, entity) pair this member accesses.
+
+    Grouped by `m.id`, not `m.name` -- `member.name` is only unique
+    together with `(library, dialect)` (the `UNIQUE(name, library, dialect)`
+    constraint in db.py; see also build_call_graph's own "Finding 1" note
+    on the same ambiguity), so grouping by the bare name alone would
+    silently merge two *different* members that happen to share a name
+    across libraries into one row, combining their CRUD stats. Grouping by
+    `m.id` instead makes every non-aggregated selected column (`m.dialect`,
+    `m.library`) a true function of the group -- deterministic, not an
+    arbitrary pick among the merged rows' values, which is what GROUP BY
+    a column absent from the grouping key produces on SQLite.
+
+    Each row also carries that grouping key as `member_id`, so a caller
+    that needs to tell two same-named members' rows apart unambiguously
+    (rather than reconstructing an identity from module/library/dialect)
+    has a real foreign key to do it with -- the same posture
+    build_call_graph already takes for its own rows.
+
+    `crud`/`verbs` are sorted in Python after fetching, not left as
+    `GROUP_CONCAT(DISTINCT ...)` produced them -- SQLite doesn't guarantee
+    concatenation order for that without an explicit ordering step, which
+    would silently violate this module's "byte-identical output on
+    unchanged source" contract (a member touching the same entity with
+    multiple CRUD letters/verbs could render its crud/verbs string in a
+    different order from one run to the next with nothing having changed).
+    """
+    # Iterate the cursor directly -- consumed exactly once, right here, and
+    # a large codebase's whole data_access table (joined against member) is
+    # exactly the kind of whole-system scan not worth holding twice over
+    # (once as the driver's own Row list, again as this function's own
+    # dict list) -- same reasoning as graph.connected_components().
+    rows = [
+        dict(r) for r in conn.execute(
+            """
+            SELECT m.id AS member_id, m.name AS module, m.library, m.dialect,
+                   da.entity_name AS entity,
+                   GROUP_CONCAT(DISTINCT da.crud) AS crud,
+                   COUNT(*) AS hits,
+                   MIN(da.line_no) AS first_line,
+                   GROUP_CONCAT(DISTINCT da.verb) AS verbs
+              FROM data_access da JOIN member m ON m.id = da.member_id
+             WHERE da.entity_name IS NOT NULL
+             GROUP BY m.id, da.entity_name
+             ORDER BY m.name, m.id, da.entity_name
+            """
+        )
+    ]
+    for r in rows:
+        r["crud"] = ",".join(sorted((r["crud"] or "").split(",")))
+        r["verbs"] = ",".join(sorted((r["verbs"] or "").split(",")))
+    return rows
 
 
 _LANGUAGE_PROFILE_SECTIONS = {
@@ -792,10 +830,13 @@ def connected_components(conn) -> list[set[int]]:
         if ra != rb:
             parent[ra] = rb
 
-    rows = conn.execute(
-        "SELECT DISTINCT caller_id, callee_id FROM call_edge"
-    ).fetchall()
-    for r in rows:
+    # Iterate the cursor directly rather than .fetchall() -- a large call
+    # graph's edge count is exactly the case union-find scales to easily,
+    # and there's no reason to also hold every row in a Python list at once
+    # just to walk it once (union-find doesn't care what order edges union
+    # in, and this query has no ORDER BY -- SQLite doesn't guarantee row
+    # order without one).
+    for r in conn.execute("SELECT DISTINCT caller_id, callee_id FROM call_edge"):
         caller_id = r["caller_id"]
         if caller_id not in parent:
             parent[caller_id] = caller_id

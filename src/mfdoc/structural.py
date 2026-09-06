@@ -97,13 +97,66 @@ def data_flow_diagram(conn) -> str:
         out.append("")
         return "\n".join(out) + "\n"
 
+    # Module nodes are keyed by member_id, not the bare name -- crud_matrix
+    # already groups by member_id specifically because member.name isn't
+    # unique on its own (only unique together with library+dialect; see its
+    # own docstring and build_call_graph's "Finding 1" note), and keying the
+    # diagram's nodes by name would silently re-collapse two different
+    # members sharing a name back into one node, undoing that fix. A name
+    # that turns out to belong to more than one distinct member_id gets a
+    # library/dialect qualifier appended to its label so the two remain
+    # visually distinguishable; a name with only one member_id keeps a
+    # plain label.
+    #
+    # Library alone isn't always enough: member.name is only guaranteed
+    # unique together with *both* library and dialect (two members can
+    # share a name and a library but differ by dialect), and library can
+    # be NULL (SQLite's UNIQUE constraint treats two NULLs as distinct, so
+    # even (name, dialect) alone isn't watertight when library is missing
+    # on both sides too). Qualifying with library *and* dialect handles
+    # every realistic case; on the rare residual collision where that
+    # still isn't unique (two members sharing name, library and dialect --
+    # only reachable when library is NULL on both, since real duplicates
+    # otherwise violate member's own UNIQUE constraint), the member_id
+    # itself is appended too. Every member_id's label is decided in one
+    # up-front pass (not incrementally while rendering) so this stays
+    # symmetric: every member sharing an ambiguous (name, qualifier) pair
+    # gets the same treatment, not just whichever one happened to render
+    # second.
+    library_by_member: dict[int, str | None] = {}
+    dialect_by_member: dict[int, str] = {}
+    member_ids_by_name: dict[str, set[int]] = defaultdict(set)
+    for row in rows:
+        mid = row["member_id"]
+        library_by_member[mid] = row["library"]
+        dialect_by_member[mid] = row["dialect"]
+        member_ids_by_name[row["module"]].add(mid)
+
+    label_by_member: dict[int, str] = {}
+    for name, member_ids in member_ids_by_name.items():
+        if len(member_ids) == 1:
+            label_by_member[next(iter(member_ids))] = name
+            continue
+        qualifier_by_member = {
+            mid: f"{library_by_member[mid] or 'no library'}/{dialect_by_member[mid]}"
+            for mid in member_ids
+        }
+        qualifier_counts: dict[str, int] = defaultdict(int)
+        for q in qualifier_by_member.values():
+            qualifier_counts[q] += 1
+        for mid in member_ids:
+            q = qualifier_by_member[mid]
+            label_by_member[mid] = (
+                f"{name} ({q}, id {mid})" if qualifier_counts[q] > 1 else f"{name} ({q})"
+            )
+
     out.append("```mermaid")
     out.append("graph LR")
     seen_nodes: set[str] = set()
     for row in rows:
-        mod_id, ent_id = _mermaid_id(row["module"]), _mermaid_id(row["entity"])
+        mod_id, ent_id = f"n_member_{row['member_id']}", _mermaid_id(row["entity"])
         if mod_id not in seen_nodes:
-            mod_label = row["module"].replace('"', '\\"')
+            mod_label = label_by_member[row["member_id"]].replace('"', '\\"')
             out.append(f'    {mod_id}["{mod_label}"]')
             seen_nodes.add(mod_id)
         if ent_id not in seen_nodes:
@@ -155,7 +208,12 @@ def build_call_graph(conn, cluster_by: str = "module") -> dict[int, dict]:
             f"unsupported cluster_by {cluster_by!r}; expected one of {sorted(valid_cluster_by)}"
         )
     cluster_column = "system" if cluster_by == "subsystem" else "library"
-    rows = conn.execute(
+    # Iterated once, in order, immediately below -- iterate the cursor
+    # directly rather than materializing every call_edge row (joined twice
+    # against member) into a list first, same reasoning as
+    # graph.connected_components().
+    graph_data: dict[int, dict] = {}
+    for r in conn.execute(
         f"""
         SELECT m.id AS caller_id, m.name AS caller, m.library AS caller_library,
                m.dialect AS caller_dialect, m.{cluster_column} AS caller_cluster,
@@ -166,10 +224,7 @@ def build_call_graph(conn, cluster_by: str = "module") -> dict[int, dict]:
           LEFT JOIN member cm ON cm.id = ce.callee_id
          ORDER BY m.name, m.id, ce.line_no, ce.callee_name
         """
-    ).fetchall()
-
-    graph_data: dict[int, dict] = {}
-    for r in rows:
+    ):
         entry = graph_data.setdefault(
             r["caller_id"],
             {
@@ -197,7 +252,7 @@ def call_graph_diagram(
     max_nodes_inline: int = 40,
     direction: str = "LR",
 ) -> dict[str, str]:
-    """Mermaid call-graph DAG, one diagram per connected component of the
+    """Mermaid call-graph diagram, one per connected component of the
     call graph (see graph.connected_components() -- direction is treated as
     irrelevant for grouping, only whether a caller/callee pair are linked at
     all). This is a strictly better default split than cluster_by's module/
