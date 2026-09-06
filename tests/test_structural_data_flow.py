@@ -3,6 +3,44 @@ from __future__ import annotations
 from mfdoc import structural
 
 
+def test_crud_matrix_never_merges_two_different_members_sharing_a_name():
+    """member.name is only unique together with (library, dialect) -- two
+    distinct members can share a bare name across libraries. Grouping by
+    name alone would silently merge their CRUD stats into one row (and
+    make the selected dialect/library an arbitrary pick among the merged
+    rows); grouping by member id must keep them as two separate rows with
+    their own, correct dialect/library."""
+    import sqlite3
+
+    from mfdoc import graph
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    insert(conn, "member", name="SHARED", dialect="natural", library="LIBA")
+    insert(conn, "member", name="SHARED", dialect="mantis", library="LIBB")
+    mid_a = conn.execute(
+        "SELECT id FROM member WHERE library='LIBA'"
+    ).fetchone()["id"]
+    mid_b = conn.execute(
+        "SELECT id FROM member WHERE library='LIBB'"
+    ).fetchone()["id"]
+    insert(conn, "data_access", member_id=mid_a, line_no=10, verb="READ",
+           crud="R", entity_name="ENTITY-X", raw="READ ENTITY-X")
+    insert(conn, "data_access", member_id=mid_b, line_no=20, verb="STORE",
+           crud="C", entity_name="ENTITY-X", raw="STORE ENTITY-X")
+    conn.commit()
+
+    rows = graph.crud_matrix(conn)
+    assert len(rows) == 2
+    by_library = {r["library"]: r for r in rows}
+    assert by_library["LIBA"]["dialect"] == "natural"
+    assert by_library["LIBA"]["crud"] == "R"
+    assert by_library["LIBB"]["dialect"] == "mantis"
+    assert by_library["LIBB"]["crud"] == "C"
+
+
 def test_every_crud_matrix_row_becomes_an_edge(indexed_db):
     from mfdoc import graph
 
