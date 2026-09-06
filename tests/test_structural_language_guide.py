@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import re
 
+import pytest
+
 from mfdoc import structural
 from mfdoc.redact import Redactor
 
@@ -125,3 +127,23 @@ def test_language_guide_cli(cli_args, derive_result):
 
     args = SimpleNamespace(config=cli_args.config, dialect="natural", out=None)
     assert cli.cmd_lang_guide(args) == 0
+
+
+def test_language_guide_rejects_non_dialect_shaped_input(indexed_db):
+    """`dialect` is interpolated directly into YAML front matter/headings,
+    with no citation or Redactor step of its own -- a value containing a
+    quote or newline must be rejected outright, not passed through into
+    the generated document's front matter."""
+    for bad in ('natural"\ntitle: injected', "natural\nkey: value", "", "Natural", "natural-1"):
+        with pytest.raises(ValueError):
+            structural.language_guide(indexed_db, bad)
+
+
+def test_lang_guide_cli_rejects_unknown_dialect(capsys):
+    """The CLI's own --dialect must reject an unknown dialect id at parse
+    time (same known set ingest/derive use), not just at render time."""
+    from mfdoc import cli
+
+    with pytest.raises(SystemExit):
+        cli.main(["lang-guide", "--config", "x.yml", "--dialect", "not-a-real-dialect"])
+    assert "invalid choice" in capsys.readouterr().err

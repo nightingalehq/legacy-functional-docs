@@ -1193,7 +1193,7 @@ def main(argv=None) -> int:
 
     p = sub.add_parser("lang-guide")
     p.add_argument("--config", required=True)
-    p.add_argument("--dialect", required=True)
+    p.add_argument("--dialect", required=True, choices=sorted(DIALECT_ROUTER))
     p.add_argument("--out", help="write to this path instead of stdout")
     p.set_defaults(func=cmd_lang_guide)
 
