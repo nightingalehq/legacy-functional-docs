@@ -129,7 +129,7 @@ def test_natural_boolean_flag_shadowed_by_an_unconditional_reset_is_caught():
     insert(conn, "member", name="TESTPROG", dialect="natural", object_type="subprogram")
     mid = conn.execute("SELECT id FROM member WHERE name='TESTPROG'").fetchone()["id"]
     src = (
-        "IF *USER = 'T#21T'\n"
+        "IF *USER = 'U#001'\n"
         "  #DEBUG := TRUE\n"
         "ELSE\n"
         "  #DEBUG := FALSE\n"
