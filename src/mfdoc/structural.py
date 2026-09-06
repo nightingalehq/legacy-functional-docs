@@ -863,8 +863,8 @@ def language_guide(conn, dialect: str, redact: Redactor = NULL_REDACTOR) -> str:
            f"# {dialect} — language guide", "", (
         f"Every recognised construct actually in use in this codebase's "
         f"`{dialect}` source, grouped by keyword with a frequency count and "
-        f"one cited example each. Regenerate with `mfdoc lang-guide "
-        f"--dialect {dialect}` after any source change; do not hand-edit. "
+        f"one cited example each. Regenerate with `mfdoc lang-guide --config "
+        f"project.yml --dialect {dialect}` after any source change; do not hand-edit. "
         f"See `templates/language-guide.md` for the narrative tier that "
         f"adds connective prose on top of this."
     ), ""]
@@ -882,8 +882,8 @@ def language_guide(conn, dialect: str, redact: Redactor = NULL_REDACTOR) -> str:
     out.append("")
     out.append(
         "Seen in source, not yet matched to a known construct -- ranked by "
-        f"frequency; see `mfdoc calibrate --dialect {dialect}` for the full "
-        "list and where to add recognition."
+        f"frequency; see `mfdoc calibrate --config project.yml --dialect {dialect}` "
+        "for the full list and where to add recognition."
     )
     out.append("")
     if not unparsed:
@@ -893,7 +893,7 @@ def language_guide(conn, dialect: str, redact: Redactor = NULL_REDACTOR) -> str:
         out.append("| keyword | count | sample |")
         out.append("|---|---|---|")
         for e in unparsed:
-            sample = e["sample"].replace("|", "\\|")
+            sample = redact(e["sample"]).replace("|", "\\|")
             out.append(f"| `{e['keyword']}` | {e['count']} | `{sample}` |")
         out.append("")
     return "\n".join(out) + "\n"

@@ -185,7 +185,7 @@ because it may write more than one file; this one never does).
 Added to the "Suggested document set" as item 7 (after `coverage-report.md`,
 before the pre-existing `executive-summary.md` entry, which shifts to 8) —
 per the issue's "after `coverage-report.md`" placement — with a short note
-to run `mfdoc lang-guide --dialect <dialect> --out <path>` first and then
+to run `mfdoc lang-guide --config project.yml --dialect <dialect> --out <path>` first and then
 write the narrative layer from `templates/language-guide.md`, same pattern
 as the existing `executive-summary.md` entry's "run `mfdoc classify-rules`
 first" note.

@@ -50,7 +50,7 @@ def test_empty_section_says_none_recorded():
 def test_appendix_reuses_unparsed_line_shapes(indexed_db):
     out = structural.language_guide(indexed_db, "natural")
     appendix = out.split("## Not yet recognized", 1)[1]
-    assert "mfdoc calibrate --dialect natural" in appendix
+    assert "mfdoc calibrate --config project.yml --dialect natural" in appendix
 
 
 def test_redactor_applied_to_example_text_only():
@@ -79,6 +79,43 @@ def test_redactor_applied_to_example_text_only():
     assert "[REDACTED]" in out
     # the keyword itself is never redacted
     assert "`IF`" in out
+
+
+def test_regeneration_hints_include_config_flag(indexed_db):
+    """Both regeneration commands suggested in the document body must be
+    directly copy-pasteable -- `mfdoc lang-guide` and `mfdoc calibrate` both
+    require `--config`, same as every other regenerate-with hint in this
+    repo's own generated docs (see README/CLAUDE.md's command examples)."""
+    out = structural.language_guide(indexed_db, "natural")
+    assert "mfdoc lang-guide --config project.yml --dialect natural" in out
+    assert "mfdoc calibrate --config project.yml --dialect natural" in out
+
+
+def test_appendix_sample_is_redacted():
+    """The 'not yet recognized' appendix's sample line comes straight from
+    a gap's raw source text -- the same class of sensitive literal the
+    rest of the language guide redacts -- so it must go through the given
+    Redactor too, not render verbatim."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA, add_gap
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (name, dialect) VALUES ('SECRETPROG', 'natural')")
+    member_id = conn.execute("SELECT id FROM member WHERE name='SECRETPROG'").fetchone()["id"]
+    add_gap(
+        conn, "unparsed_line", "unparsed",
+        member_id=member_id, raw="FOOKW ACCTNO '999-88-7777'",
+    )
+    conn.commit()
+
+    redact = Redactor(patterns=[r"\d{3}-\d{2}-\d{4}"], enabled=True)
+    out = structural.language_guide(conn, "natural", redact=redact)
+    assert "999-88-7777" not in out
+    assert "[REDACTED]" in out
+    assert "`FOOKW`" in out
 
 
 def test_language_guide_cli(cli_args, derive_result):

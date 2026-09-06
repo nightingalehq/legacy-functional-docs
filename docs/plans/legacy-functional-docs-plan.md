@@ -24,8 +24,8 @@ GitHub org.
   count and one cited example each. `graph.unparsed_line_shapes` was
   extracted out of `cmd_calibrate` (pure refactor, output unchanged) so
   the language-guide appendix and `mfdoc calibrate` share one
-  implementation instead of two. Basic tier: `mfdoc lang-guide --dialect
-  <dialect> --out <path>` (`structural.language_guide`, `doc_type:
+  implementation instead of two. Basic tier: `mfdoc lang-guide --config
+  project.yml --dialect <dialect> --out <path>` (`structural.language_guide`, `doc_type:
   register`, no model call). Narrative tier: `templates/language-guide.md`,
   written interactively per `SKILL.md`'s updated suggested document set,
   taking the basic tier's output as its cited fact source — no new

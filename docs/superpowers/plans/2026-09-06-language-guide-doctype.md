@@ -56,7 +56,8 @@ not by any Python code. No dialect-scanner or `validate.py` change.
 **Interfaces:**
 - Produces: `graph.unparsed_line_shapes(conn, dialect: str) -> list[dict]`,
   each `{"keyword": str, "count": int, "sample": str}`, sorted by count
-  descending then keyword ascending.
+  descending; ties keep first-seen order (no secondary key) so this stays
+  a true no-op refactor of `cmd_calibrate`'s prior inline sort.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -101,7 +102,7 @@ def unparsed_line_shapes(conn, dialect: str) -> list[dict]:
         kw = raw.split()[0].upper()
         entry = shapes.setdefault(kw, {"keyword": kw, "count": 0, "sample": raw})
         entry["count"] += 1
-    return sorted(shapes.values(), key=lambda e: (-e["count"], e["keyword"]))
+    return sorted(shapes.values(), key=lambda e: -e["count"])
 ```
 
   Rewrite `cmd_calibrate` to call it and keep the printed format identical:
@@ -320,8 +321,8 @@ def language_guide(conn, dialect: str, redact: Redactor = NULL_REDACTOR) -> str:
            f"# {dialect} — language guide", "", (
         f"Every recognised construct actually in use in this codebase's "
         f"`{dialect}` source, grouped by keyword with a frequency count and "
-        f"one cited example each. Regenerate with `mfdoc lang-guide "
-        f"--dialect {dialect}` after any source change; do not hand-edit. "
+        f"one cited example each. Regenerate with `mfdoc lang-guide --config "
+        f"project.yml --dialect {dialect}` after any source change; do not hand-edit. "
         f"See `templates/language-guide.md` for the narrative tier that "
         f"adds connective prose on top of this."
     ), ""]
@@ -339,7 +340,7 @@ def language_guide(conn, dialect: str, redact: Redactor = NULL_REDACTOR) -> str:
     out.append("")
     out.append(
         "Seen in source, not yet matched to a known construct -- ranked by "
-        "frequency; see `mfdoc calibrate --dialect "
+        "frequency; see `mfdoc calibrate --config project.yml --dialect "
         f"{dialect}` for the full list and where to add recognition."
     )
     out.append("")
@@ -350,7 +351,7 @@ def language_guide(conn, dialect: str, redact: Redactor = NULL_REDACTOR) -> str:
         out.append("| keyword | count | sample |")
         out.append("|---|---|---|")
         for e in unparsed:
-            sample = e["sample"].replace("|", "\\|")
+            sample = redact(e["sample"]).replace("|", "\\|")
             out.append(f"| `{e['keyword']}` | {e['count']} | `{sample}` |")
         out.append("")
     return "\n".join(out) + "\n"
