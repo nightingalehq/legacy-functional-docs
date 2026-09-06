@@ -840,7 +840,7 @@ def test_generate_module_index_narrative_succeeds_first_try(tmp_path):
             f"\n# FAKEMOD\n\n{body}"
         )
 
-    ok, attempts, in_tok, out_tok, problems = batch_mod._generate_module_index_narrative(
+    ok, attempts, in_tok, out_tok, problems, sections = batch_mod._generate_module_index_narrative(
         conn, "FAKEMOD", [(1, "## Purpose\n\nSomething [[FAKEMOD:1]].")], caller,
         "writing rules", None, out_path, assemble, max_attempts=2,
     )
@@ -886,7 +886,7 @@ def test_generate_module_index_narrative_retries_once_on_missing_section(tmp_pat
             f"\n# FAKEMOD\n\n{body}"
         )
 
-    ok, attempts, in_tok, out_tok, problems = batch_mod._generate_module_index_narrative(
+    ok, attempts, in_tok, out_tok, problems, sections = batch_mod._generate_module_index_narrative(
         conn, "FAKEMOD", [(1, "## Purpose\n\nSomething [[FAKEMOD:1]].")], caller,
         "writing rules", None, out_path, assemble, max_attempts=2,
     )
@@ -928,10 +928,79 @@ def test_generate_module_index_narrative_fails_after_max_attempts(tmp_path):
             f"\n# FAKEMOD\n\n{body}"
         )
 
-    ok, attempts, in_tok, out_tok, problems = batch_mod._generate_module_index_narrative(
+    ok, attempts, in_tok, out_tok, problems, sections = batch_mod._generate_module_index_narrative(
         conn, "FAKEMOD", [(1, "## Purpose\n\nSomething [[FAKEMOD:1]].")], caller,
         "writing rules", None, out_path, assemble, max_attempts=2,
     )
     assert ok is False
     assert attempts == 2
     assert problems
+
+
+def test_consolidated_gap_lines_keeps_distinct_gaps_with_identical_detail_text(tmp_path):
+    """Several gap rows commonly share identical `detail` text (e.g. every
+    unparsed_line gap for a member reads the same templated sentence,
+    differing only by line_no) -- deduping on text alone would collapse
+    them down to one and silently drop the rest. Dedup must be keyed on
+    (gap_kind, line_no, text), not text alone."""
+    import sqlite3
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    same_detail = "Statement not recognised by the Natural scanner in FAKEMOD."
+    insert(conn, "gap", member_id=1, gap_kind="unparsed_line", severity="low",
+           detail=same_detail, line_no=10)
+    insert(conn, "gap", member_id=1, gap_kind="unparsed_line", severity="low",
+           detail=same_detail, line_no=20)
+    conn.commit()
+
+    lines = batch_mod._consolidated_gap_lines(conn, "FAKEMOD", 1, [])
+    assert len(lines) == 2, "both gap rows must survive dedup, not just one"
+    assert any(":10]]" in line for line in lines)
+    assert any(":20]]" in line for line in lines)
+
+
+def test_generate_module_index_narrative_rejects_a_citation_not_in_any_excerpt(tmp_path):
+    """A reconciled section citing a real, resolvable line that never
+    appeared in any given chunk excerpt must be rejected -- validate_doc's
+    citation-resolution check alone can't catch this (the citation *does*
+    resolve), so this is the deterministic check that must."""
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 2, 'irrelevant')")
+    conn.commit()
+
+    def caller(prompt):
+        # Cites [[FAKEMOD:2]] -- a real, resolvable line, but never given in
+        # any chunk excerpt (only [[FAKEMOD:1]] was).
+        return batch_mod.ModelResponse(
+            text=_valid_narrative_response("[[FAKEMOD:2]]"), input_tokens=1, output_tokens=1,
+        )
+
+    out_path = tmp_path / "FAKEMOD.md"
+
+    def assemble(sections):
+        body = "\n".join(f"## {h}\n\n{sections[h]}\n" for h in batch_mod.NARRATIVE_SECTIONS)
+        return (
+            "---\ntitle: \"FAKEMOD\"\ndoc_type: module_index\nsystem: MOM\n"
+            "generated_by: legacy-functional-docs 0.1.0\ngenerated_at: \"2026-01-01\"\n"
+            "review_status: draft\nconfidence_summary:\n  verified: 1\nsources: [\"FAKEMOD\"]\n---\n"
+            f"\n# FAKEMOD\n\n{body}"
+        )
+
+    ok, attempts, in_tok, out_tok, problems, sections = batch_mod._generate_module_index_narrative(
+        conn, "FAKEMOD", [(1, "## Purpose\n\nSomething [[FAKEMOD:1]].")], caller,
+        "writing rules", None, out_path, assemble, max_attempts=2,
+    )
+    assert ok is False
+    assert sections is None
+    assert any("not present in any given chunk excerpt" in p for p in problems)

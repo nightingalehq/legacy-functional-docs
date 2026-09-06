@@ -221,3 +221,26 @@ Matches the design above. `_render_module_chunk_index` was replaced by
 paths share one assembly function); `_generate_module_index_narrative`
 implements the call -> validate -> retry-once loop for the reconciliation
 call, modelled directly on `_generate_module_doc_from_brief`.
+
+Two corrections found in review, before this shipped:
+
+- **Gap dedup was keyed on `detail` text alone.** Several gap kinds emit
+  identical `detail` text for every occurrence (e.g. every `unparsed_line`
+  gap for a member reads the same templated sentence, differing only by
+  `line_no`) -- deduping on text alone collapsed all of them into one line
+  and silently dropped the rest, contradicting `templates/module-index.md`'s
+  own promise ("every item from this module's gap register"). Fixed by
+  keying gap-row dedup on `(gap_kind, line_no, first_sentence)`, with a
+  separate, deliberately looser text-only key still used to catch an
+  sme_question that just restates a gap row's own finding.
+- **`validate_doc`'s citation-resolution check alone isn't proof a
+  reconciled citation was actually reused, not invented.** It only proves a
+  `[[MEMBER:LINE]]` citation resolves to a real source line -- a model
+  could satisfy that by citing a *different*, still-real line never present
+  in any excerpt it was given, attaching it to a broadened whole-module
+  claim, and `validate_doc` would not catch it. Added
+  `_uncited_provenance_problems`: every citation actually present in a
+  reconciled section is checked, deterministically, against the set of
+  citations literally present in the excerpts the call was given
+  (`_citations_in`) -- a citation outside that set fails the attempt and
+  triggers a retry, the same as any other `validate_doc` problem.

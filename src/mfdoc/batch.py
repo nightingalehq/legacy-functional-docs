@@ -31,7 +31,7 @@ from .brief import (
 )
 from .citations import _cite, _rule_id
 from .redact import NULL_REDACTOR, Redactor
-from .validate import BR_REF, _split_frontmatter, validate_doc
+from .validate import CITATION, _split_frontmatter, validate_doc
 
 # Object types that get the batch treatment: one module, one program's worth
 # of judgement-light narrative. Data stores, system overview, process flows
@@ -340,11 +340,20 @@ def _consolidated_gap_lines(conn, member_name: str, member_id: int,
     first, in severity order, since they're the ground-truth record;
     sme_questions only add text not already covered by a gap row's own
     detail."""
-    # Dedup key is the substantive text -- a gap row's own first sentence, or
-    # an sme_question's raw text -- not the fully-formatted line, so a
-    # chunk's sme_question that just restates a gap row's own finding (or
-    # another chunk's identical question) is recognised as the same content
-    # even though a gap row and an sme_question render differently.
+    # Two dedup keys, deliberately different: `seen_gap_identity` dedupes
+    # gap *rows* against each other -- (gap_kind, line_no, first_sentence),
+    # not first_sentence alone, since several distinct gap rows commonly
+    # share identical detail text (e.g. every unparsed_line gap for a member
+    # reads "Statement not recognised by the Natural scanner in {member}."
+    # regardless of which line it's on -- dedup on text alone would collapse
+    # every one of them down to a single line and silently drop the rest).
+    # `seen_content` dedupes only the substantive text -- a gap row's own
+    # first sentence, or an sme_question's raw text -- so a chunk's
+    # sme_question that just restates a gap row's own finding (or another
+    # chunk's identical question) is recognised as the same content even
+    # though a gap row and an sme_question render differently; it is never
+    # used to drop a *gap row* itself.
+    seen_gap_identity: set[tuple] = set()
     seen_content: set[str] = set()
     lines: list[str] = []
     for r in conn.execute(
@@ -363,8 +372,10 @@ def _consolidated_gap_lines(conn, member_name: str, member_id: int,
         # finding itself; the full detail is still one query away in the
         # fact store for anyone who wants it.
         first_sentence = r["detail"].split(". ", 1)[0].rstrip(". ") + "."
-        if first_sentence in seen_content:
+        identity = (r["gap_kind"], r["line_no"], first_sentence)
+        if identity in seen_gap_identity:
             continue
+        seen_gap_identity.add(identity)
         seen_content.add(first_sentence)
         loc = _cite(member_name, r["line_no"])
         lines.append(f"[{r['severity']}] {loc} {r['gap_kind']}: {first_sentence}")
@@ -397,10 +408,10 @@ def build_reconciliation_prompt(member_name: str, chunk_sources: list[str], writ
     index-overview-design.md) for why that keeps this safe from the same
     silent-truncation risk chunking itself exists to guard against."""
     parts = [
-        "You are reconciling several already-validated, already-cited excerpts of "
-        "the SAME legacy mainframe module -- one excerpt per chunk this module's "
-        "business-rule set was split into for documentation purposes -- into one "
-        "coherent whole-module statement. Do not invent any claim, fact, or "
+        f"You are reconciling several already-validated, already-cited excerpts of "
+        f"the SAME legacy mainframe module, `{member_name}` -- one excerpt per chunk "
+        "this module's business-rule set was split into for documentation purposes -- "
+        "into one coherent whole-module statement. Do not invent any claim, fact, or "
         "citation that is not already present, in substance, in the excerpts "
         "below; every sentence you write must carry a citation copied from one "
         "of them. Where excerpts genuinely conflict, prefer the more specific or "
@@ -470,11 +481,43 @@ _NARRATIVE_FAILED_NOTE = (
 )
 
 
+def _citations_in(text: str) -> set[str]:
+    """Every `[[MEMBER:LINE]]`-shaped citation literally present in `text`,
+    upper-cased whole so the same citation written with different member-name
+    casing by the model still compares equal to how it appeared in a chunk
+    excerpt (line numbers are untouched by .upper())."""
+    return {m.group(0).upper() for m in CITATION.finditer(text)}
+
+
+def _uncited_provenance_problems(sections: dict[str, str], allowed_citations: set[str]) -> list[str]:
+    """A citation appearing in a reconciled section but never present in any
+    of the chunk excerpts the reconciliation call was given is exactly the
+    failure mode the design spec's safety argument depends on not
+    happening: `validate_doc` alone only proves a citation *resolves* to a
+    real source line, not that it was actually copied forward rather than
+    invented fresh by the model for a broadened whole-module claim. Checked
+    deterministically here, against `allowed_citations` (every citation
+    already present, verbatim, in the excerpts given -- see
+    _generate_module_index_narrative), so this can never pass by construction
+    the way relying on validate_doc's citation-resolution check alone
+    would."""
+    problems = []
+    for heading, text in sections.items():
+        extra = _citations_in(text) - allowed_citations
+        for cite in sorted(extra):
+            problems.append(
+                f"narrative synthesis introduced citation {cite} in '## {heading}' that "
+                "was not present in any given chunk excerpt -- reconciliation must only "
+                "reuse citations already given, never invent or copy in a new one"
+            )
+    return problems
+
+
 def _generate_module_index_narrative(conn, member_name: str, chunk_bodies: list[tuple[int, str]],
                                       caller: ModelCaller, writing_rules: str,
                                       index_template: str | None, out_path: Path,
                                       assemble, max_attempts: int = 2,
-                                      ) -> tuple[bool, int, int, int, list[str]]:
+                                      ) -> tuple[bool, int, int, int, list[str], dict[str, str] | None]:
     """The one bounded model call per chunked member: reconcile every ok
     chunk's own Purpose/How-invoked/Inputs/Data-used/Outputs-and-effects
     sections into a single whole-module statement per section, then splice
@@ -489,11 +532,20 @@ def _generate_module_index_narrative(conn, member_name: str, chunk_bodies: list[
     Only ever called after every chunk is ok (see _generate_module_doc_chunked)
     and only ever given already-validated chunk text -- never raw source,
     never module_brief() -- so this cannot reintroduce the silent-truncation
-    risk chunking itself exists to guard against; see the design spec for
-    the full reasoning.
+    risk chunking itself exists to guard against. That alone isn't a
+    guarantee the model actually reused what it was given rather than
+    inventing a new (but still resolvable) citation for a broadened claim --
+    `_uncited_provenance_problems` checks that deterministically, on top of
+    `validate_doc`'s own checks, rather than resting on the prompt's own
+    instructions. See the design spec for the full reasoning.
 
-    Returns `(ok, attempts, input_tokens, output_tokens, problems)`."""
+    Returns `(ok, attempts, input_tokens, output_tokens, problems, sections)`
+    -- `sections` is the accepted {heading: text} mapping when ok, or None
+    on failure (the last, rejected attempt is not a fact worth caching)."""
     sources = [_reconciliation_source(i, body) for i, body in chunk_bodies]
+    allowed_citations: set[str] = set()
+    for body in sources:
+        allowed_citations |= _citations_in(body)
     retry_note: str | None = None
     input_tokens = output_tokens = 0
     problems: list[str] = []
@@ -512,13 +564,13 @@ def _generate_module_index_narrative(conn, member_name: str, chunk_bodies: list[
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(assemble(sections), encoding="utf-8")
         result = validate_doc(conn, out_path)
-        problems = list(result["problems"])
+        problems = list(result["problems"]) + _uncited_provenance_problems(found, allowed_citations)
         if missing:
             problems = [
                 f"narrative synthesis response missing required section(s): {', '.join(missing)}"
             ] + problems
         if not problems:
-            return True, attempt, input_tokens, output_tokens, []
+            return True, attempt, input_tokens, output_tokens, [], sections
 
         note = _retry_note(result["problems"]) if result["problems"] else ""
         if missing:
@@ -529,7 +581,15 @@ def _generate_module_index_narrative(conn, member_name: str, chunk_bodies: list[
                 + f". Missing: {', '.join(missing)}.\n\n" + note
             ).strip()
         retry_note = note
-    return False, attempt, input_tokens, output_tokens, problems
+
+    # Every attempt failed -- leave a plainly-worded, clearly-labelled note
+    # on disk instead of the last rejected attempt's raw (possibly
+    # malformed, possibly citation-invented) prose. DocResult.problems
+    # already carries the detail; this is what a reader sees in the
+    # document itself.
+    failed_sections = {h: _NARRATIVE_FAILED_NOTE for h in NARRATIVE_SECTIONS}
+    out_path.write_text(assemble(failed_sections), encoding="utf-8")
+    return False, attempt, input_tokens, output_tokens, problems, None
 
 
 def _render_module_index_doc(member_name: str, system: str | None,
@@ -660,9 +720,8 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
     combined brief hash is unchanged) or re-render all of them. This is
     what makes a fix affecting only one routine's worth of source cheap to
     pick up: only the chunk(s) whose own brief actually changed re-render."""
-    ranges = routine_aware_chunk_ranges(
-        [r["line_no"] for r in rule_rows], fetch_routines(conn, rule_rows[0]["member_id"]), chunk_size,
-    )
+    routines = fetch_routines(conn, rule_rows[0]["member_id"])
+    ranges = routine_aware_chunk_ranges([r["line_no"] for r in rule_rows], routines, chunk_size)
     chunk_count = len(ranges)
     input_tokens = output_tokens = 0
     chunk_entries: list[tuple[int, tuple[int, int], Path, DocResult]] = []
@@ -703,7 +762,6 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
             problems.append(f"chunk {i}/{chunk_count} ({chunk_path.name}) failed: " + "; ".join(result.problems))
 
     confidence = _aggregate_chunk_confidence([p for _, _, p, r in chunk_entries if r.ok])
-    routines = fetch_routines(conn, rule_rows[0]["member_id"])
     routine_labels = _chunk_processing_labels(rule_rows, routines, ranges)
     ok_chunk_paths = [p for _, _, p, r in chunk_entries if r.ok]
     gap_lines = _consolidated_gap_lines(conn, member_name, rule_rows[0]["member_id"], ok_chunk_paths)
@@ -726,39 +784,48 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
         ]
         # Same resumability idea as per-chunk reuse above, one level up: a
         # prior run's reconciled sections are reused (no model call) when
-        # every ok chunk's own body is byte-identical to what produced them
-        # last time -- stored under chunk_state's "_narrative" key (a chunk
-        # index is never this string, so it can't collide with a real
-        # chunk's own entry) alongside the per-chunk entries, so it rides
-        # along in run_batch's existing state file with no separate
-        # plumbing. A chunk's *content* changing (even one) invalidates the
-        # whole reconciliation, since it draws on every chunk's text at once.
+        # every ok chunk's own body -- and the writing-rules/index-template
+        # text the reconciliation prompt is built from -- is byte-identical
+        # to what produced them last time. Stored under chunk_state's
+        # "_narrative" key (a chunk index is never this string, so it can't
+        # collide with a real chunk's own entry) alongside the per-chunk
+        # entries, so it rides along in run_batch's existing state file with
+        # no separate plumbing. The accepted `sections` themselves are cached
+        # verbatim (not re-derived from the rendered document): re-parsing
+        # `## ` headings back out of the assembled index risks truncating a
+        # section early if its own reconciled prose happens to contain a
+        # fenced code block with a `##`-prefixed line inside it.
         narrative_input_hash = hashlib.sha256(
             "\x00".join(f"{index}:{body}" for index, body in chunk_bodies).encode("utf-8")
+            + b"\x00" + writing_rules.encode("utf-8")
+            + b"\x00" + (index_template or "").encode("utf-8")
         ).hexdigest()
         prior_narrative = (prior_chunks or {}).get("_narrative") if isinstance(prior_chunks, dict) else None
         reused = False
         if (
             isinstance(prior_narrative, dict) and prior_narrative.get("ok")
             and prior_narrative.get("input_sha256") == narrative_input_hash
-            and out_path.exists()
+            and isinstance(prior_narrative.get("sections"), dict)
+            and set(prior_narrative["sections"]) == set(NARRATIVE_SECTIONS)
         ):
-            prior_body = out_path.read_text(encoding="utf-8")
-            prior_sections = {h: _extract_section(prior_body, h) for h in NARRATIVE_SECTIONS}
-            if all(prior_sections.values()):
-                out_path.write_text(assemble(prior_sections), encoding="utf-8")
-                revalidated = validate_doc(conn, out_path)
-                if revalidated["ok"]:
-                    narrative_ok, narrative_problems, n_in, n_out = True, [], 0, 0
-                    reused = True
+            prior_sections = prior_narrative["sections"]
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(assemble(prior_sections), encoding="utf-8")
+            revalidated = validate_doc(conn, out_path)
+            if revalidated["ok"]:
+                narrative_ok, narrative_problems, n_in, n_out, sections = True, [], 0, 0, prior_sections
+                reused = True
         if not reused:
-            narrative_ok, _, n_in, n_out, narrative_problems = _generate_module_index_narrative(
+            narrative_ok, _, n_in, n_out, narrative_problems, sections = _generate_module_index_narrative(
                 conn, member_name, chunk_bodies, caller, writing_rules, index_template, out_path,
                 assemble, max_attempts=max_attempts,
             )
         input_tokens += n_in
         output_tokens += n_out
-        chunk_state["_narrative"] = {"ok": narrative_ok, "input_sha256": narrative_input_hash}
+        chunk_state["_narrative"] = {
+            "ok": narrative_ok, "input_sha256": narrative_input_hash,
+            "sections": sections if narrative_ok else None,
+        }
         if not narrative_ok:
             problems.append("narrative synthesis: " + "; ".join(narrative_problems))
     else:
