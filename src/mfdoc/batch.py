@@ -18,6 +18,7 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -264,6 +265,24 @@ def _aggregate_chunk_confidence(chunk_paths: list[Path]) -> dict[str, int]:
     return totals
 
 
+def _prune_stale_chunk_files(out_path: Path, expected_names: set[str]) -> None:
+    """Delete any `{stem}.chunk<N>{suffix}` file already on disk next to
+    `out_path` that isn't one of this run's expected chunk filenames --
+    otherwise a rerun whose chunk width changed (crossing a power of ten in
+    either direction, or the unpadded->padded migration itself) leaves
+    stale files behind indefinitely (e.g. a legacy unpadded `chunk1.md`
+    alongside the new `chunk01.md`), which confuses doc-site nav and wastes
+    space. Scoped to the chunk-file naming pattern specifically so this
+    never touches an unrelated file that happens to share the member's
+    stem (mirrored verbatim in testbatch.py's chunked path)."""
+    if not out_path.parent.is_dir():
+        return
+    pattern = re.compile(rf"^{re.escape(out_path.stem)}\.chunk\d+{re.escape(out_path.suffix)}$")
+    for candidate in out_path.parent.iterdir():
+        if pattern.match(candidate.name) and candidate.name not in expected_names:
+            candidate.unlink()
+
+
 def _render_module_chunk_index(member_name: str, system: str | None,
                                 chunk_entries: list[tuple[int, tuple[int, int], Path, DocResult]],
                                 confidence: dict[str, int]) -> str:
@@ -361,6 +380,10 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
     chunk_state: dict[str, dict] = {}
 
     chunk_width = len(str(chunk_count))
+    expected_chunk_names = {
+        f"{out_path.stem}.chunk{n:0{chunk_width}d}{out_path.suffix}" for n in range(1, chunk_count + 1)
+    }
+    _prune_stale_chunk_files(out_path, expected_chunk_names)
     for i, (start, end) in enumerate(ranges, start=1):
         chunk_path = out_path.with_name(f"{out_path.stem}.chunk{i:0{chunk_width}d}{out_path.suffix}")
         brief = module_brief(

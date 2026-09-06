@@ -458,6 +458,31 @@ def test_run_batch_chunks_a_large_member_and_still_batches_small_ones(indexed_db
     assert summary.failed == 0
 
 
+def test_run_batch_chunking_prunes_stale_legacy_chunk_files(indexed_db, tmp_path):
+    """A rerun after the unpadded->padded chunk-filename migration (or any
+    rerun whose chunk width changes) must not leave old-named chunk files
+    behind alongside the new ones."""
+    members = ["MMP0100"]
+    subdir = batch_mod._output_subdir(indexed_db, "MMP0100")
+    out_dir = tmp_path / "out" / subdir
+    out_dir.mkdir(parents=True)
+    # Plant a legacy unpadded file and an unrelated same-stem file that
+    # must survive the prune (it isn't a chunk file at all).
+    stale = out_dir / "MMP0100.chunk1.md"
+    stale.write_text("stale", encoding="utf-8")
+    unrelated = out_dir / "MMP0100.notes.md"
+    unrelated.write_text("keep me", encoding="utf-8")
+
+    batch_mod.run_batch(
+        indexed_db, members, tmp_path / "out", FakeCaller(), "rules", "template",
+        max_rules_per_call=1,
+    )
+
+    assert not stale.exists()
+    assert unrelated.exists()
+    assert (out_dir / "MMP0100.chunk01.md").exists()
+
+
 def test_resolve_max_rules_per_call():
     from mfdoc.batch import DEFAULT_MAX_RULES_PER_CALL, _resolve_max_rules_per_call
 
