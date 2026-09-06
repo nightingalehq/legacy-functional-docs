@@ -487,9 +487,12 @@ def label_control_mismatches(conn) -> list[dict]:
             out.append(f)
             add_gap(
                 conn, "label_control_mismatch",
-                f"{f['label_field']} is set to '{f['label_literal']}' at line "
+                # label_literal/control_literal already carry their own source
+                # quoting verbatim (e.g. "'Send'") -- wrapping them in another
+                # layer of quotes here would render as "''Send''".
+                f"{f['label_field']} is set to {f['label_literal']} at line "
                 f"{f['label_line']} while {f['control_field']} is set to "
-                f"'{f['control_literal']}' at line {f['control_line']}, in what looks "
+                f"{f['control_literal']} at line {f['control_line']}, in what looks "
                 f"like the same branch. Confirm whether the displayed label and the "
                 f"actual action taken genuinely agree, or whether the label overstates/"
                 f"misstates what this branch does.",

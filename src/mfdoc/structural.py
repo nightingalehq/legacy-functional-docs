@@ -729,9 +729,9 @@ def dispatch_edges_for_member(conn, member_id: int, dispatch_field=DISPATCH_FIEL
         end_line = row["end_line"] if row["end_line"] is not None else start_line
 
         calls = conn.execute(
-            "SELECT DISTINCT callee_name, call_kind FROM call_edge "
+            "SELECT callee_name, call_kind, MIN(line_no) AS line_no FROM call_edge "
             "WHERE caller_id=? AND line_no > ? AND line_no <= ? AND dynamic=0 "
-            "ORDER BY callee_name",
+            "GROUP BY callee_name, call_kind ORDER BY callee_name",
             (member_id, start_line, end_line),
         ).fetchall()
         assigns = []
@@ -791,8 +791,14 @@ def dispatch_map(conn, dispatch_field=DISPATCH_FIELD) -> str:
         out.append("| trigger value | branch | calls | fields set |")
         out.append("|---|---|---|---|")
         for e in edges:
-            calls = ", ".join(f"`{c['callee_name']}` ({c['call_kind']})" for c in e["calls"]) or "—"
-            assigns = ", ".join(f"`{a['field']}` = {a['literal']}" for a in e["assigns"]) or "—"
+            calls = ", ".join(
+                f"`{c['callee_name']}` ({c['call_kind']}) {_cite(m['name'], c['line_no'])}"
+                for c in e["calls"]
+            ) or "—"
+            assigns = ", ".join(
+                f"`{a['field']}` = {a['literal']} {_cite(m['name'], a['line_no'])}"
+                for a in e["assigns"]
+            ) or "—"
             span = _cite(m["name"], e["line_no"], e["end_line"])
             out.append(f"| `{e['trigger_value']}` | {span} | {calls} | {assigns} |")
         out.append("")

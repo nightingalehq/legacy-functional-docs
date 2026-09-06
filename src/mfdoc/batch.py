@@ -363,21 +363,25 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
     # whose own rules dispatch to a routine documented elsewhere can name
     # the specific chunk instead of leaving a dangling "covered elsewhere".
     #
-    # `ranges` is in rule-ordinal space (position within rule_rows), not raw
-    # source line numbers (see routine_aware_chunk_ranges), so a routine's
-    # chunk is found via any one rule_rows entry that falls inside its own
-    # line span, not by comparing line numbers to `ranges` directly.
+    # `ranges` is in rule-ordinal space (1-based position within `rule_rows`,
+    # not raw source line numbers -- see routine_aware_chunk_ranges), so a
+    # routine's chunk is found by scanning `rule_rows` directly (not via a
+    # line_no-keyed dict: `rule_candidate.line_no` is not guaranteed unique
+    # per member, and a dict built that way silently collapses same-line
+    # rows to whichever is last, discarding the rest) for the first row
+    # whose line falls inside the routine's own span, using that row's
+    # position (its index in `rule_rows`, 1-based) as the ordinal.
     # routine_aware_chunk_ranges already keeps a routine's rules as one
-    # contiguous, unsplit run, so the first such entry always lands in the
+    # contiguous, unsplit run, so any one of its rows' ordinals lands in the
     # same chunk as every other rule belonging to that routine. A routine
     # with no rule_candidate rows of its own (nothing to key off) is simply
     # left out of the map.
-    line_to_ordinal = {r["line_no"]: i + 1 for i, r in enumerate(rule_rows)}
     chunk_map: dict[str, int] = {}
     for routine in routines:
         end_line = routine["end_line"] if routine["end_line"] is not None else routine["start_line"]
         ordinal = next(
-            (pos for ln, pos in line_to_ordinal.items() if routine["start_line"] <= ln <= end_line),
+            (pos for pos, r in enumerate(rule_rows, start=1)
+             if routine["start_line"] <= r["line_no"] <= end_line),
             None,
         )
         if ordinal is None:
