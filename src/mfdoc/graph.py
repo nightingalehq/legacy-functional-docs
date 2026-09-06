@@ -166,13 +166,21 @@ def crud_matrix(conn) -> list[dict]:
     (rather than reconstructing an identity from module/library/dialect)
     has a real foreign key to do it with -- the same posture
     build_call_graph already takes for its own rows.
+
+    `crud`/`verbs` are sorted in Python after fetching, not left as
+    `GROUP_CONCAT(DISTINCT ...)` produced them -- SQLite doesn't guarantee
+    concatenation order for that without an explicit ordering step, which
+    would silently violate this module's "byte-identical output on
+    unchanged source" contract (a member touching the same entity with
+    multiple CRUD letters/verbs could render its crud/verbs string in a
+    different order from one run to the next with nothing having changed).
     """
     # Iterate the cursor directly -- consumed exactly once, right here, and
     # a large codebase's whole data_access table (joined against member) is
     # exactly the kind of whole-system scan not worth holding twice over
     # (once as the driver's own Row list, again as this function's own
     # dict list) -- same reasoning as graph.connected_components().
-    return [
+    rows = [
         dict(r) for r in conn.execute(
             """
             SELECT m.id AS member_id, m.name AS module, m.library, m.dialect,
@@ -188,6 +196,10 @@ def crud_matrix(conn) -> list[dict]:
             """
         )
     ]
+    for r in rows:
+        r["crud"] = ",".join(sorted((r["crud"] or "").split(",")))
+        r["verbs"] = ",".join(sorted((r["verbs"] or "").split(",")))
+    return rows
 
 
 def referenced_entities(conn, member_id: int) -> list[dict]:

@@ -122,13 +122,11 @@ def data_flow_diagram(conn) -> str:
     # symmetric: every member sharing an ambiguous (name, qualifier) pair
     # gets the same treatment, not just whichever one happened to render
     # second.
-    names_by_member: dict[int, str] = {}
     library_by_member: dict[int, str | None] = {}
     dialect_by_member: dict[int, str] = {}
     member_ids_by_name: dict[str, set[int]] = defaultdict(set)
     for row in rows:
         mid = row["member_id"]
-        names_by_member[mid] = row["module"]
         library_by_member[mid] = row["library"]
         dialect_by_member[mid] = row["dialect"]
         member_ids_by_name[row["module"]].add(mid)

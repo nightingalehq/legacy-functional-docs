@@ -3,6 +3,35 @@ from __future__ import annotations
 from mfdoc import structural
 
 
+def test_crud_matrix_sorts_crud_and_verbs_deterministically():
+    """GROUP_CONCAT(DISTINCT ...) doesn't guarantee element order in
+    SQLite without an explicit ordering step -- crud/verbs must be sorted
+    in Python after fetching so a member touching the same entity with
+    multiple CRUD letters/verbs renders the same string every run,
+    regardless of insertion order or SQLite's internal row order."""
+    import sqlite3
+
+    from mfdoc import graph
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    mid = insert(conn, "member", name="MULTIOP", dialect="natural", library="LIBA")
+    # Inserted deliberately out of C/R/U/D order.
+    insert(conn, "data_access", member_id=mid, line_no=30, verb="DELETE",
+           crud="D", entity_name="ENTITY-X", raw="DELETE ENTITY-X")
+    insert(conn, "data_access", member_id=mid, line_no=10, verb="READ",
+           crud="R", entity_name="ENTITY-X", raw="READ ENTITY-X")
+    insert(conn, "data_access", member_id=mid, line_no=20, verb="UPDATE",
+           crud="U", entity_name="ENTITY-X", raw="UPDATE ENTITY-X")
+    conn.commit()
+
+    row = graph.crud_matrix(conn)[0]
+    assert row["crud"] == "D,R,U"
+    assert row["verbs"] == "DELETE,READ,UPDATE"
+
+
 def test_crud_matrix_never_merges_two_different_members_sharing_a_name():
     """member.name is only unique together with (library, dialect) -- two
     distinct members can share a bare name across libraries. Grouping by
