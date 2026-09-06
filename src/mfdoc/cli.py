@@ -334,6 +334,7 @@ def cmd_call_graph(args) -> int:
         conn,
         cluster_by=diagrams_cfg.get("cluster_by", "module"),
         max_nodes_inline=diagrams_cfg.get("max_nodes_inline", 40),
+        direction=diagrams_cfg.get("direction", "LR"),
     )
     out_dir = Path(args.out) if args.out else None
     if out_dir is None:

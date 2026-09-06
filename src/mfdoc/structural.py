@@ -9,6 +9,7 @@ belongs in brief.py's narrative-brief functions instead, not here.
 from __future__ import annotations
 
 import hashlib
+from collections import defaultdict
 
 from . import graph
 from .citations import _cite, _rule_id
@@ -189,12 +190,56 @@ def build_call_graph(conn, cluster_by: str = "module") -> dict[int, dict]:
     return graph_data
 
 
-def call_graph_diagram(conn, cluster_by: str = "module", max_nodes_inline: int = 40) -> dict[str, str]:
-    """Mermaid call-graph DAG. If total distinct nodes <= max_nodes_inline,
-    returns {"inline": <one diagram for system-overview.md>}. Otherwise
-    returns {"inline": <collapsed cluster-level view>, <cluster_name>:
-    <that cluster's full diagram>, ...} -- callers write "inline" into
-    system-overview.md and every other key to call-graph-<cluster>.md.
+def call_graph_diagram(
+    conn,
+    cluster_by: str = "module",
+    max_nodes_inline: int = 40,
+    direction: str = "LR",
+) -> dict[str, str]:
+    """Mermaid call-graph DAG, one diagram per connected component of the
+    call graph (see graph.connected_components() -- direction is treated as
+    irrelevant for grouping, only whether a caller/callee pair are linked at
+    all). This is a strictly better default split than cluster_by's module/
+    library/subsystem grouping: two members that share a cluster but never
+    call each other have no business sharing a diagram, and two members in
+    different clusters that do call each other belong together regardless.
+
+    When the whole call graph is a single connected component (the common
+    case for a small-to-medium codebase), behaviour is unchanged from
+    before this split was added: if total distinct nodes <= max_nodes_inline,
+    returns {"inline": <one diagram, written by cli.cmd_call_graph to
+    call-graph.md>}; otherwise {"inline": <collapsed cluster-level view>,
+    <cluster_name>: <that cluster's full diagram>, ...}.
+
+    When there are 2+ connected components, every component gets its own
+    diagram (regardless of the *combined* node count -- two small but
+    disconnected subsystems must never be forced into one diagram just
+    because together they're still under max_nodes_inline): returns
+    {"inline": <index diagram, one node per component, linking to its
+    file>, <component_name>: <that component's full diagram, if under
+    max_nodes_inline>, ...}. A component itself still over max_nodes_inline
+    falls back to today's cluster-collapse behaviour, scoped to just that
+    component's own members: {..., <component_name>: <that component's own
+    collapsed cluster-level view>, <component_name>-<cluster_name>: <that
+    cluster's full diagram>, ...}.
+
+    Every key other than "inline" is written by cli.cmd_call_graph to
+    call-graph-<safe_cluster_filename(key)>.md -- "inline" is written to
+    call-graph.md.
+
+    Component naming: a component whose caller members all share one
+    cluster_by grouping is named after that cluster (e.g. "PAYROLL",
+    matching the existing per-cluster file convention) since that's the
+    most useful label a reader can act on; a component spanning more than
+    one cluster gets a numeric "component-<n>" name instead, and two
+    components that happen to share the same dominant cluster name (the
+    exact "same library, never call each other" case this split exists to
+    fix) get "-<n>" appended to that dominant name to keep filenames unique.
+    Numbering is assigned in a content-stable order (sorted by the
+    lexicographically-smallest (library, name, dialect) triple among each
+    component's members -- the same content-derived stability principle
+    mermaid_node_id() uses below) so component numbers don't churn between
+    regenerations just because SQLite rowids got renumbered.
 
     Unresolved calls render as dashed edges to their own node, labeled
     with the missing callee's name (not a single anonymous shared sink)
@@ -223,6 +268,11 @@ def call_graph_diagram(conn, cluster_by: str = "module", max_nodes_inline: int =
     triple, not the member.id rowid used to key/group internally here --
     so node ids stay stable across regenerations even when ingest order
     changes and rowids get renumbered."""
+    valid_directions = {"LR", "TD"}
+    if direction not in valid_directions:
+        raise ValueError(
+            f"unsupported direction {direction!r}; expected one of {sorted(valid_directions)}"
+        )
     graph_data = build_call_graph(conn, cluster_by=cluster_by)
 
     # id_info maps every known member id (caller or resolved callee) to its
@@ -276,12 +326,16 @@ def call_graph_diagram(conn, cluster_by: str = "module", max_nodes_inline: int =
         name, library, dialect = id_info[val]
         return _mermaid_id(f"{library}|{name}|{dialect}")
 
-    nodes = {node_key(cid, entry["name"]) for cid, entry in graph_data.items()} | {
-        node_key(c["callee_id"], c["callee_name"]) for e in graph_data.values() for c in e["calls"]
-    }
+    def nodes_for(callers: dict[int, dict]) -> set[tuple[str, object]]:
+        return {node_key(cid, entry["name"]) for cid, entry in callers.items()} | {
+            node_key(c["callee_id"], c["callee_name"])
+            for e in callers.values() for c in e["calls"]
+        }
+
+    nodes = nodes_for(graph_data)
 
     def render(callers: dict[int, dict], title: str) -> str:
-        lines = ["```mermaid", "graph TD"]
+        lines = ["```mermaid", f"graph {direction}"]
         seen: set[str] = set()
         seen_edges: set[tuple[str, str, bool]] = set()
         for caller_member_id, entry in callers.items():
@@ -316,30 +370,114 @@ def call_graph_diagram(conn, cluster_by: str = "module", max_nodes_inline: int =
             f"# {title}\n\n" + "\n".join(lines) + "\n"
         )
 
-    if len(nodes) <= max_nodes_inline:
-        return {"inline": render(graph_data, "Call graph")}
+    def cluster_collapse(callers: dict[int, dict], title_prefix: str, key_prefix: str) -> dict[str, str]:
+        """Today's over-threshold fallback (one node per cluster, plus a
+        standalone diagram per cluster), scoped to `callers`. key_prefix is
+        prepended to each cluster's result key (empty for the whole-graph
+        legacy case, "<component_name>-" when scoped to one oversized
+        component) so keys stay unique across components."""
+        clusters: dict[str, dict] = {}
+        for caller_member_id, entry in callers.items():
+            clusters.setdefault(entry["cluster"], {})[caller_member_id] = entry
 
-    clusters: dict[str, dict] = {}
-    for caller_member_id, entry in graph_data.items():
-        clusters.setdefault(entry["cluster"], {})[caller_member_id] = entry
+        collapsed_lines = ["```mermaid", f"graph {direction}"]
+        for cluster_name in clusters:
+            cluster_file = safe_cluster_filename(f"{key_prefix}{cluster_name}")
+            cluster_label = f"{cluster_name} (see call-graph-{cluster_file}.md)".replace('"', '\\"')
+            collapsed_lines.append(f'    {_mermaid_id(f"{key_prefix}{cluster_name}")}["{cluster_label}"]')
+        collapsed_lines.append("```")
+        out = {
+            "": (
+                f'---\ntitle: "{title_prefix} (collapsed)"\ndoc_type: register\n---\n\n'
+                f"# {title_prefix} (collapsed)\n\n"
+                "Too many nodes for one inline diagram -- one node per cluster below; "
+                "see the standalone file for each cluster's full graph.\n\n"
+                + "\n".join(collapsed_lines) + "\n"
+            )
+        }
+        for cluster_name, members in clusters.items():
+            out[f"{key_prefix}{cluster_name}"] = render(members, f"{title_prefix} — {cluster_name}")
+        return out
 
-    collapsed_lines = ["```mermaid", "graph TD"]
-    for cluster_name in clusters:
-        cluster_file = safe_cluster_filename(cluster_name)
-        cluster_label = f"{cluster_name} (see call-graph-{cluster_file}.md)".replace('"', '\\"')
-        collapsed_lines.append(f'    {_mermaid_id(cluster_name)}["{cluster_label}"]')
-    collapsed_lines.append("```")
-    result = {
-        "inline": (
-            '---\ntitle: "Call graph (collapsed)"\ndoc_type: register\n---\n\n'
-            "# Call graph (collapsed)\n\n"
-            "Too many nodes for one inline diagram -- one node per cluster below; "
-            "see the standalone file for each cluster's full graph.\n\n"
-            + "\n".join(collapsed_lines) + "\n"
-        )
-    }
-    for cluster_name, members in clusters.items():
-        result[cluster_name] = render(members, f"Call graph — {cluster_name}")
+    components = [c for c in graph.connected_components(conn) if c]
+
+    if len(components) <= 1:
+        # Legacy behaviour, unchanged: the whole graph is one connected
+        # component (or empty), so the connectivity-aware split below has
+        # nothing to add over the existing node-count threshold.
+        if len(nodes) <= max_nodes_inline:
+            return {"inline": render(graph_data, "Call graph")}
+        collapsed = cluster_collapse(graph_data, "Call graph", "")
+        return {"inline": collapsed.pop(""), **collapsed}
+
+    # 2+ connected components: always split by component, regardless of
+    # the *combined* node count -- two genuinely disconnected subsystems
+    # must never share a diagram just because together they're still
+    # under max_nodes_inline.
+    id_to_component: dict[int, int] = {}
+    for idx, comp in enumerate(components):
+        for member_id in comp:
+            id_to_component[member_id] = idx
+
+    callers_by_component: dict[int, dict[int, dict]] = defaultdict(dict)
+    for caller_id, entry in graph_data.items():
+        callers_by_component[id_to_component[caller_id]][caller_id] = entry
+
+    def stability_key(idx: int) -> tuple[str, str, str]:
+        # id_info values are (name, library, dialect); the ordering
+        # contract (docs/superpowers/specs/2026-09-06-call-graph-lr-
+        # components-design.md) is (library, name, dialect), so reorder
+        # each triple before taking the min.
+        triples = [
+            (library, name, dialect) for (name, library, dialect) in (id_info[m] for m in components[idx] if m in id_info)
+        ]
+        return min(triples) if triples else ("", "", "")
+
+    ordered = sorted(range(len(components)), key=stability_key)
+
+    dominant_name: dict[int, str | None] = {}
+    for idx in ordered:
+        cluster_names = {entry["cluster"] for entry in callers_by_component[idx].values()}
+        dominant_name[idx] = next(iter(cluster_names)) if len(cluster_names) == 1 else None
+
+    name_counts: dict[str, int] = {}
+    for idx in ordered:
+        dom = dominant_name[idx]
+        if dom is not None:
+            name_counts[dom] = name_counts.get(dom, 0) + 1
+
+    final_names: dict[int, str] = {}
+    for rank, idx in enumerate(ordered, start=1):
+        dom = dominant_name[idx]
+        if dom is None or name_counts[dom] > 1:
+            final_names[idx] = f"{dom}-{rank}" if dom is not None else f"component-{rank}"
+        else:
+            final_names[idx] = dom
+
+    result: dict[str, str] = {}
+    index_lines = ["```mermaid", f"graph {direction}"]
+    for idx in ordered:
+        name = final_names[idx]
+        comp_callers = callers_by_component[idx]
+        comp_nodes = nodes_for(comp_callers)
+        if len(comp_nodes) <= max_nodes_inline:
+            result[name] = render(comp_callers, f"Call graph — {name}")
+        else:
+            collapsed = cluster_collapse(comp_callers, f"Call graph — {name}", f"{name}-")
+            result[name] = collapsed.pop("")
+            result.update(collapsed)
+        index_file = safe_cluster_filename(name)
+        index_label = f"{name} (see call-graph-{index_file}.md)".replace('"', '\\"')
+        index_lines.append(f'    {_mermaid_id(name)}["{index_label}"]')
+    index_lines.append("```")
+    result["inline"] = (
+        '---\ntitle: "Call graph"\ndoc_type: register\n---\n\n'
+        "# Call graph\n\n"
+        "The call graph splits into multiple independent components -- one "
+        "node per component below; see the standalone file for each "
+        "component's full graph.\n\n"
+        + "\n".join(index_lines) + "\n"
+    )
     return result
 
 

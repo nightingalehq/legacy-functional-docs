@@ -180,5 +180,12 @@ options:
       cluster_by: module
       # Above this many distinct nodes, `mfdoc call-graph` renders inline
       # cluster summaries plus separate diagrams per cluster, rather than one
-      # large inline diagram.
+      # large inline diagram. The call graph always splits into one diagram
+      # per independent (disconnected) component first; this threshold is
+      # then applied per component, not to the combined node count.
       max_nodes_inline: 40
+      # Mermaid layout direction for call-graph diagrams: LR (left-to-right,
+      # the default -- reads better for a module with many siblings, and
+      # matches data-flow.md's own convention) or TD (top-down). Ignored by
+      # data-flow, which is always LR.
+      direction: LR

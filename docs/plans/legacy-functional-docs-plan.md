@@ -12,6 +12,24 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-06):**
+- Done: connectivity-aware call-graph splitting and LR-by-default layout
+  (#68). `mfdoc call-graph` now defaults to `graph LR` (matching
+  `data-flow.md`'s existing convention; still overridable back to `TD` via
+  `options.overview.diagrams.direction`), and `structural.call_graph_diagram`
+  now computes the call graph's connected components
+  (`graph.connected_components`, pure union-find over `call_edge`, no model
+  call) and renders one diagram per independent component instead of
+  applying `max_nodes_inline` to the combined node count across the whole
+  graph. A component still over threshold falls back to today's
+  `cluster_by` collapse-then-per-cluster behaviour, scoped to just that
+  component. The repo's own bundled `examples/` fixtures already split into
+  six components under this logic — previously all silently flattened into
+  one diagram. See `docs/superpowers/specs/2026-09-06-call-graph-lr-components-design.md`
+  for the naming convention chosen for per-component files and the
+  deliberate decision not to let a shared unresolved-callee name bridge two
+  otherwise-disconnected components.
+
 **Progress (2026-08-04):**
 - Done: 1.1 (pytest suite, 12 defect classes + coverage snapshot), 1.2
   (pyproject.toml + src layout + console script), 1.3 (CI), 1.4 (above), 2.1
