@@ -351,10 +351,41 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
     combined brief hash is unchanged) or re-render all of them. This is
     what makes a fix affecting only one routine's worth of source cheap to
     pick up: only the chunk(s) whose own brief actually changed re-render."""
+    routines = fetch_routines(conn, rule_rows[0]["member_id"])
     ranges = routine_aware_chunk_ranges(
-        [r["line_no"] for r in rule_rows], fetch_routines(conn, rule_rows[0]["member_id"]), chunk_size,
+        [r["line_no"] for r in rule_rows], routines, chunk_size,
     )
     chunk_count = len(ranges)
+    # Routine name (upper) -> 1-based chunk index whose rule range contains
+    # that routine's own rules -- known in full before any chunk is
+    # narrated, since `ranges` is already fixed above. Handed to every
+    # chunk's own brief (see module_brief's `chunk_map` param) so a chunk
+    # whose own rules dispatch to a routine documented elsewhere can name
+    # the specific chunk instead of leaving a dangling "covered elsewhere".
+    #
+    # `ranges` is in rule-ordinal space (position within rule_rows), not raw
+    # source line numbers (see routine_aware_chunk_ranges), so a routine's
+    # chunk is found via any one rule_rows entry that falls inside its own
+    # line span, not by comparing line numbers to `ranges` directly.
+    # routine_aware_chunk_ranges already keeps a routine's rules as one
+    # contiguous, unsplit run, so the first such entry always lands in the
+    # same chunk as every other rule belonging to that routine. A routine
+    # with no rule_candidate rows of its own (nothing to key off) is simply
+    # left out of the map.
+    line_to_ordinal = {r["line_no"]: i + 1 for i, r in enumerate(rule_rows)}
+    chunk_map: dict[str, int] = {}
+    for routine in routines:
+        end_line = routine["end_line"] if routine["end_line"] is not None else routine["start_line"]
+        ordinal = next(
+            (pos for ln, pos in line_to_ordinal.items() if routine["start_line"] <= ln <= end_line),
+            None,
+        )
+        if ordinal is None:
+            continue
+        for idx, (start, end) in enumerate(ranges, start=1):
+            if start <= ordinal <= end:
+                chunk_map[routine["name"].upper()] = idx
+                break
     input_tokens = output_tokens = 0
     chunk_entries: list[tuple[int, tuple[int, int], Path, DocResult]] = []
     problems: list[str] = []
@@ -364,7 +395,7 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
         chunk_path = out_path.with_name(f"{out_path.stem}.chunk{i}{out_path.suffix}")
         brief = module_brief(
             conn, member_name, redact=redact, lexicon=lexicon,
-            rule_range=(start, end), chunk_info=(i, chunk_count),
+            rule_range=(start, end), chunk_info=(i, chunk_count), chunk_map=chunk_map,
         )
         brief_hash = hashlib.sha256(brief.encode("utf-8")).hexdigest()
         prior_chunk = (prior_chunks or {}).get(str(i))

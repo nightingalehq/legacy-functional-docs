@@ -101,6 +101,7 @@ mfdoc call-graph           --config project.yml --out docs/functional/call-graph
 mfdoc complexity           --config project.yml --out docs/functional/complexity.md
 mfdoc rules-theme-register --config project.yml --out docs/functional/rules-theme-register.md
 mfdoc glossary             --config project.yml --out docs/functional/glossary.md
+mfdoc dispatch-map         --config project.yml --out docs/functional/dispatch-map.md
 
 # optional: draft tests from the same fact store, in the source dialect or a
 # destination language -- see docs/guides/testing-strategies-for-mainframes-and-4gl.md
@@ -217,6 +218,47 @@ Before "simplifying" anything in `mantis.py`/`supra.py` that looks redundant
 or overly specific, check `tests/test_call_graph_and_entities.py` and
 `tests/test_citation_alignment.py` — several such patterns are fixes for
 real, previously-shipped defects, not accidental cruft.
+
+## Planning an improvement or bug fix
+
+This tool exists to serve more than one 4GL/dialect combination (Natural/
+Adabas, Mantis/Supra, and whatever `reference/adding-a-dialect.md` adds
+next) from one shared pipeline. A fix or improvement motivated by one real
+finding (an engagement's review comments, a bug report, a gap a specific
+codebase exposed) should be planned with three questions, in this order,
+before writing code:
+
+1. **Can this generalize?** Most real fixes belong at a layer that's
+   already dialect-neutral — `graph.py`'s derive functions, `validate.py`'s
+   checks, and `batch.py`/`brief.py`'s narrative-shaping logic all operate
+   on the fact-store tables (`rule_candidate`, `routine`, `call_edge`, ...)
+   that every dialect's extractor populates the same way. A check written
+   against those tables (e.g. a dead-store scan, a citation-integrity
+   check, a chunk-boundary fix) is automatically dialect-general with no
+   extra work — prefer landing it there over a dialect-specific patch.
+2. **Where general truly isn't appropriate, add the dialect variants
+   explicitly** — don't ship Natural-only and call it done. A fix that
+   must key off a dialect-specific idiom (a naming convention, a built-in
+   system variable like Natural's `*PF-KEY`, a screen/map concept) should
+   still default to something configurable per project
+   (`options.overview.*_pattern`, `options.validate.*_pattern` — replace-
+   not-merge, the same convention `outcome_field_pattern`/
+   `dispatch_field_pattern` already establish) rather than a hardcoded
+   Natural-only pattern, so a Mantis/Supra project (or a future dialect)
+   can supply its own equivalent instead of getting silently skipped. If
+   you can't add a real Mantis/Supra fixture exercising the variant in the
+   same change, say so explicitly in the PR rather than leaving it
+   implicit — a documented gap is fine; a silent one isn't.
+3. **Update the documentation the change actually touches** — the doc
+   that would mislead someone if left stale, not every doc that mentions
+   the area. In practice that usually means: `docs/guides/architecture.md`
+   (if a stage's behavior or a fact-store table's meaning changed),
+   `README.md`/`CLAUDE.md`'s command listing (a new `mfdoc` subcommand or
+   config key), and `docs/plans/legacy-functional-docs-plan.md`'s progress
+   log (append a new dated `**Progress (YYYY-MM-DD):**` entry in the same
+   style as the existing ones near the top of that file — don't rewrite
+   the narrative sections below it). A change with no test and no doc
+   update is not done, even if the code itself is correct.
 
 ## Style and dependency discipline
 

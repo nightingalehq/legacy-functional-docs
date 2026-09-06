@@ -424,6 +424,53 @@ def test_generate_module_doc_reports_failure_when_one_chunk_fails(tmp_path):
     assert validate_doc(conn, tmp_path / "FAKEMOD.chunk1.md")["ok"]
 
 
+def test_chunked_brief_names_the_chunk_a_routine_in_another_chunk_is_documented_in(tmp_path):
+    """A routine whose rules fall in a *different* chunk than the one being
+    narrated must be annotated in that chunk's own brief with its concrete
+    chunk number -- this is what lets the model write "documented in chunk
+    2" instead of the vague, unresolved "covered by a later chunk" real
+    generated docs have been observed producing. A routine in the *same*
+    chunk gets no such annotation (nothing to forward-reference)."""
+    import sqlite3
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_rules(conn, 4)
+    insert(conn, "routine", member_id=1, name="ROUTINE-A", kind="natural_subroutine",
+           start_line=1, end_line=2)
+    insert(conn, "routine", member_id=1, name="ROUTINE-B", kind="natural_subroutine",
+           start_line=3, end_line=4)
+    conn.commit()
+
+    briefs: dict[int, str] = {}
+
+    def recording_caller(prompt: str) -> batch_mod.ModelResponse:
+        import re as _re
+        chunk_no = int(_re.search(r"chunk (\d+) of", prompt).group(1))
+        briefs[chunk_no] = prompt
+        return _chunk_aware_module_caller()(prompt)
+
+    out_path = tmp_path / "FAKEMOD.md"
+    result = batch_mod.generate_module_doc(
+        conn, "FAKEMOD", out_path, recording_caller,
+        "writing rules text", "template text", max_rules_per_call=2,
+    )
+    assert result.ok is True, result.problems
+    assert set(briefs) == {1, 2}
+
+    # Chunk 1 covers ROUTINE-A's own rules (lines 1-2) -- no self-reference.
+    assert "`ROUTINE-A` (natural_subroutine)" in briefs[1]
+    assert "`ROUTINE-A` (natural_subroutine) [[FAKEMOD:1-2]] **[documented" not in briefs[1]
+    # ROUTINE-B's rules fall in chunk 2 -- chunk 1's brief must name it concretely.
+    assert "[documented in chunk 2]" in briefs[1]
+    # Chunk 2's own brief must likewise point back at chunk 1 for ROUTINE-A
+    # (documented there, not here) -- but not at itself for ROUTINE-B.
+    assert "[documented in chunk 1]" in briefs[2]
+    assert "[documented in chunk 2]" not in briefs[2]
+
+
 def test_run_batch_chunks_a_large_member_and_still_batches_small_ones(indexed_db, tmp_path):
     """A member over the rule threshold takes the chunked path while a
     normal-sized member in the same run still goes through the ordinary

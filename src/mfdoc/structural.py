@@ -12,6 +12,7 @@ import hashlib
 
 from . import graph
 from .citations import _cite, _rule_id
+from .conditions import DISPATCH_FIELD, comparisons_in
 from .redact import NULL_REDACTOR, Redactor
 
 
@@ -678,5 +679,124 @@ def glossary(conn, redact: Redactor = NULL_REDACTOR) -> str:
             for f in fields:
                 remark = redact(f["remark"]).replace("|", "\\|") if f["remark"] else ""
                 out.append(f"| `{f['name']}` | {f['format'] or ''} | {f['length'] or ''} | {remark} |")
+        out.append("")
+    return "\n".join(out) + "\n"
+
+
+def dispatch_edges_for_member(conn, member_id: int, dispatch_field=DISPATCH_FIELD) -> list[dict]:
+    """Every branch whose own `IF` condition compares `dispatch_field`
+    (default Natural's `*PF-KEY`) against a literal, with the routines it
+    calls and the literal-valued fields it sets within that same branch --
+    the "what actually happens when this value is dispatched on" a reviewer
+    otherwise has to reconstruct by hand from a module's full source.
+
+    Deliberately `IF`-only, not `ELSE`: an `ELSE` branch's own "value" is
+    only ever "not any of the sibling `IF`s' literals", which isn't a single
+    value worth a row of its own -- and a `DECIDE ON`-style cascade renders
+    as a chain of paired `IF`/`ELSE` either way, so every real branch
+    already gets its own `IF` row.
+
+    Branch extent comes from the `IF` row's own `end_line` (the matching
+    `END-IF`, already resolved at extraction time -- see db.py's schema
+    comment on `rule_candidate.end_line`), not a depth-scan over sibling
+    `rule_candidate` rows: a branch whose entire body is a single `CALL`/
+    `PERFORM` (the single most common shape for a PF-key dispatch) produces
+    no `rule_candidate` row of its own at a deeper depth to scan for, and a
+    depth-scan would wrongly collapse such a branch to zero-width. An
+    unresolved `end_line` (no matching `END-IF` found) falls back to the
+    `IF`'s own line, same as `routine_for_line`'s posture for an unresolved
+    routine end elsewhere in this codebase: conservative rather than a guess.
+
+    Reuses `conditions.comparisons_in` -- the same deterministic condition
+    parser `validate.py`'s reversed-condition check is built on -- rather
+    than a second, bespoke parser for "does this condition compare field X
+    to a literal".
+    """
+    rows = conn.execute(
+        "SELECT id, line_no, construct, depth, condition, end_line, fields_used, literals "
+        "FROM rule_candidate WHERE member_id=? ORDER BY line_no", (member_id,)
+    ).fetchall()
+
+    out: list[dict] = []
+    for i, row in enumerate(rows):
+        if row["construct"] != "IF":
+            continue
+        comps = [c for c in comparisons_in(row["condition"], outcome_field=dispatch_field)
+                 if c["literal"] is not None]  # a field-to-field comparison names no single dispatch value
+        if not comps:
+            continue
+        start_line = row["line_no"]
+        end_line = row["end_line"] if row["end_line"] is not None else start_line
+
+        calls = conn.execute(
+            "SELECT DISTINCT callee_name, call_kind FROM call_edge "
+            "WHERE caller_id=? AND line_no > ? AND line_no <= ? AND dynamic=0 "
+            "ORDER BY callee_name",
+            (member_id, start_line, end_line),
+        ).fetchall()
+        assigns = []
+        for r2 in rows[i + 1:]:
+            if r2["line_no"] > end_line:
+                break
+            if r2["construct"] != "ASSIGN" or not (r2["literals"] or ""):
+                continue
+            fields = [f for f in (r2["fields_used"] or "").split(",") if f]
+            if len(fields) != 1:
+                continue
+            assigns.append({
+                "field": fields[0], "literal": (r2["literals"] or "").split(",")[0],
+                "line_no": r2["line_no"],
+            })
+
+        for c in comps:
+            out.append({
+                "trigger_value": c["literal"], "line_no": start_line, "end_line": end_line,
+                "calls": [dict(r) for r in calls], "assigns": assigns,
+            })
+    return out
+
+
+def dispatch_map(conn, dispatch_field=DISPATCH_FIELD) -> str:
+    """One table per member with at least one dispatch edge (see
+    `dispatch_edges_for_member`): trigger value -> routines called and
+    fields set in that branch, each cited. Answers, at a glance, "what does
+    dispatching on this value actually do" without reading the whole
+    module -- exactly the gap a real external verification report flagged:
+    a dispatch value (a PF-key) documented only by its on-screen label, with
+    its real effects scattered across a module's full source and easy to
+    describe incompletely or inconsistently with what the label suggests.
+    """
+    members = conn.execute(
+        "SELECT id, name FROM member WHERE dialect IN ('natural','mantis') ORDER BY name"
+    ).fetchall()
+
+    out = ["---", 'title: "Dispatch map"', "doc_type: register", "---", "",
+           "# Dispatch map", "", (
+        "For every branch that compares the configured dispatch field "
+        "(default: Natural's `*PF-KEY`; override via "
+        "`options.overview.dispatch_field_pattern` for a different dialect "
+        "or naming convention) against a literal value, the routines it "
+        "calls and the fields it sets to a literal within that same branch. "
+        "Regenerate with `mfdoc dispatch-map` after any source change; do "
+        "not hand-edit."
+    ), ""]
+    any_rows = False
+    for m in members:
+        edges = dispatch_edges_for_member(conn, m["id"], dispatch_field=dispatch_field)
+        if not edges:
+            continue
+        any_rows = True
+        out.append(f"## {m['name']}")
+        out.append("")
+        out.append("| trigger value | branch | calls | fields set |")
+        out.append("|---|---|---|---|")
+        for e in edges:
+            calls = ", ".join(f"`{c['callee_name']}` ({c['call_kind']})" for c in e["calls"]) or "—"
+            assigns = ", ".join(f"`{a['field']}` = {a['literal']}" for a in e["assigns"]) or "—"
+            span = _cite(m["name"], e["line_no"], e["end_line"])
+            out.append(f"| `{e['trigger_value']}` | {span} | {calls} | {assigns} |")
+        out.append("")
+    if not any_rows:
+        out.append("No dispatch branches found for the configured dispatch field.")
         out.append("")
     return "\n".join(out) + "\n"

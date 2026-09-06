@@ -113,6 +113,16 @@ Joins raw facts into structures no single scanner pass can produce alone:
   depending on whether the target was a literal or a variable.
 - `crud_matrix`, `orphans`, `transaction_scopes`, `call_closure` — the
   derived views that feed briefs and, eventually, process-flow documents.
+- `shadowed_assignments`, `label_control_mismatches` — deterministic
+  narrow-but-real dead-store/naming-mismatch scans (dialect-neutral: both
+  run over `rule_candidate`, which every dialect populates the same way).
+  The former catches a conditional literal write unconditionally
+  overwritten before anything reads it (e.g. a hardcoded-user debug flag
+  set then immediately reset, making the branch's effect unobservable at
+  runtime). The latter surfaces (never asserts wrong — see its own
+  docstring) a same-branch on-screen label literal and internal control-
+  field literal that don't obviously agree, as an `sme_question`-shaped gap
+  for a human to confirm.
 - `coverage` — the headline numbers (`line_recognition_rate`,
   `call_resolution_rate`, `entity_definition_rate`, gap counts by
   severity) that `mfdoc gate` checks against `options.quality_gates`.
@@ -132,6 +142,30 @@ value against a threshold (min or max) and report pass/fail plus what a
 failure blocks. Exists so a weak index is a **hard stop enforced by a
 process**, not an instruction a model or a person under deadline can choose
 to skip.
+
+### Pre-flight missing-dependency check
+
+`resolve()` (above) already reports every external `CALL`/`FETCH`/`PERFORM`
+target with no matching source member as an `unresolved_call` gap, and every
+data store accessed but never defined (no DDM/FDT/Supra directory entry/DDL
+supplied) as a `no_ddl_for_entity` gap — both `severity="high"` by
+construction. This *is* the missing-dependency manifest: run `mfdoc ingest`
++ `mfdoc derive` + `mfdoc coverage` + `mfdoc gate` before spending any model
+budget on `mfdoc batch`, and a source set missing real dependencies (a
+copybook, a called subprogram, a screen/map definition) fails
+`max_high_severity_gaps` immediately, loud and pre-narration, rather than
+being discovered only after reading the generated prose (or, worse, only
+once an external reviewer's report comes back). `mfdoc gap-summary` gives
+the same information as one glance-able table, grouped by gap kind and
+severity, once `options.overview` is configured.
+
+The gap register these produce (see `templates/gap-register.md` /
+`mfdoc gap-summary`) is also where a genuinely missing dependency stays
+visible after generation: it's the difference between a gap that's
+*context-limited* (flagged honestly, needs a human to go find the missing
+source) and a gap that's a *pipeline defect* (something the tool could have
+extracted but didn't) — the former shows up here with a clear "no source
+supplied" note; the latter doesn't, and is a bug report.
 
 ### Calibration (`mfdoc calibrate`, `DIALECT_CALIBRATION_HINTS` in `cli.py`)
 
@@ -181,7 +215,12 @@ do.
 - **`structural.py`** — everything downstream of classification is a pure,
   deterministic renderer over the fact store: `gap_summary`,
   `data_flow_diagram`, `build_call_graph`/`call_graph_diagram`,
-  `complexity_heatmap`, `thematic_rules_register`, and `glossary`. Same
+  `complexity_heatmap`, `thematic_rules_register`, `glossary`, and
+  `dispatch_map` (every branch comparing a configurable dispatch field —
+  default Natural's `*PF-KEY` — against a literal, with the routines it
+  calls and fields it sets in that same branch; override
+  `options.overview.dispatch_field_pattern` for a different dialect's own
+  dispatch idiom, mirroring `conditions.py`'s `outcome_field_pattern`). Same
   contract as `brief.rules_register()` — pure extraction, no judgement call,
   byte-identical output on unchanged source. If a doc needs synthesis or
   prose instead of extraction, it belongs in `brief.py`, not here.
@@ -190,10 +229,10 @@ This changes the pipeline order for a project that uses it: `mfdoc derive`
 → `mfdoc classify-rules` (new, optional — only needed if you want themed
 output or the LLM fallback; the only structural-overview step that writes
 to the fact store, populating `rule_theme`) → `mfdoc call-graph`/`data-flow`/
-`complexity`/`rules-theme-register`/`gap-summary`/`glossary` (new, all
-deterministic, no ordering dependency between them or with anything after
-`derive` — they're pure renderers, reading the fact store but never
-writing to it) → `mfdoc batch` (existing, per-module, unchanged) → the
+`complexity`/`rules-theme-register`/`gap-summary`/`glossary`/`dispatch-map`
+(new, all deterministic, no ordering dependency between them or with
+anything after `derive` — they're pure renderers, reading the fact store
+but never writing to it) → `mfdoc batch` (existing, per-module, unchanged) → the
 interactive executive-summary narrative (new; depends only on
 `classify-rules` having already populated `rule_theme` for its "Top rules"
 section — its "Risk" section reads the same underlying complexity data
@@ -257,6 +296,30 @@ Parses YAML front matter and body of each generated document and checks:
   or an explicit hedge (`inferred`, `unresolved`, etc.) — the mechanical
   enforcement of "never assert behaviour that cannot be traced to a
   specific source line."
+
+Three more checks are advisory (surfaced, never counted against a
+document's own `ok`/pass-fail — a false positive here should cost nothing,
+by design):
+
+- `_deferred_reference_problems` — a chunked module doc that defers
+  explaining something to "a later chunk" without naming which one. The
+  real fix is upstream, not this check: `_generate_module_doc_chunked`
+  (`batch.py`) now hands every chunk's own brief the full routine ->
+  chunk-number mapping (`module_brief`'s `chunk_map` parameter, computed
+  once before any chunk is narrated) so a chunk can write "documented in
+  chunk 15" concretely; this check exists to catch a *regression* back to
+  the vague, unresolved phrasing, not to fix it after the fact.
+- `_staleness_problem` — a document's `generated_by` version differs from
+  the `mfdoc` version installed right now, suggesting it predates a
+  pipeline fix and may be worth regenerating. Only catches a version bump
+  (same caveat `batch.py`'s `_corpus_signature` already documents for its
+  own, narrower purpose).
+- `_statement_completeness_problems` (existing) and the two above are all
+  scoped to `doc_type: module` documents only, for the same reason: a
+  register or test doc echoes source syntax/field-inventory phrasing
+  verbatim rather than narrating sentence-per-claim, which would make
+  these checks noise rather than signal outside the doc type they were
+  built for.
 
 This is the only stage that reads generated documents back in; everything
 upstream only ever writes forward. `validate_test_doc` (used by `mfdoc
