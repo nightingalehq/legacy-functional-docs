@@ -324,7 +324,7 @@ def shadowed_assignments_for_member(conn, member_id: int) -> list[dict]:
     """
     rows = conn.execute(
         "SELECT id, line_no, construct, depth, fields_used, literals "
-        "FROM rule_candidate WHERE member_id=? ORDER BY line_no", (member_id,)
+        "FROM rule_candidate WHERE member_id=? ORDER BY line_no, id", (member_id,)
     ).fetchall()
 
     by_field: dict[str, list[dict]] = defaultdict(list)
@@ -441,7 +441,7 @@ def label_control_pairs_for_member(conn, member_id: int) -> list[dict]:
     """
     rows = conn.execute(
         "SELECT line_no, construct, depth, fields_used, literals "
-        "FROM rule_candidate WHERE member_id=? ORDER BY line_no", (member_id,)
+        "FROM rule_candidate WHERE member_id=? ORDER BY line_no, id", (member_id,)
     ).fetchall()
 
     pending_by_depth: dict[int, dict] = {}
@@ -460,8 +460,18 @@ def label_control_pairs_for_member(conn, member_id: int) -> list[dict]:
         if LABEL_FIELD.search(field):
             pending_by_depth[depth] = {"field": field, "literal": literal, "line_no": r["line_no"]}
         elif CONTROL_FIELD.search(field):
-            label = pending_by_depth.get(depth)
-            if label is None or _literals_agree(label["literal"], literal):
+            # The nearest enclosing pending label -- the highest recorded
+            # depth that is still <= this control assign's own depth, not
+            # only an exact depth match. A control field one level deeper
+            # than where the label was set (a nested IF entered from the
+            # same branch the label opened) is still "the same branch" as
+            # far as this check is concerned; requiring an exact depth match
+            # would silently miss that documented nested case.
+            candidate_depths = [d for d in pending_by_depth if d <= depth]
+            if not candidate_depths:
+                continue
+            label = pending_by_depth[max(candidate_depths)]
+            if _literals_agree(label["literal"], literal):
                 continue
             out.append({
                 "label_field": label["field"], "label_literal": label["literal"],

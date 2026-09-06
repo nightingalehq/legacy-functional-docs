@@ -381,8 +381,7 @@ GitHub org.
 - 2026-09-06: follow-up from an external verification report reviewed on a
   client engagement (a third-party review of first-cut module docs for two
   Natural programs), generalized into pipeline fixes rather than one-off
-  patches where the underlying gap was dialect-neutral. On a local branch,
-  not yet pushed/PR'd:
+  patches where the underlying gap was dialect-neutral. Opened as PR #67:
   - **Dangling cross-chunk references (fixed at the source, not just
     detected)**: `_generate_module_doc_chunked` (`batch.py`) now computes
     the full routine -> chunk-number mapping before narrating any chunk and

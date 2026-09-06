@@ -714,7 +714,7 @@ def dispatch_edges_for_member(conn, member_id: int, dispatch_field=DISPATCH_FIEL
     """
     rows = conn.execute(
         "SELECT id, line_no, construct, depth, condition, end_line, fields_used, literals "
-        "FROM rule_candidate WHERE member_id=? ORDER BY line_no", (member_id,)
+        "FROM rule_candidate WHERE member_id=? ORDER BY line_no, id", (member_id,)
     ).fetchall()
 
     out: list[dict] = []
