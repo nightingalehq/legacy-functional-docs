@@ -360,8 +360,9 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
     problems: list[str] = []
     chunk_state: dict[str, dict] = {}
 
+    chunk_width = len(str(chunk_count))
     for i, (start, end) in enumerate(ranges, start=1):
-        chunk_path = out_path.with_name(f"{out_path.stem}.chunk{i}{out_path.suffix}")
+        chunk_path = out_path.with_name(f"{out_path.stem}.chunk{i:0{chunk_width}d}{out_path.suffix}")
         brief = module_brief(
             conn, member_name, redact=redact, lexicon=lexicon,
             rule_range=(start, end), chunk_info=(i, chunk_count),

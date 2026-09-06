@@ -437,8 +437,16 @@ def test_run_batch_chunks_a_large_member_and_still_batches_small_ones(indexed_db
         max_rules_per_call=1,
     )
     subdir = batch_mod._output_subdir(indexed_db, "MMP0100")
-    chunk1 = tmp_path / "out" / subdir / "MMP0100.chunk1.md"
+    chunk1 = tmp_path / "out" / subdir / "MMP0100.chunk01.md"
     assert chunk1.exists(), "MMP0100 has more than one rule_candidate in the fixtures and must chunk"
+    # MMP0100 chunks into 17 parts here (one rule per call) -- exercise the
+    # leading-zero padding this many chunks needs: an unpadded "chunk1.md"
+    # would otherwise sort lexicographically ahead of "chunk10.md" through
+    # "chunk17.md", listing out of rule order in a plain directory listing.
+    chunk_names = sorted(p.name for p in (tmp_path / "out" / subdir).glob("MMP0100.chunk*.md"))
+    assert len(chunk_names) == 17
+    assert chunk_names == [f"MMP0100.chunk{i:02d}.md" for i in range(1, 18)]
+    assert not (tmp_path / "out" / subdir / "MMP0100.chunk1.md").exists()
     # A member with zero (or exactly one) rule_candidate never chunks --
     # it should have gone through the ordinary single-call path instead.
     for member in members:

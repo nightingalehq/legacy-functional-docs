@@ -295,9 +295,10 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
     chunk_entries: list[tuple[int, Path, DocResult]] = []
     problems: list[str] = []
 
+    chunk_width = len(str(chunk_count))
     for i, (start, end) in enumerate(ranges, start=1):
         chunk_rows = rows[start - 1:end]
-        chunk_path = out_path.with_name(f"{out_path.stem}.chunk{i}{out_path.suffix}")
+        chunk_path = out_path.with_name(f"{out_path.stem}.chunk{i:0{chunk_width}d}{out_path.suffix}")
         brief = test_case_brief_chunk(
             member_name, system, chunk_rows, i, chunk_count, redact=redact, routines=routines,
         )
