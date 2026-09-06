@@ -21,9 +21,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import __version__
 from .batch import ModelCaller, DocResult
 from .batch import _corpus_signature as _base_corpus_signature
-from .batch import _load_state, _output_subdir, _save_state, _skip_result
+from .batch import _fix_generated_by_version, _load_state, _output_subdir, _save_state, _skip_result
 from .brief import fetch_routines, routine_aware_chunk_ranges
 from .redact import NULL_REDACTOR, Redactor
 from .testlang import sidecar_path_for
@@ -169,11 +170,12 @@ def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: 
         response = caller(prompt)
         input_tokens += response.input_tokens
         output_tokens += response.output_tokens
+        text = _fix_generated_by_version(response.text)
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(response.text, encoding="utf-8")
+        out_path.write_text(text, encoding="utf-8")
         result = validate_test_doc(conn, out_path)
         if result["ok"]:
-            write_test_doc_with_sidecar(out_path, response.text, language)
+            write_test_doc_with_sidecar(out_path, text, language)
             return DocResult(member_name, str(out_path), True, attempt, input_tokens, output_tokens, [])
         problems = result["problems"]
         retry_note = "\n".join(f"- {p}" for p in problems)
@@ -238,7 +240,7 @@ def _render_chunk_index(member_name: str, system: str | None, language: str, fra
         f'module: "{member_name}"',
         f"language: {language}",
         f"framework: {framework}",
-        "generated_by: legacy-functional-docs 0.1.0",
+        f"generated_by: legacy-functional-docs {__version__}",
         f'generated_at: "{today}"',
         "review_status: draft",
         "reviewers: []",
@@ -488,8 +490,8 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
             input_tokens, output_tokens = response.input_tokens, response.output_tokens
 
             out_path.parent.mkdir(parents=True, exist_ok=True)
-            out_path.write_text(response.text, encoding="utf-8")
-            final_text = response.text
+            final_text = _fix_generated_by_version(response.text)
+            out_path.write_text(final_text, encoding="utf-8")
             validation = validate_test_doc(conn, out_path)
             attempts = 1
             if not validation["ok"]:
@@ -500,8 +502,8 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
                 retry_response = caller(retry_prompt)
                 input_tokens += retry_response.input_tokens
                 output_tokens += retry_response.output_tokens
-                out_path.write_text(retry_response.text, encoding="utf-8")
-                final_text = retry_response.text
+                final_text = _fix_generated_by_version(retry_response.text)
+                out_path.write_text(final_text, encoding="utf-8")
                 validation = validate_test_doc(conn, out_path)
                 attempts = 2
 

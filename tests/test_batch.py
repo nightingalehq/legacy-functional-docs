@@ -106,6 +106,43 @@ def test_batch_generates_valid_docs_for_all_batchable_members(indexed_db, tmp_pa
         assert (tmp_path / "out" / subdir / f"{member}.md").exists()
 
 
+def test_written_doc_gets_the_installed_version_not_whatever_the_model_wrote(indexed_db, tmp_path):
+    """FakeCaller's GOOD_FRONTMATTER hardcodes "legacy-functional-docs 0.1.0"
+    (a stand-in for a model echoing reference/writing-rules.md's own worked
+    example verbatim, since nothing in the prompt tells it what the real
+    installed version is) -- the file actually written to disk must carry
+    the real installed version regardless, or the staleness check would
+    immediately flag every freshly generated document."""
+    from mfdoc import __version__
+
+    out_path = tmp_path / "MMP0100.md"
+    result = batch_mod.generate_module_doc(
+        indexed_db, "MMP0100", out_path, FakeCaller(), "cite everything", "module template",
+    )
+    assert result.ok, result.problems
+    text = out_path.read_text(encoding="utf-8")
+    assert f"generated_by: legacy-functional-docs {__version__}" in text
+
+
+def test_fix_generated_by_version_replaces_regardless_of_what_the_model_wrote():
+    from mfdoc import __version__
+
+    text = "---\ntitle: X\ngenerated_by: legacy-functional-docs 0.1.0\n---\nbody\n"
+    fixed = batch_mod._fix_generated_by_version(text)
+    assert fixed == f"---\ntitle: X\ngenerated_by: legacy-functional-docs {__version__}\n---\nbody\n"
+
+
+def test_fix_generated_by_version_is_a_no_op_when_the_line_is_missing_or_different_tool():
+    """Never invents a generated_by line that isn't there, and never touches
+    a different tool's own generated_by (this repo's only writer is itself,
+    but the function shouldn't assume that)."""
+    no_line = "---\ntitle: X\n---\nbody\n"
+    assert batch_mod._fix_generated_by_version(no_line) == no_line
+
+    other_tool = "---\ntitle: X\ngenerated_by: some-other-tool 3.0\n---\nbody\n"
+    assert batch_mod._fix_generated_by_version(other_tool) == other_tool
+
+
 def test_estimate_cost_computes_dollar_amount_when_pricing_configured():
     """estimate_cost is the single shared formula behind run_batch's own
     cost_usd (see test_batch_reports_cost_only_when_pricing_configured

@@ -18,6 +18,7 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,6 +28,27 @@ from . import __version__
 from .brief import fetch_routines, fetch_rule_candidate_rows, module_brief, routine_aware_chunk_ranges
 from .redact import NULL_REDACTOR, Redactor
 from .validate import BR_REF, _split_frontmatter, validate_doc
+
+# The example `generated_by` value in reference/writing-rules.md's worked
+# example and templates/module.md's front matter block is a literal,
+# unchanging string ("legacy-functional-docs 0.1.0") -- neither document
+# tells the model what the real, currently-installed version is, so a model
+# has no way to write it correctly and, worse, tends to just echo the
+# worked example's literal value verbatim run after run. Rather than fix
+# this by telling the model the real version (one more fact that could be
+# stated wrong or go stale in the prompt itself), the version is corrected
+# deterministically here, the same way `_render_module_chunk_index` already
+# builds it directly rather than asking a model for it.
+_GENERATED_BY_LINE = re.compile(r"(?m)^generated_by:\s*legacy-functional-docs\s+\S+\s*$")
+
+
+def _fix_generated_by_version(text: str) -> str:
+    """`text` with its `generated_by:` line's version corrected to the
+    actually-installed `__version__`, regardless of what the model wrote.
+    A no-op if the line isn't present in the expected `legacy-functional-docs
+    <version>` shape (e.g. missing front matter entirely) -- validate_doc's
+    own front-matter check reports that case, not this function's job to."""
+    return _GENERATED_BY_LINE.sub(f"generated_by: legacy-functional-docs {__version__}", text, count=1)
 
 # Object types that get the batch treatment: one module, one program's worth
 # of judgement-light narrative. Data stores, system overview, process flows
@@ -226,7 +248,7 @@ def _generate_module_doc_from_brief(conn, member_name: str, brief: str, out_path
         input_tokens += response.input_tokens
         output_tokens += response.output_tokens
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(response.text, encoding="utf-8")
+        out_path.write_text(_fix_generated_by_version(response.text), encoding="utf-8")
         result = validate_doc(conn, out_path)
         if result["ok"]:
             return DocResult(member_name, str(out_path), True, attempt, input_tokens, output_tokens, [])
@@ -695,7 +717,7 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
             input_tokens, output_tokens = response.input_tokens, response.output_tokens
 
             out_path.parent.mkdir(parents=True, exist_ok=True)
-            out_path.write_text(response.text, encoding="utf-8")
+            out_path.write_text(_fix_generated_by_version(response.text), encoding="utf-8")
             validation = validate_doc(conn, out_path)
             attempts = 1
             if not validation["ok"]:
@@ -704,7 +726,7 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
                 retry_response = caller(retry_prompt)
                 input_tokens += retry_response.input_tokens
                 output_tokens += retry_response.output_tokens
-                out_path.write_text(retry_response.text, encoding="utf-8")
+                out_path.write_text(_fix_generated_by_version(retry_response.text), encoding="utf-8")
                 validation = validate_doc(conn, out_path)
                 attempts = 2
 
