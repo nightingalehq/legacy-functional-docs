@@ -181,16 +181,22 @@ do.
 - **`structural.py`** — everything downstream of classification is a pure,
   deterministic renderer over the fact store: `gap_summary`,
   `data_flow_diagram`, `build_call_graph`/`call_graph_diagram`,
-  `complexity_heatmap`, `thematic_rules_register`, and `glossary`. Same
-  contract as `brief.rules_register()` — pure extraction, no judgement call,
-  byte-identical output on unchanged source. If a doc needs synthesis or
-  prose instead of extraction, it belongs in `brief.py`, not here.
+  `complexity_heatmap`, `thematic_rules_register`, `glossary`, and
+  `language_guide`. Same contract as `brief.rules_register()` — pure
+  extraction, no judgement call, byte-identical output on unchanged
+  source. If a doc needs synthesis or prose instead of extraction, it
+  belongs in `brief.py`, not here. `language_guide` (`mfdoc lang-guide`,
+  the `language-guide` document type's basic tier) is the odd one out in
+  one respect: it groups facts by `dialect`, not by system, since its
+  whole purpose is documenting what one dialect's *source syntax* looks
+  like in this codebase — see `graph.language_profile()` and
+  `docs/superpowers/specs/2026-09-06-language-guide-doctype-design.md`.
 
 This changes the pipeline order for a project that uses it: `mfdoc derive`
 → `mfdoc classify-rules` (new, optional — only needed if you want themed
 output or the LLM fallback; the only structural-overview step that writes
 to the fact store, populating `rule_theme`) → `mfdoc call-graph`/`data-flow`/
-`complexity`/`rules-theme-register`/`gap-summary`/`glossary` (new, all
+`complexity`/`rules-theme-register`/`gap-summary`/`glossary`/`lang-guide` (all
 deterministic, no ordering dependency between them or with anything after
 `derive` — they're pure renderers, reading the fact store but never
 writing to it) → `mfdoc batch` (existing, per-module, unchanged) → the
@@ -339,7 +345,8 @@ The only code paths that make a network call are `mfdoc batch`,
 `anthropic_caller.py` underneath all four. Everything else — `ingest`,
 `derive`, `coverage`, `gate`, `calibrate`, `brief`, `validate`, `export`,
 `test-plan`, `test-advisory`, `test-validate`, `gap-summary`, `data-flow`,
-`call-graph`, `complexity`, `rules-theme-register`, `glossary` — is local
+`call-graph`, `complexity`, `rules-theme-register`, `glossary`,
+`lang-guide` — is local
 Python with no egress, which is why the README states "no network access,
 nothing leaves the machine" as the default posture with those named
 exceptions.
