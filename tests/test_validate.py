@@ -976,3 +976,245 @@ def test_validate_tree_dedups_identical_omitted_statement_messages(tmp_path):
     res = validate_tree(conn, tmp_path)
     assert len(res["omitted_statement_targets"]) == 1
     assert "PGMX02" in res["omitted_statement_targets"][0]
+
+
+# --- Deferred cross-chunk references (see brief.py's chunk_map) ---
+
+DEFERRED_FRONTMATTER = """---
+title: Test doc
+doc_type: module
+system: MOM
+generated_by: legacy-functional-docs 0.1.0
+generated_at: "2026-01-01T00:00:00"
+review_status: draft
+confidence_summary:
+  verified: 1
+sources:
+  - TESTSTMT
+---
+# Test doc
+"""
+
+
+def _minimal_module_conn():
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'TESTSTMT', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
+    conn.commit()
+    return conn
+
+
+def test_validator_flags_a_deferred_reference_with_no_chunk_named(tmp_path):
+    conn = _minimal_module_conn()
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        DEFERRED_FRONTMATTER
+        + "\nPF5 is a separate branch; its effects are not captured within "
+          "this chunk's rule range and are covered by a later chunk "
+          "[[TESTSTMT:1]].\n"
+    )
+    result = validate_doc(conn, doc)
+    assert result["ok"], result["problems"]  # non-blocking: must not fail the doc
+    assert any("covered by a later chunk" in p for p in result["deferred_references"])
+
+
+def test_validator_accepts_a_deferred_reference_naming_the_chunk(tmp_path):
+    conn = _minimal_module_conn()
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        DEFERRED_FRONTMATTER
+        + "\nPF5 is a separate branch; its effects are documented in chunk 3 "
+          "[[TESTSTMT:1]].\n"
+    )
+    result = validate_doc(conn, doc)
+    assert result["deferred_references"] == []
+
+
+def test_validator_scopes_deferred_reference_check_to_module_docs(tmp_path):
+    conn = _minimal_module_conn()
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        "---\ntitle: Register\ndoc_type: register\n---\n"
+        "# Register\n\nEffects are not captured within this chunk's rule range.\n"
+    )
+    result = validate_doc(conn, doc)
+    assert result["deferred_references"] == []
+
+
+def test_validate_tree_aggregates_deferred_references_across_documents(tmp_path):
+    conn = _minimal_module_conn()
+    (tmp_path / "doc1.md").write_text(
+        DEFERRED_FRONTMATTER
+        + "\nPF3 effects are covered by a later chunk [[TESTSTMT:1]].\n"
+    )
+    (tmp_path / "doc2.md").write_text(
+        DEFERRED_FRONTMATTER
+        + "\nPF5 effects are covered by another chunk [[TESTSTMT:1]].\n"
+    )
+    res = validate_tree(conn, tmp_path)
+    assert len(res["deferred_references"]) == 2
+    # Advisory only -- must never affect pass/fail.
+    assert res["documents_ok"] == res["documents"] == 2
+
+
+# --- Stale-regeneration check (generated_by version vs. installed version) ---
+
+def test_validator_flags_a_document_generated_by_an_older_version(tmp_path):
+    from mfdoc import __version__ as installed_version
+
+    conn = _minimal_module_conn()
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        DEFERRED_FRONTMATTER.replace(
+            "generated_by: legacy-functional-docs 0.1.0",
+            "generated_by: legacy-functional-docs 0.0.1",
+        )
+        + "\nNothing else in this document matters [[TESTSTMT:1]].\n"
+    )
+    result = validate_doc(conn, doc)
+    assert result["ok"], result["problems"]  # non-blocking: must not fail the doc
+    assert len(result["staleness_problems"]) == 1
+    assert "0.0.1" in result["staleness_problems"][0]
+    assert installed_version in result["staleness_problems"][0]
+
+
+def test_validator_does_not_flag_a_document_matching_the_installed_version(tmp_path):
+    from mfdoc import __version__ as installed_version
+
+    conn = _minimal_module_conn()
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        DEFERRED_FRONTMATTER.replace(
+            "generated_by: legacy-functional-docs 0.1.0",
+            f"generated_by: legacy-functional-docs {installed_version}",
+        )
+        + "\nNothing else in this document matters [[TESTSTMT:1]].\n"
+    )
+    result = validate_doc(conn, doc)
+    assert result["staleness_problems"] == []
+
+
+def test_parse_version_treats_trailing_zero_components_as_equal():
+    """(0, 2) < (0, 2, 0) is true under plain Python tuple ordering, which
+    would wrongly rank "0.2" as older than "0.2.0" -- the same version,
+    just written with a different number of components. Trailing zeros
+    must be normalized away before any comparison happens."""
+    from mfdoc.validate import _parse_version
+
+    assert _parse_version("0.2") == _parse_version("0.2.0")
+    assert _parse_version("1.0.0") == _parse_version("1")
+    assert _parse_version("0.0.0") == (0,)
+    assert _parse_version("1.2.3") == (1, 2, 3)
+    assert _parse_version("1.2.0.3") == (1, 2, 0, 3)  # only *trailing* zeros strip
+    assert _parse_version("not-a-version") is None
+
+
+def test_validator_does_not_flag_versions_differing_only_by_trailing_zeros(tmp_path):
+    from mfdoc import __version__ as installed_version
+
+    conn = _minimal_module_conn()
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        DEFERRED_FRONTMATTER.replace(
+            "generated_by: legacy-functional-docs 0.1.0",
+            f"generated_by: legacy-functional-docs {installed_version}.0",
+        )
+        + "\nNothing else in this document matters [[TESTSTMT:1]].\n"
+    )
+    result = validate_doc(conn, doc)
+    assert result["staleness_problems"] == []
+
+
+def test_validator_flags_a_document_generated_by_a_newer_version_without_saying_older(tmp_path):
+    """A doc from a *newer* mfdoc than what's installed must not be reported
+    with "older"/"predate" wording -- that would be backwards."""
+    conn = _minimal_module_conn()
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        DEFERRED_FRONTMATTER.replace(
+            "generated_by: legacy-functional-docs 0.1.0",
+            "generated_by: legacy-functional-docs 99.0.0",
+        )
+        + "\nNothing else in this document matters [[TESTSTMT:1]].\n"
+    )
+    result = validate_doc(conn, doc)
+    assert len(result["staleness_problems"]) == 1
+    msg = result["staleness_problems"][0]
+    assert "99.0.0" in msg
+    assert "may predate" not in msg
+    assert "newer" in msg
+
+
+def test_validator_uses_direction_neutral_wording_for_an_unparseable_version(tmp_path):
+    """A version string this project's own dotted-numeric scheme can't
+    order (e.g. carrying a pre-release/build suffix) must not be guessed at
+    as "older" -- direction-neutral wording only."""
+    conn = _minimal_module_conn()
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        DEFERRED_FRONTMATTER.replace(
+            "generated_by: legacy-functional-docs 0.1.0",
+            "generated_by: legacy-functional-docs 0.2.0-dev",
+        )
+        + "\nNothing else in this document matters [[TESTSTMT:1]].\n"
+    )
+    result = validate_doc(conn, doc)
+    assert len(result["staleness_problems"]) == 1
+    msg = result["staleness_problems"][0]
+    assert "0.2.0-dev" in msg
+    assert "may predate" not in msg
+    assert "differs" in msg
+
+
+def test_validator_scopes_staleness_check_to_module_docs(tmp_path):
+    """A register/test doc that happens to carry a mismatched generated_by
+    must not be flagged -- scoped to doc_type: module only, same as the
+    deferred-reference and statement-completeness checks."""
+    conn = _minimal_module_conn()
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        "---\ntitle: Register\ndoc_type: register\n"
+        "generated_by: legacy-functional-docs 0.0.1\n---\n"
+        "# Register\n\nNothing else in this document matters.\n"
+    )
+    result = validate_doc(conn, doc)
+    assert result["staleness_problems"] == []
+
+
+def test_validator_ignores_generated_by_it_cannot_parse(tmp_path):
+    """A register doc's generated_by (if present at all) or any other
+    freeform value must not raise or false-flag -- only the exact
+    'legacy-functional-docs <version>' shape every real writer produces is
+    checked."""
+    conn = _minimal_module_conn()
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        DEFERRED_FRONTMATTER.replace(
+            "generated_by: legacy-functional-docs 0.1.0", "generated_by: some-other-tool 3.0"
+        )
+        + "\nNothing else in this document matters [[TESTSTMT:1]].\n"
+    )
+    result = validate_doc(conn, doc)
+    assert result["staleness_problems"] == []
+
+
+def test_validate_tree_aggregates_stale_documents_with_their_own_path(tmp_path):
+    conn = _minimal_module_conn()
+    (tmp_path / "doc1.md").write_text(
+        DEFERRED_FRONTMATTER.replace(
+            "generated_by: legacy-functional-docs 0.1.0",
+            "generated_by: legacy-functional-docs 0.0.1",
+        )
+        + "\nNothing else matters [[TESTSTMT:1]].\n"
+    )
+    res = validate_tree(conn, tmp_path)
+    assert len(res["stale_documents"]) == 1
+    assert "doc1.md" in res["stale_documents"][0]
+    assert "0.0.1" in res["stale_documents"][0]
+    # Advisory only -- must never affect pass/fail.
+    assert res["documents_ok"] == res["documents"] == 1

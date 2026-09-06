@@ -9,9 +9,11 @@ belongs in brief.py's narrative-brief functions instead, not here.
 from __future__ import annotations
 
 import hashlib
+from collections import defaultdict
 
 from . import graph
 from .citations import _cite, _rule_id
+from .conditions import DISPATCH_FIELD, comparisons_in
 from .redact import NULL_REDACTOR, Redactor
 
 
@@ -188,12 +190,56 @@ def build_call_graph(conn, cluster_by: str = "module") -> dict[int, dict]:
     return graph_data
 
 
-def call_graph_diagram(conn, cluster_by: str = "module", max_nodes_inline: int = 40) -> dict[str, str]:
-    """Mermaid call-graph DAG. If total distinct nodes <= max_nodes_inline,
-    returns {"inline": <one diagram for system-overview.md>}. Otherwise
-    returns {"inline": <collapsed cluster-level view>, <cluster_name>:
-    <that cluster's full diagram>, ...} -- callers write "inline" into
-    system-overview.md and every other key to call-graph-<cluster>.md.
+def call_graph_diagram(
+    conn,
+    cluster_by: str = "module",
+    max_nodes_inline: int = 40,
+    direction: str = "LR",
+) -> dict[str, str]:
+    """Mermaid call-graph DAG, one diagram per connected component of the
+    call graph (see graph.connected_components() -- direction is treated as
+    irrelevant for grouping, only whether a caller/callee pair are linked at
+    all). This is a strictly better default split than cluster_by's module/
+    library/subsystem grouping: two members that share a cluster but never
+    call each other have no business sharing a diagram, and two members in
+    different clusters that do call each other belong together regardless.
+
+    When the whole call graph is a single connected component (the common
+    case for a small-to-medium codebase), behaviour is unchanged from
+    before this split was added: if total distinct nodes <= max_nodes_inline,
+    returns {"inline": <one diagram, written by cli.cmd_call_graph to
+    call-graph.md>}; otherwise {"inline": <collapsed cluster-level view>,
+    <cluster_name>: <that cluster's full diagram>, ...}.
+
+    When there are 2+ connected components, every component gets its own
+    diagram (regardless of the *combined* node count -- two small but
+    disconnected subsystems must never be forced into one diagram just
+    because together they're still under max_nodes_inline): returns
+    {"inline": <index diagram, one node per component, linking to its
+    file>, <component_name>: <that component's full diagram, if under
+    max_nodes_inline>, ...}. A component itself still over max_nodes_inline
+    falls back to today's cluster-collapse behaviour, scoped to just that
+    component's own members: {..., <component_name>: <that component's own
+    collapsed cluster-level view>, <component_name>-<cluster_name>: <that
+    cluster's full diagram>, ...}.
+
+    Every key other than "inline" is written by cli.cmd_call_graph to
+    call-graph-<safe_cluster_filename(key)>.md -- "inline" is written to
+    call-graph.md.
+
+    Component naming: a component whose caller members all share one
+    cluster_by grouping is named after that cluster (e.g. "PAYROLL",
+    matching the existing per-cluster file convention) since that's the
+    most useful label a reader can act on; a component spanning more than
+    one cluster gets a numeric "component-<n>" name instead, and two
+    components that happen to share the same dominant cluster name (the
+    exact "same library, never call each other" case this split exists to
+    fix) get "-<n>" appended to that dominant name to keep filenames unique.
+    Numbering is assigned in a content-stable order (sorted by the
+    lexicographically-smallest (library, name, dialect) triple among each
+    component's members -- the same content-derived stability principle
+    mermaid_node_id() uses below) so component numbers don't churn between
+    regenerations just because SQLite rowids got renumbered.
 
     Unresolved calls render as dashed edges to their own node, labeled
     with the missing callee's name (not a single anonymous shared sink)
@@ -222,6 +268,11 @@ def call_graph_diagram(conn, cluster_by: str = "module", max_nodes_inline: int =
     triple, not the member.id rowid used to key/group internally here --
     so node ids stay stable across regenerations even when ingest order
     changes and rowids get renumbered."""
+    valid_directions = {"LR", "TD"}
+    if direction not in valid_directions:
+        raise ValueError(
+            f"unsupported direction {direction!r}; expected one of {sorted(valid_directions)}"
+        )
     graph_data = build_call_graph(conn, cluster_by=cluster_by)
 
     # id_info maps every known member id (caller or resolved callee) to its
@@ -275,12 +326,16 @@ def call_graph_diagram(conn, cluster_by: str = "module", max_nodes_inline: int =
         name, library, dialect = id_info[val]
         return _mermaid_id(f"{library}|{name}|{dialect}")
 
-    nodes = {node_key(cid, entry["name"]) for cid, entry in graph_data.items()} | {
-        node_key(c["callee_id"], c["callee_name"]) for e in graph_data.values() for c in e["calls"]
-    }
+    def nodes_for(callers: dict[int, dict]) -> set[tuple[str, object]]:
+        return {node_key(cid, entry["name"]) for cid, entry in callers.items()} | {
+            node_key(c["callee_id"], c["callee_name"])
+            for e in callers.values() for c in e["calls"]
+        }
+
+    nodes = nodes_for(graph_data)
 
     def render(callers: dict[int, dict], title: str) -> str:
-        lines = ["```mermaid", "graph TD"]
+        lines = ["```mermaid", f"graph {direction}"]
         seen: set[str] = set()
         seen_edges: set[tuple[str, str, bool]] = set()
         for caller_member_id, entry in callers.items():
@@ -315,30 +370,114 @@ def call_graph_diagram(conn, cluster_by: str = "module", max_nodes_inline: int =
             f"# {title}\n\n" + "\n".join(lines) + "\n"
         )
 
-    if len(nodes) <= max_nodes_inline:
-        return {"inline": render(graph_data, "Call graph")}
+    def cluster_collapse(callers: dict[int, dict], title_prefix: str, key_prefix: str) -> dict[str, str]:
+        """Today's over-threshold fallback (one node per cluster, plus a
+        standalone diagram per cluster), scoped to `callers`. key_prefix is
+        prepended to each cluster's result key (empty for the whole-graph
+        legacy case, "<component_name>-" when scoped to one oversized
+        component) so keys stay unique across components."""
+        clusters: dict[str, dict] = {}
+        for caller_member_id, entry in callers.items():
+            clusters.setdefault(entry["cluster"], {})[caller_member_id] = entry
 
-    clusters: dict[str, dict] = {}
-    for caller_member_id, entry in graph_data.items():
-        clusters.setdefault(entry["cluster"], {})[caller_member_id] = entry
+        collapsed_lines = ["```mermaid", f"graph {direction}"]
+        for cluster_name in clusters:
+            cluster_file = safe_cluster_filename(f"{key_prefix}{cluster_name}")
+            cluster_label = f"{cluster_name} (see call-graph-{cluster_file}.md)".replace('"', '\\"')
+            collapsed_lines.append(f'    {_mermaid_id(f"{key_prefix}{cluster_name}")}["{cluster_label}"]')
+        collapsed_lines.append("```")
+        out = {
+            "": (
+                f'---\ntitle: "{title_prefix} (collapsed)"\ndoc_type: register\n---\n\n'
+                f"# {title_prefix} (collapsed)\n\n"
+                "Too many nodes for one inline diagram -- one node per cluster below; "
+                "see the standalone file for each cluster's full graph.\n\n"
+                + "\n".join(collapsed_lines) + "\n"
+            )
+        }
+        for cluster_name, members in clusters.items():
+            out[f"{key_prefix}{cluster_name}"] = render(members, f"{title_prefix} — {cluster_name}")
+        return out
 
-    collapsed_lines = ["```mermaid", "graph TD"]
-    for cluster_name in clusters:
-        cluster_file = safe_cluster_filename(cluster_name)
-        cluster_label = f"{cluster_name} (see call-graph-{cluster_file}.md)".replace('"', '\\"')
-        collapsed_lines.append(f'    {_mermaid_id(cluster_name)}["{cluster_label}"]')
-    collapsed_lines.append("```")
-    result = {
-        "inline": (
-            '---\ntitle: "Call graph (collapsed)"\ndoc_type: register\n---\n\n'
-            "# Call graph (collapsed)\n\n"
-            "Too many nodes for one inline diagram -- one node per cluster below; "
-            "see the standalone file for each cluster's full graph.\n\n"
-            + "\n".join(collapsed_lines) + "\n"
-        )
-    }
-    for cluster_name, members in clusters.items():
-        result[cluster_name] = render(members, f"Call graph — {cluster_name}")
+    components = [c for c in graph.connected_components(conn) if c]
+
+    if len(components) <= 1:
+        # Legacy behaviour, unchanged: the whole graph is one connected
+        # component (or empty), so the connectivity-aware split below has
+        # nothing to add over the existing node-count threshold.
+        if len(nodes) <= max_nodes_inline:
+            return {"inline": render(graph_data, "Call graph")}
+        collapsed = cluster_collapse(graph_data, "Call graph", "")
+        return {"inline": collapsed.pop(""), **collapsed}
+
+    # 2+ connected components: always split by component, regardless of
+    # the *combined* node count -- two genuinely disconnected subsystems
+    # must never share a diagram just because together they're still
+    # under max_nodes_inline.
+    id_to_component: dict[int, int] = {}
+    for idx, comp in enumerate(components):
+        for member_id in comp:
+            id_to_component[member_id] = idx
+
+    callers_by_component: dict[int, dict[int, dict]] = defaultdict(dict)
+    for caller_id, entry in graph_data.items():
+        callers_by_component[id_to_component[caller_id]][caller_id] = entry
+
+    def stability_key(idx: int) -> tuple[str, str, str]:
+        # id_info values are (name, library, dialect); the ordering
+        # contract (docs/superpowers/specs/2026-09-06-call-graph-lr-
+        # components-design.md) is (library, name, dialect), so reorder
+        # each triple before taking the min.
+        triples = [
+            (library, name, dialect) for (name, library, dialect) in (id_info[m] for m in components[idx] if m in id_info)
+        ]
+        return min(triples) if triples else ("", "", "")
+
+    ordered = sorted(range(len(components)), key=stability_key)
+
+    dominant_name: dict[int, str | None] = {}
+    for idx in ordered:
+        cluster_names = {entry["cluster"] for entry in callers_by_component[idx].values()}
+        dominant_name[idx] = next(iter(cluster_names)) if len(cluster_names) == 1 else None
+
+    name_counts: dict[str, int] = {}
+    for idx in ordered:
+        dom = dominant_name[idx]
+        if dom is not None:
+            name_counts[dom] = name_counts.get(dom, 0) + 1
+
+    final_names: dict[int, str] = {}
+    for rank, idx in enumerate(ordered, start=1):
+        dom = dominant_name[idx]
+        if dom is None or name_counts[dom] > 1:
+            final_names[idx] = f"{dom}-{rank}" if dom is not None else f"component-{rank}"
+        else:
+            final_names[idx] = dom
+
+    result: dict[str, str] = {}
+    index_lines = ["```mermaid", f"graph {direction}"]
+    for idx in ordered:
+        name = final_names[idx]
+        comp_callers = callers_by_component[idx]
+        comp_nodes = nodes_for(comp_callers)
+        if len(comp_nodes) <= max_nodes_inline:
+            result[name] = render(comp_callers, f"Call graph — {name}")
+        else:
+            collapsed = cluster_collapse(comp_callers, f"Call graph — {name}", f"{name}-")
+            result[name] = collapsed.pop("")
+            result.update(collapsed)
+        index_file = safe_cluster_filename(name)
+        index_label = f"{name} (see call-graph-{index_file}.md)".replace('"', '\\"')
+        index_lines.append(f'    {_mermaid_id(name)}["{index_label}"]')
+    index_lines.append("```")
+    result["inline"] = (
+        '---\ntitle: "Call graph"\ndoc_type: register\n---\n\n'
+        "# Call graph\n\n"
+        "The call graph splits into multiple independent components -- one "
+        "node per component below; see the standalone file for each "
+        "component's full graph.\n\n"
+        + "\n".join(index_lines) + "\n"
+    )
     return result
 
 
@@ -756,5 +895,148 @@ def language_guide(conn, dialect: str, redact: Redactor = NULL_REDACTOR) -> str:
         for e in unparsed:
             sample = e["sample"].replace("|", "\\|")
             out.append(f"| `{e['keyword']}` | {e['count']} | `{sample}` |")
+        out.append("")
+    return "\n".join(out) + "\n"
+
+
+def dispatch_edges_for_member(conn, member_id: int, dispatch_field=DISPATCH_FIELD) -> list[dict]:
+    """Every branch whose own `IF` condition compares `dispatch_field`
+    (default Natural's `*PF-KEY`) against a literal, with the routines it
+    calls and the literal-valued fields it sets within that same branch --
+    the "what actually happens when this value is dispatched on" a reviewer
+    otherwise has to reconstruct by hand from a module's full source.
+
+    Deliberately `IF`-only, not `ELSE`: an `ELSE` branch's own "value" is
+    only ever "not any of the sibling `IF`s' literals", which isn't a single
+    value worth a row of its own -- and a `DECIDE ON`-style cascade renders
+    as a chain of paired `IF`/`ELSE` either way, so every real branch
+    already gets its own `IF` row.
+
+    Branch extent comes from the `IF` row's own `end_line` (the matching
+    `END-IF`, already resolved at extraction time -- see db.py's schema
+    comment on `rule_candidate.end_line`), not a depth-scan over sibling
+    `rule_candidate` rows: a branch whose entire body is a single `CALL`/
+    `PERFORM` (the single most common shape for a PF-key dispatch) produces
+    no `rule_candidate` row of its own at a deeper depth to scan for, and a
+    depth-scan would wrongly collapse such a branch to zero-width. An
+    unresolved `end_line` (no matching `END-IF` found) falls back to the
+    `IF`'s own line, same as `routine_for_line`'s posture for an unresolved
+    routine end elsewhere in this codebase: conservative rather than a guess.
+
+    That `end_line` spans the *whole* `IF` construct, THEN and ELSE branches
+    both -- but this function is deliberately THEN-only (see above), so a
+    paired `ELSE` row (`pair_line_no` pointing back at this `IF`'s own line,
+    the same link `validate.py`'s reversed-condition check follows) clamps
+    the range down to just before the ELSE starts, when one exists. Without
+    this, a call or field assignment that only happens on the ELSE branch
+    would be wrongly attributed to the IF condition's own literal dispatch
+    trigger.
+
+    Reuses `conditions.comparisons_in` -- the same deterministic condition
+    parser `validate.py`'s reversed-condition check is built on -- rather
+    than a second, bespoke parser for "does this condition compare field X
+    to a literal".
+    """
+    rows = conn.execute(
+        "SELECT id, line_no, construct, depth, condition, end_line, pair_line_no, "
+        "fields_used, literals "
+        "FROM rule_candidate WHERE member_id=? ORDER BY line_no, id", (member_id,)
+    ).fetchall()
+
+    out: list[dict] = []
+    for i, row in enumerate(rows):
+        if row["construct"] != "IF":
+            continue
+        comps = [c for c in comparisons_in(row["condition"], outcome_field=dispatch_field)
+                 if c["literal"] is not None]  # a field-to-field comparison names no single dispatch value
+        if not comps:
+            continue
+        start_line = row["line_no"]
+        end_line = row["end_line"] if row["end_line"] is not None else start_line
+
+        else_row = next(
+            (r2 for r2 in rows[i + 1:]
+             if r2["construct"] == "ELSE" and r2["pair_line_no"] == start_line),
+            None,
+        )
+        if else_row is not None and start_line < else_row["line_no"] <= end_line:
+            end_line = else_row["line_no"] - 1
+
+        calls = conn.execute(
+            "SELECT callee_name, call_kind, MIN(line_no) AS line_no FROM call_edge "
+            "WHERE caller_id=? AND line_no > ? AND line_no <= ? AND dynamic=0 "
+            "GROUP BY callee_name, call_kind ORDER BY callee_name",
+            (member_id, start_line, end_line),
+        ).fetchall()
+        assigns = []
+        for r2 in rows[i + 1:]:
+            if r2["line_no"] > end_line:
+                break
+            if r2["construct"] != "ASSIGN" or not (r2["literals"] or ""):
+                continue
+            fields = [f for f in (r2["fields_used"] or "").split(",") if f]
+            if len(fields) != 1:
+                continue
+            assigns.append({
+                "field": fields[0], "literal": (r2["literals"] or "").split(",")[0],
+                "line_no": r2["line_no"],
+            })
+
+        for c in comps:
+            out.append({
+                "trigger_value": c["literal"], "line_no": start_line, "end_line": end_line,
+                "calls": [dict(r) for r in calls], "assigns": assigns,
+            })
+    return out
+
+
+def dispatch_map(conn, dispatch_field=DISPATCH_FIELD) -> str:
+    """One table per member with at least one dispatch edge (see
+    `dispatch_edges_for_member`): trigger value -> routines called and
+    fields set in that branch, each cited. Answers, at a glance, "what does
+    dispatching on this value actually do" without reading the whole
+    module -- exactly the gap a real external verification report flagged:
+    a dispatch value (a PF-key) documented only by its on-screen label, with
+    its real effects scattered across a module's full source and easy to
+    describe incompletely or inconsistently with what the label suggests.
+    """
+    members = conn.execute(
+        "SELECT id, name FROM member WHERE dialect IN ('natural','mantis') ORDER BY name"
+    ).fetchall()
+
+    out = ["---", 'title: "Dispatch map"', "doc_type: register", "---", "",
+           "# Dispatch map", "", (
+        "For every branch that compares the configured dispatch field "
+        "(default: Natural's `*PF-KEY`; override via "
+        "`options.overview.dispatch_field_pattern` for a different dialect "
+        "or naming convention) against a literal value, the routines it "
+        "calls and the fields it sets to a literal within that same branch. "
+        "Regenerate with `mfdoc dispatch-map` after any source change; do "
+        "not hand-edit."
+    ), ""]
+    any_rows = False
+    for m in members:
+        edges = dispatch_edges_for_member(conn, m["id"], dispatch_field=dispatch_field)
+        if not edges:
+            continue
+        any_rows = True
+        out.append(f"## {m['name']}")
+        out.append("")
+        out.append("| trigger value | branch | calls | fields set |")
+        out.append("|---|---|---|---|")
+        for e in edges:
+            calls = ", ".join(
+                f"`{c['callee_name']}` ({c['call_kind']}) {_cite(m['name'], c['line_no'])}"
+                for c in e["calls"]
+            ) or "—"
+            assigns = ", ".join(
+                f"`{a['field']}` = {a['literal']} {_cite(m['name'], a['line_no'])}"
+                for a in e["assigns"]
+            ) or "—"
+            span = _cite(m["name"], e["line_no"], e["end_line"])
+            out.append(f"| `{e['trigger_value']}` | {span} | {calls} | {assigns} |")
+        out.append("")
+    if not any_rows:
+        out.append("No dispatch branches found for the configured dispatch field.")
         out.append("")
     return "\n".join(out) + "\n"

@@ -52,16 +52,152 @@ def test_unresolved_call_marked_not_resolved():
     )
 
 
-def test_inline_diagram_below_threshold(indexed_db):
-    out = structural.call_graph_diagram(indexed_db, cluster_by="module", max_nodes_inline=10_000)
+def test_inline_diagram_below_threshold():
+    """A single connected component under the threshold still renders as
+    the plain single "inline" diagram -- the connectivity split must not
+    change behaviour for the common, already-small case."""
+    conn = _conn()
+    conn.execute("INSERT INTO member (name, dialect, library) VALUES ('CGSOLO', 'natural', 'LIBX')")
+    conn.execute("INSERT INTO member (name, dialect, library) VALUES ('CGSOLOTARGET', 'natural', 'LIBX')")
+    caller_id = conn.execute("SELECT id FROM member WHERE name='CGSOLO'").fetchone()["id"]
+    callee_id = conn.execute("SELECT id FROM member WHERE name='CGSOLOTARGET'").fetchone()["id"]
+    conn.execute(
+        "INSERT INTO call_edge (caller_id, callee_name, callee_id, call_kind, line_no, resolved) "
+        "VALUES (?, 'CGSOLOTARGET', ?, 'CALLNAT', 1, 1)", (caller_id, callee_id)
+    )
+    conn.commit()
+    out = structural.call_graph_diagram(conn, cluster_by="module", max_nodes_inline=10_000)
     assert set(out.keys()) == {"inline"}
-    assert "```mermaid" in out["inline"] and "graph TD" in out["inline"]
+    assert "```mermaid" in out["inline"] and "graph LR" in out["inline"]
+
+
+def test_call_graph_diagram_defaults_to_lr_direction(indexed_db):
+    """Default Mermaid direction is LR (issue #68) -- TD is available via
+    the direction= override, checked separately below."""
+    out = structural.call_graph_diagram(indexed_db, max_nodes_inline=10_000)
+    for content in out.values():
+        assert "```mermaid" in content
+        assert "graph LR" in content
+        assert "graph TD" not in content
+
+
+def test_call_graph_diagram_direction_override_to_td(indexed_db):
+    out = structural.call_graph_diagram(indexed_db, max_nodes_inline=10_000, direction="TD")
+    for content in out.values():
+        assert "graph TD" in content
+        assert "graph LR" not in content
+
+
+def test_unsupported_direction_raises():
+    conn = _conn()
+    import pytest
+
+    with pytest.raises(ValueError, match="sideways"):
+        structural.call_graph_diagram(conn, direction="sideways")
 
 
 def test_standalone_files_above_threshold(indexed_db):
     out = structural.call_graph_diagram(indexed_db, cluster_by="module", max_nodes_inline=0)
     assert "inline" in out
     assert len(out) > 1, "expected per-cluster standalone files when over threshold"
+
+
+def test_real_fixture_set_splits_into_multiple_components(indexed_db):
+    """The repo's own bundled example fixtures (Natural, Mantis, JCL, CSD,
+    ...) are not all one connected system -- confirms call_graph_diagram
+    actually exercises the multi-component path (not just synthetic
+    fixtures below) against the same data every other test in this suite
+    already runs against."""
+    out = structural.call_graph_diagram(indexed_db, cluster_by="module", max_nodes_inline=10_000)
+    assert len(out) > 2, "expected the bundled example fixtures to form more than one component"
+    assert "inline" in out
+    for key, content in out.items():
+        if key != "inline":
+            # every component's own file must actually be present as a
+            # diagram, and the index must reference its real filename.
+            assert "```mermaid" in content
+            expected_file = f"call-graph-{structural.safe_cluster_filename(key)}.md"
+            assert expected_file in out["inline"]
+
+
+def test_disconnected_subgraphs_render_as_separate_diagrams_even_under_threshold():
+    """Issue #68's core connectivity fix: two genuinely disconnected
+    subsystems must render as two separate diagrams even when their
+    *combined* node count is well under max_nodes_inline -- splitting by
+    connectivity is not merely a fallback for over-threshold graphs."""
+    conn = _conn()
+    # Subsystem 1: ALPHA calls BETA, both in library LIBALPHA.
+    conn.execute("INSERT INTO member (name, dialect, library) VALUES ('ALPHA', 'natural', 'LIBALPHA')")
+    conn.execute("INSERT INTO member (name, dialect, library) VALUES ('BETA', 'natural', 'LIBALPHA')")
+    # Subsystem 2: GAMMA calls DELTA, both in a *different* library, and
+    # never called by / calling anything in subsystem 1.
+    conn.execute("INSERT INTO member (name, dialect, library) VALUES ('GAMMA', 'natural', 'LIBGAMMA')")
+    conn.execute("INSERT INTO member (name, dialect, library) VALUES ('DELTA', 'natural', 'LIBGAMMA')")
+
+    def mid(name):
+        return conn.execute("SELECT id FROM member WHERE name=?", (name,)).fetchone()["id"]
+
+    conn.execute(
+        "INSERT INTO call_edge (caller_id, callee_name, callee_id, call_kind, line_no, resolved) "
+        "VALUES (?, 'BETA', ?, 'CALLNAT', 1, 1)", (mid("ALPHA"), mid("BETA"))
+    )
+    conn.execute(
+        "INSERT INTO call_edge (caller_id, callee_name, callee_id, call_kind, line_no, resolved) "
+        "VALUES (?, 'DELTA', ?, 'CALLNAT', 1, 1)", (mid("GAMMA"), mid("DELTA"))
+    )
+    conn.commit()
+
+    # Combined node count is 4 -- nowhere near max_nodes_inline's default of
+    # 40, or even this test's generous 10_000.
+    out = structural.call_graph_diagram(conn, cluster_by="module", max_nodes_inline=10_000)
+    non_inline = {k: v for k, v in out.items() if k != "inline"}
+    assert len(non_inline) == 2, f"expected exactly 2 component diagrams, got {list(non_inline)}"
+
+    alpha_diagram = next(v for k, v in non_inline.items() if "ALPHA" in v)
+    gamma_diagram = next(v for k, v in non_inline.items() if "GAMMA" in v)
+    assert "BETA" in alpha_diagram and "GAMMA" not in alpha_diagram and "DELTA" not in alpha_diagram
+    assert "DELTA" in gamma_diagram and "ALPHA" not in gamma_diagram and "BETA" not in gamma_diagram
+    # Both subsystems share a dominant cluster_by="module" name only when
+    # their libraries happen to match -- here they don't, so both should be
+    # named after their own library, not collapsed to a numeric fallback.
+    assert set(non_inline.keys()) == {"LIBALPHA", "LIBGAMMA"}
+    assert "inline" in out
+    assert "LIBALPHA" in out["inline"] and "LIBGAMMA" in out["inline"]
+
+
+def test_disconnected_same_cluster_components_get_unique_names():
+    """The exact motivating scenario from issue #68: two members sharing
+    one library/module (cluster_by="module") that never call each other
+    must still render as two separate diagrams -- and since both would
+    otherwise want the same dominant cluster name, each gets a unique,
+    numbered filename rather than silently colliding."""
+    conn = _conn()
+    conn.execute("INSERT INTO member (name, dialect, library) VALUES ('ISOA', 'natural', 'SHAREDLIB')")
+    conn.execute("INSERT INTO member (name, dialect, library) VALUES ('ISOATARGET', 'natural', 'SHAREDLIB')")
+    conn.execute("INSERT INTO member (name, dialect, library) VALUES ('ISOB', 'natural', 'SHAREDLIB')")
+    conn.execute("INSERT INTO member (name, dialect, library) VALUES ('ISOBTARGET', 'natural', 'SHAREDLIB')")
+
+    def mid(name):
+        return conn.execute("SELECT id FROM member WHERE name=?", (name,)).fetchone()["id"]
+
+    conn.execute(
+        "INSERT INTO call_edge (caller_id, callee_name, callee_id, call_kind, line_no, resolved) "
+        "VALUES (?, 'ISOATARGET', ?, 'CALLNAT', 1, 1)", (mid("ISOA"), mid("ISOATARGET"))
+    )
+    conn.execute(
+        "INSERT INTO call_edge (caller_id, callee_name, callee_id, call_kind, line_no, resolved) "
+        "VALUES (?, 'ISOBTARGET', ?, 'CALLNAT', 1, 1)", (mid("ISOB"), mid("ISOBTARGET"))
+    )
+    conn.commit()
+
+    out = structural.call_graph_diagram(conn, cluster_by="module", max_nodes_inline=10_000)
+    non_inline = {k: v for k, v in out.items() if k != "inline"}
+    assert len(non_inline) == 2, f"expected 2 distinct component diagrams, got {list(non_inline)}"
+    # Neither key may be the bare "SHAREDLIB" name unqualified -- both
+    # components claim it as their dominant cluster, so both must be
+    # disambiguated.
+    assert "SHAREDLIB" not in non_inline
+    assert all(k.startswith("SHAREDLIB-") for k in non_inline), non_inline.keys()
 
 
 def test_unresolved_edge_renders_dashed():
@@ -120,7 +256,14 @@ def test_cluster_by_subsystem_changes_clustering():
     member.system, not silently fall back to library grouping -- two
     synthetic members share one library but have different system
     values, so the standalone-file keys differ between the two
-    cluster_by settings."""
+    cluster_by settings.
+
+    CGA and CGB are connected by a real (resolved) call edge so they land
+    in the same connected component -- this test is specifically about
+    cluster_by's effect on the over-threshold collapse-then-per-cluster
+    fallback (see test_disconnected_... below for the connectivity-split
+    behaviour itself), not about component splitting, so it must not
+    accidentally exercise that separate code path."""
     conn = _conn()
     conn.execute(
         "INSERT INTO member (name, dialect, library, system) VALUES "
@@ -134,7 +277,11 @@ def test_cluster_by_subsystem_changes_clustering():
     b_id = conn.execute("SELECT id FROM member WHERE name='CGB'").fetchone()["id"]
     conn.execute(
         "INSERT INTO call_edge (caller_id, callee_name, callee_id, call_kind, line_no, resolved) "
-        "VALUES (?, 'TARGETA', NULL, 'CALLNAT', 1, 0)", (a_id,)
+        "VALUES (?, 'CGB', ?, 'CALLNAT', 1, 1)", (a_id, b_id)
+    )
+    conn.execute(
+        "INSERT INTO call_edge (caller_id, callee_name, callee_id, call_kind, line_no, resolved) "
+        "VALUES (?, 'TARGETA', NULL, 'CALLNAT', 2, 0)", (a_id,)
     )
     conn.execute(
         "INSERT INTO call_edge (caller_id, callee_name, callee_id, call_kind, line_no, resolved) "
@@ -223,12 +370,17 @@ def test_ambiguous_member_name_renders_as_two_distinct_nodes():
     assert {c["callee_id"] for c in graph_data[dup_b]["calls"]} == {downstream_b}
 
     out = structural.call_graph_diagram(conn, cluster_by="module", max_nodes_inline=10_000)
-    inline = out["inline"]
+    # The LIBA and LIBB chains never call each other, so they land in two
+    # separate connected components (and so two separate diagrams, not one
+    # merged "inline" one) -- gather every diagram's content to check the
+    # disambiguation logic itself, which must hold regardless of which file
+    # each half ends up in.
+    everything = "\n".join(out.values())
     # Both colliding members must render as their own, distinctly-labeled
     # node -- never merged into a single "DUPPROG" node.
-    assert 'DUPPROG (LIBA)' in inline
-    assert 'DUPPROG (LIBB)' in inline
-    assert inline.count('"DUPPROG"') == 0, "the bare ambiguous name must not appear unqualified"
+    assert 'DUPPROG (LIBA)' in everything
+    assert 'DUPPROG (LIBB)' in everything
+    assert everything.count('"DUPPROG"') == 0, "the bare ambiguous name must not appear unqualified"
 
     # Each upstream caller's edge must land on its own DUPPROG node, not a
     # shared merged one -- i.e. two distinct mermaid node ids for DUPPROG,
@@ -347,7 +499,7 @@ def test_call_graph_cli_sanitizes_unsafe_cluster_names(cli_args, derive_result, 
 
     escape_attempt = "../../etc/evil"
 
-    def fake_call_graph_diagram(conn, cluster_by="module", max_nodes_inline=40):
+    def fake_call_graph_diagram(conn, cluster_by="module", max_nodes_inline=40, direction="LR"):
         return {"inline": "# inline\n", escape_attempt: "# escaped cluster\n"}
 
     monkeypatch.setattr(cli.structural, "call_graph_diagram", fake_call_graph_diagram)

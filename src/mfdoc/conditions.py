@@ -48,6 +48,37 @@ def outcome_field_from_options(options: dict | None) -> re.Pattern:
     return re.compile(pattern, re.IGNORECASE)
 
 
+# The built-in variable a Natural map-driven program branches on per
+# function key pressed. No leading `*` sigil in the pattern -- `COMPARISON`'s
+# own identifier class (`_IDENT`, below) doesn't accept `*` as a leading
+# character (Natural's `#`/`@`/`$`/`&`-prefixed user variables all lead with
+# something `_IDENT` does accept; only the built-in system-variable sigil
+# `*` doesn't), so a condition like `*PF-KEY = 'PF3'` is captured with the
+# match starting at `PF-KEY`, sigil already stripped -- matching the same
+# bare-name convention `OUTCOME_FIELD` already uses for `RETURN-CODE`/`RC`/
+# etc. Deliberately narrow to this one well-known Natural system variable,
+# not a guess at every dialect's own dispatch idiom (Mantis programs
+# typically dispatch on a menu/transfer option field with no fixed name) --
+# a project on a different dialect, or a Natural codebase that wraps
+# *PF-KEY in its own field, supplies its own pattern via
+# `options.overview.dispatch_field_pattern` (see `dispatch_field_from_options`),
+# the same replace-not-merge convention `OUTCOME_FIELD`/`outcome_field_pattern`
+# already established.
+DISPATCH_FIELD = re.compile(r"PF-KEY\b", re.IGNORECASE)
+
+
+def dispatch_field_from_options(options: dict | None) -> re.Pattern:
+    """The dispatch-field pattern to use, from
+    `options.overview.dispatch_field_pattern` in project.yml, or the
+    built-in `DISPATCH_FIELD` (Natural's `*PF-KEY`) if unset. Mirrors
+    `outcome_field_from_options` exactly -- see that function for why a
+    supplied pattern replaces rather than merges with the built-in one."""
+    pattern = ((options or {}).get("overview") or {}).get("dispatch_field_pattern")
+    if not pattern:
+        return DISPATCH_FIELD
+    return re.compile(pattern, re.IGNORECASE)
+
+
 _IDENT = r"[#@$&A-Za-z][\w\-.]*"
 _LITERAL = r"'[^']*'|\"[^\"]*\""
 
