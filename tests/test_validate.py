@@ -1063,6 +1063,62 @@ def test_validator_does_not_flag_a_document_matching_the_installed_version(tmp_p
     assert result["staleness_problems"] == []
 
 
+def test_validator_flags_a_document_generated_by_a_newer_version_without_saying_older(tmp_path):
+    """A doc from a *newer* mfdoc than what's installed must not be reported
+    with "older"/"predate" wording -- that would be backwards."""
+    conn = _minimal_module_conn()
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        DEFERRED_FRONTMATTER.replace(
+            "generated_by: legacy-functional-docs 0.1.0",
+            "generated_by: legacy-functional-docs 99.0.0",
+        )
+        + "\nNothing else in this document matters [[TESTSTMT:1]].\n"
+    )
+    result = validate_doc(conn, doc)
+    assert len(result["staleness_problems"]) == 1
+    msg = result["staleness_problems"][0]
+    assert "99.0.0" in msg
+    assert "may predate" not in msg
+    assert "newer" in msg
+
+
+def test_validator_uses_direction_neutral_wording_for_an_unparseable_version(tmp_path):
+    """A version string this project's own dotted-numeric scheme can't
+    order (e.g. carrying a pre-release/build suffix) must not be guessed at
+    as "older" -- direction-neutral wording only."""
+    conn = _minimal_module_conn()
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        DEFERRED_FRONTMATTER.replace(
+            "generated_by: legacy-functional-docs 0.1.0",
+            "generated_by: legacy-functional-docs 0.2.0-dev",
+        )
+        + "\nNothing else in this document matters [[TESTSTMT:1]].\n"
+    )
+    result = validate_doc(conn, doc)
+    assert len(result["staleness_problems"]) == 1
+    msg = result["staleness_problems"][0]
+    assert "0.2.0-dev" in msg
+    assert "may predate" not in msg
+    assert "differs" in msg
+
+
+def test_validator_scopes_staleness_check_to_module_docs(tmp_path):
+    """A register/test doc that happens to carry a mismatched generated_by
+    must not be flagged -- scoped to doc_type: module only, same as the
+    deferred-reference and statement-completeness checks."""
+    conn = _minimal_module_conn()
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        "---\ntitle: Register\ndoc_type: register\n"
+        "generated_by: legacy-functional-docs 0.0.1\n---\n"
+        "# Register\n\nNothing else in this document matters.\n"
+    )
+    result = validate_doc(conn, doc)
+    assert result["staleness_problems"] == []
+
+
 def test_validator_ignores_generated_by_it_cannot_parse(tmp_path):
     """A register doc's generated_by (if present at all) or any other
     freeform value must not raise or false-flag -- only the exact

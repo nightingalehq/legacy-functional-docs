@@ -310,10 +310,13 @@ by design):
   chunk 15" concretely; this check exists to catch a *regression* back to
   the vague, unresolved phrasing, not to fix it after the fact.
 - `_staleness_problem` — a document's `generated_by` version differs from
-  the `mfdoc` version installed right now, suggesting it predates a
-  pipeline fix and may be worth regenerating. Only catches a version bump
-  (same caveat `batch.py`'s `_corpus_signature` already documents for its
-  own, narrower purpose).
+  the `mfdoc` version installed right now. Direction-aware where the two
+  versions actually parse as ordinary dotted-numeric strings (older ->
+  may predate a pipeline fix; newer -> the installed `mfdoc` is behind
+  what produced this document), and direction-neutral otherwise, rather
+  than assuming "older" for a version string it can't order. Only catches
+  a version bump (same caveat `batch.py`'s `_corpus_signature` already
+  documents for its own, narrower purpose).
 - `_statement_completeness_problems` (existing) and the two above are all
   scoped to `doc_type: module` documents only, for the same reason: a
   register or test doc echoes source syntax/field-inventory phrasing
