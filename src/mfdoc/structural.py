@@ -423,7 +423,13 @@ def call_graph_diagram(
         callers_by_component[id_to_component[caller_id]][caller_id] = entry
 
     def stability_key(idx: int) -> tuple[str, str, str]:
-        triples = [id_info[m] for m in components[idx] if m in id_info]
+        # id_info values are (name, library, dialect); the ordering
+        # contract (docs/superpowers/specs/2026-09-06-call-graph-lr-
+        # components-design.md) is (library, name, dialect), so reorder
+        # each triple before taking the min.
+        triples = [
+            (library, name, dialect) for (name, library, dialect) in (id_info[m] for m in components[idx] if m in id_info)
+        ]
         return min(triples) if triples else ("", "", "")
 
     ordered = sorted(range(len(components)), key=stability_key)
