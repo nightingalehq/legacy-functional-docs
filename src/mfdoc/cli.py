@@ -366,6 +366,15 @@ def cmd_glossary(args) -> int:
     return 0
 
 
+def cmd_lang_guide(args) -> int:
+    cfg = load_config(args.config)
+    conn = connect(Path(args.config).parent / cfg["index_db"])
+    redact = Redactor.from_options(cfg["options"])
+    out = structural.language_guide(conn, args.dialect, redact=redact)
+    _write_or_print(out, args.out)
+    return 0
+
+
 def cmd_classify_rules(args) -> int:
     cfg = load_config(args.config)
     conn = connect(Path(args.config).parent / cfg["index_db"])
@@ -826,34 +835,19 @@ def cmd_calibrate(args) -> int:
     """
     cfg = load_config(args.config)
     conn = connect(Path(args.config).parent / cfg["index_db"])
-    rows = conn.execute(
-        """
-        SELECT g.raw FROM gap g JOIN member m ON m.id = g.member_id
-         WHERE g.gap_kind='unparsed_line' AND g.raw IS NOT NULL AND m.dialect=?
-        """,
-        (args.dialect,),
-    ).fetchall()
-    if not rows:
+    shapes = graph.unparsed_line_shapes(conn, args.dialect)
+    if not shapes:
         print(f"no unparsed_line gaps for dialect '{args.dialect}' -- either it recognises "
               f"everything ingested, or nothing of this dialect was ingested")
         return 0
-
-    shapes: dict[str, dict] = {}
-    for r in rows:
-        raw = (r["raw"] or "").strip()
-        if not raw:
-            continue
-        kw = raw.split()[0].upper()
-        entry = shapes.setdefault(kw, {"count": 0, "sample": raw})
-        entry["count"] += 1
 
     hint_file, hint_constants = DIALECT_CALIBRATION_HINTS.get(
         args.dialect, (f"src/mfdoc/dialects/{args.dialect}.py", "the dialect's keyword tables"))
     print(f"unparsed-line shapes for dialect '{args.dialect}', ranked by frequency:")
     print(f"add recognised keywords to {hint_file} -- likely {hint_constants}")
     print()
-    for kw, entry in sorted(shapes.items(), key=lambda kv: -kv[1]["count"])[: args.top]:
-        print(f"{entry['count']:5}  {kw:<20} e.g. {entry['sample'][:100]!r}")
+    for entry in shapes[: args.top]:
+        print(f"{entry['count']:5}  {entry['keyword']:<20} e.g. {entry['sample'][:100]!r}")
     return 0
 
 
@@ -1164,6 +1158,12 @@ def main(argv=None) -> int:
     p.add_argument("--config", required=True)
     p.add_argument("--out", help="write to this path instead of stdout")
     p.set_defaults(func=cmd_glossary)
+
+    p = sub.add_parser("lang-guide")
+    p.add_argument("--config", required=True)
+    p.add_argument("--dialect", required=True)
+    p.add_argument("--out", help="write to this path instead of stdout")
+    p.set_defaults(func=cmd_lang_guide)
 
     p = sub.add_parser("classify-rules")
     p.add_argument("--config", required=True)

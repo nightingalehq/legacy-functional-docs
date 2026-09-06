@@ -680,3 +680,81 @@ def glossary(conn, redact: Redactor = NULL_REDACTOR) -> str:
                 out.append(f"| `{f['name']}` | {f['format'] or ''} | {f['length'] or ''} | {remark} |")
         out.append("")
     return "\n".join(out) + "\n"
+
+
+_LANGUAGE_GUIDE_SECTION_TITLES = [
+    ("structure", "Structure / declarations"),
+    ("control_flow", "Control flow"),
+    # entity_relationships renders as a subsection immediately under this
+    # one -- see graph.language_profile's docstring for why it isn't its
+    # own top-level section.
+    ("data_access", "Data access (DML)"),
+    ("screen_interaction", "Screen interaction"),
+    ("transactions", "Transactions"),
+    ("calling_conventions", "Calling conventions"),
+]
+
+
+def _render_language_profile_table(entries: list[dict], redact: Redactor) -> list[str]:
+    if not entries:
+        return ["None recorded.", ""]
+    out = ["| keyword | count | example |", "|---|---|---|"]
+    for e in entries:
+        cite = _cite(e["example_member"], e["example_line"])
+        text = redact(e["example_text"]).replace("|", "\\|") if e["example_text"] else ""
+        out.append(f"| `{e['keyword']}` | {e['count']} | {cite} `{text}` |")
+    out.append("")
+    return out
+
+
+def language_guide(conn, dialect: str, redact: Redactor = NULL_REDACTOR) -> str:
+    """Every recognised construct actually in use in `dialect`'s source in
+    this codebase, grouped by keyword with a frequency count and one cited
+    example each -- the basic, deterministic tier of the `language-guide`
+    document type (see docs/superpowers/specs/
+    2026-09-06-language-guide-doctype-design.md). Registered as `mfdoc
+    lang-guide`. A narrative tier exists alongside this
+    (`templates/language-guide.md`, written interactively per SKILL.md) but
+    is not produced by this function -- this one is a complete, standalone
+    document on its own, the same way glossary()/data_flow_diagram() are."""
+    profile = graph.language_profile(conn, dialect)
+    unparsed = graph.unparsed_line_shapes(conn, dialect)
+
+    out = ["---", f'title: "{dialect} — language guide"', "doc_type: register", "---", "",
+           f"# {dialect} — language guide", "", (
+        f"Every recognised construct actually in use in this codebase's "
+        f"`{dialect}` source, grouped by keyword with a frequency count and "
+        f"one cited example each. Regenerate with `mfdoc lang-guide "
+        f"--dialect {dialect}` after any source change; do not hand-edit. "
+        f"See `templates/language-guide.md` for the narrative tier that "
+        f"adds connective prose on top of this."
+    ), ""]
+
+    for key, title in _LANGUAGE_GUIDE_SECTION_TITLES:
+        out.append(f"## {title}")
+        out.append("")
+        out.extend(_render_language_profile_table(profile[key], redact))
+        if key == "data_access":
+            out.append("### Entity relationships")
+            out.append("")
+            out.extend(_render_language_profile_table(profile["entity_relationships"], redact))
+
+    out.append("## Not yet recognized")
+    out.append("")
+    out.append(
+        "Seen in source, not yet matched to a known construct -- ranked by "
+        f"frequency; see `mfdoc calibrate --dialect {dialect}` for the full "
+        "list and where to add recognition."
+    )
+    out.append("")
+    if not unparsed:
+        out.append("None recorded.")
+        out.append("")
+    else:
+        out.append("| keyword | count | sample |")
+        out.append("|---|---|---|")
+        for e in unparsed:
+            sample = e["sample"].replace("|", "\\|")
+            out.append(f"| `{e['keyword']}` | {e['count']} | `{sample}` |")
+        out.append("")
+    return "\n".join(out) + "\n"

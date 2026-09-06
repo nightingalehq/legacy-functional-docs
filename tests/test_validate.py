@@ -161,6 +161,42 @@ def test_validator_still_rejects_a_register_doc_missing_doc_type_name(indexed_db
     assert any("title" in p for p in result["problems"])
 
 
+def test_language_guide_basic_tier_validates_clean(indexed_db, tmp_path):
+    """structural.language_guide()'s doc_type: register output must validate
+    with no code change to validate.py -- confirms the language-guide
+    doctype design spec's claim rather than just asserting it in prose."""
+    from mfdoc import structural
+
+    doc = tmp_path / "language-guide.md"
+    doc.write_text(structural.language_guide(indexed_db, "natural"), encoding="utf-8")
+    result = validate_doc(indexed_db, doc)
+    assert result["ok"], result["problems"]
+    assert result["invalid_citations"] == 0
+
+
+def test_language_guide_narrative_tier_frontmatter_validates_clean(indexed_db, tmp_path):
+    """templates/language-guide.md's full front-matter shape (doc_type:
+    language-guide, matching module.md/system-overview.md) must fall into
+    validate.py's existing REQUIRED_FRONTMATTER branch and validate clean
+    once its placeholders are filled in and a real citation is added --
+    the same "any doc_type other than register gets the full front-matter
+    check" behavior every other narrative template already relies on."""
+    doc = tmp_path / "language-guide.md"
+    doc.write_text(
+        '---\ntitle: "natural — language guide"\ndoc_type: language-guide\n'
+        'system: "TEST-SYSTEM"\ndialect: "natural"\n'
+        "generated_by: legacy-functional-docs 0.1.0\n"
+        'generated_at: "2026-09-06"\nreview_status: draft\nreviewers: []\n'
+        "confidence_summary:\n  verified: 1\n  inferred: 0\n  unresolved: 0\n"
+        'sources: ["natural source files"]\nsme_questions: []\n---\n'
+        "\n# natural — language guide\n"
+        "\nThe program resets the return code at the top of processing [[MMP0100:31]].\n"
+    )
+    result = validate_doc(indexed_db, doc)
+    assert result["ok"], result["problems"]
+    assert result["invalid_citations"] == 0
+
+
 def test_validate_tree_skips_readme_files(indexed_db, tmp_path):
     """A directory of pipeline output (e.g. examples/outputs/) may legitimately
     have its own README.md alongside real generated docs -- that file has no
