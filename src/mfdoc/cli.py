@@ -41,7 +41,13 @@ from .db import add_gap, connect, insert, purge_member, purge_member_facts, set_
 from .dialects import adabas, environment, mantis, natural, screen, supra
 from .redact import Redactor
 
-VERSION = "0.1.0"
+# Single source of truth for the tool's own version -- previously a second,
+# separately-hardcoded constant here, which silently drifted from
+# mfdoc.__version__ (still "0.1.0" here after __version__ was bumped to
+# "0.2.0") and would have recorded the wrong tool_version in ingest_run,
+# undermining the staleness-check work that depends on __version__ being
+# accurate.
+from . import __version__ as VERSION
 
 DIALECT_ROUTER = {
     "natural": lambda conn, mid, lines, name: natural.extract(conn, mid, lines, name),

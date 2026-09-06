@@ -1063,6 +1063,37 @@ def test_validator_does_not_flag_a_document_matching_the_installed_version(tmp_p
     assert result["staleness_problems"] == []
 
 
+def test_parse_version_treats_trailing_zero_components_as_equal():
+    """(0, 2) < (0, 2, 0) is true under plain Python tuple ordering, which
+    would wrongly rank "0.2" as older than "0.2.0" -- the same version,
+    just written with a different number of components. Trailing zeros
+    must be normalized away before any comparison happens."""
+    from mfdoc.validate import _parse_version
+
+    assert _parse_version("0.2") == _parse_version("0.2.0")
+    assert _parse_version("1.0.0") == _parse_version("1")
+    assert _parse_version("0.0.0") == (0,)
+    assert _parse_version("1.2.3") == (1, 2, 3)
+    assert _parse_version("1.2.0.3") == (1, 2, 0, 3)  # only *trailing* zeros strip
+    assert _parse_version("not-a-version") is None
+
+
+def test_validator_does_not_flag_versions_differing_only_by_trailing_zeros(tmp_path):
+    from mfdoc import __version__ as installed_version
+
+    conn = _minimal_module_conn()
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        DEFERRED_FRONTMATTER.replace(
+            "generated_by: legacy-functional-docs 0.1.0",
+            f"generated_by: legacy-functional-docs {installed_version}.0",
+        )
+        + "\nNothing else in this document matters [[TESTSTMT:1]].\n"
+    )
+    result = validate_doc(conn, doc)
+    assert result["staleness_problems"] == []
+
+
 def test_validator_flags_a_document_generated_by_a_newer_version_without_saying_older(tmp_path):
     """A doc from a *newer* mfdoc than what's installed must not be reported
     with "older"/"predate" wording -- that would be backwards."""

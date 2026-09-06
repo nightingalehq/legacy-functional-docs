@@ -295,9 +295,21 @@ _DOTTED_VERSION = re.compile(r"^\d+(\.\d+)*$")
 
 
 def _parse_version(v: str) -> tuple[int, ...] | None:
+    """`v` as a tuple of ints, with trailing zero components stripped (so
+    "0.2" and "0.2.0" -- semantically the same version, just written with a
+    different number of components -- parse to the identical tuple and
+    compare equal, rather than Python's own tuple ordering rule for
+    differing lengths silently ranking the shorter one as "older": `(0, 2)
+    < (0, 2, 0)` is true in plain Python, which would misreport "0.2" as
+    older than an installed "0.2.0" even though nothing actually changed).
+    Always at least one component long, even if every component was zero
+    (`"0"` -> `(0,)`, not `()`)."""
     if not _DOTTED_VERSION.match(v):
         return None
-    return tuple(int(p) for p in v.split("."))
+    parts = [int(p) for p in v.split(".")]
+    while len(parts) > 1 and parts[-1] == 0:
+        parts.pop()
+    return tuple(parts)
 
 
 def _staleness_problem(fm: dict | None) -> str | None:
