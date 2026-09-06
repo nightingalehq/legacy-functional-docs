@@ -13,6 +13,14 @@ GitHub org.
   flows and the gap register, where judgement matters most.
 
 **Progress (2026-09-06):**
+- Done: chunk file names (`_generate_module_doc_chunked` in `batch.py`,
+  `testbatch.py`'s test-generation counterpart) now zero-pad the chunk
+  index to the width of the member's total chunk count, so a 17-chunk
+  member writes `chunk01.md`..`chunk17.md` instead of `chunk1.md`..
+  `chunk17.md` -- the latter sorts `chunk1, chunk10, ..., chunk17, chunk2,
+  ...` in a plain lexicographic directory listing. Internal bookkeeping
+  (resume-state dict keys, `chunk_map` values, prose like "chunk 3 of 16")
+  stays unpadded/numeric; only the on-disk filename changed. Issue #72.
 - Done: connectivity-aware call-graph splitting and LR-by-default layout
   (#68). `mfdoc call-graph` now defaults to `graph LR` (matching
   `data-flow.md`'s existing convention; still overridable back to `TD` via

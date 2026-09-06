@@ -569,8 +569,16 @@ def test_run_batch_chunks_a_large_member_and_still_batches_small_ones(indexed_db
         max_rules_per_call=1,
     )
     subdir = batch_mod._output_subdir(indexed_db, "MMP0100")
-    chunk1 = tmp_path / "out" / subdir / "MMP0100.chunk1.md"
+    chunk1 = tmp_path / "out" / subdir / "MMP0100.chunk01.md"
     assert chunk1.exists(), "MMP0100 has more than one rule_candidate in the fixtures and must chunk"
+    # MMP0100 chunks into 17 parts here (one rule per call) -- exercise the
+    # leading-zero padding this many chunks needs: an unpadded "chunk1.md"
+    # would otherwise sort lexicographically ahead of "chunk10.md" through
+    # "chunk17.md", listing out of rule order in a plain directory listing.
+    chunk_names = sorted(p.name for p in (tmp_path / "out" / subdir).glob("MMP0100.chunk*.md"))
+    assert len(chunk_names) == 17
+    assert chunk_names == [f"MMP0100.chunk{i:02d}.md" for i in range(1, 18)]
+    assert not (tmp_path / "out" / subdir / "MMP0100.chunk1.md").exists()
     # A member with zero (or exactly one) rule_candidate never chunks --
     # it should have gone through the ordinary single-call path instead.
     for member in members:
@@ -580,6 +588,48 @@ def test_run_batch_chunks_a_large_member_and_still_batches_small_ones(indexed_db
         out_path = tmp_path / "out" / subdir / f"{member}.md"
         assert out_path.exists()
     assert summary.failed == 0
+
+
+def test_run_batch_chunking_prunes_stale_legacy_chunk_files(indexed_db, tmp_path):
+    """A rerun after the unpadded->padded chunk-filename migration (or any
+    rerun whose chunk width changes) must not leave old-named chunk files
+    behind alongside the new ones."""
+    members = ["MMP0100"]
+    subdir = batch_mod._output_subdir(indexed_db, "MMP0100")
+    out_dir = tmp_path / "out" / subdir
+    out_dir.mkdir(parents=True)
+    # Plant a legacy unpadded file and an unrelated same-stem file that
+    # must survive the prune (it isn't a chunk file at all).
+    stale = out_dir / "MMP0100.chunk1.md"
+    stale.write_text("stale", encoding="utf-8")
+    unrelated = out_dir / "MMP0100.notes.md"
+    unrelated.write_text("keep me", encoding="utf-8")
+
+    batch_mod.run_batch(
+        indexed_db, members, tmp_path / "out", FakeCaller(), "rules", "template",
+        max_rules_per_call=1,
+    )
+
+    assert not stale.exists()
+    assert unrelated.exists()
+    assert (out_dir / "MMP0100.chunk01.md").exists()
+
+
+def test_prune_stale_chunk_files_skips_directories_and_ignores_unlink_errors(tmp_path):
+    """A directory (or any entry that can't be removed) that happens to
+    match the chunk-file naming pattern must not abort pruning -- best
+    effort cleanup, never a hard failure over cosmetic tidiness."""
+    out_path = tmp_path / "FAKEMOD.md"
+    tmp_path.mkdir(exist_ok=True)
+    stale_dir = tmp_path / "FAKEMOD.chunk1.md"
+    stale_dir.mkdir()
+    stale_file = tmp_path / "FAKEMOD.chunk2.md"
+    stale_file.write_text("stale", encoding="utf-8")
+
+    batch_mod._prune_stale_chunk_files(out_path, {"FAKEMOD.chunk01.md"})
+
+    assert stale_dir.is_dir()  # untouched, not raised on
+    assert not stale_file.exists()
 
 
 def test_resolve_max_rules_per_call():
