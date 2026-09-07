@@ -148,16 +148,16 @@ Suggested document set, in this order (each builds vocabulary the next needs):
 5. `interface-matrix.md` — the screen-and-key interface matrix (mode x
    panel x map x PF-label x routine x outcome), from `mfdoc brief
    --interface-matrix` against `templates/interface-matrix.md`. Whole-
-   system, not one per module: a screen's PF-key behaviour is frequently
-   split across the module that displays it and the module(s) that
-   dispatch on it, so this needs the same whole-system view as
-   `system-overview.md`. The brief hands over which module(s) display
-   each screen, its PF-key/dispatch branches (routine called, fields
-   set), and any literal on-screen text as candidate PF-key labels —
-   matching a label to a specific key, and characterising the outcome
-   (exit/navigate/error/...), is the judgement call to make when writing
-   this document; never invent a match or an outcome the cited facts
-   don't evidence.
+   system, not one per module: the brief gathers each screen's display
+   reference(s) and the PF-key/dispatch branches found in the same
+   modules that display it, so the matrix is built from the screen's own
+   display context rather than from a member-local note. The brief hands
+   over which module(s) display each screen, its PF-key/dispatch
+   branches (routine called, fields set), and any literal on-screen text
+   as candidate PF-key labels — matching a label to a specific key, and
+   characterising the outcome (exit/navigate/error/...), is the judgement
+   call to make when writing this document; never invent a match or an
+   outcome the cited facts don't evidence.
 6. `gap-register.md` — every unresolved item, as SME questions
 7. `coverage-report.md` — the numbers, unspun
 8. `reference/language-guide.md` — what this dialect's source actually

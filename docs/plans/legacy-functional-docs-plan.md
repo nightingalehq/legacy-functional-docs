@@ -15,12 +15,12 @@ GitHub org.
 **Progress (2026-09-07):**
 - Implemented issue #91: a new document type, `interface-matrix`, for the
   screen-and-key interface matrix a client review asked for (mode x panel
-  x map x PF-label x routine x outcome). Judgement-heavy synthesis across
-  more than one module (the module that displays a screen and the
-  module(s) that dispatch on it are frequently different), so it follows
-  the interactive brief/template pattern (`brief.interface_matrix_brief()`,
+  x map x PF-label x routine x outcome). It follows the interactive
+  brief/template pattern (`brief.interface_matrix_brief()`,
   `templates/interface-matrix.md`, `mfdoc brief --interface-matrix`) like
-  `system_brief`/`executive_brief`, not `batch.py`'s per-member path.
+  `system_brief`/`executive_brief`, not `batch.py`'s per-member path, so
+  the brief can gather each screen's display reference(s) and the
+  PF-key/dispatch branches found in the same modules that display it.
   Reuses `structural.dispatch_edges_for_member` (the same derivation
   `mfdoc dispatch-map` uses) for the PF-key branches, joined against
   `interaction.target` (dialect-general: Natural's `INPUT USING MAP`,

@@ -55,9 +55,10 @@ bug in the tree above.
 `docs/interface-matrix.md` and `docs/gap-register.md` don't have a
 per-dialect home because they're cross-cutting by nature (an entity doc
 spans whatever dialects define and use it; the system overview spans
-everything; a screen can be displayed by one dialect's module and
-dispatched on by another's) — they sit at the `docs/` root instead of
-being forced into a `<dialect>/` shape that doesn't fit them.
+everything; the interface matrix groups each screen's display references
+and PF-key/dispatch facts together at whole-system scope) — they sit at
+the `docs/` root instead of being forced into a `<dialect>/` shape that
+doesn't fit them.
 
 ## What's auto-refreshed vs. hand/session-produced
 

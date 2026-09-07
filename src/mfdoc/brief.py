@@ -1137,10 +1137,11 @@ def interface_matrix_brief(conn, redact: Redactor = NULL_REDACTOR, dispatch_fiel
     label text recorded on the screen itself.
 
     Whole-system scope, no member argument -- like `system_brief` and
-    `structural.dispatch_map`, not `module_brief`: a screen's PF-key
-    behaviour is frequently split across more than one module (one module
-    displays it, another -- or several -- dispatch on it), so a single
-    module's own brief can never show the whole matrix for one screen.
+    `structural.dispatch_map`, not `module_brief`: this brief gathers each
+    screen's display references and the PF-key branches found in the same
+    modules that display it, so the matrix stays grounded in the fact
+    store's actual screen-to-module relationships rather than inventing a
+    cross-member correlation that is not recorded explicitly.
 
     Data-model decisions made here, since the fact store has no single
     table shaped like the target document:
@@ -1172,7 +1173,7 @@ def interface_matrix_brief(conn, redact: Redactor = NULL_REDACTOR, dispatch_fiel
       here would risk a wrong match going uncorrected (no source line
       actually pairs a label with its key value together).
 
-    A screen with no dispatch edges from any of its displaying modules is
+    A screen with no dispatch edges in the modules that display it is
     omitted outright (nothing for the matrix to add over what
     `mfdoc dispatch-map` already shows); a screen never displayed anywhere
     can't be reached in the first place, so it can't appear in "reachable
@@ -1304,9 +1305,9 @@ def interface_matrix_brief(conn, redact: Redactor = NULL_REDACTOR, dispatch_fiel
     if not any_rows:
         out.append(
             "No screen with both a display reference and a dispatch branch "
-            "was found. Either no screen in this index is dispatched on via "
-            "the configured dispatch field, or the modules that display a "
-            "screen and the modules that dispatch on it were not both supplied."
+            "in one of its display modules was found. Either no screen in "
+            "this index is dispatched on via the configured dispatch field, "
+            "or the relevant display modules were not supplied in the index."
         )
         out.append("")
 
