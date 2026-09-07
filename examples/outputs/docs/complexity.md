@@ -21,4 +21,5 @@ risk_score = (rule_count + max_depth) * (in_degree + out_degree + 1), normalized
 | `MMP9800` | 2 | 0 | 0 | 0 | 1.7 |
 | `MMP9300` | 1 | 0 | 0 | 0 | 0.9 |
 | `MMP9600` | 1 | 0 | 0 | 0 | 0.9 |
+| `MMP9560` | 1 | 0 | 0 | 0 | 0.9 |
 

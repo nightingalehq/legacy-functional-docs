@@ -223,6 +223,14 @@ RE_END_ANY = re.compile(r"^\s*END-(IF|DECIDE|FOR|REPEAT|WHILE|ALL|WORK|SUBROUTIN
 RE_INPUT = re.compile(r"^\s*INPUT\b(?P<rest>.*)$", re.I)
 RE_REINPUT = re.compile(r"^\s*REINPUT\b(?P<rest>.*)$", re.I)
 RE_WRITE = re.compile(r"^\s*(WRITE|DISPLAY|PRINT)\b(?P<rest>.*)$", re.I)
+
+# COMPRESS/SEPARATE build the same kind of multi-operand list as WRITE/
+# DISPLAY/PRINT (literals and field references, routinely one per
+# continuation line) before their own INTO target -- scoped into the fold
+# loop's operand-continuation check the same way WRITE/INPUT/REINPUT
+# already are, for the same reason (see CONTINUATION_LEAD_QUOTE/_SLASH/
+# _FIELD's own comments).
+RE_COMPRESS_SEPARATE = re.compile(r"^\s*(COMPRESS|SEPARATE)\b", re.I)
 RE_USING_MAP = re.compile(r"USING\s+MAP\s+(?P<map>'[^']+'|[A-Z0-9#@$&\-_.]+)", re.I)
 
 # Natural map (.nsm) source body, after DEFINE DATA/END-DEFINE: a level, a T
@@ -317,16 +325,18 @@ CONTINUATION_LEAD_QUOTE = re.compile(r"^\s*['\"]")
 
 # Natural report-writer column-position tokens ("5T" = tab to column 5, "2X"
 # = skip 2 spaces) commonly appear on their own continuation line within a
-# multi-line WRITE/DISPLAY/PRINT/INPUT/REINPUT operand list -- CONTINUATION_LEAD
-# doesn't cover them (they aren't a keyword), so without this such a line falls
-# through as its own unparsed_line gap instead of folding into the statement
-# it's actually part of. Scoped to WRITE/DISPLAY/PRINT/INPUT/REINPUT only (see
-# the fold loop's verb check) -- a bare "5T" on its own line in any other
-# context is much more likely a genuine unrecognised construct than a
-# continuation, and this is specifically a report-writer/screen-layout
-# convention. The optional leading "/" or "//" is Natural's own
-# next-line/skip-a-line marker, routinely paired with a column-position token
-# on the same continuation line (e.g. "// 1X #MESSAGE").
+# multi-line WRITE/DISPLAY/PRINT/INPUT/REINPUT/COMPRESS/SEPARATE operand
+# list -- CONTINUATION_LEAD doesn't cover them (they aren't a keyword), so
+# without this such a line falls through as its own unparsed_line gap
+# instead of folding into the statement it's actually part of. Scoped to
+# that verb list only (see the fold loop's verb check) -- a bare "5T" on
+# its own line in any other context is much more likely a genuine
+# unrecognised construct than a continuation, and this is specifically a
+# report-writer/screen-layout convention (COMPRESS/SEPARATE just piggyback
+# on the same scope, since they build the same kind of operand list). The
+# optional leading "/" or "//" is Natural's own next-line/skip-a-line
+# marker, routinely paired with a column-position token on the same
+# continuation line (e.g. "// 1X #MESSAGE").
 CONTINUATION_LEAD_COLSPEC = re.compile(r"^\s*/{0,2}\s*\d+[TX]\b", re.I)
 
 # A bare "/" or "//" with nothing else on the line is the same next-line/
@@ -337,13 +347,12 @@ CONTINUATION_LEAD_SLASH = re.compile(r"^\s*/{1,2}\s*$")
 
 # A continuation line that's one or more bare field references (optionally
 # array-indexed, e.g. "#IDN(#I)" or "#LINE-UP(*)"), themselves further
-# operands of the same WRITE/DISPLAY/PRINT/INPUT/REINPUT statement's operand
-# list. Restricted to a leading "#" specifically because Natural's own
-# naming convention reserves that sigil for user-defined variables -- no
-# statement verb ever starts with "#" -- *except* a bare assignment
-# ("#FIELD := ..."), which this scan excludes via the ":=" check at its call
-# site below, since that's a genuine new statement, not another operand.
-# Scoped to WRITE/DISPLAY/PRINT/INPUT/REINPUT the same way as
+# operands of the same statement's operand list. Restricted to a leading
+# "#" specifically because Natural's own naming convention reserves that
+# sigil for user-defined variables -- no statement verb ever starts with
+# "#" -- *except* a bare assignment ("#FIELD := ..."), which this scan
+# excludes via the ":=" check at its call site below, since that's a
+# genuine new statement, not another operand. Scoped the same way as
 # CONTINUATION_LEAD_COLSPEC, for the same reason.
 CONTINUATION_LEAD_FIELD = re.compile(r"^\s*#[A-Z]", re.I)
 
@@ -606,13 +615,16 @@ def extract(conn, member_id: int, lines: list[tuple[int, str | None, str]], memb
             if nxt_comment:
                 look += 1
                 continue
-            is_write_family = RE_WRITE.match(stmt) or RE_INPUT.match(stmt) or RE_REINPUT.match(stmt)
-            is_write_operand_continuation = is_write_family and (
+            is_operand_list_verb = (
+                RE_WRITE.match(stmt) or RE_INPUT.match(stmt) or RE_REINPUT.match(stmt)
+                or RE_COMPRESS_SEPARATE.match(stmt)
+            )
+            is_operand_list_continuation = is_operand_list_verb and (
                 CONTINUATION_LEAD_COLSPEC.match(nxt_code) or CONTINUATION_LEAD_SLASH.match(nxt_code)
                 or (CONTINUATION_LEAD_FIELD.match(nxt_code) and ":=" not in nxt_code)
             )
             if not (CONTINUATION_TAIL.search(stmt.rstrip()) or CONTINUATION_LEAD.match(nxt_code)
-                    or CONTINUATION_LEAD_QUOTE.match(nxt_code) or is_write_operand_continuation):
+                    or CONTINUATION_LEAD_QUOTE.match(nxt_code) or is_operand_list_continuation):
                 break
             look += 1
             stmt = stmt.rstrip() + " " + nxt_code.strip()

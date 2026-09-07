@@ -277,6 +277,17 @@ CONTINUATION_LEAD_COLSPEC already is. +1 member/code_member, +23
 source_lines, unparsed_lines unchanged (the continuation lines fold instead
 of gapping, which is the point of the fixture), +1 orphan_module/gaps_total
 (uncalled by design, as usual for these regression-only fixtures).
+
+2026-09-07: numbers moved again when MMP9560.nsp was added, extending the
+same operand-continuation fold to COMPRESS/SEPARATE (RE_COMPRESS_SEPARATE,
+newly scoped into the fold loop's operand-continuation check alongside
+WRITE/INPUT/REINPUT) -- found calibrating against a real client corpus,
+where a bare field-reference operand line routinely precedes a COMPRESS's
+closing INTO clause (MMP9800.nsp's own COMPRESS fixture only exercises a
+continuation line that already carries INTO). +1 member/code_member, +16
+source_lines, +1 rule_candidate (the folded COMPRESS), unparsed_lines
+unchanged (the continuation line folds instead of gapping), +1
+orphan_module/gaps_total (uncalled by design, as usual).
 """
 
 from __future__ import annotations
@@ -284,17 +295,17 @@ from __future__ import annotations
 from mfdoc import graph
 
 EXPECTED_COVERAGE = {
-    "members": 31,
-    "code_members": 19,
-    "source_lines": 634,
+    "members": 32,
+    "code_members": 20,
+    "source_lines": 650,
     "unparsed_lines": 4,
-    "line_recognition_rate": 0.9937,
+    "line_recognition_rate": 0.9938,
     "entities": 19,
     "entities_with_definition": 14,
     "entity_definition_rate": 0.7368,
     "entity_fields": 71,
     "data_accesses": 18,
-    "rule_candidates": 53,
+    "rule_candidates": 54,
     "invocation_edges": 15,
     "invocations_resolved": 3,
     "call_resolution_rate": 0.2,
@@ -303,7 +314,7 @@ EXPECTED_COVERAGE = {
     "includes_resolved": 7,
     "include_resolution_rate": 0.6364,
     "gaps_high": 20,
-    "gaps_total": 165,
+    "gaps_total": 166,
 }
 
 
@@ -320,5 +331,5 @@ def test_run_all_summary_matches_snapshot(derive_result):
     assert derive_result["unresolved_calls"] == 12
     assert derive_result["undefined_entities"] == 4
     assert derive_result["adabas_entities_merged"] == 3
-    assert derive_result["orphans"] == 13
+    assert derive_result["orphans"] == 14
     assert derive_result["transaction_scopes"] == 5

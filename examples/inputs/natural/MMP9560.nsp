@@ -1,0 +1,15 @@
+** MMP9560 - COMPRESS/SEPARATE OPERAND-LIST CONTINUATION FIXTURE
+** Sibling of MMP9550.nsp: COMPRESS/SEPARATE build the same kind of
+** multi-operand list as WRITE/DISPLAY/PRINT (see natural.py's
+** RE_COMPRESS_SEPARATE), so a continuation line opening with a bare field
+** reference (CONTINUATION_LEAD_FIELD) must fold into them the same way it
+** does for WRITE, not just when the line already carries the closing INTO
+** keyword (MMP9800.nsp's own COMPRESS fixture only exercises that case).
+DEFINE DATA LOCAL
+1 #BATCH-SEQ (N4)
+1 #MESSAGE (A60)
+END-DEFINE
+COMPRESS 'BATCH'
+  #BATCH-SEQ
+  INTO #MESSAGE
+END

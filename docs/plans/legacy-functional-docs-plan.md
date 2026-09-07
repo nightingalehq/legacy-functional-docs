@@ -37,6 +37,32 @@ GitHub org.
   - Full suite green (715 passed, 2 skipped); bundled fixture pipeline
     clean (33/33 docs, 0 invalid citations of 548).
 
+**Progress (2026-09-07d):**
+- Re-ran `mfdoc calibrate` against two engagement codebases' Natural/Mantis
+  corpora (no client content in this repo -- findings generalised into
+  invented fixtures/tests, same as 2026-09-07b) after 2026-09-07c's fixes
+  landed. The Mantis corpus is now fully clean -- zero `unparsed_line`
+  gaps. The Natural corpus dropped from ~30 gap rows (several at 3-8
+  occurrences each) to ~26 rows, all now singleton occurrences: the
+  quote/slash-lead fixes eliminated every occurrence of those shapes; the
+  remaining ones are all bare field-reference lines (e.g. `#IDN(#I)`,
+  `#STORE-*(#I)`) that turned out to precede a `COMPRESS`/`SEPARATE`
+  statement's `INTO` clause, not a `WRITE` -- those two verbs build the
+  same kind of operand list (see `RE_COMPUTE`) but weren't in the fold
+  loop's WRITE-family scope. Added `RE_COMPRESS_SEPARATE` to that scope
+  (`natural.py`); new fixture `MMP9560.nsp` (sibling of `MMP9800.nsp`'s
+  existing COMPRESS+INTO fixture, which only exercised a continuation line
+  that *already* carries `INTO` -- this one exercises a bare operand line
+  *before* it) plus `test_compress_separate_operand_continuations.py`.
+- The remaining single-occurrence gaps in that Natural corpus are left as
+  genuine gap-register questions -- each looks like a distinct,
+  lower-frequency construct (a different `DEFINE` form, a bare DDM/view
+  field-list line, an unfamiliar report-writer page marker) that would
+  need a real client source sample to generalise safely, not something to
+  guess a fix for.
+- Full suite green (717 passed, 2 skipped); bundled fixture pipeline clean
+  (33/33 docs, 0 invalid citations of 548).
+
 **Progress (2026-09-07b):**
 - Natural dialect calibration pass, driven by `mfdoc calibrate --dialect natural`
   against two engagement codebases (no client content in this repo — findings
