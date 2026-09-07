@@ -80,9 +80,57 @@ def reconcile_adabas_files(conn) -> int:
     return merged
 
 
+def resolve_interface_literal_calls(conn) -> int:
+    """Reclassify a `CALL` on a Mantis `INTERFACE` handle as a resolved edge,
+    not a `dynamic_target` gap, when that handle was bound to a literal at
+    its own `INTERFACE handle("LITERAL",...)` declaration.
+
+    `mantis.py`'s RE_CALL flags any unquoted CALL target as dynamic,
+    because in isolation it has no way to tell "a variable that could hold
+    anything at runtime" apart from "a handle whose target was already
+    fixed by an earlier declaration in the same source" -- both look like a
+    bare identifier at the call site. The declaration side *does* know the
+    binding, and records it (see mantis.RE_EXT_DECL) as a `variable` row,
+    scope='mantis_interface', `view_of` holding the literal target. Joining
+    that back against every `dynamic=1` `CALL` edge in the same member lets
+    this resolve exactly the cases where the target was knowable from
+    source all along -- the actually-hard, genuinely-runtime-determined
+    cases (the handle never bound to a literal in this member, or bound
+    to another variable) are left as `dynamic_target` gaps, same as before.
+
+    Runs before the general callee_id lookup below so a rewritten
+    `callee_name` still gets resolved against `member` in the same pass.
+    """
+    rows = conn.execute(
+        """
+        SELECT ce.id AS edge_id, ce.caller_id, ce.line_no, v.view_of AS literal_target
+          FROM call_edge ce
+          JOIN variable v
+            ON v.member_id = ce.caller_id
+           AND v.scope = 'mantis_interface'
+           AND UPPER(v.name) = UPPER(ce.callee_name)
+         WHERE ce.dynamic = 1 AND ce.call_kind = 'CALL'
+        """
+    ).fetchall()
+    for r in rows:
+        conn.execute(
+            "UPDATE call_edge SET callee_name=?, dynamic=0 WHERE id=?",
+            (r["literal_target"], r["edge_id"]),
+        )
+        conn.execute(
+            """
+            DELETE FROM gap
+             WHERE gap_kind='dynamic_target' AND member_id=? AND line_no=?
+            """,
+            (r["caller_id"], r["line_no"]),
+        )
+    return len(rows)
+
+
 def resolve(conn) -> dict:
     """Resolve call edges and data-access entities to their definitions."""
     merged = reconcile_adabas_files(conn)
+    interface_literal_calls = resolve_interface_literal_calls(conn)
     conn.execute(
         """
         UPDATE call_edge
@@ -144,7 +192,8 @@ def resolve(conn) -> dict:
                 member_id=r["caller_id"], line_no=r["ln"], severity="high")
 
     return {"unresolved_calls": len(unresolved), "undefined_entities": len(rows),
-            "adabas_entities_merged": merged}
+            "adabas_entities_merged": merged,
+            "interface_literal_calls_resolved": interface_literal_calls}
 
 
 def crud_matrix(conn) -> list[dict]:

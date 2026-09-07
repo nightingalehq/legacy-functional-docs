@@ -101,6 +101,25 @@ GitHub org.
   wiring `notes_for()` into `brief.py`'s actual brief-building call sites
   is issue #94's job, kept separate so #94 has a stable, merged foundation
   to build on.
+- Implemented issue #104 (two gate-gap classes miscalibrated as harder than
+  they are): (1) `mantis.py`'s `'`-marked continuation fold recognised only
+  a *leading* marker (continuation line starts with `'`); added the
+  complementary *trailing* shape, where the marker sits at the end of the
+  line being wrapped instead (e.g. a long quoted assignment split as
+  `DESC="text so far '` / `more text"`) — new `_has_open_trailing_marker`
+  helper, distinguishing a genuine trailing marker from an ordinary line
+  that just happens to end with a real, closed literal. (2) new
+  `graph.resolve_interface_literal_calls`, run from `resolve()` before the
+  general callee_id lookup: a `CALL` on a Mantis `INTERFACE handle(...)`
+  bound to a literal at its own declaration (`mantis.py` now also records
+  that binding as a `variable` row, `scope='mantis_interface'`) is
+  reclassified to the literal target instead of being left as a
+  `dynamic_target` gap — that gap kind is reserved for targets genuinely
+  not determinable from source, not ones the extraction-time check just
+  hadn't looked up yet. Neither fixture set exercises either shape yet, so
+  both are covered by new isolated unit tests only (`tests/
+  test_mantis_rules.py`, new `tests/test_dynamic_call_resolution.py`); the
+  bundled fixture pipeline's gap/coverage counts are unchanged.
 
 **Progress (2026-09-06):**
 - Implemented issue #64: an eighth document type, `language-guide`, that

@@ -23,16 +23,22 @@ below is unaffected, since it derives depth from matched constructs rather
 than from the dot count itself.
 
 The same export style also wraps a long condition or string expression across
-physical lines by marking every continuation line with a leading `'` (after
-its own depth-dots), e.g. an unclosed `IF(...` followed by `'OR ...)`. Unlike
+physical lines by marking the wrap with a `'`, in either of two observed
+shapes: **leading** -- every continuation line starts with `'` (after its own
+depth-dots), e.g. an unclosed `IF(...` followed by `'OR ...)`; and
+**trailing** -- the line being wrapped itself ends with a bare, unpaired `'`
+and the following line carries no marker of its own, e.g. a long quoted
+assignment split as `DESC="text so far '` followed by `more text"`. Unlike
 Natural's implicit continuation (inferred from a trailing/leading connective,
-see `natural.CONTINUATION_TAIL`/`CONTINUATION_LEAD`), this is an explicit,
-unambiguous marker, so `extract` folds every run of `'`-marked lines onto the
-statement they continue -- joined with a single inserted space -- before any
-keyword pattern is matched against it. Each continuation line is still
-visited afterwards in its own right and correctly fails to stand alone as a
-statement (the same accepted double-visit `natural.py`'s own continuation
-fold relies on), so it still raises its own
+see `natural.CONTINUATION_TAIL`/`CONTINUATION_LEAD`), both of these are
+explicit, unambiguous markers, so `extract` folds every run of either-marked
+lines onto the statement they continue -- joined with a single inserted
+space -- before any keyword pattern is matched against it (see
+`_has_open_trailing_marker` for how the trailing shape is told apart from an
+ordinary line that just happens to end with a real, closed literal). Each
+continuation line is still visited afterwards in its own right and correctly
+fails to stand alone as a statement (the same accepted double-visit
+`natural.py`'s own continuation fold relies on), so it still raises its own
 low-severity `unparsed_line` gap -- the fold only fixes the *content*
 recorded for the statement it belongs to.
 """
@@ -154,6 +160,21 @@ def _strip_trailing_remark(stmt: str) -> str:
     masked, _ = mask_literals(stmt)
     m = re.search(r":\|.*$", masked)
     return stmt[: m.start()].rstrip() if m else stmt
+
+
+def _has_open_trailing_marker(stmt: str) -> bool:
+    """True if `stmt` ends with a bare, unpaired `'` -- this export's other
+    continuation shape, where the marker sits at the *end* of the line being
+    wrapped rather than at the start of the line that continues it (e.g. a
+    long `DESC="..."` assignment split as `DESC="text so far '` /
+    `more text"`). Checked against the masked form: `mask_literals`'s
+    `'[^']*'` pattern only replaces a *closed* pair, so a genuine trailing
+    marker (no matching `'` earlier on the line) survives masking untouched,
+    while an ordinary line that happens to end with a real closed literal
+    (`X='HOLD'`) has already had that whole literal -- including its closing
+    `'` -- replaced with NULs and so does not false-trigger here."""
+    masked, _ = mask_literals(stmt)
+    return masked.rstrip().endswith("'")
 
 
 def _split_depth_marker(stmt: str) -> tuple[str, bool]:
@@ -382,7 +403,11 @@ def extract(conn, member_id: int, lines, member_name: str = "?") -> dict:
         look = idx
         while look + 1 < len(lines) and look - idx < MAX_CONTINUATION_LOOKAHEAD:
             nxt_body, nxt_is_remark = _split_depth_marker(lines[look + 1][2].strip())
-            if nxt_is_remark or not nxt_body.startswith("'"):
+            if nxt_is_remark:
+                break
+            leading_marker = nxt_body.startswith("'")
+            trailing_marker = not leading_marker and _has_open_trailing_marker(stmt)
+            if not (leading_marker or trailing_marker):
                 break
             # A single inserted space, not a bare concatenation: real
             # continuations are usually adjacent to a natural delimiter on
@@ -394,7 +419,13 @@ def extract(conn, member_id: int, lines, member_name: str = "?") -> dict:
             # like `500OR` with no separator at all, which distorts the
             # stored condition text. A single space is harmless either way:
             # downstream matching here is already whitespace-tolerant.
-            stmt = stmt.rstrip() + " " + nxt_body[1:]
+            if leading_marker:
+                stmt = stmt.rstrip() + " " + nxt_body[1:]
+            else:
+                # Trailing shape: the marker belongs to *this* line, not the
+                # next one -- drop it before joining, so it doesn't linger
+                # mid-statement as a stray apostrophe in the recorded text.
+                stmt = stmt.rstrip()[:-1].rstrip() + " " + nxt_body
             look += 1
 
         stmt = _strip_trailing_remark(stmt)
@@ -484,12 +515,31 @@ def extract(conn, member_id: int, lines, member_name: str = "?") -> dict:
             # nothing for the quoted-token alternative below to match and
             # silently fell through to the bare word after the comma
             # (`PASSWORD`) as a fabricated callee.
-            toks = [(a or b).upper() for a, b in
-                    re.findall(r"\"([^\"]+)\"|([A-Z0-9_#$\-]+)", m.group("args"), re.I) if (a or b)]
+            raw_toks = [(a, b) for a, b in
+                        re.findall(r"\"([^\"]+)\"|([A-Z0-9_#$\-]+)", m.group("args"), re.I) if (a or b)]
+            toks = [(a or b).upper() for a, b in raw_toks]
             target = toks[0] if toks else m.group("name").upper()
             insert(conn, "call_edge", caller_id=member_id, callee_name=target,
                    call_kind="CALL", line_no=line_no,
                    args=f"{m.group('kind').upper()} declaration")
+            # `INTERFACE handle("LITERAL",...)` binds `handle` to a known
+            # literal target, distinct from the declaration call_edge above
+            # (which records the declaration line itself as a call, not the
+            # binding). A later bare `CALL handle` statement -- RE_CALL
+            # below -- has no way to see that binding on its own and would
+            # otherwise misflag a perfectly determinable target as
+            # `dynamic_target`; recording it here as a variable (mirroring
+            # RE_VIEW/RE_SCREEN's own name->target mapping via `view_of`)
+            # is what graph.resolve_interface_literal_calls reads to
+            # reclassify that call_edge instead of leaving the gap stand.
+            # Only recorded for INTERFACE (not PROGRAM) and only when the
+            # first token is an actual quoted literal, not another bare
+            # identifier -- a bare first token is itself unresolved, not a
+            # literal binding, and guessing one would misreport a genuinely
+            # dynamic case as solved.
+            if m.group("kind").upper() == "INTERFACE" and raw_toks and raw_toks[0][0] is not None:
+                insert(conn, "variable", member_id=member_id, scope="mantis_interface",
+                       name=m.group("name").upper(), view_of=target, line_no=line_no)
             matched = True
 
         if not matched and (m := RE_SUPRA_CALL.search(masked)):
