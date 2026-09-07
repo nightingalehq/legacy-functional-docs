@@ -300,8 +300,14 @@ def cmd_brief(args) -> int:
         out = brief_mod.entity_brief(conn, args.entity, redact=redact, lexicon=lexicon)
     elif args.executive:
         out = brief_mod.executive_brief(conn, args.executive, redact=redact)
+    elif args.interface_matrix:
+        from .conditions import dispatch_field_from_options
+
+        out = brief_mod.interface_matrix_brief(
+            conn, redact=redact, dispatch_field=dispatch_field_from_options(cfg["options"])
+        )
     else:
-        print("specify --module, --entity, --system or --executive", file=sys.stderr)
+        print("specify --module, --entity, --system, --executive or --interface-matrix", file=sys.stderr)
         return 2
     _write_or_print(out, args.out)
     return 0
@@ -1222,6 +1228,9 @@ def main(argv=None) -> int:
     p.add_argument("--system", action="store_true")
     p.add_argument("--executive", help="member name; emits the cited-facts brief for the "
                                         "executive-summary narrative template (templates/executive-summary.md)")
+    p.add_argument("--interface-matrix", action="store_true",
+                    help="whole-system cited-facts brief for the screen-and-key interface "
+                         "matrix narrative template (templates/interface-matrix.md)")
     p.add_argument("--out")
     p.set_defaults(func=cmd_brief)
 
