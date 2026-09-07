@@ -9,7 +9,7 @@ Every candidate business rule, grouped by business theme instead of by module. S
 
 ## MILLPROD
 
-37 rule(s) (37 structural)
+38 rule(s) (38 structural)
 
 | BR-ID | member | line | depth | construct | condition | literals |
 |---|---|---|---|---|---|---|
@@ -50,6 +50,7 @@ Every candidate business rule, grouped by business theme instead of by module. S
 | **MMP9600:BR-001** | `MMP9600` | [[MMP9600:9]] | 0 | `LOOP` | `` | `` |
 | **MMP9800:BR-001** | `MMP9800` | [[MMP9800:13]] | 0 | `ASSIGN` | `#FLAG := 1` | `1` |
 | **MMP9800:BR-002** | `MMP9800` | [[MMP9800:18]] | 0 | `COMPRESS` | `COMPRESS 'A' 'B' INTO #MESSAGE` | `A,B` |
+| **MMP9560:BR-001** | `MMP9560` | [[MMP9560:12]] | 0 | `COMPRESS` | `COMPRESS 'BATCH' #BATCH-SEQ INTO #MESSAGE` | `BATCH` |
 
 ## STEELLIB
 
@@ -74,5 +75,5 @@ Every candidate business rule, grouped by business theme instead of by module. S
 | **PRODSCHED:BR-003** | `PRODSCHED` | [[PRODSCHED:17]] | 1 | `ASSIGN` | `MSG = "Schedule could not be added"` | `Schedule could not be added` |
 | **SCRNENT:BR-001** | `SCRNENT` | [[SCRNENT:7]] | 0 | `IF` | `CH_UNIT = " "` | ` ` |
 
-Total: 53 rule candidate(s) across 2 theme(s).
+Total: 54 rule candidate(s) across 2 theme(s).
 
