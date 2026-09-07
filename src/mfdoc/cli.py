@@ -3,6 +3,7 @@
     mfdoc ingest   --config project.yml
     mfdoc derive   --config project.yml
     mfdoc coverage --config project.yml
+    mfdoc coverage --config project.yml --history
     mfdoc gate     --config project.yml
     mfdoc calibrate --config project.yml --dialect mantis
     mfdoc brief    --config project.yml [--module NAME | --entity NAME | --system]
@@ -37,7 +38,10 @@ from . import graph, normalise
 from . import structural
 from . import testadvisor as testadvisor_mod
 from . import testplan as testplan_mod
-from .db import add_gap, connect, insert, purge_member, purge_member_facts, set_metric, upsert_member
+from .db import (
+    add_gap, connect, coverage_history, insert, purge_member, purge_member_facts,
+    record_coverage_history, set_metric, upsert_member,
+)
 from .dialects import adabas, environment, mantis, natural, screen, supra
 from .redact import Redactor
 
@@ -875,10 +879,37 @@ def cmd_calibrate(args) -> int:
     return 0
 
 
+def _print_coverage_history(history: list[dict]) -> None:
+    """Render recorded coverage snapshots as a plain trend table -- oldest
+    first, so a reader sees drift/improvement in the order it happened."""
+    if not history:
+        print("no coverage history recorded yet -- run `mfdoc coverage` or "
+              "`mfdoc gate` at least once to start tracking a trend")
+        return
+    cols = ("recorded_at", "source", "line_recognition_rate", "call_resolution_rate",
+            "entity_definition_rate", "gaps_high", "gaps_total")
+    header = "  ".join(f"{c:<24}" if c == "recorded_at" else f"{c:>22}" for c in cols)
+    print(header)
+    for row in history:
+        cells = []
+        for c in cols:
+            v = row.get(c, "")
+            cells.append(f"{v:<24}" if c == "recorded_at" else f"{v!s:>22}")
+        print("  ".join(cells))
+
+
 def cmd_coverage(args) -> int:
     cfg = load_config(args.config)
     conn = connect(Path(args.config).parent / cfg["index_db"])
+    if getattr(args, "history", False):
+        # A view over previously recorded snapshots -- deliberately does not
+        # itself compute or record a fresh one, so repeatedly checking the
+        # trend can't pollute it with runs that were never a real
+        # `mfdoc coverage`/`mfdoc gate` invocation.
+        _print_coverage_history(coverage_history(conn))
+        return 0
     cov = graph.coverage(conn)
+    record_coverage_history(conn, cov, source="coverage")
     conn.commit()
     print(json.dumps(cov, indent=2))
     gaps = conn.execute(
@@ -935,6 +966,7 @@ def cmd_gate(args) -> int:
     cfg = load_config(args.config)
     conn = connect(Path(args.config).parent / cfg["index_db"])
     cov = graph.coverage(conn)
+    record_coverage_history(conn, cov, source="gate")
     conn.commit()
     gates = (cfg["options"] or {}).get("quality_gates") or {}
 
@@ -1141,6 +1173,10 @@ def main(argv=None) -> int:
     sub.choices["coverage"].add_argument(
         "--json", help="also write the coverage numbers (only -- not the gap breakdown "
                         "printed alongside them) as JSON to this path")
+    sub.choices["coverage"].add_argument(
+        "--history", action="store_true",
+        help="print the trend of previously recorded `mfdoc coverage`/`mfdoc gate` "
+             "snapshots instead of computing a new one")
 
     p = sub.add_parser("calibrate")
     p.add_argument("--config", required=True)

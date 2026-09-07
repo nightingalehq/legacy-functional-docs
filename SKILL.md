@@ -95,6 +95,11 @@ than writing narrative on a weak index.
 
 Report these numbers to the user honestly, including when they are poor.
 
+Every `mfdoc coverage`/`mfdoc gate` run appends a timestamped snapshot of
+these metrics to the index; on a multi-week engagement, run
+`mfdoc coverage --config project.yml --history` to see the trend across
+runs instead of only ever seeing the latest one.
+
 ### 4. Generate briefs and write
 
 Module docs are high-volume and formulaic — one program or subprogram, one

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 SCHEMA = """
@@ -335,6 +336,24 @@ CREATE TABLE IF NOT EXISTS metric (
     value         TEXT NOT NULL
 );
 
+-- One row per `mfdoc coverage`/`mfdoc gate` invocation, append-only (never
+-- edited or deduplicated in place -- same discipline as ingest_run above),
+-- so a multi-week engagement can see drift/improvement in the coverage
+-- numbers over time (`mfdoc coverage --history`) instead of only ever
+-- seeing the latest run. `metric`, above, is deliberately not reused for
+-- this: set_metric() overwrites in place (one row per scope+name, "the
+-- current value"), which is exactly the "no history retained" gap this
+-- table exists to fix. metrics_json carries the whole graph.coverage()
+-- dict verbatim so a new metric added there shows up in history with no
+-- schema change here.
+CREATE TABLE IF NOT EXISTS coverage_history (
+    id            INTEGER PRIMARY KEY,
+    recorded_at   TEXT NOT NULL,          -- UTC ISO8601, e.g. 2026-09-07T12:34:56Z
+    source        TEXT NOT NULL,          -- 'coverage' | 'gate' -- which command recorded this run
+    metrics_json  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_coverage_history_recorded_at ON coverage_history(recorded_at);
+
 -- Test-plan derive: one row per test scenario, built only from facts already
 -- in the tables above (rule_candidate branches, parameter variables, data
 -- access / call edges for mocking). Wholly derived and rebuilt on every
@@ -619,6 +638,42 @@ def group_members_by_name(rows) -> tuple[dict, list[str]]:
 def set_metric(conn, scope, name, value):
     conn.execute("DELETE FROM metric WHERE scope=? AND name=?", (scope, name))
     insert(conn, "metric", scope=scope, name=name, value=json.dumps(value) if isinstance(value, (dict, list)) else str(value))
+
+
+def record_coverage_history(conn, cov: dict, source: str) -> int:
+    """Append a timestamped snapshot of `graph.coverage()`'s output to
+    `coverage_history`, for `mfdoc coverage --history` to read back later.
+
+    `source` names which command triggered this snapshot ('coverage' or
+    'gate') -- both compute the same metrics fresh on every invocation (see
+    cli.cmd_coverage/cmd_gate), so both are worth recording; a caller that
+    only ever runs `mfdoc gate` in CI still gets a trend line.
+    """
+    recorded_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return insert(conn, "coverage_history", recorded_at=recorded_at, source=source,
+                  metrics_json=json.dumps(cov))
+
+
+def coverage_history(conn, limit: int | None = None) -> list[dict]:
+    """Return recorded coverage snapshots, oldest first, each as
+    `{"recorded_at": ..., "source": ..., **metrics}`.
+
+    `limit`, if given, keeps only the most recently recorded `limit` rows --
+    still returned oldest-first, so a caller printing a trend doesn't have
+    to reverse it itself.
+    """
+    sql = "SELECT recorded_at, source, metrics_json FROM coverage_history ORDER BY id DESC"
+    if limit:
+        sql += " LIMIT ?"
+        rows = conn.execute(sql, (limit,)).fetchall()
+    else:
+        rows = conn.execute(sql).fetchall()
+    out = []
+    for r in reversed(rows):
+        entry = {"recorded_at": r["recorded_at"], "source": r["source"]}
+        entry.update(json.loads(r["metrics_json"]))
+        out.append(entry)
+    return out
 
 
 def resolve_entity(conn, name, kind_family: str, default_kind: str, **kw) -> int:
