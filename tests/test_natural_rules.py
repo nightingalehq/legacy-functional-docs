@@ -382,3 +382,93 @@ def test_input_using_map_variable_target_is_dynamic():
     ).fetchone()
     assert gap is not None
     assert "#MAP-NAME" in gap["detail"]
+
+
+def test_bare_update_and_delete_with_no_view_are_recognised():
+    """`UPDATE`/`DELETE` with nothing after them at all -- the common form
+    that acts on whatever record the enclosing FIND/READ loop currently
+    holds -- must not read as an unparsed_line gap just because there is no
+    trailing view name to anchor a `\\s+` after the verb. With no loop label
+    in play, the target genuinely can't be resolved from this snippet alone,
+    so it must still land as an honest unresolved data_access row (the same
+    outcome the labelled-but-unopened case gets in
+    test_loop_label_resolution.py) rather than disappearing entirely."""
+    conn = _extract(
+        "FIND ORDER-VIEW WITH ORDER-KEY = #KEY\n"
+        "  UPDATE\n"
+        "END-FIND\n"
+        "FIND LOG-VIEW WITH LOG-KEY = #KEY\n"
+        "  DELETE\n"
+        "END-FIND\n"
+    )
+    assert conn.execute("SELECT 1 FROM gap WHERE gap_kind='unparsed_line' AND line_no IN (2, 5)").fetchone() is None
+    rows = {r["verb"]: r["confidence"] for r in conn.execute("SELECT verb, confidence FROM data_access")}
+    assert rows["UPDATE"] == "unresolved"
+    assert rows["DELETE"] == "unresolved"
+
+
+def test_find_and_read_with_no_space_before_occurrence_count():
+    """`FIND(1) VIEW WITH ...` / `READ(1) VIEW ...` -- some exports drop the
+    space before the occurrence-count parenthesis. Must still resolve the
+    view, and a longer identifier that merely starts with the same letters
+    (`READY`) must not be misread as the READ verb."""
+    conn = _extract(
+        "FIND(1) ORDER-VIEW WITH ORDER-KEY = #KEY\n"
+        "READ(1) ORDER-VIEW BY ORDER-KEY STARTING FROM #KEY\n"
+        "READY := TRUE\n"
+    )
+    assert conn.execute("SELECT 1 FROM gap WHERE gap_kind='unparsed_line' AND line_no IN (1, 2)").fetchone() is None
+    verbs = {r["verb"] for r in conn.execute("SELECT verb FROM data_access")}
+    assert "FIND" in verbs
+    assert "READ" in verbs
+    assert conn.execute("SELECT 1 FROM data_access WHERE line_no=3").fetchone() is None
+
+
+def test_set_key_is_a_recognised_no_op():
+    """`SET KEY ALL` governs which PF-keys are active on the next input
+    statement -- presentation, not a business decision, recognised the same
+    way as the existing `SET CONTROL` case so it doesn't read as an
+    unparsed_line gap."""
+    conn = _extract("SET KEY ALL\n")
+    assert conn.execute("SELECT 1 FROM gap WHERE gap_kind='unparsed_line'").fetchone() is None
+
+
+def test_reject_if_is_recorded_as_a_rule_candidate():
+    """`REJECT IF <cond>` drops the current FIND/READ loop iteration -- a
+    real filtering decision, unlike SET/RESET/IGNORE, so it must land in
+    rule_candidate with its condition intact, not just be swallowed."""
+    conn = _extract("FIND ORDER-VIEW WITH ORDER-KEY = #KEY\n  REJECT IF ORDER-STATUS NE 'OPEN'\n")
+    row = conn.execute(
+        "SELECT condition FROM rule_candidate WHERE construct='REJECT IF'"
+    ).fetchone()
+    assert row is not None
+    assert "OPEN" in row["condition"]
+
+
+def test_find_condition_wrapped_with_sorted_by_or_where_is_folded():
+    """A `FIND ... WITH` condition commonly wraps onto its own line with a
+    `SORTED BY`/`WHERE` clause. Both must fold into the FIND's own recorded
+    condition text, not just get individually swallowed."""
+    conn = _extract(
+        "FIND ORDER-VIEW WITH ORDER-KEY = #KEY\n"
+        "    SORTED BY ORDER-DATE\n"
+    )
+    row = conn.execute("SELECT raw FROM data_access WHERE verb='FIND'").fetchone()
+    assert row is not None
+    assert "SORTED BY ORDER-DATE" in row["raw"]
+
+
+def test_hash_prefixed_relabelled_statement_label_is_recognised():
+    """Some export/conversion tools renumber statement labels with a
+    leading '#'/'&' (e.g. '##L100.'), which collides with nothing else since
+    a bare '#'/'&' is never itself a legal label start."""
+    conn = _extract("##L100. FIND ORDER-VIEW WITH ORDER-KEY = #KEY\n")
+    assert conn.execute("SELECT 1 FROM gap WHERE gap_kind='unparsed_line' AND line_no=1").fetchone() is None
+    assert conn.execute("SELECT 1 FROM data_access WHERE verb='FIND' AND line_no=1").fetchone() is not None
+
+
+def test_bare_label_line_with_nothing_after_it_is_not_a_gap():
+    """A label alone on its own line (the statement it targets is on the
+    next line) must not read as an unparsed_line gap."""
+    conn = _extract("MYLABEL.\nRESET #FLAG\n")
+    assert conn.execute("SELECT 1 FROM gap WHERE gap_kind='unparsed_line' AND line_no=1").fetchone() is None
