@@ -1063,6 +1063,221 @@ def rules_register(conn, redact: Redactor = NULL_REDACTOR) -> str:
     return "\n".join(out) + "\n"
 
 
+def _screen_label_candidates(conn, screen_name: str) -> list[dict]:
+    """Literal on-screen text recorded against `screen_name` itself --
+    candidate PF-key labels (e.g. "PF3=Exit"), cited but *not* matched to a
+    specific dispatch trigger value: that correlation (which label goes
+    with which PF-key) is judgement, left for the narrative pass, not
+    guessed here.
+
+    Two shapes, since a Natural map and a Mantis screen record their own
+    definition differently (see db.py/dialects/screen.py):
+
+    - Natural: the map is its own `member` row (`object_type='map'`) with
+      `interaction` rows of kind `MAP_TEXT` for each literal text/prompt
+      found in the map body (natural.py's `_match_map_body`).
+    - Mantis: the screen is a `mantis_map` `entity` row (dialects/screen.py),
+      whose `HEADING`-format `entity_field` rows are the literal captions on
+      the layout (see `FIELD_TYPES`'s own comment on why a `HEADING`'s
+      "name" is the literal text itself, not a variable).
+    """
+    map_member = conn.execute(
+        "SELECT id, name FROM member WHERE UPPER(name)=UPPER(?) AND object_type='map' LIMIT 1",
+        (screen_name,),
+    ).fetchone()
+    if map_member:
+        rows = conn.execute(
+            "SELECT line_no, fields FROM interaction WHERE member_id=? AND kind='MAP_TEXT' "
+            "ORDER BY line_no",
+            (map_member["id"],),
+        ).fetchall()
+        return [
+            {"cite": _cite(map_member["name"], r["line_no"]), "text": r["fields"]}
+            for r in rows if r["fields"]
+        ]
+
+    entity = conn.execute(
+        "SELECT id, defined_in, defined_line FROM entity WHERE UPPER(name)=UPPER(?) "
+        "AND kind='mantis_map' LIMIT 1",
+        (screen_name,),
+    ).fetchone()
+    if entity and entity["defined_in"]:
+        definer = conn.execute(
+            "SELECT name FROM member WHERE id=?", (entity["defined_in"],)
+        ).fetchone()
+        if definer:
+            rows = conn.execute(
+                "SELECT defined_line, name FROM entity_field WHERE entity_id=? AND format='HEADING' "
+                "ORDER BY IFNULL(defined_line,0)",
+                (entity["id"],),
+            ).fetchall()
+            return [
+                {"cite": _cite(definer["name"], r["defined_line"]), "text": r["name"]}
+                for r in rows
+            ]
+    return []
+
+
+def interface_matrix_brief(conn, redact: Redactor = NULL_REDACTOR, dispatch_field=None) -> str:
+    """Fact brief for the screen-and-key interface matrix document type
+    (mode x panel x map x PF-label x routine x outcome, issue #91): per
+    screen/map, which module(s) display it, the PF-key (or configured
+    dispatch field) branches those modules dispatch on, and any literal
+    label text recorded on the screen itself.
+
+    Whole-system scope, no member argument -- like `system_brief` and
+    `structural.dispatch_map`, not `module_brief`: a screen's PF-key
+    behaviour is frequently split across more than one module (one module
+    displays it, another -- or several -- dispatch on it), so a single
+    module's own brief can never show the whole matrix for one screen.
+
+    Data-model decisions made here, since the fact store has no single
+    table shaped like the target document:
+
+    - **"reachable from"** is every module whose own source displays this
+      screen (an `interaction` row -- Natural `INPUT`, Mantis
+      `CONVERSE`/`SHOW` -- with `target` naming it), not a dedicated "mode"
+      field: nothing in the fact store records an application mode (e.g.
+      add/change/inquire) as such. Multiple modules reaching one screen are
+      surfaced as multiple candidate modes to confirm with an SME, not
+      asserted to be distinct modes.
+    - **PF-key branches** reuse `structural.dispatch_edges_for_member`
+      verbatim (the same derivation `mfdoc dispatch-map` already uses) --
+      trigger value, routine(s) called, fields set -- scoped to the
+      module(s) that display this particular screen, not every
+      dispatching module system-wide.
+    - **"outcome"** (exit / navigate / error / ...) is deliberately not
+      classified here: the routine name and call kind are handed over
+      cited, and the narrative pass is trusted to characterise the outcome
+      from them (or mark it `unresolved`) -- inventing a canonical
+      "PF3 always means exit" mapping from naming conventions alone would
+      be exactly the kind of plausible-but-unverified assertion this tool
+      exists to avoid.
+    - **PF-key labels** are handed over as candidate literal text
+      (`_screen_label_candidates`), not pre-matched to a trigger value --
+      matching, say, a screen's `PF3=Exit` caption to the branch on
+      `*PF-KEY = 'PF3'` is a one-line correlation a human or the narrative
+      pass can make immediately from the two cited facts, and doing it
+      here would risk a wrong match going uncorrected (no source line
+      actually pairs a label with its key value together).
+
+    A screen with no dispatch edges from any of its displaying modules is
+    omitted outright (nothing for the matrix to add over what
+    `mfdoc dispatch-map` already shows); a screen never displayed anywhere
+    can't be reached in the first place, so it can't appear in "reachable
+    from" either.
+    """
+    from . import structural  # local: avoids a circular import at load time (structural imports from this module)
+    from .conditions import DISPATCH_FIELD
+
+    if dispatch_field is None:
+        dispatch_field = DISPATCH_FIELD
+
+    out = ["# Fact brief: screen-and-key interface matrix", ""]
+    out.append(
+        "One section per screen/map with at least one dispatch branch "
+        "(default: Natural's `*PF-KEY`; configurable via "
+        "`options.overview.dispatch_field_pattern`) recorded against a "
+        "module that displays it. \"Reachable from\" lists every module "
+        "whose own source displays this screen -- the closest fact-store "
+        "equivalent to an application \"mode\" (e.g. add/change/inquire), "
+        "since no mode field is recorded as such; treat more than one "
+        "reachable-from module as candidate modes to confirm with an SME, "
+        "not as confirmed distinct modes. \"Candidate PF-key labels\" are "
+        "literal text found on the screen itself -- matching a specific "
+        "label to a specific PF-key value is a judgement call to make when "
+        "writing the document, citing both; do not invent a match the "
+        "source doesn't evidence. \"Outcome\" (exit/navigate/error/...) is "
+        "not classified here either -- characterise it from the cited "
+        "routine/call kind when writing, or mark it `unresolved`."
+    )
+    out.append("")
+
+    screens = conn.execute(
+        "SELECT DISTINCT target FROM interaction "
+        "WHERE target IS NOT NULL AND kind IN ('INPUT','CONVERSE','SHOW') "
+        "ORDER BY target"
+    ).fetchall()
+
+    any_rows = False
+    for s in screens:
+        screen_name = s["target"]
+        displaying = conn.execute(
+            """
+            SELECT DISTINCT m.id, m.name FROM interaction i JOIN member m ON m.id = i.member_id
+             WHERE UPPER(i.target)=UPPER(?) AND i.kind IN ('INPUT','CONVERSE','SHOW')
+             ORDER BY m.name
+            """,
+            (screen_name,),
+        ).fetchall()
+        if not displaying:
+            continue
+
+        # Keyed by member id, not name -- member names are only unique
+        # together with library+dialect (see db.py's `UNIQUE(name, library,
+        # dialect)`), so two distinct members displaying the same screen
+        # could otherwise share a dict key and silently lose one's edges.
+        edges_by_module: dict[int, tuple[str, list]] = {}
+        for m in displaying:
+            edges = structural.dispatch_edges_for_member(conn, m["id"], dispatch_field=dispatch_field)
+            if edges:
+                edges_by_module[m["id"]] = (m["name"], edges)
+        if not edges_by_module:
+            continue
+        any_rows = True
+
+        out.append(f"## Screen/map `{screen_name}`")
+        out.append("")
+        out.append("### Reachable from")
+        for m in displaying:
+            row = conn.execute(
+                "SELECT line_no FROM interaction WHERE member_id=? AND UPPER(target)=UPPER(?) "
+                "ORDER BY line_no LIMIT 1",
+                (m["id"], screen_name),
+            ).fetchone()
+            out.append(f"- `{m['name']}` {_cite(m['name'], row['line_no'] if row else None)}")
+        out.append("")
+
+        labels = _screen_label_candidates(conn, screen_name)
+        if labels:
+            out.append(
+                "### Candidate PF-key labels (literal text on the screen -- "
+                "confirm which PF-key each belongs to before writing it into the matrix)"
+            )
+            for lab in labels:
+                out.append(f"- {lab['cite']} `{redact(lab['text'])}`")
+            out.append("")
+
+        out.append("### PF-key branches, by module")
+        out.append("")
+        out.append("| module | trigger value | branch | calls | fields set |")
+        out.append("|---|---|---|---|---|")
+        for _mid, (module_name, edges) in edges_by_module.items():
+            for e in edges:
+                calls = ", ".join(
+                    f"`{c['callee_name']}` ({c['call_kind']}) {_cite(module_name, c['line_no'])}"
+                    for c in e["calls"]
+                ) or "—"
+                assigns = ", ".join(
+                    f"`{a['field']}` = {a['literal']} {_cite(module_name, a['line_no'])}"
+                    for a in e["assigns"]
+                ) or "—"
+                span = _cite(module_name, e["line_no"], e["end_line"])
+                out.append(f"| `{module_name}` | `{e['trigger_value']}` | {span} | {calls} | {assigns} |")
+        out.append("")
+
+    if not any_rows:
+        out.append(
+            "No screen with both a display reference and a dispatch branch "
+            "was found. Either no screen in this index is dispatched on via "
+            "the configured dispatch field, or the modules that display a "
+            "screen and the modules that dispatch on it were not both supplied."
+        )
+        out.append("")
+
+    return "\n".join(out) + "\n"
+
+
 def json_index(conn) -> str:
     """Machine-readable dump for downstream tooling."""
     payload = {}

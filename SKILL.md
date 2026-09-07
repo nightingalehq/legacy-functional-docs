@@ -127,6 +127,7 @@ Needs `pip install 'mfdoc[batch]'` and `ANTHROPIC_API_KEY` set. See
 ```bash
 mfdoc brief --config project.yml --entity MILL-ORDER
 mfdoc brief --config project.yml --system
+mfdoc brief --config project.yml --interface-matrix
 ```
 
 Write from the brief. Read `reference/writing-rules.md` before the first
@@ -139,9 +140,22 @@ Suggested document set, in this order (each builds vocabulary the next needs):
 2. `data/<entity>.md` — one per data store
 3. `modules/<module>.md` — one per program or subprogram (batched, above)
 4. `processes/<process>.md` — batch job or online transaction end-to-end
-5. `gap-register.md` — every unresolved item, as SME questions
-6. `coverage-report.md` — the numbers, unspun
-7. `reference/language-guide.md` — what this dialect's source actually
+5. `interface-matrix.md` — the screen-and-key interface matrix (mode x
+   panel x map x PF-label x routine x outcome), from `mfdoc brief
+   --interface-matrix` against `templates/interface-matrix.md`. Whole-
+   system, not one per module: a screen's PF-key behaviour is frequently
+   split across the module that displays it and the module(s) that
+   dispatch on it, so this needs the same whole-system view as
+   `system-overview.md`. The brief hands over which module(s) display
+   each screen, its PF-key/dispatch branches (routine called, fields
+   set), and any literal on-screen text as candidate PF-key labels —
+   matching a label to a specific key, and characterising the outcome
+   (exit/navigate/error/...), is the judgement call to make when writing
+   this document; never invent a match or an outcome the cited facts
+   don't evidence.
+6. `gap-register.md` — every unresolved item, as SME questions
+7. `coverage-report.md` — the numbers, unspun
+8. `reference/language-guide.md` — what this dialect's source actually
    looks like in this codebase, useful for Mantis/Supra especially since
    they have no public documentation. Run the basic (deterministic) tier
    first: `mfdoc lang-guide --config project.yml --dialect mantis --out
@@ -153,7 +167,7 @@ Suggested document set, in this order (each builds vocabulary the next needs):
    idioms in this codebase — same citation discipline as
    `system-overview.md`, never asserting a pattern the basic tier's
    table doesn't already cite.
-8. `executive-summary.md` — one page per program, for a reviewer who
+9. `executive-summary.md` — one page per program, for a reviewer who
    won't read the per-module docs. From `mfdoc brief --executive NAME`
    (or `brief.executive_brief()` directly — same fact-brief-then-write
    pattern as the others) against `templates/executive-summary.md`.
@@ -242,7 +256,7 @@ src/mfdoc/
   db.py               schema + fact-store helpers
   normalise.py        encoding, sequence columns, member splitting, dialect sniffing
   graph.py            derivation: resolution, CRUD matrix, orphans, transaction scopes
-  brief.py            fact briefs (module / entity / system) and JSON export
+  brief.py            fact briefs (module / entity / system / interface-matrix) and JSON export
   testplan.py         test-case derivation + test-plan register (model-free)
   testadvisor.py       testability classification + refactor-seam advisory (model-free)
   testoverlay.py       bug-vs-spec curation overlay (model-drafted, human-promoted)

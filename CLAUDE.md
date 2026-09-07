@@ -188,8 +188,9 @@ source ─▶ [0 Ingest: normalise.py] ─▶ [1 Extract: dialects/*.py] ─▶ 
   for high-volume formulaic module docs via a swappable `ModelCaller`
   (`anthropic_caller.py` for real calls, a `fake-echo` caller for
   network-free tests); the interactive Claude Code path (`SKILL.md`) for
-  system overview, entity docs, process flows, the gap register, and
-  (once `classify-rules`/`call-graph`/`complexity` have populated the
+  system overview, entity docs, process flows, the screen-and-key
+  interface matrix (`brief.interface_matrix_brief()`), the gap register,
+  and (once `classify-rules`/`call-graph`/`complexity` have populated the
   facts it reads) the executive-summary doc via `brief.executive_brief()`
   — where judgement about grouping benefits from a session holding the
   whole system in mind.
