@@ -1347,6 +1347,42 @@ def test_chunk_resume_always_regenerates_a_previously_failed_chunk(tmp_path):
     assert second.chunk_state["2"]["ok"] is True
 
 
+def test_chunk_resume_regenerates_a_reused_chunk_that_fails_revalidation(tmp_path):
+    """The other half of the reuse guard: a chunk the prior run recorded as
+    clean, but whose cached file no longer validates (its content was
+    tampered with, or validate_test_doc's own rules tightened since), must
+    fall back to a normal regeneration rather than being reported as a
+    terminal failure."""
+    import sqlite3
+
+    from mfdoc import testbatch
+    from mfdoc.db import SCHEMA
+    from mfdoc.validate import validate_test_doc
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_scenarios(conn, 5)
+
+    out_path = tmp_path / "FAKEMOD.md"
+    first = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, _chunk_aware_caller("python", "pytest"),
+        "writing rules text", "template text", max_scenarios_per_call=2,
+    )
+    assert first.ok is True, first.problems
+    (tmp_path / "FAKEMOD.chunk2.md").write_text("not a valid document", encoding="utf-8")
+
+    second_caller = _counting_caller(_chunk_aware_caller("python", "pytest"))
+    second = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, second_caller,
+        "writing rules text", "template text", max_scenarios_per_call=2,
+        prior_chunks=first.chunk_state,
+    )
+    assert second.ok is True, second.problems
+    assert second_caller.calls == 1, "the chunk failing re-validation must be regenerated"
+    assert validate_test_doc(conn, tmp_path / "FAKEMOD.chunk2.md")["ok"]
+
+
 def test_run_test_batch_persists_chunk_state_and_reuses_it_across_calls(tmp_path):
     """End-to-end through run_test_batch's own state file, not just the
     lower-level generate_member_test_doc -- a second run against unchanged

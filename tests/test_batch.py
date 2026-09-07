@@ -1104,6 +1104,76 @@ def test_chunk_resume_falls_back_to_regenerating_a_chunk_whose_cached_file_is_go
     assert (tmp_path / "FAKEMOD.chunk2.md").exists()
 
 
+def test_chunk_resume_regenerates_a_chunk_the_prior_run_recorded_as_failed(tmp_path):
+    """A chunk that failed leaves its last (invalid) attempt on disk, so
+    reusing it on the strength of an unchanged brief hash alone would
+    re-validate the same bad file forever and never re-render it."""
+    import sqlite3
+    from mfdoc.db import SCHEMA
+    from mfdoc.validate import validate_doc
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_rules(conn, 4)
+
+    good_caller = _chunk_aware_module_caller()
+
+    def flaky_caller(prompt: str) -> batch_mod.ModelResponse:
+        if "BR-003" in prompt and "# Fact brief:" in prompt:
+            return batch_mod.ModelResponse(text="not a valid document", input_tokens=1, output_tokens=1)
+        return good_caller(prompt)
+
+    out_path = tmp_path / "FAKEMOD.md"
+    first = batch_mod.generate_module_doc(
+        conn, "FAKEMOD", out_path, flaky_caller,
+        "writing rules text", "template text", max_rules_per_call=2,
+    )
+    assert first.ok is False
+    assert first.chunk_state["2"]["ok"] is False
+    assert (tmp_path / "FAKEMOD.chunk2.md").exists(), "the failed attempt is left on disk"
+    chunk1_before = (tmp_path / "FAKEMOD.chunk1.md").read_text(encoding="utf-8")
+
+    second = batch_mod.generate_module_doc(
+        conn, "FAKEMOD", out_path, good_caller,
+        "writing rules text", "template text", max_rules_per_call=2,
+        prior_chunks=first.chunk_state,
+    )
+    assert second.ok is True, second.problems
+    assert validate_doc(conn, tmp_path / "FAKEMOD.chunk2.md")["ok"]
+    assert (tmp_path / "FAKEMOD.chunk1.md").read_text(encoding="utf-8") == chunk1_before
+
+
+def test_chunk_resume_regenerates_a_reused_chunk_that_fails_revalidation(tmp_path):
+    """A cached chunk the prior run recorded clean but that no longer
+    validates must fall back to a normal regeneration, not be reported as a
+    terminal failure."""
+    import sqlite3
+    from mfdoc.db import SCHEMA
+    from mfdoc.validate import validate_doc
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_rules(conn, 5)
+
+    out_path = tmp_path / "FAKEMOD.md"
+    first = batch_mod.generate_module_doc(
+        conn, "FAKEMOD", out_path, _chunk_aware_module_caller(),
+        "writing rules text", "template text", max_rules_per_call=2,
+    )
+    assert first.ok is True, first.problems
+    (tmp_path / "FAKEMOD.chunk2.md").write_text("not a valid document", encoding="utf-8")
+
+    second = batch_mod.generate_module_doc(
+        conn, "FAKEMOD", out_path, _chunk_aware_module_caller(),
+        "writing rules text", "template text", max_rules_per_call=2,
+        prior_chunks=first.chunk_state,
+    )
+    assert second.ok is True, second.problems
+    assert validate_doc(conn, tmp_path / "FAKEMOD.chunk2.md")["ok"]
+
+
 def test_run_batch_persists_chunk_state_and_reuses_it_across_calls(indexed_db, tmp_path):
     """End-to-end through run_batch's own state file, not just the lower-
     level generate_module_doc -- a second run against unchanged facts must
