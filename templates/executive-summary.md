@@ -42,7 +42,12 @@ _Which entities this program reads/writes, from the brief's "I/O" section._
 ## External dependents
 
 _Which other programs call this one, from the brief's "External
-dependents" section — omit this section if the brief lists none._
+dependents" section. The brief always includes this heading, with a "no
+known callers recorded for this member" line when there are none -- do
+not treat the brief's presence of the heading as a reason to keep it in
+the generated document. In the document you write, condense an empty
+list to a single one-line statement that no callers were found, rather
+than reproducing an empty table or omitting the heading outright._
 
 ## Risk
 

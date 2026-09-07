@@ -53,7 +53,7 @@ Reads whatever files `project.yml` points at, per source set:
   `options.splitters` in config.
 - Detects (or takes a pinned) **dialect** per source set: `natural`,
   `mantis`, `adabas_fdt`, `ddm`, `supra_dir`, `sql_ddl`, `cobol_copybook`,
-  `jcl`, `cics_csd`.
+  `jcl`, `cics_csd`, `mantis_screen`.
 
 Ingest is incremental: a file whose `sha256` matches the `source_file` row
 from the last run is skipped outright, and everything it owns (members,
@@ -82,6 +82,7 @@ One module per dialect, routed by `DIALECT_ROUTER` in `cli.py`:
 | `adabas.py` | `ddm`, `adabas_fdt` | Two listing formats for the same underlying entity |
 | `supra.py` | `supra_dir` | Calibration expected |
 | `environment.py` | `sql_ddl`, `cobol_copybook`, `jcl`, `cics_csd` | Surrounding infrastructure, not application logic |
+| `screen.py` | `mantis_screen` | Screen/map field-table parser; backs unused-field detection for on-screen fields |
 
 Each scanner is a heuristic line-and-clause matcher (regex-driven), not a
 parser built on a formal grammar — mainframe 4GLs mostly don't have public,
@@ -109,8 +110,8 @@ Joins raw facts into structures no single scanner pass can produce alone:
   physical file into one `entity` row (a common source of phantom
   duplicate entities if skipped).
 - `resolve` — resolves `call_edge.callee_name` against known members;
-  unresolved calls become `missing_source` or `dynamic_target` gaps
-  depending on whether the target was a literal or a variable.
+  unresolved calls become `unresolved_call` gaps, whether the target was a
+  literal with no matching member or a dynamic (variable) target.
 - `crud_matrix`, `orphans`, `transaction_scopes`, `call_closure` — the
   derived views that feed briefs and, eventually, process-flow documents.
 - `shadowed_assignments`, `label_control_mismatches` — deterministic
@@ -129,8 +130,9 @@ Joins raw facts into structures no single scanner pass can produce alone:
 
 Everything here is still deterministic and still free of model calls.
 `run_all` is idempotent — it purges its own previously-derived gap rows
-(`DERIVED_GAP_KINDS`: `orphan_module`, `unresolved_call`, `no_ddl_for_entity`,
-`ambiguous_adabas_file`, `sme_question`) before re-deriving, so running
+(`DERIVED_GAP_KINDS`: `ambiguous_adabas_file`, `no_ddl_for_entity`,
+`unresolved_call`, `orphan_module`, `sme_question`, `unused_field`,
+`shadowed_assignment`, `label_control_mismatch`) before re-deriving, so running
 `mfdoc derive` twice against an unchanged index — a normal thing to do now
 that `mfdoc ingest` can legitimately no-op — reproduces the same `coverage()`
 output rather than doubling every gap.
@@ -179,11 +181,23 @@ something's broken.
 
 Produces the plain-text input to the narrative stage: `module_brief`
 (one program), `entity_brief` (one data store), `system_brief` (the whole
-system), plus `json_index` for downstream tooling (`mfdoc export`). A brief
-contains only facts already in the store, each already carrying its
-citation — the narrative stage's job is reduced to "write from what's
-already true and cited," not "find and verify facts while also writing
-prose."
+system), `executive_brief` (`mfdoc brief --executive`, feeds
+`templates/executive-summary.md`), `interface_matrix_brief` (`mfdoc brief
+--interface-matrix`, whole-system screen-and-key interface matrix, feeds
+`templates/interface-matrix.md`), plus `json_index` for downstream tooling
+(`mfdoc export`). `rules_register` is its own subcommand
+(`mfdoc rules-register`) rather than a `brief` flag, but lives in the same
+module and follows the same fact-summary shape. A brief contains only
+facts already in the store, each already carrying its citation — the
+narrative stage's job is reduced to "write from what's already true and
+cited," not "find and verify facts while also writing prose."
+
+Any SME notes supplied for a member (`sme_notes.py`, parsed free-text
+annotations keyed by member/entity name) are threaded into every one of
+`module_brief`, `entity_brief` and `executive_brief` as their own
+advisory-only section — clearly marked as not derived from the fact store,
+so the narrative stage can use them for context without treating them as
+citable facts.
 
 **Redaction** (`redact.py`) runs here, on the brief text, before anything
 is written to a file or sent anywhere — not later, at document-render time,
@@ -443,12 +457,14 @@ The only code paths that make a network call are `mfdoc batch`,
 `mfdoc test-gen`/`mfdoc test-batch`, `mfdoc test-overlay-draft`,
 `mfdoc classify-rules` (only when its LLM fallback is enabled — via
 `options.overview.themes.llm_fallback` or `--llm-fallback`; with it off,
-`classify-rules` is deterministic like everything else in this list), and
-`anthropic_caller.py` underneath all four. Everything else — `ingest`,
-`derive`, `coverage`, `gate`, `calibrate`, `brief`, `validate`, `export`,
-`test-plan`, `test-advisory`, `test-validate`, `gap-summary`, `data-flow`,
-`call-graph`, `complexity`, `rules-theme-register`, `glossary`,
-`lang-guide` — is local
+`classify-rules` is deterministic like everything else in this list),
+`mfdoc sample-citations --judge llm` (its `--judge human`/`--judge report`
+modes are local; only the LLM-judge pass builds a `ModelCaller`), and
+`anthropic_caller.py` underneath all five. Everything else — `ingest`,
+`derive`, `coverage`, `gate`, `calibrate`, `brief`, `rules-register`,
+`validate`, `export`, `test-plan`, `test-advisory`, `test-validate`,
+`gap-summary`, `data-flow`, `dispatch-map`, `call-graph`, `complexity`,
+`rules-theme-register`, `glossary`, `lang-guide` — is local
 Python with no egress, which is why the README states "no network access,
 nothing leaves the machine" as the default posture with those named
 exceptions.

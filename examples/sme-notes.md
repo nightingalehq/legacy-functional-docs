@@ -5,6 +5,22 @@
   commented out -- this file just shows the shape. Everything below
   describes this repo's own invented fixture project (Mill Order
   Management / MOM), not a real client system.
+
+  Note on the "General" section below: `_parse_text` treats content before
+  the first `##` heading identically to an explicit `## General` heading --
+  a project can equally well skip the heading and just start the file with
+  plain project-wide prose, e.g.:
+
+      This project's source was exported from a decommissioned mainframe LPAR
+      in 2025; some copybooks reference a test region that no longer exists,
+      so treat any environment name that isn't PROD as unverifiable.
+
+      ## MODULE-ALPHA
+      ...
+
+  Both forms reach the same general (unscoped) bucket in Notes -- this file
+  uses the explicit `## General` heading for the fixture below only because
+  it reads more clearly next to the member-scoped headings that follow it.
 -->
 
 ## General

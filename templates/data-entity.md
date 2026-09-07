@@ -32,7 +32,7 @@ discrepancies are usually the most valuable findings; do not smooth them over.
 
 ## Fields
 
-| Field | Short name | Format | Length | Key/index | Business meaning | Confidence | Citation |
+| Field | Short name | Format | Length | Descriptor | Business meaning | Confidence | Citation |
 |---|---|---|---|---|---|---|---|
 
 Business meaning is `inferred` unless a comment, a validation rule in code, or an
@@ -58,7 +58,15 @@ the second kind does not survive a naive migration.
 
 ## Data quality and integrity rules
 
-Uniqueness constraints, null suppression, validation enforced in application code,
-values that appear only as literals in conditions. Each cited.
+Unlike every other section above, `entity_brief` has no dedicated fact section
+this one is copied from — there is no "Data quality" or "Integrity" heading in
+the brief to read off. This section is synthesized narrative: infer it from the
+raw material scattered elsewhere in the brief, chiefly the Fields table's own
+`descriptor` column (`DE`/`SUPER`/`SUB`/`PHON`/`HYPER`/`UQ` — uniqueness and
+lookup structure) and `options` column (format/validation notes), plus any
+literal values a rule candidate tests against a field (see the module briefs'
+"Candidate business rules" for modules that access this entity). Do not go
+looking for a brief heading named after this section; there isn't one. Every
+claim must still carry its own citation back to the fact it was inferred from.
 
 ## Gaps and questions for review

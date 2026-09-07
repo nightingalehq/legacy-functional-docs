@@ -54,7 +54,24 @@ calibrated, or scope reduced with the limitation recorded in affected documents.
 | Document | verified | inferred | unresolved |
 |---|---|---|---|
 
+No `mfdoc` command aggregates this across documents -- `mfdoc coverage` only
+reports index-wide extraction rates (line_recognition_rate, call_resolution_rate,
+entity_definition_rate, dynamic_call_edges, gap counts), not per-document
+confidence. Assemble this table by hand: open each generated document under
+`docs_root` and copy its own front matter's `confidence_summary.verified` /
+`.inferred` / `.unresolved` counts into one row per document.
+
 ## Reproducing this run
 
-Tool version, config file, and the commands. The index rebuilds from source, so any
-figure here can be re-derived and challenged.
+The exact command sequence that rebuilds the index and re-derives these
+numbers, in order:
+
+```
+mfdoc ingest   --config project.yml
+mfdoc derive   --config project.yml
+mfdoc coverage --config project.yml --json <path>
+```
+
+Also record the tool version (`generated_by` above) and the config file used.
+The index rebuilds from source, so any figure here can be re-derived and
+challenged by running the same three commands again against unchanged source.

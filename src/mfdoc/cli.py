@@ -980,7 +980,8 @@ DIALECT_CALIBRATION_HINTS = {
     "mantis": ("src/mfdoc/dialects/mantis.py",
                "DECL_TYPES, COMMENT_PREFIXES, or the call/screen verb patterns"),
     "supra_dir": ("src/mfdoc/dialects/supra.py",
-                  "LABELS or SUPRA_DML -- or override dialects.supra.labels in project config"),
+                  "LABELS or SUPRA_DML -- edit LABELS in supra.py directly; extract() takes no "
+                  "config, so there is no project-config override for it"),
     "adabas_fdt": ("src/mfdoc/dialects/adabas.py", "RE_FDT_PIPE / RE_FDT_WS field-row patterns"),
     "ddm": ("src/mfdoc/dialects/adabas.py", "RE_DDM_FIELD / RE_DDM_SUPER field-row patterns"),
     "jcl": ("src/mfdoc/dialects/environment.py", "RE_EXEC / RE_DD / INFRASTRUCTURE_DDS"),

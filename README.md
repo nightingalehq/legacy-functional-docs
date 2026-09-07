@@ -212,6 +212,7 @@ mfdoc calibrate --config project.yml --dialect mantis
 mfdoc brief --config project.yml --system
 mfdoc brief --config project.yml --module MMP0100
 mfdoc brief --config project.yml --entity MILL-ORDER
+mfdoc brief --config project.yml --executive MMP0100
 mfdoc brief --config project.yml --interface-matrix
 # whole-system: per screen/map, which module(s) display it, the PF-key (or
 # configured dispatch field) branches those modules dispatch on, and any
@@ -272,15 +273,26 @@ mfdoc dispatch-map --config project.yml --out docs/functional/dispatch-map.md
 # it sets in that same branch -- override options.overview.dispatch_field_pattern
 # for a different dialect's own dispatch idiom (e.g. a Mantis menu/transfer
 # option field) or a Natural codebase that wraps *PF-KEY in its own field
+mfdoc lang-guide --config project.yml --dialect mantis --out docs/functional/reference/language-guide.md
+# every recognised construct in one dialect's source, grouped by keyword,
+# with a cited example of each -- the basic (deterministic) tier of the
+# language-guide document type; --dialect is required
 
 # Note: unlike the other structural overview commands above (gap-summary, data-flow,
-# complexity, rules-theme-register, glossary, dispatch-map), call-graph's --out must be
-# a directory path, not a file path; it generates multiple files (one per cluster if needed).
+# complexity, rules-theme-register, glossary, dispatch-map, lang-guide), call-graph's
+# --out must be a directory path, not a file path; it generates multiple files (one
+# per cluster if needed).
 
 mfdoc validate --config project.yml --docs docs/functional
 
 # smoke-test against the bundled fixtures and worked examples:
 mfdoc validate --config project.yml --docs examples/outputs
+
+# sample generated claims against their cited source and record whether the
+# source actually supports each one -- backs the min_citation_accuracy_rate
+# quality gate (see "Coverage gates" below); mfdoc gate fails that gate until
+# this has been run at least once with --judge human:
+mfdoc sample-citations --config project.yml --docs docs/functional --judge human
 ```
 
 `mfdoc export --config project.yml --json out/index.json` dumps the whole
@@ -309,14 +321,17 @@ options:
       # documented-but-unimplemented future option
       metric: rule_depth
     diagrams:
-      # how `mfdoc call-graph` clusters nodes ("module" -> member.library,
-      # "subsystem" -> member.system); data-flow always renders one diagram
-      # and ignores this
+      # how `mfdoc call-graph` clusters nodes ("module" and "library" are
+      # aliases for the same grouping -> member.library; "subsystem" ->
+      # member.system); data-flow always renders one diagram and ignores this
       cluster_by: module
       # above this many distinct nodes, `mfdoc call-graph` renders a
       # collapsed cluster-level diagram inline plus one full diagram per
       # cluster on disk, instead of one large inline diagram
       max_nodes_inline: 40
+      # mermaid layout direction for `mfdoc call-graph`'s diagrams: "LR"
+      # (left-to-right, the default) or "TD" (top-down)
+      direction: LR
     # the field `mfdoc dispatch-map` looks for on the left/right of an IF
     # condition; default (unset) is Natural's built-in *PF-KEY. Replaces
     # rather than merges with the built-in pattern -- same convention
@@ -325,6 +340,18 @@ options:
     # that wraps *PF-KEY in its own field supplies its own complete
     # pattern here
     dispatch_field_pattern: null
+  validate:
+    # the field(s) `mfdoc validate` treats as an "outcome" field (return/
+    # response/status codes, flags) when cross-checking that a narrative
+    # sentence's claimed comparison direction matches the condition it
+    # cites -- catches a model narrating the logical inverse of a real
+    # comparison (e.g. describing a reversed pass/fail check on a status
+    # field). Default (unset) is the built-in OUTCOME_FIELD denylist
+    # (conditions.py); replaces rather than merges with it, same
+    # replace-not-merge convention options.overview.dispatch_field_pattern
+    # uses -- so a codebase with different outcome-field naming supplies
+    # its own complete pattern here
+    outcome_field_pattern: null
 ```
 
 Optional: draft tests from the same fact store (see
@@ -341,12 +368,19 @@ silently truncated response reported as success. See
 ```bash
 mfdoc test-plan     --config project.yml
 mfdoc test-advisory --config project.yml
+mfdoc test-overlay-draft --config project.yml --out test-overlay.yml
+# a model proposes a bug-vs-spec split per scenario (needs mfdoc[batch]);
+# only takes effect once a human moves an entry's review_status past `draft`
 mfdoc test-gen      --config project.yml --member MMP0100 --language python --framework pytest
 # output nests as <out_dir>/<project-namespace>/<dialect>/<library>/<language>/<framework>/<member>.md
 # (same <dialect>/<library>/<language>/<framework> convention as `mfdoc batch` above,
 # plus a namespace segment -- project.yml's `system`, else `project`, else "default" --
 # so two configs sharing a working directory don't share one output tree) -- e.g.
 # tests_generated/mom/natural/MILLPROD/python/pytest/MMP0100.md
+mfdoc test-batch    --config project.yml --language python --framework pytest --out tests_generated
+# the direct high-volume analogue of `mfdoc batch` above, for generated tests
+# instead of module docs -- needs `pip install 'mfdoc[batch]'` and
+# ANTHROPIC_API_KEY; resumable the same way `mfdoc batch` is
 mfdoc test-validate --config project.yml --docs tests_generated
 ```
 
@@ -375,9 +409,16 @@ real via `--provider claude-code` (the local Claude Code CLI, no
 ## Requirements
 
 Python 3.10+ and PyYAML. No other dependencies, no network access, nothing leaves
-the machine -- with one exception: `mfdoc batch` (below) sends briefs to the
-Claude API, needs `pip install 'mfdoc[batch]'` and `ANTHROPIC_API_KEY`, and is
-entirely optional.
+the machine by default. The exceptions are the handful of commands that build a
+model caller (`--provider anthropic` by default; `--caller fake-echo` keeps any
+of them network-free for a dry run) and so can call out to the Claude API (or
+Vertex AI with `--provider vertex`, or the local Claude Code CLI with
+`--provider claude-code`) when actually run: `mfdoc batch` (below); `mfdoc
+classify-rules --llm-fallback` (or `options.overview.themes.llm_fallback`);
+`mfdoc test-overlay-draft`; `mfdoc test-gen`/`mfdoc test-batch`; and `mfdoc
+sample-citations --judge llm`. Each needs `pip install 'mfdoc[batch]'` (or
+`mfdoc[vertex]`) and `ANTHROPIC_API_KEY` (unless using `--provider claude-code`),
+and every one is entirely optional -- the deterministic stages never call out.
 
 ## Layout
 
@@ -407,10 +448,24 @@ docs/plans/           working backlog and design-decision record
 
 `options.quality_gates` in the config sets thresholds the run should clear before
 narrative is written. Against the shipped fixtures the pipeline achieves a
-`line_recognition_rate` of 0.996 with citation line alignment verified against
-source for every member. `call_resolution_rate` is deliberately low on the fixtures
-because three called modules are intentionally absent, which exercises the gap
-machinery.
+`line_recognition_rate` of 0.9753 with citation line alignment verified against
+source for every member. `call_resolution_rate` is deliberately low on the
+fixtures (0.1538) because three called modules are intentionally absent, which
+exercises the gap machinery.
+
+One gate, `min_citation_accuracy_rate`, is different from the rest: it isn't
+computed from facts at all, it's sampling-derived. Run
+`mfdoc sample-citations --config project.yml --docs docs/functional --judge human`
+at least once to pull a random sample of generated claims, show each one next
+to its cited source line, and record a human yes/no verdict on whether the
+source actually supports the claim; an optional second pass,
+`--judge llm`, checks an LLM judge's agreement against those human verdicts
+rather than trusting it standalone (needs a model caller, see Requirements
+above). Until at least one `--judge human` verdict is recorded,
+`citation_accuracy_rate` doesn't exist in `coverage()`'s output, so if
+`min_citation_accuracy_rate` is configured, `mfdoc gate` evaluates it against 0
+and fails -- correctly, since a citation's accuracy has never actually been
+checked, only that it resolves.
 
 ## Known limitations
 

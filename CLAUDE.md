@@ -104,16 +104,22 @@ mfdoc batch     --config project.yml --out docs/functional/modules  # needs mfdo
 # --config project.yml ...` -- most useful on a long `batch`/`test-batch` run
 mfdoc rules-register --config project.yml --out docs/functional/rules-register.md
 mfdoc validate  --config project.yml --docs docs/functional
+mfdoc sample-citations --config project.yml --docs docs/functional --judge human
+# samples generated claims against cited source, records a human verdict --
+# backs the min_citation_accuracy_rate gate; mfdoc gate fails that gate
+# (evaluated against 0) until this has been run at least once
 mfdoc export    --config project.yml --json out/index.json
 
 # optional structural overview reports, all deterministic, configured under
 # options.overview in project.yml:
-mfdoc classify-rules       --config project.yml    # populates rule_theme; run before the two below
+mfdoc classify-rules       --config project.yml    # populates rule_theme
 mfdoc gap-summary          --config project.yml --out docs/functional/gap-summary.md
 mfdoc data-flow            --config project.yml --out docs/functional/data-flow.md
 mfdoc call-graph           --config project.yml --out docs/functional/call-graph
 mfdoc complexity           --config project.yml --out docs/functional/complexity.md
 mfdoc rules-theme-register --config project.yml --out docs/functional/rules-theme-register.md
+# needs `mfdoc classify-rules` run first (and before the executive-summary doc,
+# per README's "SME notes"/architecture wording), or every rule lands under "uncategorized"
 mfdoc glossary             --config project.yml --out docs/functional/glossary.md
 mfdoc dispatch-map         --config project.yml --out docs/functional/dispatch-map.md
 mfdoc lang-guide           --config project.yml --dialect mantis --out docs/functional/reference/language-guide.md
@@ -268,8 +274,10 @@ before writing code:
    system variable like Natural's `*PF-KEY`, a screen/map concept) should
    still default to something configurable per project
    (`options.overview.*_pattern`, `options.validate.*_pattern` — replace-
-   not-merge, the same convention `outcome_field_pattern`/
-   `dispatch_field_pattern` already establish) rather than a hardcoded
+   not-merge, the same convention `outcome_field_pattern` (the return/
+   response/status/flag fields `mfdoc validate` polarity-checks, see
+   `conditions.py`'s `OUTCOME_FIELD`) and `dispatch_field_pattern` already
+   establish) rather than a hardcoded
    Natural-only pattern, so a Mantis/Supra project (or a future dialect)
    can supply its own equivalent instead of getting silently skipped. If
    you can't add a real Mantis/Supra fixture exercising the variant in the
