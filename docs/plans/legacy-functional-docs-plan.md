@@ -22,6 +22,23 @@ GitHub org.
   `--claude-code-timeout`) wires it through `classify-rules`/
   `test-overlay-draft`/`test-batch`/`batch` for `--provider anthropic`
   and `--provider vertex`.
+- Implemented issue #86: centralized `options.*` config validation.
+  `config_validate.py` is a new, declarative validation pass (`OPTION_SPECS`,
+  a list of `OptionSpec(path, types, check=...)` entries, not an if/elif
+  chain) covering every `options.*` leaf that was previously either
+  validated ad hoc at point of use (`batch._resolve_max_rules_per_call`,
+  `testbatch._resolve_max_scenarios_per_call`, `structural.py`'s
+  `cluster_by`/`direction`/`metric` checks) or not type-checked at all
+  (`options.redact.patterns` regex validity, `options.quality_gates`
+  rate/count ranges). `cli.load_config` calls `raise_if_invalid` on every
+  resolved config before returning it -- since every `cmd_*` calls
+  `load_config` first, this is a single upfront check at CLI startup for
+  every command, and `cli.main` catches the resulting `ConfigError` and
+  exits 2 with a readable, multi-problem message instead of an unhandled
+  traceback partway through a run. The existing point-of-use checks are
+  left in place as a harmless second line of defence for callers that
+  build a config dict without going through `load_config` (e.g. tests
+  calling `batch.run_batch` directly).
 - Implemented issue #85: coverage metrics now persist across runs for trend
   visibility. `db.coverage_history`/`db.record_coverage_history` (new
   `coverage_history` table, append-only, one row per `mfdoc coverage`/
