@@ -107,10 +107,9 @@ Whether `MSG`'s value is actually rendered to the user as an error/warning on th
 
 ## Gaps and questions for review
 
-- Neither `MAIN` nor `VALIDATE_CREDIT_LIMIT` is referenced by any JCL step, CICS transaction, or program call in the supplied source. Is either invoked dynamically, or started from a menu or scheduler definition not included in this extract? [[ORDENQ]]
+- None of `MAIN`, `VALIDATE_CREDIT_LIMIT`, or `SCHEDULE_PRODUCTION` is referenced by any JCL step, CICS transaction, or program call in the supplied source. Is any invoked dynamically, or started from a menu or scheduler definition not included in this extract? [[ORDENQ]]
 - `PRICECALC` is declared `EXTERNAL` in library `STEELLIB` and called once, but its source was not supplied. What does it do, and in what argument order does this site call it? [[ORDENQ:10]]
-- `ORDSCR1` (used three times) and `ORDSCR2` (used once) have no supplied source. What fields do these screens display or collect? [[ORDENQ:12]][[ORDENQ:35]]
-- The header comment calls this an "order enquiry" program, but it also writes to `ORDERMST`, calls `PRICECALC`, and (via `VALIDATE_CREDIT_LIMIT`) enforces a credit-check rule. Is this maintenance/validation scope an intended part of ORDENQ's job? [[ORDENQ:1]][[ORDENQ:33]]
-- `VALIDATE_CREDIT_LIMIT` [[ORDENQ:38]] is never called from anywhere in the supplied source. What is meant to invoke it, and is it dead code in this extract or called from a module not supplied?
+- The header comment calls this an "order enquiry" program, but it also writes to `ORDERMST`, calls `PRICECALC`, enforces a credit-check rule (`VALIDATE_CREDIT_LIMIT`), and hands off to production scheduling (`SCHEDULE_PRODUCTION`). Is this broader maintenance/scheduling scope an intended part of ORDENQ's job? [[ORDENQ:1]][[ORDENQ:33]]
+- `VALIDATE_CREDIT_LIMIT` [[ORDENQ:38]] and `SCHEDULE_PRODUCTION` [[ORDENQ:46]] are never called from anywhere in the supplied source. What is meant to invoke each, and are they dead code in this extract or called from a module not supplied?
 - Is `MSG`'s value actually rendered to the user as an error/warning on the re-shown `ORDSCR1`, or is it a general-purpose status line the screen always displays regardless? [[ORDENQ:14]][[ORDENQ:19]][[ORDENQ:31]][[ORDENQ:41]]
-- What does a non-zero `STATUS` after the `ORDERMST` read (line 16) mean beyond "the read did not succeed"? [[ORDENQ:18]]
+- What does a non-zero `STATUS` after the `ORDERMST` read (line 18) mean beyond "the read did not succeed"? [[ORDENQ:18]]
