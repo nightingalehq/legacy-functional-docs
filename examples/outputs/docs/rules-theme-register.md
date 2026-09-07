@@ -9,7 +9,7 @@ Every candidate business rule, grouped by business theme instead of by module. S
 
 ## MILLPROD
 
-31 rule(s) (31 structural)
+37 rule(s) (37 structural)
 
 | BR-ID | member | line | depth | construct | condition | literals |
 |---|---|---|---|---|---|---|
@@ -36,6 +36,12 @@ Every candidate business rule, grouped by business theme instead of by module. S
 | **MMP0200:BR-002** | `MMP0200` | [[MMP0200:16]] | 0 | `IF NO RECORDS FOUND` | `no records found for preceding database loop` | `` |
 | **MMP0200:BR-003** | `MMP0200` | [[MMP0200:21]] | 0 | `MOVE` | `MOVE 'MMP0300' TO #PGM` | `MMP0300` |
 | **MMP0200:BR-004** | `MMP0200` | [[MMP0200:24]] | 0 | `ON ERROR` | `` | `` |
+| **MMP0400:BR-001** | `MMP0400` | [[MMP0400:33]] | 0 | `IF NO RECORDS FOUND` | `no records found for preceding database loop` | `` |
+| **MMP0400:BR-002** | `MMP0400` | [[MMP0400:34]] | 1 | `MOVE` | `MOVE 40 TO #RETURN-CODE` | `40` |
+| **MMP0400:BR-003** | `MMP0400` | [[MMP0400:35]] | 1 | `ESCAPE ROUTINE` | `` | `` |
+| **MMP0400:BR-004** | `MMP0400` | [[MMP0400:37]] | 0 | `REJECT IF` | `ORDER-VIEW.ORDER-STATUS = 'HELD'` | `HELD` |
+| **MMP0400:BR-005** | `MMP0400` | [[MMP0400:38]] | 0 | `MOVE` | `MOVE 'HELD' TO ORDER-VIEW.ORDER-STATUS` | `HELD` |
+| **MMP0400:BR-006** | `MMP0400` | [[MMP0400:46]] | 0 | `MOVE` | `MOVE 'OPEN' TO HOLD-VIEW.HOLD-STATUS` | `OPEN` |
 | **MMP9000:BR-001** | `MMP9000` | [[MMP9000:14]] | 0 | `IF` | `ORDER-VIEW.ORDER-STATUS = 'CONF' AND ORDER-VIEW.CUSTOMER-NO = 'C00123'` | `CONF,C00123` |
 | **MMP9000:BR-002** | `MMP9000` | [[MMP9000:16]] | 1 | `MOVE` | `MOVE 1 TO #FLAG` | `1` |
 | **MMP9300:BR-001** | `MMP9300` | [[MMP9300:12]] | 0 | `IF` | `#STATUS = 'A'` | `A` |
@@ -47,23 +53,26 @@ Every candidate business rule, grouped by business theme instead of by module. S
 
 ## STEELLIB
 
-13 rule(s) (13 structural)
+16 rule(s) (16 structural)
 
 | BR-ID | member | line | depth | construct | condition | literals |
 |---|---|---|---|---|---|---|
-| **ORDENQ:BR-001** | `ORDENQ` | [[ORDENQ:11]] | 0 | `IF` | `ORDER_NO = " "` | ` ` |
-| **ORDENQ:BR-002** | `ORDENQ` | [[ORDENQ:12]] | 1 | `ASSIGN` | `MSG = "Order number required"` | `Order number required` |
-| **ORDENQ:BR-003** | `ORDENQ` | [[ORDENQ:16]] | 0 | `IF` | `STATUS <> 0` | `0` |
-| **ORDENQ:BR-004** | `ORDENQ` | [[ORDENQ:17]] | 1 | `ASSIGN` | `MSG = "Order not found"` | `Order not found` |
-| **ORDENQ:BR-005** | `ORDENQ` | [[ORDENQ:21]] | 0 | `WHILE` | `STATUS = 0` | `0` |
-| **ORDENQ:BR-006** | `ORDENQ` | [[ORDENQ:22]] | 1 | `ASSIGN` | `ORDER_WT = ORDER_WT + ORDVIEW.LINE_WT` | `` |
-| **ORDENQ:BR-007** | `ORDENQ` | [[ORDENQ:25]] | 0 | `CASE` | `ORDVIEW.STATUS` | `` |
-| **ORDENQ:BR-008** | `ORDENQ` | [[ORDENQ:26]] | 1 | `WHEN` | `"CONF"` | `CONF` |
-| **ORDENQ:BR-009** | `ORDENQ` | [[ORDENQ:28]] | 1 | `WHEN` | `"HELD"` | `HELD` |
-| **ORDENQ:BR-010** | `ORDENQ` | [[ORDENQ:29]] | 1 | `ASSIGN` | `MSG = "Order is on credit hold"` | `Order is on credit hold` |
-| **ORDENQ:BR-011** | `ORDENQ` | [[ORDENQ:37]] | 0 | `IF` | `ORDER_WT > 500 OR CUST_NO = " "` | ` ,500` |
-| **ORDENQ:BR-012** | `ORDENQ` | [[ORDENQ:39]] | 1 | `ASSIGN` | `MSG = "Credit check required"` | `Credit check required` |
+| **ORDENQ:BR-001** | `ORDENQ` | [[ORDENQ:13]] | 0 | `IF` | `ORDER_NO = " "` | ` ` |
+| **ORDENQ:BR-002** | `ORDENQ` | [[ORDENQ:14]] | 1 | `ASSIGN` | `MSG = "Order number required"` | `Order number required` |
+| **ORDENQ:BR-003** | `ORDENQ` | [[ORDENQ:18]] | 0 | `IF` | `STATUS <> 0` | `0` |
+| **ORDENQ:BR-004** | `ORDENQ` | [[ORDENQ:19]] | 1 | `ASSIGN` | `MSG = "Order not found"` | `Order not found` |
+| **ORDENQ:BR-005** | `ORDENQ` | [[ORDENQ:23]] | 0 | `WHILE` | `STATUS = 0` | `0` |
+| **ORDENQ:BR-006** | `ORDENQ` | [[ORDENQ:24]] | 1 | `ASSIGN` | `ORDER_WT = ORDER_WT + ORDVIEW.LINE_WT` | `` |
+| **ORDENQ:BR-007** | `ORDENQ` | [[ORDENQ:27]] | 0 | `CASE` | `ORDVIEW.STATUS` | `` |
+| **ORDENQ:BR-008** | `ORDENQ` | [[ORDENQ:28]] | 1 | `WHEN` | `"CONF"` | `CONF` |
+| **ORDENQ:BR-009** | `ORDENQ` | [[ORDENQ:30]] | 1 | `WHEN` | `"HELD"` | `HELD` |
+| **ORDENQ:BR-010** | `ORDENQ` | [[ORDENQ:31]] | 1 | `ASSIGN` | `MSG = "Order is on credit hold"` | `Order is on credit hold` |
+| **ORDENQ:BR-011** | `ORDENQ` | [[ORDENQ:39]] | 0 | `IF` | `ORDER_WT > 500 OR CUST_NO = " "` | ` ,500` |
+| **ORDENQ:BR-012** | `ORDENQ` | [[ORDENQ:41]] | 1 | `ASSIGN` | `MSG = "Credit check required"` | `Credit check required` |
+| **PRODSCHED:BR-001** | `PRODSCHED` | [[PRODSCHED:14]] | 0 | `ASSIGN` | `SCHED_STATUS = "PLND"` | `PLND` |
+| **PRODSCHED:BR-002** | `PRODSCHED` | [[PRODSCHED:16]] | 0 | `IF` | `STATUS <> 0` | `0` |
+| **PRODSCHED:BR-003** | `PRODSCHED` | [[PRODSCHED:17]] | 1 | `ASSIGN` | `MSG = "Schedule could not be added"` | `Schedule could not be added` |
 | **SCRNENT:BR-001** | `SCRNENT` | [[SCRNENT:7]] | 0 | `IF` | `CH_UNIT = " "` | ` ` |
 
-Total: 44 rule candidate(s) across 2 theme(s).
+Total: 53 rule candidate(s) across 2 theme(s).
 

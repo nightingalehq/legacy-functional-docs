@@ -37,10 +37,11 @@ space -- before any keyword pattern is matched against it (see
 `_has_open_trailing_marker` for how the trailing shape is told apart from an
 ordinary line that just happens to end with a real, closed literal). Each
 continuation line is still visited afterwards in its own right and correctly
-fails to stand alone as a statement (the same accepted double-visit
-`natural.py`'s own continuation fold relies on), so it still raises its own
-low-severity `unparsed_line` gap -- the fold only fixes the *content*
-recorded for the statement it belongs to.
+fails to stand alone as a statement, but (like `natural.py`'s own
+continuation fold) that second visit is tracked in `folded_lines` and no
+longer raises its own `unparsed_line` gap on top of the first -- the
+content was never lost (it's in the statement it folded into), so flagging
+it again would be noise, not a real coverage gap.
 """
 
 from __future__ import annotations
@@ -333,6 +334,16 @@ def extract(conn, member_id: int, lines, member_name: str = "?") -> dict:
                start_line=r["start_line"], end_line=r["end_line"])
 
     stats = {"lines": len(lines), "code_lines": 0, "comment_lines": 0, "unparsed": 0}
+
+    # Line numbers already folded into a *preceding* statement's condition
+    # text (see the fold loop below). Such a line is still visited again on
+    # its own -- source_line has to hold every physical line unconditionally
+    # for citations to work -- and correctly fails to stand alone as a
+    # statement there. That second visit used to always raise its own
+    # unparsed_line gap; now it's suppressed for lines recorded here, since
+    # the content was never lost (it's in the statement it folded into), so
+    # flagging it again is noise, not a real coverage gap.
+    folded_lines: set[int] = set()
     views: dict[str, str] = {}
     depth = 0
     open_blocks: list[tuple[str, int]] = []
@@ -398,8 +409,9 @@ def extract(conn, member_id: int, lines, member_name: str = "?") -> dict:
         # folded line is still visited on its own in a later iteration of
         # this same loop -- idx only advances past the statement that
         # started the run, not past the lines folded into it -- so it still
-        # gets its own source_line row and, correctly, its own unparsed_line
-        # gap for standing alone.
+        # gets its own source_line row and, correctly, fails to stand alone
+        # as a statement there; folded_lines (populated below) keeps that
+        # from also raising a redundant unparsed_line gap.
         look = idx
         while look + 1 < len(lines) and look - idx < MAX_CONTINUATION_LOOKAHEAD:
             nxt_body, nxt_is_remark = _split_depth_marker(lines[look + 1][2].strip())
@@ -427,6 +439,9 @@ def extract(conn, member_id: int, lines, member_name: str = "?") -> dict:
                 # mid-statement as a stray apostrophe in the recorded text.
                 stmt = stmt.rstrip()[:-1].rstrip() + " " + nxt_body
             look += 1
+
+        for folded_idx in range(idx + 1, look + 1):
+            folded_lines.add(lines[folded_idx][0])
 
         stmt = _strip_trailing_remark(stmt)
         masked, _ = mask_literals(stmt)
@@ -701,7 +716,11 @@ def extract(conn, member_id: int, lines, member_name: str = "?") -> dict:
                 last_assign[var] = (line_no, rhs)
             matched = True
 
-        if not matched:
+        if not matched and line_no in folded_lines:
+            # Already folded into the statement it continues -- see
+            # folded_lines above. Not a gap: the content wasn't lost.
+            pass
+        elif not matched:
             stats["unparsed"] += 1
             if len(stmt) > 3:
                 add_gap(conn, "unparsed_line",

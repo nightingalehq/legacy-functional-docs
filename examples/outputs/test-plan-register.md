@@ -20,14 +20,16 @@ Every scenario `mfdoc test-plan` derived from the fact store, keyed by the same 
 | `MMP0200:BR-001` | `MMP0200` | unit | characterization | `IF` | `#CERT-NO = ' '` | [[MMP0200:12]] |
 | `MMP0200:BR-002` | `MMP0200` | unit | characterization | `IF NO RECORDS FOUND` | `no records found for preceding database loop` | [[MMP0200:16]] |
 | `MMP0200:BR-004` | `MMP0200` | unit | characterization | `ON ERROR` | `` | [[MMP0200:24]] |
+| `MMP0400:BR-001` | `MMP0400` | unit | characterization | `IF NO RECORDS FOUND` | `no records found for preceding database loop` | [[MMP0400:33]] |
 | `MMP9000:BR-001` | `MMP9000` | unit | characterization | `IF` | `ORDER-VIEW.ORDER-STATUS = 'CONF' AND ORDER-VIEW.CUSTOMER-NO = 'C00123'` | [[MMP9000:14]] |
 | `MMP9300:BR-001` | `MMP9300` | unit | characterization | `IF` | `#STATUS = 'A'` | [[MMP9300:12]] |
 | `MMP9400:BR-002` | `MMP9400` | unit | characterization | `IF` | `#STATUS = 'CONF'` | [[MMP9400:11]] |
-| `ORDENQ:BR-001` | `ORDENQ` | unit | characterization | `IF` | `ORDER_NO = " "` | [[ORDENQ:11]] |
-| `ORDENQ:BR-003` | `ORDENQ` | unit | characterization | `IF` | `STATUS <> 0` | [[ORDENQ:16]] |
-| `ORDENQ:BR-007` | `ORDENQ` | unit | characterization | `CASE` | `ORDVIEW.STATUS` | [[ORDENQ:25]] |
-| `ORDENQ:BR-008` | `ORDENQ` | unit | characterization | `WHEN` | `"CONF"` | [[ORDENQ:26]] |
-| `ORDENQ:BR-009` | `ORDENQ` | unit | characterization | `WHEN` | `"HELD"` | [[ORDENQ:28]] |
-| `ORDENQ:BR-011` | `ORDENQ` | unit | characterization | `IF` | `ORDER_WT > 500 OR CUST_NO = " "` | [[ORDENQ:37]] |
+| `ORDENQ:BR-001` | `ORDENQ` | unit | characterization | `IF` | `ORDER_NO = " "` | [[ORDENQ:13]] |
+| `ORDENQ:BR-003` | `ORDENQ` | unit | characterization | `IF` | `STATUS <> 0` | [[ORDENQ:18]] |
+| `ORDENQ:BR-007` | `ORDENQ` | unit | characterization | `CASE` | `ORDVIEW.STATUS` | [[ORDENQ:27]] |
+| `ORDENQ:BR-008` | `ORDENQ` | unit | characterization | `WHEN` | `"CONF"` | [[ORDENQ:28]] |
+| `ORDENQ:BR-009` | `ORDENQ` | unit | characterization | `WHEN` | `"HELD"` | [[ORDENQ:30]] |
+| `ORDENQ:BR-011` | `ORDENQ` | unit | characterization | `IF` | `ORDER_WT > 500 OR CUST_NO = " "` | [[ORDENQ:39]] |
+| `PRODSCHED:BR-002` | `PRODSCHED` | unit | characterization | `IF` | `STATUS <> 0` | [[PRODSCHED:16]] |
 | `SCRNENT:BR-001` | `SCRNENT` | unit | characterization | `IF` | `CH_UNIT = " "` | [[SCRNENT:7]] |
 

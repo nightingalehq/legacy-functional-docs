@@ -1,0 +1,20 @@
+* PRODSCHED - PRODUCTION SCHEDULE MAINTENANCE (MANTIS/SUPRA)
+* New (2026-09) manufacturing scenario: schedules a production line and
+* date against an order ORDENQ has already confirmed, via ORDENQ's own
+* SCHEDULE_PRODUCTION entry point -- the two programs' call graphs and
+* the STEELDB schema's ORDERMST/PRODSCHED linkpath connect through this.
+PROGRAM "PRODSCHED"
+TEXT ORDER_NO(10)
+TEXT LINE_ID(4)
+NUMERIC SCHED_DATE(6)
+TEXT SCHED_STATUS(4)
+TEXT MSG(60)
+VIEW SCHEDVIEW OF PRODSCHED
+ENTRY MAIN(ORDER_NO, LINE_ID, SCHED_DATE)
+  SCHED_STATUS = "PLND"
+  ADD-M(SCHEDVIEW)
+  IF STATUS <> 0
+    MSG = "Schedule could not be added"
+  END
+  ENDTR
+EXIT

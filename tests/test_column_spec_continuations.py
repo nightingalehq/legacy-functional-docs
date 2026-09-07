@@ -31,18 +31,17 @@ def test_column_spec_continuations_fold_into_one_write_interaction(indexed_db):
         assert token in row["fields"], f"{token!r} missing -- continuation lines weren't folded"
 
 
-def test_folded_continuation_lines_are_still_visited_but_stay_harmless_gaps(indexed_db):
-    """Same accepted quirk as the 4.5/MMP9000 fixture: a line that's already
-    been folded into the preceding statement is still visited on its own by
-    the main loop, and correctly doesn't match as a standalone statement."""
+def test_folded_continuation_lines_do_not_also_raise_their_own_gap(indexed_db):
+    """A line that's already been folded into the preceding statement is
+    still visited on its own by the main loop, and correctly doesn't match
+    as a standalone statement -- but since its content wasn't lost (it's in
+    the statement it folded into), that second visit must not also raise
+    its own unparsed_line gap (see `folded_lines` in natural.py's extract())."""
     conn = indexed_db
     rows = conn.execute(
         """
-        SELECT g.line_no, g.raw FROM gap g JOIN member m ON m.id = g.member_id
-         WHERE m.name='MMP9500' AND g.gap_kind='unparsed_line'
-         ORDER BY g.line_no
+        SELECT g.line_no FROM gap g JOIN member m ON m.id = g.member_id
+         WHERE m.name='MMP9500' AND g.gap_kind='unparsed_line' AND g.line_no IN (14, 15)
         """
     ).fetchall()
-    assert [r["line_no"] for r in rows] == [14, 15]
-    assert rows[0]["raw"] == "5T 'HEAT NO:' #HEAT-NO"
-    assert rows[1]["raw"] == "30T 'DATE:' #CAST-DATE"
+    assert rows == []

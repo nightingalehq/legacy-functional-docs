@@ -1,0 +1,19 @@
+** MMM0150 - QUALITY INSPECTION HOLD ENTRY MAP
+** Captures the inspector's hold reason and ID before MMP0400 stores a
+** QUALITY-HOLD record. Same best-effort T/F tagged-line convention as
+** MMM9000 -- see dialects/screen module docstring for the map dialect
+** used for Mantis screen exports; this is Natural's own map body, parsed
+** inline by natural.py's _match_map_body.
+DEFINE DATA LOCAL
+1 #ORDER-NO (A10)
+1 #HOLD-REASON (A30)
+1 #INSPECTOR-ID (A8)
+END-DEFINE
+*
+1 T 'Order number:' 01/01
+1 F #ORDER-NO (AD=O) 01/16
+1 T 'Hold reason:' 02/01
+1 F #HOLD-REASON (AD=I) 02/16
+1 T 'Inspector ID:' 03/01
+1 F #INSPECTOR-ID (AD=I) 03/16
+END

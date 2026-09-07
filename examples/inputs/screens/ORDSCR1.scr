@@ -1,0 +1,13 @@
+  NAME: ORDSCR1                           DESCRIPTION: ORDER ENQUIRY ENTRY                              PASSWORD: NONE
+  FRMT: NEW   MASK: #   BLANK FILL: |   FULL DISPLAY: YES   PROT BOT LINE: NO    ALARM: NO    OPAQUE: NO     DOMAIN: (24,80)
+                                 DATA     FLD-POS  FLD  VER-REP HOR-REP  PRO AUT INS MOD PEN REV                 UPP       --BOX--
+  ---------FIELD NAME----------- TYPE---  ROW COL  LEN  OCC DIS OCC DIS  TCT SKP CUR TAG DET VID BLI HIG INT CLR CAS SO/SI O L R U
+  "ORDER ENQUIRY" HEADING           1  30   13                   YES                             BRI NEU
+  ORDER_NO                        TEXT       3   2   10                   YES                             NOR GRE
+  CUST_NO                         TEXT       4   2    8                   YES                             NOR GRE
+  ORDER_WT                        NUMERIC    5   2    9                       YES                         NOR GRE
+  MSG                             TEXT      22   2   60                                                   NOR RED
+
+    ....+....1....+....2....+....3....+....4....+....5....+....6....+....7....+....8
+  .  ####################       #########################################       .
+  +  # ##### ##.##.## # ########.## # #### # ##.## ##.## # ########## ##.## # +
