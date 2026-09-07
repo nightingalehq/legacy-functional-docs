@@ -282,12 +282,17 @@ class FlakyCaller:
     def __call__(self, prompt: str) -> "batch_mod.ModelResponse":
         with self._lock:
             self.calls += 1
+            member = None
             if "# Fact brief:" in prompt:
                 member = prompt.split("# Fact brief:")[1].splitlines()[0].strip()
-                if member in self._fail_for_members and member not in self._failed_once:
-                    self._failed_once.add(member)
-                    raise RuntimeError(f"simulated transient error for {member}")
-            return self._inner(prompt)
+            should_fail = (
+                member in self._fail_for_members and member not in self._failed_once
+            )
+            if should_fail:
+                self._failed_once.add(member)
+        if should_fail:
+            raise RuntimeError(f"simulated transient error for {member}")
+        return self._inner(prompt)
 
 
 def test_save_state_never_leaves_a_truncated_file_on_a_mid_write_crash(tmp_path):
@@ -465,8 +470,7 @@ class RetryMaskedCaller:
                     raise _SimulatedTransientAPIError(
                         f"simulated transient error for {member}"
                     )
-                with self._lock:
-                    return self._inner(prompt)
+                return self._inner(prompt)
             except _SimulatedTransientAPIError:
                 # Caught -- and only this type -- and retried right here,
                 # exactly like call_with_retry does, so it never
