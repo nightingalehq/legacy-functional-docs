@@ -13,7 +13,7 @@ GitHub org.
   flows and the gap register, where judgement matters most.
 
 **Progress (2026-09-07):**
-- Implemented issue #82: a regression test (`test_batch_absorbs_a_transient_caller_retry_while_another_member_succeeds`
+- Added a regression test (`test_batch_absorbs_a_transient_caller_retry_while_another_member_succeeds`
   in `tests/test_batch.py`) exercising issue #79's retry/backoff and issue
   #78's per-future isolation *together* in one `run_batch` pass, which
   `tests/test_batch.py` didn't yet cover -- the existing isolation test

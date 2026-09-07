@@ -450,7 +450,7 @@ class RetryMaskedCaller:
         member = None
         if "# Fact brief:" in prompt:
             member = prompt.split("# Fact brief:")[1].splitlines()[0].strip()
-        while True:
+        for underlying_attempt in range(2):
             with self._lock:
                 self.attempts += 1
             try:
@@ -471,11 +471,12 @@ class RetryMaskedCaller:
                 # Caught -- and only this type -- and retried right here,
                 # exactly like call_with_retry does, so it never
                 # propagates to run_batch's fut.result().
-                continue
+                if underlying_attempt == 1:
+                    raise
 
 
 def test_batch_absorbs_a_transient_caller_retry_while_another_member_succeeds(indexed_db, tmp_path):
-    """Regression test for issue #82: #79's retry/backoff and #78's
+    """Regression test for the #79/#78 interaction: #79's retry/backoff and #78's
     per-member isolation must cooperate correctly in one run, not just be
     covered by separate tests of each in isolation. A caller that retries a
     transient failure internally for one member, while a second member
