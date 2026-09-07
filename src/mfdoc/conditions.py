@@ -221,7 +221,7 @@ _LT_WORDS = re.compile(r"\b(less\s+than|fewer\s+than)\b", re.IGNORECASE)
 # (here "at least", which describes OBS_COUNT, not STAT) reads as though it
 # modified this literal instead, misattributing a relational/negation
 # reading across a clause boundary it has nothing to do with (issue #90).
-_CLAUSE_BOUNDARY = re.compile(r"\b(?:and|or)\b", re.IGNORECASE)
+_CLAUSE_BOUNDARY = re.compile(r"\b(?:and|or)\b(?!\s+equal\b)", re.IGNORECASE)
 
 
 def _clip_at_clause_boundary(text: str, *, keep_end: bool) -> str:

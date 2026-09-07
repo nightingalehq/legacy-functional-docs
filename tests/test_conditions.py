@@ -215,3 +215,18 @@ def test_prose_polarity_still_reads_hedge_word_on_the_same_side_of_an_and_clause
     assert prose_polarity(
         "the count is at least '4' and STAT equals 'FAIL'", "4"
     ) == "ge"
+
+
+def test_prose_polarity_or_equal_is_not_a_clause_boundary():
+    """"or equal (to)" is part of relational phrasing ("greater/less than or
+    equal to"), not a logical clause conjunction. Without excluding it,
+    clause-boundary clipping cuts the search window right at the "or",
+    before it ever reaches the literal on the far side -- which would
+    regress this down to a plain "eq"/"ne" reading, silently losing the
+    relational wording entirely. (_GE_WORDS/_LE_WORDS don't themselves
+    recognise "or equal to" phrasing -- that's a separate, pre-existing gap,
+    not this issue's concern -- so today this correctly resolves via
+    _GT_WORDS/_LT_WORDS to plain "gt"/"lt"; what matters here is that it
+    resolves to *that*, not to "eq".)"""
+    assert prose_polarity("the count is greater than or equal to '4'", "4") == "gt"
+    assert prose_polarity("the count is less than or equal to '4'", "4") == "lt"
