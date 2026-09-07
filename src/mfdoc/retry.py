@@ -50,7 +50,19 @@ def call_with_retry(
     `mfdoc.retry.time.sleep` and have it actually take effect) purely so
     tests can assert on backoff timing/attempt counts without a real test
     suite run taking `max_retries` seconds per case.
+
+    Raises `ValueError` immediately, before any attempt, for a negative
+    `max_retries`, `base_delay`, or `max_delay` -- a negative `max_retries`
+    would silently disable retries with no signal to the caller, and a
+    negative delay only surfaces later as a confusing `time.sleep`
+    `ValueError` deep inside the first retry.
     """
+    if max_retries < 0:
+        raise ValueError(f"max_retries must be >= 0, got {max_retries!r}")
+    if base_delay < 0:
+        raise ValueError(f"base_delay must be >= 0, got {base_delay!r}")
+    if max_delay < 0:
+        raise ValueError(f"max_delay must be >= 0, got {max_delay!r}")
     do_sleep = sleep if sleep is not None else time.sleep
     attempt = 0
     while True:

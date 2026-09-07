@@ -95,3 +95,25 @@ def test_backoff_delay_grows_exponentially_and_is_capped():
     for observed, uncapped in zip(sleeps, expected_uncapped):
         ceiling = min(uncapped, 3.0)
         assert ceiling * 0.5 <= observed <= ceiling
+
+
+def test_negative_max_retries_raises_value_error_before_any_attempt():
+    calls = []
+
+    def fn():
+        calls.append(1)
+        return "ok"
+
+    with pytest.raises(ValueError, match="max_retries"):
+        call_with_retry(fn, is_retryable=lambda exc: True, max_retries=-1, sleep=lambda s: None)
+    assert calls == []
+
+
+def test_negative_base_delay_raises_value_error_before_any_attempt():
+    with pytest.raises(ValueError, match="base_delay"):
+        call_with_retry(lambda: "ok", is_retryable=lambda exc: True, base_delay=-1.0, sleep=lambda s: None)
+
+
+def test_negative_max_delay_raises_value_error_before_any_attempt():
+    with pytest.raises(ValueError, match="max_delay"):
+        call_with_retry(lambda: "ok", is_retryable=lambda exc: True, max_delay=-1.0, sleep=lambda s: None)
