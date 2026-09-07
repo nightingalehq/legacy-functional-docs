@@ -352,21 +352,30 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
         brief_hash = hashlib.sha256(brief.encode("utf-8")).hexdigest()
         prior_chunk = (prior_chunks or {}).get(str(i))
         reusable = (
-            isinstance(prior_chunk, dict) and prior_chunk.get("brief_sha256") == brief_hash
+            isinstance(prior_chunk, dict) and prior_chunk.get("ok") is True
+            and prior_chunk.get("brief_sha256") == brief_hash
             and chunk_path.exists()
         )
+        result = None
         if reusable:
             # Re-validate rather than trust the stored "ok" flag verbatim --
             # the *content* is cached, but validate_test_doc's own logic can
             # have changed since it was last checked, and this costs no
-            # model call (mirrors batch._generate_module_doc_chunked's
-            # identical re-validate-on-reuse choice).
+            # model call. Only ever attempted when the prior run's own
+            # record for this chunk was itself ok=True: reusing a
+            # previously-*failed* chunk just because its brief is unchanged
+            # would re-validate the same broken content and report the same
+            # failure forever, with no path back to a real retry -- a
+            # failed chunk must always get a fresh model call instead. And
+            # if re-validation of a genuinely-ok cached chunk still fails
+            # (e.g. validate_test_doc's own logic changed since it was
+            # written), fall back to regenerating rather than reporting a
+            # stale failure for content that was never actually wrong when
+            # it was produced.
             revalidated = validate_test_doc(conn, chunk_path)
-            result = DocResult(
-                member_name, str(chunk_path), revalidated["ok"], 0, 0, 0,
-                revalidated["problems"],
-            )
-        else:
+            if revalidated["ok"]:
+                result = DocResult(member_name, str(chunk_path), True, 0, 0, 0, [])
+        if result is None:
             result = _generate_test_doc_from_brief(
                 conn, member_name, brief, language, framework, chunk_path, caller,
                 writing_rules, template, max_attempts=max_attempts,

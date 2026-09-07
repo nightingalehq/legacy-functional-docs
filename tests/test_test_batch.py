@@ -1300,6 +1300,53 @@ def test_chunk_resume_falls_back_to_regenerating_a_chunk_whose_cached_file_is_go
     assert (tmp_path / "FAKEMOD.chunk2.md").exists()
 
 
+def test_chunk_resume_always_regenerates_a_previously_failed_chunk(tmp_path):
+    """A chunk that failed last run, with a brief unchanged since, must
+    never be treated as reusable just because its (invalid) file is still
+    on disk and its hash still matches -- that would re-validate the same
+    broken content and report the same failure forever, with no path back
+    to a real retry. Only a chunk whose *prior* record was itself ok=True
+    is eligible for reuse."""
+    import sqlite3
+
+    from mfdoc import testbatch
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_scenarios(conn, 4)
+
+    good_caller = _chunk_aware_caller("python", "pytest")
+
+    def flaky_caller(prompt: str) -> ModelResponse:
+        if "BR-003" in prompt:
+            return ModelResponse(text="not a valid document", input_tokens=1, output_tokens=1)
+        return good_caller(prompt)
+
+    out_path = tmp_path / "FAKEMOD.md"
+    first = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, flaky_caller,
+        "writing rules text", "template text", max_scenarios_per_call=2,
+    )
+    assert first.ok is False
+    assert first.chunk_state["2"]["ok"] is False, "chunk 2 (covering BR-003) must be recorded as failed"
+
+    # Second run: chunk 2's brief is unchanged (same test_case content), but
+    # this time the caller can actually produce a valid response for it --
+    # a chunk recorded as failed must always get a fresh model call, never
+    # be silently reused/re-validated into the same stale failure.
+    second_caller = _counting_caller(good_caller)
+    second = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, second_caller,
+        "writing rules text", "template text", max_scenarios_per_call=2,
+        prior_chunks=first.chunk_state,
+    )
+    assert second.ok is True, second.problems
+    assert second_caller.calls == 1, "the previously-failed chunk must be regenerated, not reused"
+    assert second.chunk_state["2"]["ok"] is True
+
+
 def test_run_test_batch_persists_chunk_state_and_reuses_it_across_calls(tmp_path):
     """End-to-end through run_test_batch's own state file, not just the
     lower-level generate_member_test_doc -- a second run against unchanged
