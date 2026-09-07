@@ -185,6 +185,50 @@ def test_continuation_line_is_still_visited_and_gapped_on_its_own(indexed_db):
     assert row is not None, "continuation line must still raise its own unparsed_line gap"
 
 
+def test_continuation_fold_joins_an_assignment_wrapped_with_a_trailing_quote_marker():
+    """Second observed continuation shape in this export style: the marker
+    sits at the *end* of the line being wrapped, not the start of the line
+    that continues it -- e.g. a long quoted assignment split as
+    `DESC="text so far '` / `more text"`. Before this fix, the scanner only
+    recognised the leading-marker shape (see
+    test_continuation_fold_joins_a_condition_wrapped_with_a_quote_marker
+    above), so the second physical line here (`more text"`) would be seen as
+    a standalone, unrecognisable statement and the assignment's recorded
+    value would be silently truncated at the wrap point."""
+    conn = _extract(
+        'PROGRAM "TESTMOD"\n'
+        "ENTRY MAIN\n"
+        '  DESC="Order requires manual review because the credit limit was\'\n'
+        '  exceeded on this account"\n'
+        "EXIT\n"
+    )
+    row = conn.execute(
+        "SELECT raw FROM rule_candidate WHERE construct='ASSIGN' AND raw LIKE '%DESC%'"
+    ).fetchone()
+    assert row is not None, "expected an ASSIGN rule candidate for DESC"
+    assert "exceeded on this account" in row["raw"], (
+        f"assignment truncated at the wrap point, lost the second line: {row['raw']!r}"
+    )
+
+
+def test_continuation_trailing_marker_line_is_still_visited_and_gapped_on_its_own():
+    """Same accepted double-visit as the leading-marker shape: the fold only
+    fixes the content recorded for the statement it belongs to, the
+    continuation line itself must still get its own source_line row and
+    still fail to stand alone as a statement."""
+    conn = _extract(
+        'PROGRAM "TESTMOD"\n'
+        "ENTRY MAIN\n"
+        '  DESC="Order requires manual review because the credit limit was\'\n'
+        '  exceeded on this account"\n'
+        "EXIT\n"
+    )
+    row = conn.execute(
+        "SELECT raw FROM gap WHERE gap_kind='unparsed_line' AND raw LIKE '%exceeded on this account%'"
+    ).fetchone()
+    assert row is not None, "trailing-marker continuation line must still raise its own unparsed_line gap"
+
+
 def test_orderq_entry_points_recorded_as_routines(indexed_db):
     """ORDENQ.mantis declares two ENTRY points, MAIN and
     VALIDATE_CREDIT_LIMIT (see the module docstring on the continuation-fold
