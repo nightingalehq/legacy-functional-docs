@@ -20,15 +20,15 @@ GitHub org.
   (`FlakyCaller`) only covers a caller exception that *propagates out* to
   run_batch across two separate `run_batch` calls, not a transient failure
   a caller absorbs internally (as `AnthropicCaller`/`VertexCaller` do via
-  `call_with_retry`) while a different member succeeds
-  normally in the same pool. The new `RetryMaskedCaller` test double
-  inlines that catch-and-retry-once shape (rather than importing
-  `mfdoc.retry` directly, so the test stays focused on the batch boundary
-  without coupling to the helper's implementation or timing) and asserts: no failure
-  recorded for the retried member, its
-  batch-level `attempts` stays 1 (the retry is invisible to run_batch),
-  the other member's result is untouched, and no second `run_batch` call
-  is needed to pick up the retried member.
+  `call_with_retry`) while a different member succeeds normally in the
+  same pool. The new `RetryMaskedCaller` test double calls the real
+  `mfdoc.retry.call_with_retry` directly (rather than hand-rolling an
+  equivalent retry loop, per review feedback -- avoids the test drifting
+  from the production retry helper's actual behavior over time) and
+  asserts: no failure recorded for the retried member, its batch-level
+  `attempts` stays 1 (the retry is invisible to run_batch), the other
+  member's result is untouched, and no second `run_batch` call is needed
+  to pick up the retried member.
   Issue #81 was investigated and closed without a code change: `VertexCaller`
   narrows its lock to wrap only the single `messages.create()` call inside
   each retry attempt (acquired and released fresh per attempt, never held
