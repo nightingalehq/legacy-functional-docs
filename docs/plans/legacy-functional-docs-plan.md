@@ -13,6 +13,26 @@ GitHub org.
   flows and the gap register, where judgement matters most.
 
 **Progress (2026-09-07):**
+- Implemented issues #87/#88/#89, giving `testbatch.py`'s harness the same
+  checkpoint/retry/reuse discipline `batch.py` already has for module docs:
+  (#87) every `caller()` call site now catches an exception instead of
+  letting it propagate and crash the whole run with zero state saved, and
+  state is checkpointed after every finished member/chunk (a new
+  `_checkpoint` helper) rather than only once at the end; (#88) ported
+  `batch._generate_module_doc_chunked`'s `prior_chunks` content-hash
+  skip/reuse mechanism into `testbatch._generate_member_test_doc_chunked`,
+  so a retry only regenerates the chunk(s) whose own brief actually
+  changed (or that failed last run -- reuse requires the prior record's
+  own `ok` to have been `True`, so a previously-failed chunk always gets a
+  fresh model call rather than re-validating the same broken content
+  forever); (#89) `mfdoc test-batch`/`test-gen`'s default resume-state
+  file and output directory are now namespaced per project config (`cli.
+  _project_namespace`, keyed by `system`, else `project`, else "default"),
+  so two `project.yml` files sharing a working directory no longer
+  silently share -- and a `rm -f` on one no longer clobbers -- the other's
+  resume-state/output tree. An explicit `--out`/`--state` is still used
+  exactly as given, matching how `index_db` itself is always an explicit,
+  project-specific choice.
 - Follow-up to issue #105 (PR #107 review): `flag_density_outliers`'s
   `avg_depth` comparison left a chunk unflagged whenever the run's other
   chunks' median depth was 0, on the same "a multiple of 0 is meaningless"

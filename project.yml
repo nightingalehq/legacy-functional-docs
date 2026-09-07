@@ -149,7 +149,11 @@ options:
     # test-overlay.yml path, relative to this config file. test-plan reads
     # promoted entries from it; test-overlay-draft writes proposals to it.
     overlay_path: test-overlay.yml
-    # test-batch's output directory, relative to this config file.
+    # test-batch's output directory, relative to this config file -- nested
+    # one level deeper by a project-namespace subdirectory (this config's
+    # own `system`, else `project`, else "default"; see
+    # cli._project_namespace), so a second project.yml sharing this
+    # directory doesn't share (and clobber) this one's generated tests.
     out_dir: tests_generated
     # The full set of destination targets this project wants rendered by
     # `mfdoc test-batch --matrix` / `mfdoc test-gen --matrix` in one pass.
