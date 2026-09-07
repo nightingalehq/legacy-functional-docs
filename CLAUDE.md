@@ -74,6 +74,14 @@ This applies to every branch and PR against this repo, not just `main`.
 
 ## Commands
 
+Every `mfdoc` command validates the resolved config (`config_validate.py`)
+before doing any work -- `options.*` shape/types/ranges are checked once, at
+startup, so a malformed `project.yml` is a clear exit-2 error immediately
+rather than a run failing partway through wherever the first ad hoc
+point-of-use check (e.g. `batch._resolve_max_rules_per_call`) happened to be
+reached. New config key: add an `OptionSpec` row to `OPTION_SPECS` there,
+not a new if/elif branch.
+
 ```bash
 pip install -e '.[dev]'          # dev install (adds pytest)
 pytest                           # full test suite

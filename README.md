@@ -152,6 +152,12 @@ pip install -e .
 cp config/project.example.yml project.yml
 # edit source paths, pin the dialect for each source set
 
+# Every mfdoc command validates the resolved config's options.* shape/types/
+# ranges before doing any work, and exits 2 with a readable message on the
+# first bad project.yml it's pointed at -- so a typo (e.g. a negative
+# options.narrative.max_rules_per_call, an out-of-range quality_gates
+# threshold) is caught immediately rather than partway through a run.
+
 mfdoc ingest   --config project.yml
 mfdoc derive   --config project.yml
 mfdoc coverage --config project.yml     # read this before writing anything

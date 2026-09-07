@@ -37,6 +37,7 @@ from . import graph, normalise
 from . import structural
 from . import testadvisor as testadvisor_mod
 from . import testplan as testplan_mod
+from .config_validate import ConfigError, raise_if_invalid
 from .db import add_gap, connect, insert, purge_member, purge_member_facts, set_metric, upsert_member
 from .dialects import adabas, environment, mantis, natural, screen, supra
 from .redact import Redactor
@@ -74,6 +75,13 @@ def load_config(path: str | Path) -> dict:
     cfg.setdefault("index_db", ".mfdoc/index.db")
     cfg.setdefault("sources", [])
     cfg.setdefault("options", {})
+    # Validated here, once, before any command does anything else with the
+    # config -- every cmd_* calls load_config first, so this is the single
+    # upfront check point for the whole CLI (see config_validate.py). A
+    # malformed project.yml is then a clear error at startup instead of a
+    # run failing partway through at whichever ad hoc point-of-use check
+    # happens to be reached first.
+    raise_if_invalid(cfg)
     return cfg
 
 
@@ -1372,7 +1380,15 @@ def main(argv=None) -> int:
     p.set_defaults(func=cmd_export)
 
     args = ap.parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except ConfigError as exc:
+        # Same "clean message, exit 2" idiom as the config-shape checks
+        # cmd_test_gen/cmd_test_batch already do inline (e.g.
+        # _testgen_matrix_error) -- a config problem is a usage error, not
+        # an unhandled traceback.
+        print(str(exc), file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
