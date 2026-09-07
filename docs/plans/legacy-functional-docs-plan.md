@@ -13,6 +13,28 @@ GitHub org.
   flows and the gap register, where judgement matters most.
 
 **Progress (2026-09-07):**
+- Implemented issue #82: a regression test (`test_batch_absorbs_a_transient_caller_retry_while_another_member_succeeds`
+  in `tests/test_batch.py`) exercising issue #79's retry/backoff and issue
+  #78's per-future isolation *together* in one `run_batch` pass, which
+  `tests/test_batch.py` didn't yet cover -- the existing isolation test
+  (`FlakyCaller`) only covers a caller exception that *propagates out* to
+  run_batch across two separate `run_batch` calls, not a transient failure
+  a caller absorbs internally (as `AnthropicCaller`/`VertexCaller` do via
+  `call_with_retry` once #79 lands) while a different member succeeds
+  normally in the same pool. The new `RetryMaskedCaller` test double
+  inlines that catch-and-retry-once shape (rather than importing
+  `mfdoc.retry`, which is still on issue #79's own branch, not yet merged
+  to `main`) and asserts: no failure recorded for the retried member, its
+  batch-level `attempts` stays 1 (the retry is invisible to run_batch),
+  the other member's result is untouched, and no second `run_batch` call
+  is needed to pick up the retried member.
+  Issue #81 investigated and closed without a code change: PR #106 (issue
+  #79, in review) already narrows `VertexCaller`'s lock to wrap only the
+  single `messages.create()` call inside each retry attempt (acquired and
+  released fresh per attempt, never held across `call_with_retry`'s
+  backoff sleep) -- the narrowest scope that's still safe given
+  `AnthropicVertex`'s in-place credential refresh. See the closing comment
+  on #81 for the full analysis.
 - Implemented issue #91: a new document type, `interface-matrix`, for the
   screen-and-key interface matrix a client review asked for (mode x panel
   x map x PF-label x routine x outcome). It follows the interactive

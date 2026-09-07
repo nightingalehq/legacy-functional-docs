@@ -400,6 +400,97 @@ def test_batch_isolates_a_single_member_caller_failure_and_checkpoints_the_rest(
     assert caller.calls == calls_before_rerun + 1
 
 
+class RetryMaskedCaller:
+    """Simulates what AnthropicCaller/VertexCaller do internally once #79's
+    retry/backoff lands (`call_with_retry`): a transient error on the
+    underlying API call is caught and retried *inside the caller itself*,
+    so run_batch's ThreadPoolExecutor loop never sees an exception for that
+    member at all -- unlike FlakyCaller above, which raises *out* to
+    run_batch and relies on #78's per-future isolation to survive it. This
+    inlines that same catch-and-immediately-retry-once shape rather than
+    importing `mfdoc.retry.call_with_retry` directly, since that module is
+    still on issue #79's own branch as of this test, not yet on `main`.
+
+    Exercises #79 (retry) and #78 (isolation) *together*, in one pass: one
+    member's transient failure is fully absorbed by the caller's own retry
+    before run_batch ever learns about it, while a second member succeeds
+    normally in the same run -- both members' results must come out clean
+    in a single `run_batch` call, with no failure recorded for either and
+    no second run needed to pick up the retried member."""
+
+    def __init__(self, retry_once_for_members: set[str]):
+        self._inner = FakeCaller()
+        self._retry_once_for_members = set(retry_once_for_members)
+        self._retried: set[str] = set()
+        self.calls = 0
+        self.attempts = 0
+
+    def __call__(self, prompt: str) -> "batch_mod.ModelResponse":
+        self.calls += 1
+        member = None
+        if "# Fact brief:" in prompt:
+            member = prompt.split("# Fact brief:")[1].splitlines()[0].strip()
+        while True:
+            self.attempts += 1
+            if (member in self._retry_once_for_members
+                    and member not in self._retried):
+                self._retried.add(member)
+                # A transient error on the first underlying attempt --
+                # caught and retried right here, exactly like
+                # call_with_retry does, so it never propagates to
+                # run_batch's fut.result().
+                continue
+            return self._inner(prompt)
+
+
+def test_batch_absorbs_a_transient_caller_retry_while_another_member_succeeds(indexed_db, tmp_path):
+    """Regression test for issue #82: #79's retry/backoff and #78's
+    per-member isolation must cooperate correctly in one run, not just be
+    covered by separate tests of each in isolation. A caller that retries a
+    transient failure internally for one member, while a second member
+    succeeds normally in the same batch pool, must produce a single clean
+    pass -- no failure recorded for the retried member, no re-run needed,
+    and the other member's result completely unaffected."""
+    members = ["MMP0100", "MMP0200"]
+    state_path = tmp_path / "state.json"
+    caller = RetryMaskedCaller(retry_once_for_members={"MMP0100"})
+
+    summary = batch_mod.run_batch(
+        indexed_db, members, tmp_path / "out", caller, "rules", "template",
+        state_path=state_path,
+    )
+
+    # Nothing fails -- the retry was fully absorbed inside the caller
+    # before run_batch's per-future isolation (#78) ever had anything to
+    # catch, so it never needed to.
+    assert summary.ok == 2
+    assert summary.failed == 0
+
+    retried_result = next(r for r in summary.results if r.member == "MMP0100")
+    other_result = next(r for r in summary.results if r.member == "MMP0200")
+    assert retried_result.ok is True
+    # From run_batch's perspective this was one clean call -- the caller's
+    # internal retry is invisible to the batch-level attempts counter,
+    # which only tracks run_batch's own validation-retry path.
+    assert retried_result.attempts == 1
+    assert retried_result.problems == []
+    assert other_result.ok is True
+    assert other_result.attempts == 1
+    assert other_result.problems == []
+
+    # The caller really did retry once for MMP0100 (two underlying attempts)
+    # and call straight through once for MMP0200 -- three attempts, two
+    # run_batch-visible calls.
+    assert caller.calls == 2
+    assert caller.attempts == 3
+
+    # Both members' success is checkpointed -- no second run_batch call is
+    # needed to "pick up" the retried member; it's already done.
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["natural/MILLPROD/MMP0100"]["ok"] is True
+    assert state["natural/MILLPROD/MMP0200"]["ok"] is True
+
+
 def test_batch_skips_unchanged_members_on_resume(indexed_db, tmp_path):
     members = ["MMP0100"]
     state_path = tmp_path / "state.json"
