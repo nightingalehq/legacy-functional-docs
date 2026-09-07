@@ -201,27 +201,6 @@ GitHub org.
   both are covered by new isolated unit tests only (`tests/
   test_mantis_rules.py`, new `tests/test_dynamic_call_resolution.py`); the
   bundled fixture pipeline's gap/coverage counts are unchanged.
-- Implemented issue #89: `mfdoc test-gen`/`mfdoc test-batch`'s default
-  output subdirectory and `test-batch`'s default resume-state file are now
-  namespaced per project config, via a new `cli._project_namespace(cfg)`
-  helper -- keyed on `system` (falling back to `project`, then the literal
-  string `"default"`), sluggified to a filesystem-safe token. Previously
-  both defaulted to a single fixed path (`tests_generated`,
-  `.mfdoc/test-batch-state.json`) regardless of which project config was
-  in use, so two `project.yml` files sharing a working directory (a common
-  setup for documenting more than one system from one checkout) would
-  silently share -- and a `rm -f` meant to force a clean retry for one
-  project could silently clobber -- the other's resume-state file. The
-  namespace segment is inserted even when `options.testgen.out_dir` is
-  explicitly configured (only a CLI-level `--out`/`--state` bypasses it),
-  since `out_dir` is commonly left at, or copy-pasted as, the same literal
-  value across projects. This is a clean break, not a migration: pre-1.0
-  (`pyproject.toml` is still `0.1.0`) with no backward-compatibility
-  promise in `CLAUDE.md`, so a project upgrading past this change simply
-  gets a fresh default state file on its next `test-batch` run (a one-time
-  full re-render, not data loss) -- `--out`/`--state` still let a project
-  pin the old shared path explicitly if that's ever wanted. See
-  `tests/test_test_batch.py`'s "Issue #89" section.
 
 **Progress (2026-09-06):**
 - Implemented issue #64: an eighth document type, `language-guide`, that

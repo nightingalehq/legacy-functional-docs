@@ -1993,6 +1993,25 @@ def test_project_namespace_derives_from_system_then_project_then_default():
     assert _project_namespace({"system": "  Weird/Chars!! "}) == "weird-chars"
 
 
+def test_project_namespace_never_produces_a_path_traversal_segment():
+    """A `system`/`project` value that slugifies to "." or ".." must not be
+    used as-is: as a single path segment (no "/" survives the sub above),
+    either one still means "this directory" / "the parent directory" to
+    the filesystem, which would silently point test-batch's output/state
+    at an unrelated location instead of a real per-project subfolder --
+    the opposite of what this namespacing exists to guarantee."""
+    from mfdoc.cli import _project_namespace
+
+    assert _project_namespace({"system": "."}) == "default"
+    assert _project_namespace({"system": ".."}) == "default"
+    assert _project_namespace({"system": "..."}) not in (".", "..")
+    assert _project_namespace({"system": "  ..  "}) == "default"
+    # A leading/trailing run of dots around otherwise-real content must be
+    # trimmed, not just rejected wholesale -- ".." isn't the *only*
+    # substring that must never survive to become the whole segment.
+    assert _project_namespace({"system": "..sysa.."}) == "sysa"
+
+
 def _seed_fakemod_for_cli(config_path: Path) -> None:
     """Minimal index_db content for one config: a single FAKEMOD member
     with one derived test_case row -- just enough for `cmd_test_batch` to

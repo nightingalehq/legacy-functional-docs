@@ -311,6 +311,14 @@ mfdoc test-gen      --config project.yml --member MMP0100 --language python --fr
 mfdoc test-validate --config project.yml --docs tests_generated
 ```
 
+If multiple `project.yml` configs share the same `out_dir` (the common case
+once namespacing is in play), point `mfdoc test-validate --docs` at the
+namespaced subdirectory for the config you're validating (e.g.
+`tests_generated/mom`) rather than the bare `out_dir` -- pointed at the bare
+`out_dir` it walks every project's namespace subdirectory it finds there and
+attempts to validate their generated test docs too, not just the one config
+you ran it for.
+
 ## Worked examples
 
 [`examples/outputs/`](examples/outputs/) is a full, real run of the pipeline

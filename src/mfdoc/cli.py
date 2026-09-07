@@ -509,6 +509,13 @@ def _project_namespace(cfg: dict) -> str:
     collision this function exists to prevent."""
     raw = cfg.get("system") or cfg.get("project") or "default"
     slug = re.sub(r"[^A-Za-z0-9._-]+", "-", str(raw).strip()).strip("-").lower()
+    # Strip leading/trailing dots so a slug of "." or ".." (or anything that
+    # reduces to just dots once punctuation is stripped) can never become a
+    # literal "." or ".." path segment in the output directory -- that would
+    # resolve to the parent (or same) directory instead of a real namespace
+    # subfolder, enabling path traversal and the exact cross-project
+    # clobbering this function exists to prevent.
+    slug = slug.strip(".")
     return slug or "default"
 
 
@@ -1443,8 +1450,11 @@ def main(argv=None) -> int:
         p.set_defaults(func=fn)
     sub.choices["test-gen"].add_argument("--member", required=True)
     sub.choices["test-gen"].add_argument(
-        "--out", help="default: tests_generated/<project-namespace>/<language>/<MEMBER>.md "
-                      "(see options.testgen.out_dir/--config's system or project key)")
+        "--out", help="default: <out_dir>/<project-namespace>/<dialect>/<library>/<language>/"
+                      "<framework>/<MEMBER>.md, where <out_dir> is options.testgen.out_dir "
+                      "from --config (else tests_generated), <project-namespace> is --config's "
+                      "system or project key, and <dialect>/<library> come from the member's "
+                      "own fact-store row (see _output_subdir)")
     sub.choices["test-batch"].add_argument(
         "--out", default=None,
         help="default: options.testgen.out_dir from --config (else tests_generated), "
