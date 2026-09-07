@@ -33,6 +33,39 @@ GitHub org.
   resume-state/output tree. An explicit `--out`/`--state` is still used
   exactly as given, matching how `index_db` itself is always an explicit,
   project-specific choice.
+- Follow-up to issue #105 (PR #107 review): `flag_density_outliers`'s
+  `avg_depth` comparison left a chunk unflagged whenever the run's other
+  chunks' median depth was 0, on the same "a multiple of 0 is meaningless"
+  reasoning used for `lines_per_item` -- but `rule_candidate.depth` is
+  0-based (top-level depth is often 0), so a run whose other chunks are
+  all flat never flagged a genuinely nested chunk under that rule, however
+  deep it went. A 0 depth median with `avg_depth > 0` is now flagged
+  directly (message names the flat baseline explicitly instead of a
+  division), while a 0 `lines_per_item` median is still left unflagged (a
+  0 span shouldn't occur in practice, unlike a 0 depth).
+- Implemented issue #105: chunk-boundary logic (`brief.
+  routine_aware_chunk_ranges`, shared by `batch.py`/`testbatch.py`) preserves
+  routine boundaries while packing chunks by rule/scenario count, but that
+  count is blind to how content-dense a chunk's *source* actually is -- a chunk could match its siblings' rule
+  count while its source was far harder to narrate (more lines, deeper
+  nesting per rule), and the only symptom was repeated retry failures on
+  that one chunk. Added `brief.chunk_density_metrics`/
+  `flag_density_outliers`/`format_density_note`: a cheap lines-per-rule and
+  average-nesting-depth estimate per chunk from facts already at hand
+  (`rule_candidate.line_no`/`.depth`), flagging a chunk well above the
+  run's own median for either metric. Wired into both `_generate_module_
+  doc_chunked` (batch.py) and `_generate_member_test_doc_chunked`
+  (testbatch.py, lines-per-rule only -- no depth is joined onto test_case
+  rows): a failed chunk's own reported problem now carries a `density: ...
+  -- OUTLIER (...)` note when it's a density outlier, so that distinction
+  is visible immediately rather than requiring a human to notice the
+  pattern across several failed runs. Chose surfacing the estimate in
+  diagnostics (approach (b) from the issue) over auto-splitting a dense
+  chunk further (approach (a)): a synthetic fixture can demonstrate the
+  estimate correctly flags a rule-dense chunk, but not that a smaller
+  chunk boundary actually improves a real model's success rate on it --
+  that would need validating against real (or much more elaborate
+  synthetic) failure data this change doesn't have.
 - Implemented issue #79: `AnthropicCaller` and `VertexCaller` now retry
   transient errors (`RateLimitError`, `APIConnectionError`,
   `InternalServerError`) with bounded exponential backoff and jitter, via a

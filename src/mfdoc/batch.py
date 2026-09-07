@@ -28,8 +28,8 @@ from typing import Callable
 
 from . import __version__
 from .brief import (
-    fetch_routines, fetch_rule_candidate_rows, module_brief, routine_aware_chunk_ranges,
-    routine_for_line,
+    chunk_density_metrics, fetch_routines, fetch_rule_candidate_rows, flag_density_outliers,
+    format_density_note, module_brief, routine_aware_chunk_ranges, routine_for_line,
 )
 from .citations import _cite, _rule_id
 from .db import GAP_SEVERITY_ORDER_SQL
@@ -821,6 +821,21 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
         [r["line_no"] for r in rule_rows], routines, chunk_size,
     )
     chunk_count = len(ranges)
+    # Source-density estimate per chunk (issue #105): routine-aware chunking
+    # packs by rule count within routine boundaries, but that count says
+    # nothing about how content-dense a chunk's *source* actually is -- two
+    # chunks can carry the same rule
+    # count while one's source sprawls across far more lines with far
+    # deeper nesting, and that's exactly the kind of chunk that tends to
+    # burn through its retries without anyone realising *why* until the
+    # pattern's noticed across a whole run. Computed once, up front, from
+    # facts already in `rule_rows` (line_no, depth) -- cheap, no extra
+    # fact-store query -- and only rendered into a chunk's own diagnostics
+    # if that chunk actually fails (see the `problems.append` below), never
+    # into the brief itself.
+    density_metrics = flag_density_outliers(chunk_density_metrics(
+        [r["line_no"] for r in rule_rows], ranges, [r["depth"] for r in rule_rows],
+    ))
     # Routine name (upper) -> 1-based chunk index whose rule range contains
     # that routine's own rules -- known in full before any chunk is
     # narrated, since `ranges` is already fixed above. Handed to every
@@ -919,7 +934,11 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
         chunk_entries.append((i, (start, end), chunk_path, result))
         chunk_state[str(i)] = {"ok": result.ok, "brief_sha256": brief_hash}
         if not result.ok:
-            problems.append(f"chunk {i}/{chunk_count} ({chunk_path.name}) failed: " + "; ".join(result.problems))
+            density_note = format_density_note(density_metrics[i - 1])
+            problems.append(
+                f"chunk {i}/{chunk_count} ({chunk_path.name}) failed: "
+                + "; ".join(result.problems) + f" -- {density_note}"
+            )
 
     confidence = _aggregate_chunk_confidence([p for _, _, p, r in chunk_entries if r.ok])
     routine_labels = _chunk_processing_labels(rule_rows, routines, ranges)

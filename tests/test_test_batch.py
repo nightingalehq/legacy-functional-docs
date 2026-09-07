@@ -861,6 +861,32 @@ def _seed_fakemod_scenarios_with_routines(conn, per_routine: dict[str, int]):
     conn.commit()
 
 
+def _seed_fakemod_scenarios_with_lines(conn, line_nos: list[int]):
+    """Like _seed_fakemod_scenarios, but each scenario is linked (via
+    rule_candidate_id) to a rule_candidate at an explicit line_no -- lets a
+    test control source-line spacing directly, to build a deliberately
+    sparse (source-dense) chunk alongside ordinary ones (issue #105)."""
+    from mfdoc.db import insert
+
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    max_line = max(line_nos)
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, ?, 'irrelevant')", (max_line,))
+    for n, line_no in enumerate(line_nos, start=1):
+        rc_id = insert(
+            conn, "rule_candidate", member_id=1, line_no=line_no, construct="IF",
+            condition=f"COND-{n}", raw=f"IF COND-{n}",
+        )
+        insert(
+            conn, "test_case", member_id=1, kind="unit", rule_candidate_id=rc_id,
+            scenario_name=f"FAKEMOD:BR-{n:03d}",
+            given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+            when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+            then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+            status="characterization", citation="FAKEMOD:1", confidence="verified",
+        )
+    conn.commit()
+
+
 def _chunk_aware_caller(language: str, framework: str):
     """A fake caller that returns a fully valid single-chunk document citing
     exactly the FAKEMOD:BR-nnn ids present in the prompt it was sent --
@@ -980,6 +1006,48 @@ def test_generate_member_test_doc_reports_failure_when_one_chunk_fails(tmp_path)
     index_text = out_path.read_text(encoding="utf-8")
     assert "FAKEMOD:BR-001" in index_text and "FAKEMOD:BR-002" in index_text
     assert "FAKEMOD:BR-003" not in index_text, "a failed chunk's scenarios must not be claimed as covered"
+
+
+def test_generate_member_test_doc_failed_chunk_diagnostics_flag_a_sparse_outlier(tmp_path):
+    """Issue #105: two ordinary chunks (2 scenarios each, tightly packed
+    source lines) plus one deliberately sparse chunk (2 scenarios, but
+    their originating rules sit far apart in the source) -- when the
+    sparse chunk is the one that fails, its own reported problem must
+    carry a density diagnostic marking it an outlier relative to its
+    siblings, mirroring batch.py's module-doc chunking (shared
+    implementation in brief.py)."""
+    from mfdoc import testbatch
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_scenarios_with_lines(conn, [
+        1, 2,      # chunk 1: tight
+        10, 11,    # chunk 2: tight
+        20, 90,    # chunk 3: sprawling source -- the outlier
+    ])
+
+    good_caller = _chunk_aware_caller("python", "pytest")
+
+    def flaky_caller(prompt: str) -> ModelResponse:
+        if "BR-005" in prompt:
+            return ModelResponse(text="not a valid document", input_tokens=1, output_tokens=1)
+        return good_caller(prompt)
+
+    out_path = tmp_path / "FAKEMOD.md"
+    result = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, flaky_caller,
+        "writing rules text", "template text", max_scenarios_per_call=2,
+    )
+    assert result.ok is False
+    dense_problems = [p for p in result.problems if "chunk 3" in p]
+    assert dense_problems, result.problems
+    assert "density:" in dense_problems[0]
+    assert "OUTLIER" in dense_problems[0]
+    assert not any("chunk 1" in p and "OUTLIER" in p for p in result.problems)
+    assert not any("chunk 2" in p and "OUTLIER" in p for p in result.problems)
 
 
 def test_generate_member_test_doc_chunks_by_routine_not_flat_count(tmp_path):
