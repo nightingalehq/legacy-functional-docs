@@ -244,6 +244,24 @@ def test_configure_logging_verbose_enables_debug_level():
     assert logging.getLogger().getEffectiveLevel() == logging.INFO
 
 
+def test_main_exits_cleanly_when_log_file_parent_dir_is_missing(cli_args, tmp_path, capsys):
+    """A `--log-file` path whose parent directory doesn't exist raises
+    `OSError` from `logging.FileHandler` inside `_configure_logging` --
+    previously an uncaught traceback since it fired before the
+    try/except ConfigError block in main() even started; should be a
+    clean, exit-2 usage error like every other CLI validation failure
+    instead (see the Copilot review on PR #115)."""
+    bad_log_path = tmp_path / "no-such-parent-dir" / "mfdoc.log"
+    argv = ["--log-file", str(bad_log_path), "coverage", "--config", cli_args.config]
+
+    rc = cli.main(argv)
+
+    assert rc == 2
+    assert not bad_log_path.parent.exists()
+    err = capsys.readouterr().err
+    assert str(bad_log_path) in err
+
+
 def test_main_wires_verbose_and_log_file_flags_before_the_subcommand(cli_args, tmp_path, caplog):
     """End-to-end through cli.main()'s own argument parsing -- not just
     cmd_batch called directly -- proving --verbose/--log-file actually reach

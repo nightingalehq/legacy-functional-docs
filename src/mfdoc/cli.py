@@ -1508,7 +1508,20 @@ def main(argv=None) -> int:
     p.set_defaults(func=cmd_export)
 
     args = ap.parse_args(argv)
-    _configure_logging(args.verbose, args.log_file)
+    try:
+        _configure_logging(args.verbose, args.log_file)
+    except OSError as exc:
+        # e.g. --log-file pointing at an unwritable path or a missing
+        # parent directory -- a bad CLI argument, not an internal error,
+        # so it gets the same "clean message, exit 2" treatment as
+        # ConfigError below rather than an uncaught traceback. Scoped to
+        # just this call (not the args.func(args) dispatch below) so an
+        # OSError raised from inside a subcommand itself still surfaces as
+        # its own uncaught traceback rather than being misreported as a
+        # --log-file problem.
+        print(f"error: could not open --log-file {args.log_file!r}: {exc}",
+              file=sys.stderr)
+        return 2
     try:
         return args.func(args)
     except ConfigError as exc:
