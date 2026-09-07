@@ -873,20 +873,26 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
         )
         brief_hash = hashlib.sha256(brief.encode("utf-8")).hexdigest()
         prior_chunk = (prior_chunks or {}).get(str(i))
+        # Only a chunk the prior run recorded as *clean* is a reuse
+        # candidate: a failed chunk leaves its last (invalid) attempt on
+        # disk, so reusing it would re-validate the same bad file forever
+        # and the chunk would never re-render.
         reusable = (
-            isinstance(prior_chunk, dict) and prior_chunk.get("brief_sha256") == brief_hash
+            isinstance(prior_chunk, dict) and prior_chunk.get("ok") is True
+            and prior_chunk.get("brief_sha256") == brief_hash
             and chunk_path.exists()
         )
+        result = None
         if reusable:
             # Re-validate rather than trust the stored "ok" flag verbatim --
             # the *content* is cached, but validate_doc's own logic can have
             # changed since it was last checked, and this costs no model call.
+            # A re-validation failure falls through to a normal regeneration
+            # below rather than being reported as terminal.
             revalidated = validate_doc(conn, chunk_path)
-            result = DocResult(
-                member_name, str(chunk_path), revalidated["ok"], 0, 0, 0,
-                revalidated["problems"],
-            )
-        else:
+            if revalidated["ok"]:
+                result = DocResult(member_name, str(chunk_path), True, 0, 0, 0, [])
+        if result is None:
             # A caller exception here (transient network error, rate limit,
             # timeout, ...) must isolate to this one chunk, not propagate out
             # of this whole function and discard every already-completed

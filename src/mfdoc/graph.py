@@ -108,12 +108,15 @@ def resolve_interface_literal_calls(conn) -> int:
           JOIN variable v
             ON v.member_id = ce.caller_id
            AND v.scope = 'mantis_interface'
-           -- Direct comparison, not UPPER()=UPPER(): mantis.py already
-           -- upper()s both the handle name (v.name) and the CALL target
-           -- (ce.callee_name) at insert time, so wrapping either side here
-           -- would only cost the expression index without changing which
-           -- rows match.
-           AND v.name = ce.callee_name
+           -- v.name is not wrapped in UPPER(): mantis.py already upper()s
+           -- it at insert time, so re-wrapping it here would only cost a
+           -- redundant function call without changing which rows match.
+           -- ce.callee_name *is* still wrapped, even though it's also
+           -- already uppercase at insert time, because the query planner
+           -- can only use ix_call_edge_upper_callee (an index on
+           -- UPPER(callee_name); there is no plain index on callee_name)
+           -- when the column appears inside that exact expression.
+           AND v.name = UPPER(ce.callee_name)
          WHERE ce.dynamic = 1 AND ce.call_kind = 'CALL'
         """
     ).fetchall()
