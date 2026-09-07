@@ -226,6 +226,180 @@ def test_batch_retries_once_on_validation_failure_then_reports(indexed_db, tmp_p
     assert "Previous attempt failed validation" in caller.prompts[1]
 
 
+def test_batch_reports_two_attempts_when_the_retry_call_itself_raises(indexed_db, tmp_path):
+    """A caller exception on the *retry* call (not the first) means two
+    calls were actually attempted -- the first (which produced a document
+    that then failed validation) and the retry itself (which raised) --
+    so attempts must be 2, matching the normal successful-retry path's
+    accounting, not 1 as if only the first call had ever happened. See
+    issue #78 review."""
+
+    class RaisesOnRetry:
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, prompt: str) -> batch_mod.ModelResponse:
+            self.calls += 1
+            if "Previous attempt failed validation" in prompt:
+                raise RuntimeError("simulated transient error on retry")
+            return batch_mod.ModelResponse(
+                text="not even front matter, this will fail validation\n",
+                input_tokens=1, output_tokens=1,
+            )
+
+    caller = RaisesOnRetry()
+    state_path = tmp_path / "state.json"
+    summary = batch_mod.run_batch(
+        indexed_db, ["MMP0100"], tmp_path / "out", caller, "rules", "template",
+        state_path=state_path,
+    )
+    assert summary.failed == 1
+    result = summary.results[0]
+    assert result.attempts == 2
+    assert caller.calls == 2
+    assert any("retry model call failed" in p for p in result.problems)
+
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["natural/MILLPROD/MMP0100"]["attempts"] == 2
+
+
+class FlakyCaller:
+    """Wraps a FakeCaller, raising a transient-looking exception for every
+    prompt whose brief is for one of `fail_for_members`, on their first call
+    only -- simulates a real network blip/rate-limit hitting exactly one
+    member mid-batch, the failure mode #78/#79 exist to make survivable.
+    Every other member (and a previously-failed member's later retry-run
+    call) goes through to the wrapped FakeCaller normally."""
+
+    def __init__(self, fail_for_members: set[str]):
+        self._inner = FakeCaller()
+        self._fail_for_members = set(fail_for_members)
+        self._failed_once: set[str] = set()
+        self.calls = 0
+
+    def __call__(self, prompt: str) -> "batch_mod.ModelResponse":
+        self.calls += 1
+        if "# Fact brief:" in prompt:
+            member = prompt.split("# Fact brief:")[1].splitlines()[0].strip()
+            if member in self._fail_for_members and member not in self._failed_once:
+                self._failed_once.add(member)
+                raise RuntimeError(f"simulated transient error for {member}")
+        return self._inner(prompt)
+
+
+def test_save_state_never_leaves_a_truncated_file_on_a_mid_write_crash(tmp_path):
+    """_save_state must write atomically: a failed replacement must never
+    leave a truncated/corrupt JSON file in place of the last good checkpoint
+    -- see issue #78 review. The atomic rename is made to raise, then the
+    previous good state file is asserted to remain intact and valid JSON."""
+    state_path = tmp_path / "state.json"
+    batch_mod._save_state(state_path, {"first": "good state"})
+    assert json.loads(state_path.read_text(encoding="utf-8")) == {"first": "good state"}
+
+    import os as os_mod
+
+    real_replace = os_mod.replace
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated crash before the atomic rename completes")
+
+    os_mod.replace = boom
+    try:
+        with pytest.raises(RuntimeError):
+            batch_mod._save_state(state_path, {"second": "state that must not land"})
+    finally:
+        os_mod.replace = real_replace
+
+    # The original good checkpoint must be untouched -- no partial write
+    # ever replaced it, and the failed attempt's temp file must not be left
+    # behind either.
+    assert json.loads(state_path.read_text(encoding="utf-8")) == {"first": "good state"}
+    leftover_tmp_files = [p for p in tmp_path.iterdir() if p.name != "state.json"]
+    assert leftover_tmp_files == [], f"temp file(s) leaked: {leftover_tmp_files}"
+
+
+def test_corpus_sha256_is_checkpointed_before_the_run_finishes(indexed_db, tmp_path):
+    """`_corpus_sha256` must be written into the persisted state on the
+    *first* incremental checkpoint, not only once at the very end of
+    run_batch -- otherwise a process killed partway through a run leaves a
+    resumed run unable to take the corpus-level `corpus_unchanged`
+    fast-path, even though every member processed before the kill did
+    complete and checkpoint successfully. See issue #78 review.
+
+    Simulated by having the second member's call raise `KeyboardInterrupt`
+    (a BaseException, not caught by run_batch's per-future `except
+    Exception` isolation) so run_batch itself aborts partway through --
+    proving the state on disk already reflects the corpus signature from
+    the first member's checkpoint, not just a final save that never ran."""
+    members = ["MMP0100", "MMP0200"]
+    state_path = tmp_path / "state.json"
+    inner = FakeCaller()
+
+    def kill_on_second_member(prompt: str) -> "batch_mod.ModelResponse":
+        if "# Fact brief:" in prompt:
+            member = prompt.split("# Fact brief:")[1].splitlines()[0].strip()
+            if member == "MMP0200":
+                raise KeyboardInterrupt("simulated process kill")
+        return inner(prompt)
+
+    with pytest.raises(KeyboardInterrupt):
+        batch_mod.run_batch(
+            indexed_db, members, tmp_path / "out", kill_on_second_member, "rules", "template",
+            state_path=state_path, concurrency=1,
+        )
+
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert "_corpus_sha256" in state, (
+        "corpus signature must already be checkpointed from the first "
+        "member's save, not deferred to a final save that never happened"
+    )
+    assert state["natural/MILLPROD/MMP0100"]["ok"] is True
+
+
+def test_batch_isolates_a_single_member_caller_failure_and_checkpoints_the_rest(indexed_db, tmp_path):
+    """A caller exception for one member (ThreadPoolExecutor's fut.result())
+    must not crash the whole run or lose the other members' already-
+    completed state -- see issue #78. The failed member is reported as
+    failed, not silently dropped, and a re-run only needs to redo it."""
+    members = ["MMP0100", "MMP0200", "MMC0100"]
+    state_path = tmp_path / "state.json"
+    caller = FlakyCaller(fail_for_members={"MMP0200"})
+
+    summary = batch_mod.run_batch(
+        indexed_db, members, tmp_path / "out", caller, "rules", "template",
+        state_path=state_path,
+    )
+
+    assert summary.ok == 2
+    assert summary.failed == 1
+    failed = [r for r in summary.results if not r.ok]
+    assert [r.member for r in failed] == ["MMP0200"]
+    assert any("simulated transient error" in p for p in failed[0].problems)
+
+    # The two members the caller never raised for must have their success
+    # checkpointed to state -- not lost because the run as a whole also
+    # contained a failure.
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["natural/MILLPROD/MMP0100"]["ok"] is True
+    assert state["natural/MILLPROD/MMC0100"]["ok"] is True
+    assert state["natural/MILLPROD/MMP0200"]["ok"] is False
+
+    # A re-run must only redo the failed member: the two ok members are
+    # skipped (their briefs are unchanged), and MMP0200 -- which no longer
+    # raises -- succeeds without needing to touch the others again.
+    calls_before_rerun = caller.calls
+    second = batch_mod.run_batch(
+        indexed_db, members, tmp_path / "out", caller, "rules", "template",
+        state_path=state_path,
+    )
+    assert second.ok == 3
+    assert second.failed == 0
+    assert second.skipped == 2
+    # Only MMP0200's own prompt (one fresh attempt) should have gone through
+    # the caller on the re-run -- the other two members made no new calls.
+    assert caller.calls == calls_before_rerun + 1
+
+
 def test_batch_skips_unchanged_members_on_resume(indexed_db, tmp_path):
     members = ["MMP0100"]
     state_path = tmp_path / "state.json"
@@ -521,6 +695,50 @@ def test_generate_module_doc_reports_failure_when_one_chunk_fails(tmp_path):
 
     index_text = out_path.read_text(encoding="utf-8")
     assert "narrative synthesis was skipped" in index_text.lower()
+
+
+def test_generate_module_doc_isolates_a_caller_exception_to_one_chunk(tmp_path):
+    """A caller exception (transient network error, rate limit, ...) on one
+    chunk's model call must not propagate out of the whole chunked-member
+    generation and discard the chunk_state already built for every other
+    chunk in this same pass -- see issue #78 review. The failing chunk is
+    recorded as a failed chunk_state entry (never written to disk, so a
+    later run's `reusable` check can't mistake it for done); every other
+    chunk's real, validated chunk_state survives."""
+    import sqlite3
+    from mfdoc.db import SCHEMA
+    from mfdoc.validate import validate_doc
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_rules(conn, 4)
+
+    good_caller = _chunk_aware_module_caller()
+
+    def flaky_caller(prompt: str) -> batch_mod.ModelResponse:
+        if "# Fact brief:" in prompt and "BR-003" in prompt:
+            raise RuntimeError("simulated transient error for chunk 2")
+        return good_caller(prompt)
+
+    out_path = tmp_path / "FAKEMOD.md"
+    result = batch_mod.generate_module_doc(
+        conn, "FAKEMOD", out_path, flaky_caller,
+        "writing rules text", "template text", max_rules_per_call=2,
+    )
+    assert result.ok is False
+    assert any("chunk 2" in p and "model call failed" in p for p in result.problems)
+    assert any("narrative synthesis: skipped" in p for p in result.problems)
+
+    # Chunk 1 (unaffected) rendered and validated normally -- its
+    # chunk_state entry must be the real, ok one, not lost because chunk 2
+    # blew up in the same pass.
+    assert result.chunk_state["1"]["ok"] is True
+    assert result.chunk_state["2"]["ok"] is False
+    assert (tmp_path / "FAKEMOD.chunk1.md").exists()
+    assert validate_doc(conn, tmp_path / "FAKEMOD.chunk1.md")["ok"]
+    # Chunk 2 never got a response written, so it's not mistakable for done.
+    assert not (tmp_path / "FAKEMOD.chunk2.md").exists()
 
 
 def test_chunked_brief_names_the_chunk_a_routine_in_another_chunk_is_documented_in(tmp_path):
