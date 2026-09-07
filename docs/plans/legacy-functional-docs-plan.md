@@ -32,6 +32,15 @@ GitHub org.
   targets; it already turns a hung/failed `claude -p` call into a clear
   `RuntimeError` on its own. (A retry addition was briefly tried and
   reverted for exactly this reason -- see this branch's history.)
+- Implemented issue #80: `AnthropicCaller` and `VertexCaller` now take a
+  configurable `timeout` (seconds), defaulting to 600 -- the same
+  `DEFAULT_TIMEOUT_S` value and None-means-default pattern
+  `claude_cli_caller.ClaudeCLICaller` already used, so a hung request
+  surfaces as a clear timeout instead of blocking a worker thread
+  indefinitely. A new `--api-timeout` CLI flag (mirroring the existing
+  `--claude-code-timeout`) wires it through `classify-rules`/
+  `test-overlay-draft`/`test-batch`/`batch` for `--provider anthropic`
+  and `--provider vertex`.
 - Implemented issue #91: a new document type, `interface-matrix`, for the
   screen-and-key interface matrix a client review asked for (mode x panel
   x map x PF-label x routine x outcome). It follows the interactive

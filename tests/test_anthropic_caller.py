@@ -1,8 +1,8 @@
-"""Guards for AnthropicCaller's error-path contract and its transient-error
-retry/backoff (#79) -- no real network call or API key is exercised here,
-same isolation approach as test_vertex_caller.py: fake the `anthropic`
-module entirely via sys.modules so nothing needs the real package
-installed to run these."""
+"""Guards for AnthropicCaller's error-path contract, its transient-error
+retry/backoff (#79), and its configurable request timeout (#80) -- no real
+network call or API key is exercised here, same isolation approach as
+test_vertex_caller.py: fake the `anthropic` module entirely via sys.modules
+so nothing needs the real package installed to run these."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import types
 
 import pytest
 
-from mfdoc.anthropic_caller import AnthropicCaller
+from mfdoc.anthropic_caller import DEFAULT_TIMEOUT_S, AnthropicCaller
 
 
 class _FakeRateLimitError(Exception):
@@ -34,7 +34,7 @@ def _fake_anthropic_module(create_fn):
     messages = types.SimpleNamespace(create=create_fn)
     client = types.SimpleNamespace(messages=messages)
     module = types.SimpleNamespace(
-        Anthropic=lambda api_key=None: client,
+        Anthropic=lambda api_key=None, timeout=None: client,
         RateLimitError=_FakeRateLimitError,
         APIConnectionError=_FakeAPIConnectionError,
         InternalServerError=_FakeInternalServerError,
@@ -120,3 +120,59 @@ def test_a_non_retryable_error_propagates_without_retrying(monkeypatch):
     with pytest.raises(_FakeBadRequestError):
         caller("some prompt")
     assert calls["n"] == 1
+
+
+def test_default_timeout_is_passed_to_the_anthropic_client(monkeypatch):
+    constructed = {}
+
+    def fake_anthropic_ctor(**kwargs):
+        constructed.update(kwargs)
+        return types.SimpleNamespace(messages=types.SimpleNamespace(create=lambda **kw: None))
+
+    monkeypatch.setitem(sys.modules, "anthropic", types.SimpleNamespace(
+        Anthropic=fake_anthropic_ctor,
+        RateLimitError=_FakeRateLimitError,
+        APIConnectionError=_FakeAPIConnectionError,
+        InternalServerError=_FakeInternalServerError,
+    ))
+
+    caller = AnthropicCaller()
+    assert caller.timeout == DEFAULT_TIMEOUT_S == 600
+    assert constructed["timeout"] == DEFAULT_TIMEOUT_S
+
+
+def test_explicit_timeout_overrides_the_default(monkeypatch):
+    constructed = {}
+
+    def fake_anthropic_ctor(**kwargs):
+        constructed.update(kwargs)
+        return types.SimpleNamespace(messages=types.SimpleNamespace(create=lambda **kw: None))
+
+    monkeypatch.setitem(sys.modules, "anthropic", types.SimpleNamespace(
+        Anthropic=fake_anthropic_ctor,
+        RateLimitError=_FakeRateLimitError,
+        APIConnectionError=_FakeAPIConnectionError,
+        InternalServerError=_FakeInternalServerError,
+    ))
+
+    caller = AnthropicCaller(timeout=30)
+    assert caller.timeout == 30
+    assert constructed["timeout"] == 30
+
+
+def test_explicit_timeout_is_passed_alongside_an_api_key(monkeypatch):
+    constructed = {}
+
+    def fake_anthropic_ctor(**kwargs):
+        constructed.update(kwargs)
+        return types.SimpleNamespace(messages=types.SimpleNamespace(create=lambda **kw: None))
+
+    monkeypatch.setitem(sys.modules, "anthropic", types.SimpleNamespace(
+        Anthropic=fake_anthropic_ctor,
+        RateLimitError=_FakeRateLimitError,
+        APIConnectionError=_FakeAPIConnectionError,
+        InternalServerError=_FakeInternalServerError,
+    ))
+
+    AnthropicCaller(api_key="sk-test", timeout=45)
+    assert constructed == {"api_key": "sk-test", "timeout": 45}
