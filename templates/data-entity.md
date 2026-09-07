@@ -60,13 +60,15 @@ the second kind does not survive a naive migration.
 
 Unlike every other section above, `entity_brief` has no dedicated fact section
 this one is copied from — there is no "Data quality" or "Integrity" heading in
-the brief to read off. This section is synthesized narrative: infer it from the
-raw material scattered elsewhere in the brief, chiefly the Fields table's own
-`descriptor` column (`DE`/`SUPER`/`SUB`/`PHON`/`HYPER`/`UQ` — uniqueness and
-lookup structure) and `options` column (format/validation notes), plus any
-literal values a rule candidate tests against a field (see the module briefs'
-"Candidate business rules" for modules that access this entity). Do not go
-looking for a brief heading named after this section; there isn't one. Every
-claim must still carry its own citation back to the fact it was inferred from.
+the brief to read off. This section is synthesized narrative: infer it from
+raw material scattered elsewhere in *`entity_brief`'s own* Fields table (not
+this template's rendered one above, which drops some of the brief's columns) —
+chiefly its `descriptor` column (`DE`/`SUPER`/`SUB`/`PHON`/`HYPER`/`UQ` —
+uniqueness and lookup structure) and its `options` column (format/validation
+notes) — plus any literal values a rule candidate tests against a field (see
+the module briefs' "Candidate business rules" for modules that access this
+entity). Do not go looking for a brief heading named after this section;
+there isn't one. Every claim must still carry its own citation back to the
+fact it was inferred from.
 
 ## Gaps and questions for review
