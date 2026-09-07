@@ -942,10 +942,13 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
                     max_attempts=max_attempts,
                 )
             except Exception as exc:
-                logger.error("%s: chunk %d/%d model call failed: %r", member_name, i, chunk_count, exc)
+                logger.error(
+                    "%s: chunk %d/%d model call failed: %s: %s",
+                    member_name, i, chunk_count, exc.__class__.__name__, exc,
+                )
                 result = DocResult(
                     member_name, str(chunk_path), False, 1, 0, 0,
-                    [f"model call failed: {exc!r}"],
+                    [f"model call failed: {exc.__class__.__name__}: {exc}"],
                 )
         input_tokens += result.input_tokens
         output_tokens += result.output_tokens
@@ -1339,10 +1342,12 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
             try:
                 response = fut.result()
             except Exception as exc:
-                logger.error("%s: model call failed: %r", name, exc)
+                logger.error(
+                    "%s: model call failed: %s: %s", name, exc.__class__.__name__, exc,
+                )
                 result = DocResult(
                     name, str(out_path), False, 1, 0, 0,
-                    [f"model call failed: {exc!r}"],
+                    [f"model call failed: {exc.__class__.__name__}: {exc}"],
                 )
                 results.append(result)
                 state[state_key] = {"ok": False, "attempts": 1, "brief_sha256": brief_hash}
@@ -1372,10 +1377,13 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
                     # retry-on-validation-failure path's attempts=2 below,
                     # so BatchSummary/resume state isn't misreported as a
                     # single-attempt failure. See issue #78 review.
-                    logger.error("%s: retry model call failed: %r", name, exc)
+                    logger.error(
+                        "%s: retry model call failed: %s: %s",
+                        name, exc.__class__.__name__, exc,
+                    )
                     result = DocResult(
                         name, str(out_path), False, 2, input_tokens, output_tokens,
-                        validation["problems"] + [f"retry model call failed: {exc!r}"],
+                        validation["problems"] + [f"retry model call failed: {exc.__class__.__name__}: {exc}"],
                     )
                     results.append(result)
                     state[state_key] = {"ok": False, "attempts": 2, "brief_sha256": brief_hash}
@@ -1421,10 +1429,12 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
                 index_template=index_template,
             )
         except Exception as exc:
-            logger.error("%s: chunked generation failed: %r", name, exc)
+            logger.error(
+                "%s: chunked generation failed: %s: %s", name, exc.__class__.__name__, exc,
+            )
             result = DocResult(
                 name, str(out_path), False, 0, 0, 0,
-                [f"model call failed: {exc!r}"], chunked=True, chunk_state=prior_chunks,
+                [f"model call failed: {exc.__class__.__name__}: {exc}"], chunked=True, chunk_state=prior_chunks,
             )
         results.append(result)
         state[state_key] = {

@@ -85,7 +85,7 @@ def call_with_retry(
             delay = min(max_delay, base_delay * (2 ** (attempt - 1)))
             delay *= 0.5 + random.random() / 2  # jitter: 50%-100% of the computed delay
             logger.warning(
-                "transient error on attempt %d/%d, retrying in %.1fs: %r",
-                attempt, max_retries + 1, delay, exc,
+                "transient error on attempt %d/%d, retrying in %.1fs: %s: %s",
+                attempt, max_retries + 1, delay, exc.__class__.__name__, exc,
             )
             do_sleep(delay)
