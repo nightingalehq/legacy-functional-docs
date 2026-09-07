@@ -25,6 +25,23 @@ GitHub org.
   every other worker's access to the shared client. Combined with #78's
   per-member isolation, a transient API error no longer forces a whole
   member to fail and be re-run from scratch.
+- Implemented issue #86: centralized `options.*` config validation.
+  `config_validate.py` is a new, declarative validation pass (`OPTION_SPECS`,
+  a list of `OptionSpec(path, types, check=...)` entries, not an if/elif
+  chain) covering every `options.*` leaf that was previously either
+  validated ad hoc at point of use (`batch._resolve_max_rules_per_call`,
+  `testbatch._resolve_max_scenarios_per_call`, `structural.py`'s
+  `cluster_by`/`direction`/`metric` checks) or not type-checked at all
+  (`options.redact.patterns` regex validity, `options.quality_gates`
+  rate/count ranges). `cli.load_config` calls `raise_if_invalid` on every
+  resolved config before returning it -- since every `cmd_*` calls
+  `load_config` first, this is a single upfront check at CLI startup for
+  every command, and `cli.main` catches the resulting `ConfigError` and
+  exits 2 with a readable, multi-problem message instead of an unhandled
+  traceback partway through a run. The existing point-of-use checks are
+  left in place as a harmless second line of defence for callers that
+  build a config dict without going through `load_config` (e.g. tests
+  calling `batch.run_batch` directly).
 - Implemented issue #85: coverage metrics now persist across runs for trend
   visibility. `db.coverage_history`/`db.record_coverage_history` (new
   `coverage_history` table, append-only, one row per `mfdoc coverage`/
@@ -51,6 +68,23 @@ GitHub org.
   on the same clause still must be). No dialect-specific change needed --
   the fix is in the dialect-neutral prose-polarity helper `validate.py`
   already calls for every dialect.
+- Implemented issue #93: `src/mfdoc/sme_notes.py`, a standalone parser for
+  an optional `sme-notes.md` file (path configured via a new
+  `options.sme_notes` key, documented with a one-line comment in
+  `project.yml` next to the other `options.*` keys). Schema is
+  deliberately semi-structured: text before the first `##` heading (or an
+  explicit `## General` heading) is general context applied to every
+  member/entity; each `## <name>` heading afterwards scopes its body to
+  just that member/entity, matched case-insensitively. `parse()` returns
+  `{None: general_text, "module-alpha": ..., ...}`; `notes_for(notes, member_name)`
+  combines the general section with the member's own section, general
+  first. A missing or empty file parses to `{}` with no error, keeping the
+  whole thing optional. `load(cfg, base)` is the convenience entry point
+  that reads `options.sme_notes` off an already-`cli.load_config`-loaded
+  project config. This PR is deliberately scoped to the parser only --
+  wiring `notes_for()` into `brief.py`'s actual brief-building call sites
+  is issue #94's job, kept separate so #94 has a stable, merged foundation
+  to build on.
 
 **Progress (2026-09-06):**
 - Implemented issue #64: an eighth document type, `language-guide`, that
