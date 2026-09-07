@@ -437,16 +437,19 @@ class RetryMaskedCaller:
         self._inner = FakeCaller()
         self._retry_once_for_members = set(retry_once_for_members)
         self._retried: set[str] = set()
+        self._lock = threading.Lock()
         self.calls = 0
         self.attempts = 0
 
     def __call__(self, prompt: str) -> "batch_mod.ModelResponse":
-        self.calls += 1
+        with self._lock:
+            self.calls += 1
         member = None
         if "# Fact brief:" in prompt:
             member = prompt.split("# Fact brief:")[1].splitlines()[0].strip()
         while True:
-            self.attempts += 1
+            with self._lock:
+                self.attempts += 1
             try:
                 if (member in self._retry_once_for_members
                         and member not in self._retried):
@@ -476,9 +479,13 @@ def test_batch_absorbs_a_transient_caller_retry_while_another_member_succeeds(in
     state_path = tmp_path / "state.json"
     caller = RetryMaskedCaller(retry_once_for_members={"MMP0100"})
 
+    # concurrency=1 keeps this deterministic: RetryMaskedCaller's shared
+    # calls/attempts counters are plain, unlocked `+= 1`s, which would be
+    # racy (and the assertions below flaky) if run_batch's default
+    # ThreadPoolExecutor concurrency let both members' calls interleave.
     summary = batch_mod.run_batch(
         indexed_db, members, tmp_path / "out", caller, "rules", "template",
-        state_path=state_path,
+        state_path=state_path, concurrency=1,
     )
 
     # Nothing fails -- the retry was fully absorbed inside the caller
