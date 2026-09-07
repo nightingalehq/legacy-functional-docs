@@ -164,7 +164,7 @@ def routine_aware_chunk_ranges(rule_line_nos: list[int], routines: list[dict],
     return ranges
 
 
-def chunk_density_metrics(line_nos: list[int], ranges: list[tuple[int, int]],
+def chunk_density_metrics(line_nos: list[int | None], ranges: list[tuple[int, int]],
                            depths: list[int | None] | None = None) -> list[dict]:
     """Per-chunk source-density metrics, computed from facts already at
     hand at chunk-boundary time -- cheap, and shared by batch.py's and
@@ -242,27 +242,44 @@ def flag_density_outliers(metrics: list[dict], factor: float = 1.5) -> list[dict
     a given metric to have a median to compare against at all; a metric
     whose median is 0 is left unflagged for that metric (a multiple of 0 is
     meaningless)."""
-    def _median(key):
-        vals = [m[key] for m in metrics if m.get(key) is not None]
-        return statistics.median(vals) if len(vals) >= 2 else None
+    def _usable(key):
+        return [(i, m[key]) for i, m in enumerate(metrics) if m.get(key) is not None]
 
-    lpi_median = _median("lines_per_item")
-    depth_median = _median("avg_depth")
+    def _median_excluding(usable, idx):
+        # Median of the OTHER chunks' values only -- excluding this chunk's
+        # own entry by position, not by value, so two chunks that happen to
+        # share a value don't cancel each other out of each other's medians.
+        # A candidate chunk's own (often extreme) value must never pull the
+        # median it's being compared against toward itself, or a run with
+        # multiple dense chunks (e.g. [1, 100, 100] lines/item) can dilute
+        # the median enough that none of them clear `factor` (issue #105
+        # review feedback).
+        others = [v for i, v in usable if i != idx]
+        return statistics.median(others) if others else None
+
+    lpi_usable = _usable("lines_per_item")
+    depth_usable = _usable("avg_depth")
 
     out: list[dict] = []
-    for m in metrics:
+    for i, m in enumerate(metrics):
         reasons = []
         lpi = m.get("lines_per_item")
-        if lpi_median and lpi is not None and lpi >= factor * lpi_median:
-            reasons.append(
-                f"lines/item {lpi:.1f} vs run median {lpi_median:.1f} ({lpi / lpi_median:.1f}x)"
-            )
+        if lpi is not None:
+            lpi_median = _median_excluding(lpi_usable, i)
+            # A 0 (or absent) median is left unflagged: a multiple of 0 is
+            # meaningless, and there's nothing to divide by.
+            if lpi_median and lpi >= factor * lpi_median:
+                reasons.append(
+                    f"lines/item {lpi:.1f} vs run median {lpi_median:.1f} ({lpi / lpi_median:.1f}x)"
+                )
         depth = m.get("avg_depth")
-        if depth_median and depth is not None and depth >= factor * depth_median:
-            reasons.append(
-                f"avg nesting depth {depth:.1f} vs run median {depth_median:.1f} "
-                f"({depth / depth_median:.1f}x)"
-            )
+        if depth is not None:
+            depth_median = _median_excluding(depth_usable, i)
+            if depth_median and depth >= factor * depth_median:
+                reasons.append(
+                    f"avg nesting depth {depth:.1f} vs run median {depth_median:.1f} "
+                    f"({depth / depth_median:.1f}x)"
+                )
         out.append({**m, "outlier": bool(reasons), "outlier_reasons": reasons})
     return out
 

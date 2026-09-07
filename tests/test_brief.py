@@ -235,6 +235,27 @@ def test_flag_density_outliers_needs_at_least_two_chunks_to_compare():
     assert flagged[0]["outlier_reasons"] == []
 
 
+def test_flag_density_outliers_flags_multiple_dense_chunks_against_others_median():
+    """A single median across *all* chunks (including the candidate itself)
+    can be pulled upward by that very candidate, so a run with more than one
+    dense chunk can fail to flag any of them -- e.g. [1, 100, 100] lines/item
+    has an all-inclusive median of 100, and neither dense chunk (100) clears
+    factor(1.5) * 100 = 150. The median must instead be computed, per chunk,
+    from its *other* chunks' values only (issue #105 review comment) -- then
+    both dense chunks clear factor * median([1, 100]) = 75.75."""
+    metrics = [
+        {"item_count": 1, "line_span": 1, "lines_per_item": 1.0, "avg_depth": None},
+        {"item_count": 1, "line_span": 100, "lines_per_item": 100.0, "avg_depth": None},
+        {"item_count": 1, "line_span": 100, "lines_per_item": 100.0, "avg_depth": None},
+    ]
+    flagged = flag_density_outliers(metrics)
+    assert flagged[0]["outlier"] is False
+    assert flagged[1]["outlier"] is True
+    assert flagged[2]["outlier"] is True
+    assert any("lines/item" in r for r in flagged[1]["outlier_reasons"])
+    assert any("lines/item" in r for r in flagged[2]["outlier_reasons"])
+
+
 def test_format_density_note_reports_metrics_and_outlier_flag():
     metrics = chunk_density_metrics(_DENSE_LINE_NOS, _DENSE_RANGES, _DENSE_DEPTHS)
     flagged = flag_density_outliers(metrics)
