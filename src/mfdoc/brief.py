@@ -1080,12 +1080,23 @@ def _screen_label_candidates(conn, screen_name: str) -> list[dict]:
       whose `HEADING`-format `entity_field` rows are the literal captions on
       the layout (see `FIELD_TYPES`'s own comment on why a `HEADING`'s
       "name" is the literal text itself, not a variable).
+
+    A bare member name is only unique together with library+dialect (see
+    db.py's `UNIQUE(name, library, dialect)`), so a Natural map name
+    matching more than one member is ambiguous across libraries -- picking
+    one with `LIMIT 1` could silently attribute another library's labels
+    to this screen. Omit labels entirely in that case rather than guess
+    which map they belong to (the `entity` table's own `UNIQUE(name, kind)`
+    means the Mantis path below has no equivalent ambiguity).
     """
-    map_member = conn.execute(
-        "SELECT id, name FROM member WHERE UPPER(name)=UPPER(?) AND object_type='map' LIMIT 1",
+    map_members = conn.execute(
+        "SELECT id, name FROM member WHERE UPPER(name)=UPPER(?) AND object_type='map'",
         (screen_name,),
-    ).fetchone()
-    if map_member:
+    ).fetchall()
+    if len(map_members) > 1:
+        return []
+    if map_members:
+        map_member = map_members[0]
         rows = conn.execute(
             "SELECT line_no, fields FROM interaction WHERE member_id=? AND kind='MAP_TEXT' "
             "ORDER BY line_no",
@@ -1193,11 +1204,33 @@ def interface_matrix_brief(conn, redact: Redactor = NULL_REDACTOR, dispatch_fiel
     )
     out.append("")
 
+    def _cell(text: str) -> str:
+        # A literal `|` in source-derived text would otherwise be read as an
+        # extra column delimiter and corrupt the row -- same escaping
+        # rules_register's own table rendering already applies to
+        # source-derived condition/literal text -- and redact() runs before
+        # that escaping so a redaction placeholder can never itself
+        # introduce an unescaped `|`.
+        return redact(text).replace("|", "\\|")
+
     screens = conn.execute(
         "SELECT DISTINCT target FROM interaction "
         "WHERE target IS NOT NULL AND kind IN ('INPUT','CONVERSE','SHOW') "
         "ORDER BY target"
     ).fetchall()
+
+    # Cached across every screen a member displays -- dispatch_edges_for_member
+    # scans that member's whole rule_candidate set, so a member appearing as
+    # a display point for more than one screen would otherwise repeat that
+    # scan once per screen for no new information.
+    edges_cache: dict[int, list] = {}
+
+    def _dispatch_edges(member_id: int) -> list:
+        if member_id not in edges_cache:
+            edges_cache[member_id] = structural.dispatch_edges_for_member(
+                conn, member_id, dispatch_field=dispatch_field
+            )
+        return edges_cache[member_id]
 
     any_rows = False
     for s in screens:
@@ -1219,7 +1252,7 @@ def interface_matrix_brief(conn, redact: Redactor = NULL_REDACTOR, dispatch_fiel
         # could otherwise share a dict key and silently lose one's edges.
         edges_by_module: dict[int, tuple[str, list]] = {}
         for m in displaying:
-            edges = structural.dispatch_edges_for_member(conn, m["id"], dispatch_field=dispatch_field)
+            edges = _dispatch_edges(m["id"])
             if edges:
                 edges_by_module[m["id"]] = (m["name"], edges)
         if not edges_by_module:
@@ -1232,7 +1265,7 @@ def interface_matrix_brief(conn, redact: Redactor = NULL_REDACTOR, dispatch_fiel
         for m in displaying:
             row = conn.execute(
                 "SELECT line_no FROM interaction WHERE member_id=? AND UPPER(target)=UPPER(?) "
-                "ORDER BY line_no LIMIT 1",
+                "AND kind IN ('INPUT','CONVERSE','SHOW') ORDER BY line_no LIMIT 1",
                 (m["id"], screen_name),
             ).fetchone()
             out.append(f"- `{m['name']}` {_cite(m['name'], row['line_no'] if row else None)}")
@@ -1255,15 +1288,17 @@ def interface_matrix_brief(conn, redact: Redactor = NULL_REDACTOR, dispatch_fiel
         for _mid, (module_name, edges) in edges_by_module.items():
             for e in edges:
                 calls = ", ".join(
-                    f"`{c['callee_name']}` ({c['call_kind']}) {_cite(module_name, c['line_no'])}"
+                    f"`{_cell(c['callee_name'])}` ({c['call_kind']}) {_cite(module_name, c['line_no'])}"
                     for c in e["calls"]
                 ) or "—"
                 assigns = ", ".join(
-                    f"`{a['field']}` = {a['literal']} {_cite(module_name, a['line_no'])}"
+                    f"`{_cell(a['field'])}` = `{_cell(a['literal'])}` {_cite(module_name, a['line_no'])}"
                     for a in e["assigns"]
                 ) or "—"
                 span = _cite(module_name, e["line_no"], e["end_line"])
-                out.append(f"| `{module_name}` | `{e['trigger_value']}` | {span} | {calls} | {assigns} |")
+                out.append(
+                    f"| `{_cell(module_name)}` | `{_cell(e['trigger_value'])}` | {span} | {calls} | {assigns} |"
+                )
         out.append("")
 
     if not any_rows:

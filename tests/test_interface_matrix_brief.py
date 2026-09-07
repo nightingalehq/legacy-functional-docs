@@ -158,3 +158,100 @@ def test_interface_matrix_cli(cli_args, derive_result):
         executive=None, interface_matrix=True, out=None,
     )
     assert cli.cmd_brief(args) == 0
+
+
+def test_ambiguous_natural_map_name_across_libraries_omits_labels_rather_than_guessing():
+    """Two distinct map members sharing a bare name (only unique together
+    with library+dialect, see db.py) must not have either one's MAP_TEXT
+    silently attributed to this screen."""
+    conn = _conn()
+    _member(conn, 1, "MMP0100")
+    conn.execute(
+        "INSERT INTO member (id, name, dialect, object_type, library) "
+        "VALUES (2, 'MMM0100', 'natural', 'map', 'LIBA')"
+    )
+    conn.execute(
+        "INSERT INTO member (id, name, dialect, object_type, library) "
+        "VALUES (3, 'MMM0100', 'natural', 'map', 'LIBB')"
+    )
+    insert(conn, "interaction", member_id=1, line_no=5, kind="INPUT", target="MMM0100")
+    insert(conn, "interaction", member_id=2, line_no=20, kind="MAP_TEXT", fields="PF3=Exit (LIBA)")
+    insert(conn, "interaction", member_id=3, line_no=20, kind="MAP_TEXT", fields="PF3=Quit (LIBB)")
+    _rc(conn, 1, 10, "IF", condition="*PF-KEY = 'PF3'", depth=0, end_line=11)
+    insert(conn, "call_edge", caller_id=1, callee_name="MMP9999", call_kind="FETCH",
+           dynamic=0, line_no=11)
+
+    out = interface_matrix_brief(conn, redact=NULL_REDACTOR)
+    assert "MMM0100" in out
+    assert "### Candidate PF-key labels" not in out
+    assert "LIBA" not in out and "LIBB" not in out
+
+
+def test_reachable_from_citation_only_considers_display_interaction_rows():
+    """A non-display interaction row (e.g. MAP_TEXT) sharing the same
+    target name as a display point must never supply the "reachable from"
+    citation -- only INPUT/CONVERSE/SHOW rows describe an actual display."""
+    conn = _conn()
+    _member(conn, 1, "MMP0100")
+    # An earlier, unrelated interaction row that happens to share the
+    # screen's name as its own `target` but isn't a display kind.
+    insert(conn, "interaction", member_id=1, line_no=1, kind="MAP_TEXT", target="MMM0100",
+           fields="not a display point")
+    insert(conn, "interaction", member_id=1, line_no=5, kind="INPUT", target="MMM0100")
+    _rc(conn, 1, 10, "IF", condition="*PF-KEY = 'PF3'", depth=0, end_line=11)
+    insert(conn, "call_edge", caller_id=1, callee_name="MMP9999", call_kind="FETCH",
+           dynamic=0, line_no=11)
+
+    out = interface_matrix_brief(conn, redact=NULL_REDACTOR)
+    assert "[[MMP0100:5]]" in out
+    assert "[[MMP0100:1]]" not in out
+
+
+def test_a_pipe_in_a_dispatch_literal_does_not_corrupt_the_markdown_table():
+    """A literal value containing `|` must not be read as an extra column
+    delimiter, and source-derived text must be redacted like every other
+    fact this brief hands over."""
+    conn = _conn()
+    _member(conn, 1, "MMP0100")
+    insert(conn, "interaction", member_id=1, line_no=5, kind="INPUT", target="MMM0100")
+    _rc(conn, 1, 10, "IF", condition="*PF-KEY = 'PF3'", depth=0, end_line=12)
+    insert(conn, "call_edge", caller_id=1, callee_name="MMP9999", call_kind="FETCH",
+           dynamic=0, line_no=11)
+    _rc(conn, 1, 12, "ASSIGN", fields_used="#MODE", literals="'A|B'", depth=1)
+
+    out = interface_matrix_brief(conn, redact=NULL_REDACTOR)
+    assert "\\|" in out, "the literal's own pipe must be escaped, not left to break the table"
+    table_lines = [l for l in out.splitlines() if l.startswith("| `MMP0100`")]
+    assert table_lines, "expected a rendered matrix row"
+    # 5 columns -> 6 real column-delimiter pipes; an escaped `\|` inside a
+    # cell's own text must not be counted as one of them.
+    unescaped = re.findall(r"(?<!\\)\|", table_lines[0])
+    assert len(unescaped) == 6, f"unescaped pipe corrupted the row: {table_lines[0]!r}"
+
+
+def test_dispatch_edges_are_computed_once_per_member_across_multiple_screens(monkeypatch):
+    """A module displaying more than one screen must not re-scan its own
+    rule_candidate set once per screen (dispatch_edges_for_member scans the
+    whole member) -- the per-member cache must make this a single call."""
+    import mfdoc.structural as structural_mod
+
+    conn = _conn()
+    _member(conn, 1, "MMP0100")
+    insert(conn, "interaction", member_id=1, line_no=5, kind="INPUT", target="MMM0100")
+    insert(conn, "interaction", member_id=1, line_no=7, kind="INPUT", target="MMM0200")
+    _rc(conn, 1, 10, "IF", condition="*PF-KEY = 'PF3'", depth=0, end_line=11)
+    insert(conn, "call_edge", caller_id=1, callee_name="MMP9999", call_kind="FETCH",
+           dynamic=0, line_no=11)
+
+    calls = []
+    real = structural_mod.dispatch_edges_for_member
+
+    def _counting(conn_, member_id, dispatch_field=None):
+        calls.append(member_id)
+        return real(conn_, member_id, dispatch_field=dispatch_field)
+
+    monkeypatch.setattr(structural_mod, "dispatch_edges_for_member", _counting)
+
+    out = interface_matrix_brief(conn, redact=NULL_REDACTOR)
+    assert "MMM0100" in out and "MMM0200" in out
+    assert calls == [1], f"expected exactly one scan of member 1, got {calls}"
