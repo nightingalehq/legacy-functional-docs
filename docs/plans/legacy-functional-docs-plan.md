@@ -22,6 +22,34 @@ GitHub org.
   `--claude-code-timeout`) wires it through `classify-rules`/
   `test-overlay-draft`/`test-batch`/`batch` for `--provider anthropic`
   and `--provider vertex`.
+- Implemented issue #91: a new document type, `interface-matrix`, for the
+  screen-and-key interface matrix a client review asked for (mode x panel
+  x map x PF-label x routine x outcome). It follows the interactive
+  brief/template pattern (`brief.interface_matrix_brief()`,
+  `templates/interface-matrix.md`, `mfdoc brief --interface-matrix`) like
+  `system_brief`/`executive_brief`, not `batch.py`'s per-member path, so
+  the brief can gather each screen's display reference(s) and the
+  PF-key/dispatch branches found in the same modules that display it.
+  Reuses `structural.dispatch_edges_for_member` (the same derivation
+  `mfdoc dispatch-map` uses) for the PF-key branches, joined against
+  `interaction.target` (dialect-general: Natural's `INPUT USING MAP`,
+  Mantis's `CONVERSE`/`SHOW`) for which module(s) display each screen.
+  Data-model decisions, since the fact store has no table shaped like the
+  target document: "mode(s) reachable from" is every module whose own
+  source displays the screen (no dedicated mode field exists in the fact
+  store); PF-key labels are handed over as candidate literal text found on
+  the screen (Natural `MAP_TEXT` interaction rows / Mantis `HEADING`-format
+  `entity_field` rows on the `mantis_map` entity) rather than pre-matched
+  to a trigger value; "outcome" (exit/navigate/error) is deliberately left
+  for the narrative pass to characterise from the cited routine/call kind,
+  not classified deterministically, since neither a PF-key's number nor a
+  routine's name reliably implies its outcome. The bundled sample codebase
+  has no member that both displays a screen and dispatches on a PF-key/
+  configured field for it, so `examples/outputs/docs/interface-matrix.md`
+  demonstrates the brief's honest "nothing to report" path rather than
+  populated rows; `tests/test_interface_matrix_brief.py` covers populated
+  rows with synthetic facts, for both Natural's `*PF-KEY` and a
+  Mantis-style configured dispatch field.
 - Implemented issue #86: centralized `options.*` config validation.
   `config_validate.py` is a new, declarative validation pass (`OPTION_SPECS`,
   a list of `OptionSpec(path, types, check=...)` entries, not an if/elif
@@ -82,6 +110,25 @@ GitHub org.
   wiring `notes_for()` into `brief.py`'s actual brief-building call sites
   is issue #94's job, kept separate so #94 has a stable, merged foundation
   to build on.
+- Implemented issue #104 (two gate-gap classes miscalibrated as harder than
+  they are): (1) `mantis.py`'s `'`-marked continuation fold recognised only
+  a *leading* marker (continuation line starts with `'`); added the
+  complementary *trailing* shape, where the marker sits at the end of the
+  line being wrapped instead (e.g. a long quoted assignment split as
+  `DESC="text so far '` / `more text"`) — new `_has_open_trailing_marker`
+  helper, distinguishing a genuine trailing marker from an ordinary line
+  that just happens to end with a real, closed literal. (2) new
+  `graph.resolve_interface_literal_calls`, run from `resolve()` before the
+  general callee_id lookup: a `CALL` on a Mantis `INTERFACE handle(...)`
+  bound to a literal at its own declaration (`mantis.py` now also records
+  that binding as a `variable` row, `scope='mantis_interface'`) is
+  reclassified to the literal target instead of being left as a
+  `dynamic_target` gap — that gap kind is reserved for targets genuinely
+  not determinable from source, not ones the extraction-time check just
+  hadn't looked up yet. Neither fixture set exercises either shape yet, so
+  both are covered by new isolated unit tests only (`tests/
+  test_mantis_rules.py`, new `tests/test_dynamic_call_resolution.py`); the
+  bundled fixture pipeline's gap/coverage counts are unchanged.
 
 **Progress (2026-09-06):**
 - Implemented issue #64: an eighth document type, `language-guide`, that

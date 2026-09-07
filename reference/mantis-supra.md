@@ -83,6 +83,21 @@ it. The scanner records the first token as the library and raises a gap saying t
 confirm, because recording a library as a callee invents a missing module that an
 SME then has to chase and dismiss.
 
+A long condition or quoted string can wrap across physical lines, marked with a
+`'` in either of two shapes: **leading** (every continuation line starts with
+`'`, e.g. an unclosed `IF(...` followed by `'OR ...)`) or **trailing** (the
+line being wrapped itself ends with a bare `'` and the next line carries no
+marker of its own, e.g. `DESC="text so far '` / `more text"`). Both are folded
+into one statement before keyword matching — see `mantis.py`'s module
+docstring for the exact rule that tells a genuine trailing marker apart from
+an ordinary line that just happens to end with a closed literal.
+
+`INTERFACE handle("LITERAL",...)` binds `handle` to a known callee. A later
+bare `CALL handle` is not left as an indeterminate `dynamic_target` gap —
+`graph.resolve_interface_literal_calls` reclassifies it to the bound literal,
+since the target was knowable from source all along, just not at the line
+that calls it.
+
 **Declarations.** `TEXT`, `SMALLTEXT`, `BIGTEXT`, `NUMERIC`, `BIGNUMERIC`,
 `SMALLNUMERIC`, `ARRAY`, `PICTURE`, `LEVEL`, and `VIEW name OF dataset`.
 

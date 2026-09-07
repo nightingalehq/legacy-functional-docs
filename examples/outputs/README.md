@@ -24,6 +24,7 @@ outputs/
   testability-advisory.md      mfdoc test-advisory --out (doc_type: register)
   docs/
     system-overview.md         cross-cutting: whole-system narrative
+    interface-matrix.md        cross-cutting: screen-and-key interface matrix (mode x panel x map x PF-label x routine x outcome)
     gap-register.md            cross-cutting: every unresolved gap, as SME questions
     entities/                  cross-cutting: one doc per business entity (spans multiple dialects)
     process-flows/             cross-cutting: JCL/CICS-driven orchestration
@@ -50,11 +51,14 @@ Natural program) and `tests/mantis/` contains a `natural/natunit` rendering
 the same way; that's the intended behaviour of a destination matrix, not a
 bug in the tree above.
 
-`docs/entities/`, `docs/process-flows/`, `docs/system-overview.md` and
-`docs/gap-register.md` don't have a per-dialect home because they're
-cross-cutting by nature (an entity doc spans whatever dialects define and use
-it; the system overview spans everything) — they sit at the `docs/` root
-instead of being forced into a `<dialect>/` shape that doesn't fit them.
+`docs/entities/`, `docs/process-flows/`, `docs/system-overview.md`,
+`docs/interface-matrix.md` and `docs/gap-register.md` don't have a
+per-dialect home because they're cross-cutting by nature (an entity doc
+spans whatever dialects define and use it; the system overview spans
+everything; the interface matrix groups each screen's display references
+and PF-key/dispatch facts together at whole-system scope) — they sit at
+the `docs/` root instead of being forced into a `<dialect>/` shape that
+doesn't fit them.
 
 ## What's auto-refreshed vs. hand/session-produced
 
@@ -62,7 +66,7 @@ instead of being forced into a `<dialect>/` shape that doesn't fit them.
 |---|---|---|
 | `index.db`, `index.json`, `coverage.json`, `rules-register.md`, `test-plan-register.md`, `testability-advisory.md` | Fully deterministic — no model call anywhere in `ingest`/`derive`/`coverage`/`test-plan`/`test-advisory`/`rules-register`/`export` | CI, automatically, on every push to `main` (see `.github/workflows/ci.yml`'s `update-examples` job) — committed back with `[skip ci]` so it doesn't retrigger itself |
 | `docs/natural/`, `docs/mantis/`, `tests/natural/`, `tests/mantis/` | `mfdoc batch`/`mfdoc test-batch --matrix`, run for real via `--provider claude-code` (the local Claude Code CLI, no `ANTHROPIC_API_KEY` needed); `tests/` covers every configured `options.testgen.matrix` target, not just one language | Whoever re-runs the commands below — CI does not call any model, by design (see the root README's security/compliance guide) |
-| `docs/entities/`, `docs/process-flows/`, `docs/system-overview.md`, `docs/gap-register.md` | Written directly, from `mfdoc brief --entity`/`--system` output — the interactive Claude Code path these four doc types are designed for (no automated CLI path exists for them) | Same as above — hand/session-produced, CI only validates they haven't drifted |
+| `docs/entities/`, `docs/process-flows/`, `docs/system-overview.md`, `docs/interface-matrix.md`, `docs/gap-register.md` | Written directly, from `mfdoc brief --entity`/`--system`/`--interface-matrix` output — the interactive Claude Code path these five doc types are designed for (no automated CLI path exists for them) | Same as above — hand/session-produced, CI only validates they haven't drifted |
 
 CI's `test` job runs `mfdoc validate`/`mfdoc test-validate` against this whole
 tree on every push and pull request, so a citation that stops resolving (a
@@ -100,10 +104,11 @@ mfdoc validate       --config project.yml --docs examples/outputs
 mfdoc test-validate  --config project.yml --docs examples/outputs/tests
 ```
 
-`docs/entities/`, `docs/process-flows/`, `docs/system-overview.md` and
-`docs/gap-register.md` aren't reproduced by a single command — write them the
-way `SKILL.md` describes, from `mfdoc brief --entity NAME`/`--system` output,
-following `reference/writing-rules.md`. The gap register's one "Discrepancies
+`docs/entities/`, `docs/process-flows/`, `docs/system-overview.md`,
+`docs/interface-matrix.md` and `docs/gap-register.md` aren't reproduced by a
+single command — write them the way `SKILL.md` describes, from `mfdoc brief
+--entity NAME`/`--system`/`--interface-matrix` output, following
+`reference/writing-rules.md`. The gap register's one "Discrepancies
 found" entry (`MILL-CERT` vs. the DDL's `MILL_CERT`) is a good illustration of
 why: it was found by a person cross-referencing two independently-correct
 facts no single automated brief puts side by side, not by any tool.

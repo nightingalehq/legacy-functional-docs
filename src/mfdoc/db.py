@@ -118,14 +118,14 @@ CREATE TABLE IF NOT EXISTS entity_link (
 CREATE TABLE IF NOT EXISTS variable (
     id            INTEGER PRIMARY KEY,
     member_id     INTEGER NOT NULL REFERENCES member(id),
-    scope         TEXT,                   -- local | parameter | global | independent | view | mantis_local | mantis_shared
+    scope         TEXT,                   -- local | parameter | global | independent | view | mantis_local | mantis_shared | mantis_interface
     level         INTEGER,
     name          TEXT NOT NULL,
     format        TEXT,
     length        TEXT,
     redefines     TEXT,
     init_value    TEXT,
-    view_of       TEXT,                   -- DDM name when scope='view'
+    view_of       TEXT,                   -- DDM name when scope='view'; screen/literal target when scope='screen'/'mantis_interface'
     line_no       INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_var_member ON variable(member_id);
