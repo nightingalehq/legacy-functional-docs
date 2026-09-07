@@ -187,3 +187,46 @@ def test_prose_polarity_no_more_than_reads_as_at_most_not_greater_than():
 
 def test_prose_polarity_no_less_than_reads_as_at_least_not_less_than():
     assert prose_polarity("the code is no less than '4'", "4") == "ge"
+
+
+def test_prose_polarity_ignores_hedge_word_across_an_and_boundary():
+    """Issue #90: a compound `AND` condition narrated as two clauses in one
+    sentence must not let a hedge word ('at least') that modifies the
+    *other* clause's operand bleed across the conjunction into this
+    literal's own reading. Real example: source `STAT="FAIL" AND
+    OBS_COUNT>ZERO`, narrated as "STAT equals 'FAIL' and at least one
+    observation was counted" -- "at least" describes OBS_COUNT, not STAT,
+    so STAT's own literal ('FAIL') must still read as plain equality."""
+    assert prose_polarity(
+        "if STAT equals 'FAIL' and at least one observation was counted", "FAIL"
+    ) == "eq"
+
+
+def test_prose_polarity_ignores_hedge_word_across_an_or_boundary():
+    assert prose_polarity(
+        "if STAT equals 'FAIL' or at least one observation was counted", "FAIL"
+    ) == "eq"
+
+
+def test_prose_polarity_still_reads_hedge_word_on_the_same_side_of_an_and_clause():
+    """The AND-boundary clipping above must not blanket-suppress hedge-word
+    detection for a clause it genuinely belongs to -- only clip the side of
+    the literal that's on the *other* side of the conjunction from it."""
+    assert prose_polarity(
+        "the count is at least '4' and STAT equals 'FAIL'", "4"
+    ) == "ge"
+
+
+def test_prose_polarity_or_equal_is_not_a_clause_boundary():
+    """"or equal (to)" is part of relational phrasing ("greater/less than or
+    equal to"), not a logical clause conjunction. Without excluding it,
+    clause-boundary clipping cuts the search window right at the "or",
+    before it ever reaches the literal on the far side -- which would
+    regress this down to a plain "eq"/"ne" reading, silently losing the
+    relational wording entirely. (_GE_WORDS/_LE_WORDS don't themselves
+    recognise "or equal to" phrasing -- that's a separate, pre-existing gap,
+    not this issue's concern -- so today this correctly resolves via
+    _GT_WORDS/_LT_WORDS to plain "gt"/"lt"; what matters here is that it
+    resolves to *that*, not to "eq".)"""
+    assert prose_polarity("the count is greater than or equal to '4'", "4") == "gt"
+    assert prose_polarity("the count is less than or equal to '4'", "4") == "lt"

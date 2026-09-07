@@ -23,6 +23,22 @@ GitHub org.
   runtime dependency. `mfdoc coverage --history` reads the trend back as a
   plain table (view-only — it does not itself append a row, so checking
   the trend repeatedly can't pollute it).
+- Fixed issue #90: the reversed-condition checker's proximity heuristic
+  (`conditions.prose_polarity`) misattributed a hedge word ("at least",
+  "no more than", ...) to an unrelated outcome-field comparison sitting
+  next to it in a compound `AND`/`OR` condition's narration, rather than to
+  the clause it actually modifies. `_clip_at_clause_boundary` now clips
+  each side of the literal's search window at the nearest `AND`/`OR`
+  conjunction before scanning for a hedge/negation marker, so a marker on
+  the far side of a conjunction from the literal (belonging to a different
+  clause's operand) no longer bleeds into this literal's reading. Covered
+  by new unit tests in `tests/test_conditions.py` (the false-positive
+  case, plus its `OR` variant and a same-clause control) and an
+  end-to-end pair in `tests/test_validate.py` (a compound-`AND` condition
+  narrated correctly must not be flagged; a hedge word genuinely reversed
+  on the same clause still must be). No dialect-specific change needed --
+  the fix is in the dialect-neutral prose-polarity helper `validate.py`
+  already calls for every dialect.
 
 **Progress (2026-09-06):**
 - Implemented issue #64: an eighth document type, `language-guide`, that
