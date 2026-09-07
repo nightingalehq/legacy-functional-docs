@@ -1,0 +1,22 @@
+** MMP9550 - WRITE OPERAND-LIST CONTINUATION FIXTURE, NO COLSPEC TOKEN
+** Sibling of MMP9500 (issue 4.11a/#24): that fixture's continuation lines
+** each carry a report-writer column-spec token ("5T"/"30T"), which is what
+** CONTINUATION_LEAD_COLSPEC keys off. This one wraps the same way but
+** without any column-spec token riding along, exercising the three other
+** WRITE-scoped continuation leads instead: a line opening with a quoted
+** literal (CONTINUATION_LEAD_QUOTE, checked unconditionally -- no verb ever
+** starts with a bare literal), a bare "/" skip-a-line marker with nothing
+** else on it (CONTINUATION_LEAD_SLASH), and a bare field reference
+** (CONTINUATION_LEAD_FIELD, restricted to a leading "#" and excluding a
+** ":=" so a genuine bare assignment statement isn't mistaken for another
+** WRITE operand). All three are scoped to WRITE/DISPLAY/PRINT/INPUT/
+** REINPUT only, same as CONTINUATION_LEAD_COLSPEC.
+DEFINE DATA LOCAL
+1 #BATCH-SEQ (N4)
+1 #BATCH-STATUS (A20)
+END-DEFINE
+WRITE 'BATCH LOG'
+  '- STARTED' #BATCH-SEQ (#BATCH-SEQ + 1)
+  /
+  #BATCH-STATUS
+END
