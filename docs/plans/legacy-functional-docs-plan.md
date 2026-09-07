@@ -13,6 +13,16 @@ GitHub org.
   flows and the gap register, where judgement matters most.
 
 **Progress (2026-09-07):**
+- Implemented issue #85: coverage metrics now persist across runs for trend
+  visibility. `db.coverage_history`/`db.record_coverage_history` (new
+  `coverage_history` table, append-only, one row per `mfdoc coverage`/
+  `mfdoc gate` invocation, `metrics_json` carrying the whole
+  `graph.coverage()` dict so a future metric needs no schema change) —
+  chosen over a bare JSONL file so it lives alongside the rest of a
+  project's per-engagement state in the same `.mfdoc/index.db`, with no new
+  runtime dependency. `mfdoc coverage --history` reads the trend back as a
+  plain table (view-only — it does not itself append a row, so checking
+  the trend repeatedly can't pollute it).
 - Fixed issue #90: the reversed-condition checker's proximity heuristic
   (`conditions.prose_polarity`) misattributed a hedge word ("at least",
   "no more than", ...) to an unrelated outcome-field comparison sitting
