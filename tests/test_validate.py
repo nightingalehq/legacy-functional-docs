@@ -383,6 +383,65 @@ def test_validator_flags_reversed_field_to_field_condition(tmp_path):
     assert any("comparison direction may be reversed" in p for p in result["problems"])
 
 
+def test_validator_ignores_hedge_word_from_a_different_and_clause(tmp_path):
+    """Issue #90: `#STAT="FAIL" AND #OBS-COUNT>'0'` narrated as "STAT equals
+    'FAIL' and at least one observation was counted" is correct prose -- "at
+    least" describes #OBS-COUNT (not an outcome field, so not checked here),
+    not #STAT's own equality comparison. The reversed-condition check must
+    not misattribute that hedge word across the AND to #STAT's literal."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    mid = insert(conn, "member", name="TESTAND", dialect="natural", object_type="subprogram")
+    lines = [
+        "IF #STAT = 'FAIL' AND #OBS-COUNT > '0'",
+        "  COMPRESS 'discrepancy noted' INTO #MSG",
+        "END-IF",
+    ]
+    natural.extract(conn, mid, [(i + 1, None, line) for i, line in enumerate(lines)], "TESTAND")
+    conn.commit()
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        COND_FRONTMATTER.replace("TESTCOND", "TESTAND")
+        + "\nIf STAT equals 'FAIL' and at least one observation was counted, "
+          "a discrepancy is noted [[TESTAND:1-3]].\n"
+    )
+    result = validate_doc(conn, doc)
+    assert not any("comparison direction may be reversed" in p for p in result["problems"]), result["problems"]
+
+
+def test_validator_flags_a_genuinely_reversed_hedge_word_on_the_same_clause(tmp_path):
+    """Companion to the AND-boundary fix above -- it must not blanket-suppress
+    a hedge word that genuinely belongs to the same clause as the outcome
+    field it's next to. `#RETURN-CODE > '4'` means the success path (the
+    ELSE branch) is `#RETURN-CODE <= '4'`; narrating that success path as
+    "at least 4" has the relational direction backwards, same class of bug
+    as test_validator_flags_reversed_relational_condition, just phrased with
+    a hedge word instead of "greater than"."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    mid = insert(conn, "member", name="TESTHEDGE", dialect="natural", object_type="subprogram")
+    lines = [
+        "IF #RETURN-CODE > '4'",
+        "  BACKOUT TRANSACTION",
+        "ELSE",
+        "  END TRANSACTION",
+        "END-IF",
+    ]
+    natural.extract(conn, mid, [(i + 1, None, line) for i, line in enumerate(lines)], "TESTHEDGE")
+    conn.commit()
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        COND_FRONTMATTER.replace("TESTCOND", "TESTHEDGE")
+        + "\nOn success (`#RETURN-CODE` at least `'4'`), the transaction "
+          "completes [[TESTHEDGE:1-5]].\n"
+    )
+    result = validate_doc(conn, doc)
+    assert not result["ok"]
+    assert any("comparison direction may be reversed" in p for p in result["problems"])
+
+
 def test_validator_supports_a_custom_outcome_field_pattern(tmp_path):
     """A project with different outcome-field naming conventions gets
     coverage from this check by supplying its own pattern, instead of

@@ -38,7 +38,10 @@ detection, fields on a referenced screen/table a module never touches
 and coverage metrics (`line_recognition_rate`,
 `call_resolution_rate`, `entity_definition_rate`, gap counts by severity).
 `mfdoc gate` checks these against configurable thresholds before anything is
-written.
+written. Every `mfdoc coverage`/`mfdoc gate` run appends a timestamped
+snapshot of these metrics to the fact store; `mfdoc coverage --history`
+prints the resulting trend so drift or improvement across a multi-week
+engagement is visible without tracking it by hand.
 
 ### What it produces
 
