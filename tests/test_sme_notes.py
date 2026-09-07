@@ -109,7 +109,7 @@ def test_explicit_general_heading(tmp_path):
     assert sme_notes.notes_for(parsed, "MODULE-ALPHA") == "Explicit general section.\n\nMODULE-ALPHA note."
 
 
-def test_unknown_heading_names_are_parsed_but_never_matched(tmp_path):
+def test_unknown_heading_names_are_parsed_and_match_only_when_looked_up(tmp_path):
     path = tmp_path / "sme-notes.md"
     path.write_text(
         "## SOME-UNKNOWN-MEMBER\n"
@@ -119,9 +119,26 @@ def test_unknown_heading_names_are_parsed_but_never_matched(tmp_path):
     )
     parsed = sme_notes.parse(path)
     assert parsed == {"some-unknown-member": "Notes about something that isn't looked up."}
-    # Never matched by lookup for any real member -- not an error, just no hit.
+    # Unrelated member names do not match; looking up the heading itself does.
     assert sme_notes.notes_for(parsed, "MODULE-ALPHA") is None
     assert sme_notes.notes_for(parsed, "SOME-UNKNOWN-MEMBER") == "Notes about something that isn't looked up."
+
+
+def test_duplicate_member_headings_are_combined_in_document_order(tmp_path):
+    path = tmp_path / "sme-notes.md"
+    path.write_text(
+        "## MODULE-ALPHA\n"
+        "\n"
+        "First note.\n"
+        "\n"
+        "## module-alpha\n"
+        "\n"
+        "Second note.\n",
+        encoding="utf-8",
+    )
+    parsed = sme_notes.parse(path)
+    assert parsed == {"module-alpha": "First note.\n\nSecond note."}
+    assert sme_notes.notes_for(parsed, "MODULE-ALPHA") == "First note.\n\nSecond note."
 
 
 def test_case_insensitivity(tmp_path):

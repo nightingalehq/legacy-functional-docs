@@ -79,7 +79,7 @@ def _parse_text(text: str) -> Notes:
         if key == "general":
             notes[None] = f"{notes[None]}\n\n{body}" if notes.get(None) else body
         else:
-            notes[key] = body
+            notes[key] = f"{notes[key]}\n\n{body}" if notes.get(key) else body
 
     return notes
 
