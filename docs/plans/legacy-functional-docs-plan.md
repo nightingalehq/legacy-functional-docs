@@ -14,7 +14,7 @@ GitHub org.
 
 **Progress (2026-09-07):**
 - Added a regression test (`test_batch_absorbs_a_transient_caller_retry_while_another_member_succeeds`
-  in `tests/test_batch.py`) exercising issue #79's retry/backoff and issue
+  in `tests/test_batch.py`) exercising issue #79's internal retry and issue
   #78's per-future isolation *together* in one `run_batch` pass, which
   `tests/test_batch.py` didn't yet cover -- the existing isolation test
   (`FlakyCaller`) only covers a caller exception that *propagates out* to
@@ -23,7 +23,9 @@ GitHub org.
   `call_with_retry`) while a different member succeeds
   normally in the same pool. The new `RetryMaskedCaller` test double
   inlines that catch-and-retry-once shape (rather than importing
-  `mfdoc.retry` directly) and asserts: no failure recorded for the retried member, its
+  `mfdoc.retry` directly, so the test stays focused on the batch boundary
+  without coupling to the helper's implementation or timing) and asserts: no failure
+  recorded for the retried member, its
   batch-level `attempts` stays 1 (the retry is invisible to run_batch),
   the other member's result is untouched, and no second `run_batch` call
   is needed to pick up the retried member.

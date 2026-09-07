@@ -418,14 +418,15 @@ class _SimulatedTransientAPIError(Exception):
 
 class RetryMaskedCaller:
     """Simulates what AnthropicCaller/VertexCaller do internally via #79's
-    retry/backoff implementation (`call_with_retry`): a transient error on the
+    retry behavior (`call_with_retry`): a transient error on the
     underlying API call is caught and retried *inside the caller itself*,
     so run_batch's ThreadPoolExecutor loop never sees an exception for that
     member at all -- unlike FlakyCaller above, which raises *out* to
     run_batch and relies on #78's per-future isolation to survive it. This
     inlines that same catch-and-immediately-retry-once shape rather than
     importing `mfdoc.retry.call_with_retry` directly, keeping this test
-    focused on the batch boundary and independent of retry helper details.
+    focused on the batch boundary without coupling it to the helper's
+    implementation or timing.
 
     Exercises #79 (retry) and #78 (isolation) *together*, in one pass: one
     member's transient failure is fully absorbed by the caller's own retry
@@ -480,7 +481,7 @@ class RetryMaskedCaller:
 
 
 def test_batch_absorbs_a_transient_caller_retry_while_another_member_succeeds(indexed_db, tmp_path):
-    """Regression test for the #79/#78 interaction: #79's retry/backoff and #78's
+    """Regression test for the #79/#78 interaction: #79's internal retry and #78's
     per-member isolation must cooperate correctly in one run, not just be
     covered by separate tests of each in isolation. A caller that retries a
     transient failure internally for one member, while a second member
