@@ -885,10 +885,26 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
                 revalidated["problems"],
             )
         else:
-            result = _generate_module_doc_from_brief(
-                conn, member_name, brief, chunk_path, caller, writing_rules, template,
-                max_attempts=max_attempts,
-            )
+            # A caller exception here (transient network error, rate limit,
+            # timeout, ...) must isolate to this one chunk, not propagate out
+            # of this whole function and discard every already-completed
+            # chunk_state entry built up in this same pass -- see issue #78's
+            # review discussion. Recorded as a failed DocResult (ok=False,
+            # attempts=0 since no attempt produced a validation result to
+            # count) so the member overall reports not-ok and this chunk
+            # re-renders on the next run (chunk_path was never written, so
+            # the `reusable` check above can't mistake it for done), while
+            # every other chunk's real work from this pass is preserved.
+            try:
+                result = _generate_module_doc_from_brief(
+                    conn, member_name, brief, chunk_path, caller, writing_rules, template,
+                    max_attempts=max_attempts,
+                )
+            except Exception as exc:
+                result = DocResult(
+                    member_name, str(chunk_path), False, 0, 0, 0,
+                    [f"model call failed: {exc!r}"],
+                )
         input_tokens += result.input_tokens
         output_tokens += result.output_tokens
         chunk_entries.append((i, (start, end), chunk_path, result))
@@ -1178,6 +1194,12 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
         _corpus_signature(conn, redact, lexicon, extra=[str(threshold)]) if state_path else None
     )
     corpus_unchanged = bool(state_path) and state.get("_corpus_sha256") == corpus_sig
+    if state_path:
+        # Written into `state` up front, before any per-member checkpoint,
+        # so a process killed mid-run still leaves a resumed run able to
+        # take the corpus-level `corpus_unchanged` fast-path above -- not
+        # just a run that reached the very end. See issue #78.
+        state["_corpus_sha256"] = corpus_sig
     results: list[DocResult] = []
     # Keyed by the subdir-qualified state_key computed below, not bare
     # member name: two batchable members can share a name across
@@ -1264,12 +1286,18 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
                 try:
                     retry_response = caller(retry_prompt)
                 except Exception as exc:
+                    # attempts=2, not 1: the first call already completed
+                    # (it just failed validation), and this retry call was
+                    # itself attempted -- matching the normal
+                    # retry-on-validation-failure path's attempts=2 below,
+                    # so BatchSummary/resume state isn't misreported as a
+                    # single-attempt failure. See issue #78 review.
                     result = DocResult(
-                        name, str(out_path), False, 1, input_tokens, output_tokens,
+                        name, str(out_path), False, 2, input_tokens, output_tokens,
                         validation["problems"] + [f"retry model call failed: {exc!r}"],
                     )
                     results.append(result)
-                    state[state_key] = {"ok": False, "attempts": 1, "brief_sha256": brief_hash}
+                    state[state_key] = {"ok": False, "attempts": 2, "brief_sha256": brief_hash}
                     if state_path:
                         _save_state(state_path, state)
                     continue
@@ -1296,12 +1324,15 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
     for name, brief_hash, out_path, state_key in to_run_chunked:
         prior = state.get(state_key)
         prior_chunks = prior.get("chunks") if isinstance(prior, dict) else None
-        # Same isolation as the single-call pool above: a caller exception
-        # partway through a chunked member's several model calls must not
-        # abort every other (already-run or still-queued) chunked member,
-        # and the already-checkpointed prior_chunks are preserved so a
-        # re-run only re-renders the chunk(s) that actually failed to
-        # complete, not the whole member from scratch -- see issue #78.
+        # Same isolation as the single-call pool above, one member wide: a
+        # per-chunk caller exception is now handled inside
+        # _generate_module_doc_chunked itself (each chunk's own chunk_state
+        # entry survives a sibling chunk's failure), so this try/except is
+        # a second line of defense for anything unexpected *outside* that
+        # per-chunk loop (chunk-range computation, narrative reconciliation,
+        # ...) -- in that rarer case there's no partial chunk_state from
+        # this pass to report, so prior_chunks (last run's state) is the
+        # best available fallback, same as before. See issue #78.
         try:
             result = generate_module_doc(
                 conn, name, out_path, caller, writing_rules, template, redact=redact,
@@ -1327,7 +1358,11 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
             _save_state(state_path, state)
 
     if state_path:
-        state["_corpus_sha256"] = corpus_sig
+        # `_corpus_sha256` was already written into `state` up front (see
+        # above) so every incremental checkpoint above already carries it --
+        # this final save just persists whatever the last member/chunk loop
+        # iteration didn't already flush (there always is at least one,
+        # from the corpus-signature write itself).
         _save_state(state_path, state)
 
     total_in = sum(r.input_tokens for r in results)
