@@ -902,6 +902,11 @@ def cmd_coverage(args) -> int:
     cfg = load_config(args.config)
     conn = connect(Path(args.config).parent / cfg["index_db"])
     if getattr(args, "history", False):
+        if getattr(args, "json", None):
+            print("--history and --json are mutually exclusive -- --history prints "
+                  "previously recorded snapshots and computes nothing new to write",
+                  file=sys.stderr)
+            return 2
         # A view over previously recorded snapshots -- deliberately does not
         # itself compute or record a fresh one, so repeatedly checking the
         # trend can't pollute it with runs that were never a real

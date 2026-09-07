@@ -660,12 +660,14 @@ def coverage_history(conn, limit: int | None = None) -> list[dict]:
 
     `limit`, if given, keeps only the most recently recorded `limit` rows --
     still returned oldest-first, so a caller printing a trend doesn't have
-    to reverse it itself.
+    to reverse it itself. Checked against `None` specifically (not merely
+    falsy) so a caller passing `limit=0` gets an empty result rather than
+    every row.
     """
     sql = "SELECT recorded_at, source, metrics_json FROM coverage_history ORDER BY id DESC"
-    if limit:
+    if limit is not None:
         sql += " LIMIT ?"
-        rows = conn.execute(sql, (limit,)).fetchall()
+        rows = conn.execute(sql, (max(limit, 0),)).fetchall()
     else:
         rows = conn.execute(sql).fetchall()
     out = []

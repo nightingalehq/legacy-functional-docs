@@ -46,6 +46,16 @@ def test_coverage_history_limit_keeps_most_recent_oldest_first(indexed_db):
     assert history[0]["gaps_total"] <= history[1]["gaps_total"]
 
 
+def test_coverage_history_limit_zero_returns_no_rows(indexed_db):
+    """limit=0 must be treated as 'zero rows', not as falsy-therefore-
+    unlimited -- a caller passing a computed limit of 0 should get an
+    empty result, not every row in the table."""
+    indexed_db.commit()
+    db.record_coverage_history(indexed_db, {"gaps_total": 1}, source="coverage")
+    indexed_db.commit()
+    assert db.coverage_history(indexed_db, limit=0) == []
+
+
 def test_cmd_coverage_appends_a_history_row(project_config, indexed_db):
     indexed_db.commit()
     before = len(db.coverage_history(indexed_db))
@@ -116,6 +126,18 @@ def test_coverage_history_flag_with_no_history_says_so(tmp_path, project_config)
     assert rc == 0
     assert "no coverage history" in buf.getvalue().lower()
     shutil.rmtree(tmp_path, ignore_errors=True)
+
+
+def test_coverage_history_and_json_flags_are_mutually_exclusive(project_config, indexed_db, tmp_path, capsys):
+    """--history is a view over past runs and computes nothing new to write
+    to --json -- the combination must be rejected rather than silently
+    ignoring one of the two flags."""
+    indexed_db.commit()
+    out_path = tmp_path / "coverage.json"
+    rc = cli.cmd_coverage(_args(project_config, history=True, json=str(out_path)))
+    assert rc == 2
+    assert "mutually exclusive" in capsys.readouterr().err
+    assert not out_path.exists()
 
 
 def test_coverage_json_flag_still_works_alongside_history_persistence(project_config, indexed_db, tmp_path):
