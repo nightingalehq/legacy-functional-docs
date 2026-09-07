@@ -1122,12 +1122,14 @@ def _save_state(state_path: Path, state: dict) -> None:
     Windows, unlike a plain os.rename on Windows when the destination
     exists."""
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(
-        dir=state_path.parent, prefix=f".{state_path.name}.", suffix=".tmp",
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=state_path.parent,
+        prefix=f".{state_path.name}.", suffix=".tmp", delete=False,
     )
+    tmp_name = tmp.name
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(json.dumps(state, indent=2))
+        with tmp:
+            tmp.write(json.dumps(state, indent=2))
         os.replace(tmp_name, state_path)
     except BaseException:
         Path(tmp_name).unlink(missing_ok=True)

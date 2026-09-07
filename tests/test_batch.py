@@ -288,12 +288,10 @@ class FlakyCaller:
 
 
 def test_save_state_never_leaves_a_truncated_file_on_a_mid_write_crash(tmp_path):
-    """_save_state must write atomically: a crash partway through the write
-    must never leave a truncated/corrupt JSON file in place of the last
-    good checkpoint -- see issue #78 review. Simulated by making
-    `Path.write_text`-equivalent (here, the fdopen'd file's own `.write`)
-    raise partway through, then asserting the previous good state file is
-    still intact and still valid JSON."""
+    """_save_state must write atomically: a failed replacement must never
+    leave a truncated/corrupt JSON file in place of the last good checkpoint
+    -- see issue #78 review. The atomic rename is made to raise, then the
+    previous good state file is asserted to remain intact and valid JSON."""
     state_path = tmp_path / "state.json"
     batch_mod._save_state(state_path, {"first": "good state"})
     assert json.loads(state_path.read_text(encoding="utf-8")) == {"first": "good state"}
