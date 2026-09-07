@@ -13,6 +13,16 @@ GitHub org.
   flows and the gap register, where judgement matters most.
 
 **Progress (2026-09-07):**
+- Follow-up to issue #105 (PR #107 review): `flag_density_outliers`'s
+  `avg_depth` comparison left a chunk unflagged whenever the run's other
+  chunks' median depth was 0, on the same "a multiple of 0 is meaningless"
+  reasoning used for `lines_per_item` -- but `rule_candidate.depth` is
+  0-based (top-level depth is often 0), so a run whose other chunks are
+  all flat never flagged a genuinely nested chunk under that rule, however
+  deep it went. A 0 depth median with `avg_depth > 0` is now flagged
+  directly (message names the flat baseline explicitly instead of a
+  division), while a 0 `lines_per_item` median is still left unflagged (a
+  0 span shouldn't occur in practice, unlike a 0 depth).
 - Implemented issue #105: chunk-boundary logic (`brief.
   routine_aware_chunk_ranges`, shared by `batch.py`/`testbatch.py`) chose
   chunks purely by rule/scenario count, blind to how content-dense a

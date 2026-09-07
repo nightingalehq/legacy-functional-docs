@@ -239,9 +239,14 @@ def flag_density_outliers(metrics: list[dict], factor: float = 1.5) -> list[dict
     chunks -- "well above the run's median" (issue #105's own phrasing),
     not a fixed absolute threshold, since what counts as dense varies by
     codebase and dialect. Needs at least 2 chunks with a usable value for
-    a given metric to have a median to compare against at all; a metric
-    whose median is 0 is left unflagged for that metric (a multiple of 0 is
-    meaningless)."""
+    a given metric to have a median to compare against at all; a
+    `lines_per_item` median of 0 is left unflagged for that metric (a
+    multiple of 0 is meaningless, and a 0 `lines_per_item` shouldn't occur
+    in practice). `avg_depth` is different: it's 0-based (top-level depth
+    is often 0), so a run whose other chunks are all flat (median 0) would
+    never flag a genuinely nested chunk under the usual "factor x median"
+    rule -- a chunk with `avg_depth > 0` against a 0 median is flagged
+    directly instead."""
     def _usable(key):
         return [(i, m[key]) for i, m in enumerate(metrics) if m.get(key) is not None]
 
@@ -275,11 +280,24 @@ def flag_density_outliers(metrics: list[dict], factor: float = 1.5) -> list[dict
         depth = m.get("avg_depth")
         if depth is not None:
             depth_median = _median_excluding(depth_usable, i)
-            if depth_median and depth >= factor * depth_median:
-                reasons.append(
-                    f"avg nesting depth {depth:.1f} vs run median {depth_median:.1f} "
-                    f"({depth / depth_median:.1f}x)"
-                )
+            if depth_median is not None:
+                if depth_median == 0:
+                    # depth is 0-based (top-level depth is often 0), so a run
+                    # where every other chunk is flat has a median of 0 --
+                    # leaving that unflagged (as a 0 lines_per_item median is)
+                    # would mean a genuinely nested chunk never gets flagged
+                    # against an all-flat baseline. Flag it directly instead
+                    # of dividing by a 0 median.
+                    if depth > 0:
+                        reasons.append(
+                            f"avg nesting depth {depth:.1f} vs run median 0.0 "
+                            f"(run's other chunks are flat)"
+                        )
+                elif depth >= factor * depth_median:
+                    reasons.append(
+                        f"avg nesting depth {depth:.1f} vs run median {depth_median:.1f} "
+                        f"({depth / depth_median:.1f}x)"
+                    )
         out.append({**m, "outlier": bool(reasons), "outlier_reasons": reasons})
     return out
 

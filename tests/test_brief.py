@@ -256,6 +256,35 @@ def test_flag_density_outliers_flags_multiple_dense_chunks_against_others_median
     assert any("lines/item" in r for r in flagged[2]["outlier_reasons"])
 
 
+def test_flag_density_outliers_flags_depth_against_a_flat_zero_median():
+    """avg_depth is 0-based -- top-level depth is often 0 -- so a run whose
+    other chunks are all flat (median 0) must still flag a genuinely nested
+    chunk; the usual factor-times-median rule can never fire against a 0
+    median (issue #105 review comment)."""
+    metrics = [
+        {"item_count": 1, "line_span": 1, "lines_per_item": 1.0, "avg_depth": 0.0},
+        {"item_count": 1, "line_span": 1, "lines_per_item": 1.0, "avg_depth": 0.0},
+        {"item_count": 1, "line_span": 1, "lines_per_item": 1.0, "avg_depth": 3.0},
+    ]
+    flagged = flag_density_outliers(metrics)
+    assert flagged[0]["outlier"] is False
+    assert flagged[1]["outlier"] is False
+    assert flagged[2]["outlier"] is True
+    assert any("nesting depth" in r for r in flagged[2]["outlier_reasons"])
+
+
+def test_flag_density_outliers_does_not_flag_flat_chunk_against_flat_median():
+    """A chunk with avg_depth 0 compared against an all-flat median of 0
+    must not be flagged (there's nothing deeper about it)."""
+    metrics = [
+        {"item_count": 1, "line_span": 1, "lines_per_item": 1.0, "avg_depth": 0.0},
+        {"item_count": 1, "line_span": 1, "lines_per_item": 1.0, "avg_depth": 0.0},
+        {"item_count": 1, "line_span": 1, "lines_per_item": 1.0, "avg_depth": 0.0},
+    ]
+    flagged = flag_density_outliers(metrics)
+    assert all(m["outlier"] is False for m in flagged)
+
+
 def test_format_density_note_reports_metrics_and_outlier_flag():
     metrics = chunk_density_metrics(_DENSE_LINE_NOS, _DENSE_RANGES, _DENSE_DEPTHS)
     flagged = flag_density_outliers(metrics)
