@@ -10,7 +10,7 @@ Counts of unresolved items by kind and severity. See the per-module docs' inline
 | gap_kind | severity | count |
 |---|---|---|
 | `unused_field` | low | 122 |
-| `orphan_module` | medium | 13 |
+| `orphan_module` | medium | 14 |
 | `unresolved_call` | high | 12 |
 | `no_ddl_for_entity` | high | 4 |
 | `unparsed_line` | low | 4 |
