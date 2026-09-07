@@ -213,6 +213,31 @@ _GE_WORDS = re.compile(r"\b(at\s+least|no\s+less\s+than|minimum\s+of)\b", re.IGN
 _GT_WORDS = re.compile(r"\b(greater\s+than|more\s+than|exceeds?)\b", re.IGNORECASE)
 _LT_WORDS = re.compile(r"\b(less\s+than|fewer\s+than)\b", re.IGNORECASE)
 
+# A compound `AND`/`OR` condition (`STAT="FAIL" AND OBS_COUNT>ZERO`) is
+# commonly narrated as two clauses in one sentence, each describing its own
+# operand ("STAT equals 'FAIL' and at least one observation was counted").
+# The word/negation window below must not cross one of these conjunctions --
+# without this, a hedge word that modifies the *other* clause's operand
+# (here "at least", which describes OBS_COUNT, not STAT) reads as though it
+# modified this literal instead, misattributing a relational/negation
+# reading across a clause boundary it has nothing to do with (issue #90).
+_CLAUSE_BOUNDARY = re.compile(r"\b(?:and|or)\b(?!\s+equal\b)", re.IGNORECASE)
+
+
+def _clip_at_clause_boundary(text: str, *, keep_end: bool) -> str:
+    """Clip the "before" or "after" half of a search window at the nearest
+    AND/OR conjunction, so a marker belonging to a different clause of a
+    compound condition can't reach across it.
+
+    `keep_end=True` is for the *before*-literal half: keep only the text
+    after its last conjunction (the part nearest the literal, in the same
+    clause as it). `keep_end=False` is for the *after*-literal half: keep
+    only the text before its first conjunction, for the same reason."""
+    matches = list(_CLAUSE_BOUNDARY.finditer(text))
+    if not matches:
+        return text
+    return text[matches[-1].end():] if keep_end else text[:matches[0].start()]
+
 
 def prose_polarity(sentence: str, literal: str, window: int = 40) -> str | None:
     """The comparison direction `sentence` reads as claiming about `literal`,
@@ -230,6 +255,12 @@ def prose_polarity(sentence: str, literal: str, window: int = 40) -> str | None:
     back to the plain equality/negation reading (unchanged from before
     relational operators were supported), so an ordinary "equals"/"is not"
     narration is unaffected.
+
+    Each side of the window is additionally clipped at the nearest AND/OR
+    conjunction (`_clip_at_clause_boundary`) before being searched -- a
+    compound condition is commonly narrated as two clauses in one sentence,
+    and a hedge/negation marker on the far side of the conjunction from
+    `literal` belongs to the *other* clause's operand, not this one.
     """
     # Bounded against alphanumerics on both sides -- not `\b`, which only
     # anchors between a word char and a non-word char and so fails to bound
@@ -243,7 +274,13 @@ def prose_polarity(sentence: str, literal: str, window: int = 40) -> str | None:
     )
     if not m:
         return None
-    nearby = sentence[max(0, m.start() - window):min(len(sentence), m.end() + window)]
+    before = _clip_at_clause_boundary(
+        sentence[max(0, m.start() - window):m.start()], keep_end=True
+    )
+    after = _clip_at_clause_boundary(
+        sentence[m.end():min(len(sentence), m.end() + window)], keep_end=False
+    )
+    nearby = before + after
     if _LE_WORDS.search(nearby):
         return "le"
     if _GE_WORDS.search(nearby):
