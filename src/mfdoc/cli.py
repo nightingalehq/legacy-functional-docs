@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import json
+import logging
 import re
 import sys
 from pathlib import Path
@@ -1287,9 +1288,48 @@ def cmd_export(args) -> int:
     return 0
 
 
+def _configure_logging(verbose: bool, log_file: str | None) -> None:
+    """Set up the root logger for this process -- issue #83. Every `mfdoc`
+    module's own progress/diagnostic logging (batch.py, testbatch.py,
+    retry.py, ...) goes through `logging.getLogger("mfdoc.*")`, which
+    propagates up to the root logger configured here; this is the one
+    place that decides where those records actually go and at what level,
+    so an individual module never needs to know about `--verbose`/
+    `--log-file` itself.
+
+    Deliberately separate from the real CLI output every `cmd_*` function
+    still prints directly (coverage numbers, gate pass/fail, the batch
+    summary table, ...) -- those stay on stdout via `print()` regardless of
+    this configuration, so piping/scripting against them is unaffected.
+
+    `force=True` lets this be called more than once within the same
+    process (e.g. a test harness invoking `main()` repeatedly) and still
+    take effect each time, rather than being a no-op after the first call
+    the way plain `logging.basicConfig` would be.
+    """
+    level = logging.DEBUG if verbose else logging.INFO
+    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
+    if log_file:
+        handlers.append(logging.FileHandler(log_file, encoding="utf-8"))
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+        handlers=handlers,
+        force=True,
+    )
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="mfdoc", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--verbose", "-v", action="store_true",
+                     help="emit DEBUG-level diagnostic logging (e.g. per-chunk batch "
+                          "progress, retries) in addition to INFO -- applies to every "
+                          "subcommand, not just batch/test-batch")
+    ap.add_argument("--log-file",
+                     help="also write diagnostic logging to this path, in addition to "
+                          "stderr -- useful for an unattended, engagement-scale "
+                          "`mfdoc batch`/`mfdoc test-batch` run")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     for name, fn in (("ingest", cmd_ingest), ("derive", cmd_derive), ("coverage", cmd_coverage),
@@ -1566,6 +1606,20 @@ def main(argv=None) -> int:
     p.set_defaults(func=cmd_export)
 
     args = ap.parse_args(argv)
+    try:
+        _configure_logging(args.verbose, args.log_file)
+    except OSError as exc:
+        # e.g. --log-file pointing at an unwritable path or a missing
+        # parent directory -- a bad CLI argument, not an internal error,
+        # so it gets the same "clean message, exit 2" treatment as
+        # ConfigError below rather than an uncaught traceback. Scoped to
+        # just this call (not the args.func(args) dispatch below) so an
+        # OSError raised from inside a subcommand itself still surfaces as
+        # its own uncaught traceback rather than being misreported as a
+        # --log-file problem.
+        print(f"error: could not open --log-file {args.log_file!r}: {exc}",
+              file=sys.stderr)
+        return 2
     try:
         return args.func(args)
     except ConfigError as exc:

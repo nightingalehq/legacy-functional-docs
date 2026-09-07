@@ -223,6 +223,33 @@ GitHub org.
   both are covered by new isolated unit tests only (`tests/
   test_mantis_rules.py`, new `tests/test_dynamic_call_resolution.py`); the
   bundled fixture pipeline's gap/coverage counts are unchanged.
+- Implemented issue #83 (partial, scoped to the batch/test-batch pipeline
+  per the issue's own suggested starting point): standard `logging` in
+  place of ad hoc `print()` for the genuinely diagnostic/progress output of
+  a long `mfdoc batch`/`mfdoc test-batch` run -- a resumed member/chunk
+  skip, a chunk starting/completing, a validation-failure retry, a failed
+  model call, and (in `retry.call_with_retry`, shared by `AnthropicCaller`/
+  `VertexCaller`) a transient-error backoff being retried, previously
+  invisible entirely. New top-level `mfdoc --verbose`/`-v` (DEBUG level)
+  and `--log-file PATH` (also write to a file, in addition to stderr) flags
+  in `cli.py`, given before the subcommand, configure the root logger once
+  in `main()` via a new `_configure_logging()`; every module's own logger
+  (`mfdoc.batch`, `mfdoc.testbatch`, `mfdoc.retry`) just calls
+  `logging.getLogger(__name__)`-equivalent and propagates up to it, no
+  per-module wiring needed. Every `cmd_*` function's actual CLI output
+  (coverage numbers, gate pass/fail, the batch/test-batch OK/FAIL/SKIP
+  table and cost summary, calibrate/coverage-history reports, ...) is
+  deliberately untouched -- still `print()`, since a user piping/scripting
+  against it needs it to stay real stdout, not diagnostic logging gated
+  behind `--verbose`. The other ~90 `print()` call sites across `cli.py`
+  (every other subcommand's own report/summary output) are left as-is for
+  the same reason and are explicitly out of scope for this PR; issue #83
+  itself says this can be done incrementally per-module. Covered by new
+  `tests/test_logging.py` (`caplog` on `call_with_retry`'s retry-warning,
+  `run_batch`'s resumed-skip/validation-retry/model-call-failure logging,
+  `run_test_batch`'s equivalents, `_configure_logging`'s level/`--log-file`
+  behavior, and an end-to-end `cli.main(["--verbose", "--log-file", ...])`
+  check).
 - Implemented issue #84: `DocResult` and `BatchSummary` now track per-call
   wall-clock duration and transient-error retry counts, so a multi-hundred-
   module `mfdoc batch` run can tell "is this run stuck or just slow" and

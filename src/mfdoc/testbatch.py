@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import datetime
 import hashlib
+import logging
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -40,6 +41,11 @@ from .redact import NULL_REDACTOR, Redactor
 from .testlang import sidecar_path_for
 from .testplan import fetch_test_case_rows, test_case_brief, test_case_brief_chunk
 from .validate import BR_REF, _split_frontmatter, validate_test_doc
+
+# Same progress/diagnostic logger idea as batch.py -- see that module's
+# `logger` docstring; mirrored here for `mfdoc test-batch`'s own resumable,
+# potentially long-running render loop.
+logger = logging.getLogger("mfdoc.testbatch")
 
 # A member whose test_case set exceeds this gets rendered as several
 # independent chunk documents instead of one (see
@@ -197,6 +203,10 @@ def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: 
         try:
             response = caller(prompt)
         except Exception as exc:
+            logger.warning(
+                "%s: model call raised %s on attempt %d/%d: %s",
+                member_name, exc.__class__.__name__, attempt, max_attempts, exc,
+            )
             problems = problems + [f"model call raised {exc.__class__.__name__}: {exc}"]
             retry_note = "\n".join(f"- {p}" for p in problems)
             continue
@@ -209,6 +219,10 @@ def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: 
         if result["ok"]:
             write_test_doc_with_sidecar(out_path, text, language)
             return DocResult(member_name, str(out_path), True, attempt, input_tokens, output_tokens, [])
+        logger.warning(
+            "%s: validation failed on attempt %d/%d (%d problem(s))",
+            member_name, attempt, max_attempts, len(result["problems"]),
+        )
         problems = problems + result["problems"]
         retry_note = "\n".join(f"- {p}" for p in problems)
     return DocResult(member_name, str(out_path), False, attempt, input_tokens, output_tokens, problems)
@@ -387,7 +401,9 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
             revalidated = validate_test_doc(conn, chunk_path)
             if revalidated["ok"]:
                 result = DocResult(member_name, str(chunk_path), True, 0, 0, 0, [])
+                logger.debug("%s: chunk %d/%d reused (unchanged)", member_name, i, chunk_count)
         if result is None:
+            logger.info("%s: chunk %d/%d generating", member_name, i, chunk_count)
             result = _generate_test_doc_from_brief(
                 conn, member_name, brief, language, framework, chunk_path, caller,
                 writing_rules, template, max_attempts=max_attempts,
@@ -396,8 +412,14 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
         output_tokens += result.output_tokens
         chunk_entries.append((i, chunk_path, result))
         chunk_state[str(i)] = {"ok": result.ok, "brief_sha256": brief_hash}
+        if result.ok:
+            logger.debug("%s: chunk %d/%d complete", member_name, i, chunk_count)
         if not result.ok:
             density_note = format_density_note(density_metrics[i - 1])
+            logger.warning(
+                "%s: chunk %d/%d failed: %s -- %s", member_name, i, chunk_count,
+                "; ".join(result.problems), density_note,
+            )
             problems.append(
                 f"chunk {i}/{chunk_count} ({chunk_path.name}) failed: "
                 + "; ".join(result.problems) + f" -- {density_note}"
@@ -577,6 +599,7 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
         prior_ok = isinstance(prior, dict) and prior.get("ok") and out_path.exists()
 
         if corpus_unchanged and prior_ok:
+            logger.debug("skip %s: unchanged (corpus signature match, resumed)", name)
             results.append(_skip_result(name, out_path, prior))
             continue
 
@@ -591,6 +614,7 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
         brief = test_case_brief(conn, name, redact=redact)
         brief_hash = hashlib.sha256(f"{brief}\x00{threshold}".encode("utf-8")).hexdigest()
         if prior_ok and prior.get("brief_sha256") == brief_hash:
+            logger.debug("skip %s: unchanged (brief hash match, resumed)", name)
             results.append(_skip_result(name, out_path, prior))
             continue
 
@@ -633,6 +657,7 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
                 response = fut.result()
             except Exception as exc:
                 initial_exc_problem = f"model call raised {exc.__class__.__name__}: {exc}"
+                logger.warning("%s: %s, retrying once", name, initial_exc_problem)
                 retry_prompt = build_test_prompt(
                     briefs[name], writing_rules, template, language, framework,
                     f"- {initial_exc_problem}",
@@ -640,6 +665,10 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
                 try:
                     response = caller(retry_prompt)
                 except Exception as exc2:
+                    logger.error(
+                        "%s: retry model call raised %s: %s", name, exc2.__class__.__name__, exc2,
+                        exc_info=True,
+                    )
                     result = DocResult(
                         name, str(out_path), False, 2, 0, 0,
                         [initial_exc_problem, f"retry model call raised {exc2.__class__.__name__}: {exc2}"],
@@ -658,6 +687,10 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
             out_path.write_text(final_text, encoding="utf-8")
             validation = validate_test_doc(conn, out_path)
             if not validation["ok"] and attempts == 1:
+                logger.warning(
+                    "%s: validation failed (%d problem(s)), retrying once",
+                    name, len(validation["problems"]),
+                )
                 retry_note = "\n".join(f"- {p}" for p in validation["problems"])
                 retry_prompt = build_test_prompt(
                     briefs[name], writing_rules, template, language, framework, retry_note
@@ -665,6 +698,10 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
                 try:
                     retry_response = caller(retry_prompt)
                 except Exception as exc:
+                    logger.error(
+                        "%s: retry model call raised %s: %s", name, exc.__class__.__name__, exc,
+                        exc_info=True,
+                    )
                     validation = {
                         "ok": False,
                         "problems": list(validation["problems"])

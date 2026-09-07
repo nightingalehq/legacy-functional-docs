@@ -15,6 +15,7 @@ predicate for what "transient" means to it.
 
 from __future__ import annotations
 
+import logging
 import random
 import time
 from typing import Callable, TypeVar
@@ -24,6 +25,15 @@ T = TypeVar("T")
 DEFAULT_MAX_RETRIES = 5
 DEFAULT_BASE_DELAY_S = 1.0
 DEFAULT_MAX_DELAY_S = 20.0
+
+# One logger shared by every ModelCaller that delegates to this helper
+# (AnthropicCaller, VertexCaller) -- retries here are exactly the kind of
+# long-running-batch diagnostic noise issue #83 exists to move off stdout:
+# real signal (a rate limit or transient network error being backed off,
+# not silently swallowed) that a caller watching a multi-hour `mfdoc batch`
+# run needs visibility into, without it competing with the batch harness's
+# own progress reporting.
+logger = logging.getLogger("mfdoc.retry")
 
 
 def call_with_retry(
@@ -96,6 +106,10 @@ def call_with_retry(
                 raise
             delay = min(max_delay, base_delay * (2 ** (attempt - 1)))
             delay *= 0.5 + random.random() / 2  # jitter: 50%-100% of the computed delay
+            logger.warning(
+                "transient error on attempt %d/%d, retrying in %.1fs: %s: %s",
+                attempt, max_retries + 1, delay, exc.__class__.__name__, exc,
+            )
             if on_retry is not None:
                 try:
                     on_retry(attempt, exc)

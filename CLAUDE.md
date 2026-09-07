@@ -98,6 +98,10 @@ mfdoc gate      --config project.yml     # pass/fail vs options.quality_gates
 mfdoc calibrate --config project.yml --dialect mantis   # Mantis/Supra usually need this
 mfdoc brief     --config project.yml --system|--module NAME|--entity NAME
 mfdoc batch     --config project.yml --out docs/functional/modules  # needs mfdoc[batch] + ANTHROPIC_API_KEY
+# --verbose/-v (DEBUG-level progress: resumed skips, chunk N/M, retries) and
+# --log-file PATH (also write that logging to a file) are top-level flags,
+# given *before* the subcommand -- e.g. `mfdoc -v --log-file batch.log batch
+# --config project.yml ...` -- most useful on a long `batch`/`test-batch` run
 mfdoc rules-register --config project.yml --out docs/functional/rules-register.md
 mfdoc validate  --config project.yml --docs docs/functional
 mfdoc export    --config project.yml --json out/index.json
