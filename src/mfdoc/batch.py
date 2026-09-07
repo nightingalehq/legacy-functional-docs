@@ -18,7 +18,9 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
+import os
 import re
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -885,10 +887,27 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
                 revalidated["problems"],
             )
         else:
-            result = _generate_module_doc_from_brief(
-                conn, member_name, brief, chunk_path, caller, writing_rules, template,
-                max_attempts=max_attempts,
-            )
+            # A caller exception here (transient network error, rate limit,
+            # timeout, ...) must isolate to this one chunk, not propagate out
+            # of this whole function and discard every already-completed
+            # chunk_state entry built up in this same pass -- see issue #78's
+            # review discussion. Recorded as a failed DocResult (ok=False,
+            # attempts=1 -- one call was actually attempted and failed,
+            # matching run_batch's own accounting for a failed initial call)
+            # so the member overall reports not-ok and this chunk re-renders
+            # on the next run (chunk_path was never written, so the
+            # `reusable` check above can't mistake it for done), while every
+            # other chunk's real work from this pass is preserved.
+            try:
+                result = _generate_module_doc_from_brief(
+                    conn, member_name, brief, chunk_path, caller, writing_rules, template,
+                    max_attempts=max_attempts,
+                )
+            except Exception as exc:
+                result = DocResult(
+                    member_name, str(chunk_path), False, 1, 0, 0,
+                    [f"model call failed: {exc!r}"],
+                )
         input_tokens += result.input_tokens
         output_tokens += result.output_tokens
         chunk_entries.append((i, (start, end), chunk_path, result))
@@ -1092,8 +1111,29 @@ def _load_state(state_path: Path) -> dict:
 
 
 def _save_state(state_path: Path, state: dict) -> None:
+    """Write `state` to `state_path` atomically: a direct write_text leaves
+    a window where a process killed mid-write drops a truncated/invalid
+    JSON file in place of the last good checkpoint -- a real risk now that
+    this is called after every member/chunk, not just once at the end of a
+    run (see issue #78 review). Writing to a temp file in the same
+    directory first and os.replace()-ing it over the real path means every
+    on-disk state file is either the previous checkpoint or the new one in
+    full, never a partial write -- os.replace is atomic on both POSIX and
+    Windows, unlike a plain os.rename on Windows when the destination
+    exists."""
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=state_path.parent,
+        prefix=f".{state_path.name}.", suffix=".tmp", delete=False,
+    )
+    tmp_name = tmp.name
+    try:
+        with tmp:
+            tmp.write(json.dumps(state, indent=2))
+        os.replace(tmp_name, state_path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
 
 
 def estimate_cost(
@@ -1178,6 +1218,12 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
         _corpus_signature(conn, redact, lexicon, extra=[str(threshold)]) if state_path else None
     )
     corpus_unchanged = bool(state_path) and state.get("_corpus_sha256") == corpus_sig
+    if state_path:
+        # Written into `state` up front, before any per-member checkpoint,
+        # so a process killed mid-run still leaves a resumed run able to
+        # take the corpus-level `corpus_unchanged` fast-path above -- not
+        # just a run that reached the very end. See issue #78.
+        state["_corpus_sha256"] = corpus_sig
     results: list[DocResult] = []
     # Keyed by the subdir-qualified state_key computed below, not bare
     # member name: two batchable members can share a name across
@@ -1233,7 +1279,25 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
         }
         for fut in as_completed(futures):
             name, brief_hash, out_path, state_key = futures[fut]
-            response = fut.result()
+            # A caller exception here (transient network error, rate limit,
+            # timeout, ...) must isolate to this one member, not propagate
+            # and kill every other in-flight/queued future in the pool --
+            # see issue #78. Recorded as a failed DocResult (ok=False) so a
+            # re-run's resume check (prior_ok above) re-does exactly this
+            # member and nothing else that already succeeded.
+            try:
+                response = fut.result()
+            except Exception as exc:
+                result = DocResult(
+                    name, str(out_path), False, 1, 0, 0,
+                    [f"model call failed: {exc!r}"],
+                )
+                results.append(result)
+                state[state_key] = {"ok": False, "attempts": 1, "brief_sha256": brief_hash}
+                if state_path:
+                    _save_state(state_path, state)
+                continue
+
             input_tokens, output_tokens = response.input_tokens, response.output_tokens
 
             out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1243,7 +1307,24 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
             if not validation["ok"]:
                 retry_note = _retry_note(validation["problems"])
                 retry_prompt = build_prompt(briefs[state_key], writing_rules, template, retry_note)
-                retry_response = caller(retry_prompt)
+                try:
+                    retry_response = caller(retry_prompt)
+                except Exception as exc:
+                    # attempts=2, not 1: the first call already completed
+                    # (it just failed validation), and this retry call was
+                    # itself attempted -- matching the normal
+                    # retry-on-validation-failure path's attempts=2 below,
+                    # so BatchSummary/resume state isn't misreported as a
+                    # single-attempt failure. See issue #78 review.
+                    result = DocResult(
+                        name, str(out_path), False, 2, input_tokens, output_tokens,
+                        validation["problems"] + [f"retry model call failed: {exc!r}"],
+                    )
+                    results.append(result)
+                    state[state_key] = {"ok": False, "attempts": 2, "brief_sha256": brief_hash}
+                    if state_path:
+                        _save_state(state_path, state)
+                    continue
                 input_tokens += retry_response.input_tokens
                 output_tokens += retry_response.output_tokens
                 out_path.write_text(_fix_generated_by_version(retry_response.text), encoding="utf-8")
@@ -1256,23 +1337,56 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
             )
             results.append(result)
             state[state_key] = {"ok": result.ok, "attempts": attempts, "brief_sha256": brief_hash}
+            # Checkpoint after every completed/failed member, not only once
+            # at the very end -- otherwise a later member's failure (or the
+            # process being killed mid-run) loses every already-completed
+            # member's state from this same pass too, forcing a full re-run
+            # instead of just re-doing what actually failed. See issue #78.
+            if state_path:
+                _save_state(state_path, state)
 
     for name, brief_hash, out_path, state_key in to_run_chunked:
         prior = state.get(state_key)
         prior_chunks = prior.get("chunks") if isinstance(prior, dict) else None
-        result = generate_module_doc(
-            conn, name, out_path, caller, writing_rules, template, redact=redact,
-            lexicon=lexicon, max_rules_per_call=threshold, prior_chunks=prior_chunks,
-            index_template=index_template,
-        )
+        # Same isolation as the single-call pool above, one member wide: a
+        # per-chunk caller exception is now handled inside
+        # _generate_module_doc_chunked itself (each chunk's own chunk_state
+        # entry survives a sibling chunk's failure), so this try/except is
+        # a second line of defense for anything unexpected *outside* that
+        # per-chunk loop (chunk-range computation, narrative reconciliation,
+        # ...) -- in that rarer case there's no partial chunk_state from
+        # this pass to report, so prior_chunks (last run's state) is the
+        # best available fallback, same as before. See issue #78.
+        try:
+            result = generate_module_doc(
+                conn, name, out_path, caller, writing_rules, template, redact=redact,
+                lexicon=lexicon, max_rules_per_call=threshold, prior_chunks=prior_chunks,
+                index_template=index_template,
+            )
+        except Exception as exc:
+            result = DocResult(
+                name, str(out_path), False, 0, 0, 0,
+                [f"model call failed: {exc!r}"], chunked=True, chunk_state=prior_chunks,
+            )
         results.append(result)
         state[state_key] = {
             "ok": result.ok, "attempts": result.attempts, "brief_sha256": brief_hash,
             "chunks": result.chunk_state,
         }
+        # Checkpoint after every chunked member too -- these are rendered
+        # serially and can each involve several model calls of their own, so
+        # this is exactly the same "don't lose already-completed work" case
+        # the pool above guards against, just one member wide instead of
+        # scoped to a single call.
+        if state_path:
+            _save_state(state_path, state)
 
     if state_path:
-        state["_corpus_sha256"] = corpus_sig
+        # `_corpus_sha256` was already written into `state` up front (see
+        # above) so every incremental checkpoint above already carries it --
+        # this final save just persists whatever the last member/chunk loop
+        # iteration didn't already flush (there always is at least one,
+        # from the corpus-signature write itself).
         _save_state(state_path, state)
 
     total_in = sum(r.input_tokens for r in results)

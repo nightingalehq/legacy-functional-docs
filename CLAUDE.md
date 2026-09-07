@@ -93,6 +93,7 @@ pytest tests/test_natural_rules.py::test_x -v  # single test
 mfdoc ingest    --config project.yml
 mfdoc derive    --config project.yml
 mfdoc coverage  --config project.yml     # read before writing any docs
+mfdoc coverage  --config project.yml --history  # trend of past coverage/gate runs
 mfdoc gate      --config project.yml     # pass/fail vs options.quality_gates
 mfdoc calibrate --config project.yml --dialect mantis   # Mantis/Supra usually need this
 mfdoc brief     --config project.yml --system|--module NAME|--entity NAME
