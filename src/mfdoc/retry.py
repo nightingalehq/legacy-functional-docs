@@ -36,13 +36,14 @@ def call_with_retry(
 ) -> T:
     """Call `fn()`, retrying up to `max_retries` times (so at most
     `max_retries + 1` attempts total) whenever the raised exception is one
-    `is_retryable` accepts as transient. Delay between attempts grows
-    exponentially (`base_delay * 2**attempt`, capped at `max_delay`) with
-    +/-50% jitter, so many concurrent workers hitting the same rate limit
-    don't all retry in lockstep. A non-retryable exception, or the last
-    permitted attempt's exception, propagates immediately and normally --
-    this never swallows a genuine failure, only defers it past a bounded
-    number of transient-looking ones.
+    `is_retryable` accepts as transient. Delay before the Nth retry grows
+    exponentially (`base_delay * 2**(N-1)`, capped at `max_delay`), then has
+    50%-100% jitter applied (never lengthened beyond the capped value, only
+    shortened), so many concurrent workers hitting the same rate limit don't
+    all retry in lockstep. A non-retryable exception, or the last permitted
+    attempt's exception, propagates immediately and normally -- this never
+    swallows a genuine failure, only defers it past a bounded number of
+    transient-looking ones.
 
     `sleep` is injectable (defaults to `time.sleep`, looked up at call time
     rather than bound as a literal default value, so a test can monkeypatch

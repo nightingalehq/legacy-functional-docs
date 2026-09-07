@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import shutil
 import sys
+import types
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -21,6 +22,22 @@ from mfdoc import cli
 from mfdoc.vertex_caller import VertexCaller
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _fake_google_auth_package(monkeypatch):
+    """A `SimpleNamespace(auth=SimpleNamespace())` fake for `google` doesn't
+    reliably satisfy `import google.auth`: the import system requires the
+    parent (`google`) to actually be a package (have `__path__`), which a
+    plain SimpleNamespace doesn't. Real `ModuleType` objects with `__path__`
+    set on the parent are what `import google.auth` actually needs -- this
+    also registers "google.auth" in sys.modules directly, matching how the
+    real import system would leave it after a successful import."""
+    google_pkg = types.ModuleType("google")
+    google_pkg.__path__ = []
+    auth_mod = types.ModuleType("google.auth")
+    google_pkg.auth = auth_mod
+    monkeypatch.setitem(sys.modules, "google", google_pkg)
+    monkeypatch.setitem(sys.modules, "google.auth", auth_mod)
 
 
 def test_missing_anthropic_package_raises_install_hint(monkeypatch):
@@ -71,8 +88,7 @@ def test_call_retries_a_transient_error_and_eventually_succeeds(monkeypatch):
         InternalServerError=_InternalServerError,
     )
     monkeypatch.setitem(sys.modules, "anthropic", fake_anthropic)
-    monkeypatch.setitem(sys.modules, "google", SimpleNamespace(auth=SimpleNamespace()))
-    monkeypatch.setitem(sys.modules, "google.auth", SimpleNamespace())
+    _fake_google_auth_package(monkeypatch)
 
     # call_with_retry's real backoff would sleep ~1s+2s here; patch it out
     # so the test doesn't pay for real wall-clock retry delay.
@@ -114,8 +130,7 @@ def test_call_does_not_retry_a_non_transient_error(monkeypatch):
         InternalServerError=_InternalServerError,
     )
     monkeypatch.setitem(sys.modules, "anthropic", fake_anthropic)
-    monkeypatch.setitem(sys.modules, "google", SimpleNamespace(auth=SimpleNamespace()))
-    monkeypatch.setitem(sys.modules, "google.auth", SimpleNamespace())
+    _fake_google_auth_package(monkeypatch)
 
     caller = VertexCaller(project="some-project")
     with pytest.raises(_BadRequestError):
