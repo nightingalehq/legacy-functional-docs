@@ -170,8 +170,9 @@ def chunk_density_metrics(line_nos: list[int | None], ranges: list[tuple[int, in
     hand at chunk-boundary time -- cheap, and shared by batch.py's and
     testbatch.py's chunked-rendering paths so a rule-dense chunk's failure
     diagnostics look the same no matter which harness produced it (issue
-    #105). Rule-count-based chunking alone is blind to how content-dense a
-    chunk's *source* actually is: two chunks can carry the same rule count
+    #105). Routine-aware chunking packs by rule count within routine
+    # boundaries, but that count is blind to how content-dense a chunk's
+    # *source* actually is: two chunks can carry the same rule count
     while one's source is far harder for the model to narrate correctly
     (more source lines, more nested branches, per rule) -- these metrics
     make that difference visible instead of only showing up, after the

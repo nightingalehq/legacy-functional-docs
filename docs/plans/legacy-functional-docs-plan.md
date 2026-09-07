@@ -24,9 +24,9 @@ GitHub org.
   division), while a 0 `lines_per_item` median is still left unflagged (a
   0 span shouldn't occur in practice, unlike a 0 depth).
 - Implemented issue #105: chunk-boundary logic (`brief.
-  routine_aware_chunk_ranges`, shared by `batch.py`/`testbatch.py`) chose
-  chunks purely by rule/scenario count, blind to how content-dense a
-  chunk's *source* actually is -- a chunk could match its siblings' rule
+  routine_aware_chunk_ranges`, shared by `batch.py`/`testbatch.py`) preserves
+  routine boundaries while packing chunks by rule/scenario count, but that
+  count is blind to how content-dense a chunk's *source* actually is -- a chunk could match its siblings' rule
   count while its source was far harder to narrate (more lines, deeper
   nesting per rule), and the only symptom was repeated retry failures on
   that one chunk. Added `brief.chunk_density_metrics`/

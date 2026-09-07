@@ -279,8 +279,9 @@ judgement-heavy documents are deliberately routed differently:
   `batch._render_module_index_doc`) — a whole-module overview to start from,
   distinct from each chunk's own per-rule `doc_type: module` detail. A chunk
   failure skips the reconciliation call entirely and reports it as a plain
-  skipped note instead. A chunk boundary is chosen purely by rule count
-  (`brief.routine_aware_chunk_ranges`), which says nothing about how
+  skipped note instead. A chunk boundary is chosen by
+  `brief.routine_aware_chunk_ranges`, which preserves routine boundaries while
+  packing by rule count within them; that count says nothing about how
   content-dense a chunk's *source* actually is — two chunks can carry the
   same rule count while one's source is far harder to narrate correctly
   (more source lines, more nested branches, per rule). `brief.

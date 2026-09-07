@@ -821,9 +821,10 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
         [r["line_no"] for r in rule_rows], routines, chunk_size,
     )
     chunk_count = len(ranges)
-    # Source-density estimate per chunk (issue #105): rule count alone
-    # (what `ranges` is packed by) says nothing about how content-dense a
-    # chunk's *source* actually is -- two chunks can carry the same rule
+    # Source-density estimate per chunk (issue #105): routine-aware chunking
+    # packs by rule count within routine boundaries, but that count says
+    # nothing about how content-dense a chunk's *source* actually is -- two
+    # chunks can carry the same rule
     # count while one's source sprawls across far more lines with far
     # deeper nesting, and that's exactly the kind of chunk that tends to
     # burn through its retries without anyone realising *why* until the
