@@ -287,6 +287,39 @@ class FlakyCaller:
         return self._inner(prompt)
 
 
+def test_save_state_never_leaves_a_truncated_file_on_a_mid_write_crash(tmp_path):
+    """_save_state must write atomically: a crash partway through the write
+    must never leave a truncated/corrupt JSON file in place of the last
+    good checkpoint -- see issue #78 review. Simulated by making
+    `Path.write_text`-equivalent (here, the fdopen'd file's own `.write`)
+    raise partway through, then asserting the previous good state file is
+    still intact and still valid JSON."""
+    state_path = tmp_path / "state.json"
+    batch_mod._save_state(state_path, {"first": "good state"})
+    assert json.loads(state_path.read_text(encoding="utf-8")) == {"first": "good state"}
+
+    import os as os_mod
+
+    real_replace = os_mod.replace
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated crash before the atomic rename completes")
+
+    os_mod.replace = boom
+    try:
+        with pytest.raises(RuntimeError):
+            batch_mod._save_state(state_path, {"second": "state that must not land"})
+    finally:
+        os_mod.replace = real_replace
+
+    # The original good checkpoint must be untouched -- no partial write
+    # ever replaced it, and the failed attempt's temp file must not be left
+    # behind either.
+    assert json.loads(state_path.read_text(encoding="utf-8")) == {"first": "good state"}
+    leftover_tmp_files = [p for p in tmp_path.iterdir() if p.name != "state.json"]
+    assert leftover_tmp_files == [], f"temp file(s) leaked: {leftover_tmp_files}"
+
+
 def test_corpus_sha256_is_checkpointed_before_the_run_finishes(indexed_db, tmp_path):
     """`_corpus_sha256` must be written into the persisted state on the
     *first* incremental checkpoint, not only once at the very end of

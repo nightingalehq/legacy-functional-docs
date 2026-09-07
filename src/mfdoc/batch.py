@@ -18,7 +18,9 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
+import os
 import re
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -890,11 +892,12 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
             # of this whole function and discard every already-completed
             # chunk_state entry built up in this same pass -- see issue #78's
             # review discussion. Recorded as a failed DocResult (ok=False,
-            # attempts=0 since no attempt produced a validation result to
-            # count) so the member overall reports not-ok and this chunk
-            # re-renders on the next run (chunk_path was never written, so
-            # the `reusable` check above can't mistake it for done), while
-            # every other chunk's real work from this pass is preserved.
+            # attempts=1 -- one call was actually attempted and failed,
+            # matching run_batch's own accounting for a failed initial call)
+            # so the member overall reports not-ok and this chunk re-renders
+            # on the next run (chunk_path was never written, so the
+            # `reusable` check above can't mistake it for done), while every
+            # other chunk's real work from this pass is preserved.
             try:
                 result = _generate_module_doc_from_brief(
                     conn, member_name, brief, chunk_path, caller, writing_rules, template,
@@ -902,7 +905,7 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
                 )
             except Exception as exc:
                 result = DocResult(
-                    member_name, str(chunk_path), False, 0, 0, 0,
+                    member_name, str(chunk_path), False, 1, 0, 0,
                     [f"model call failed: {exc!r}"],
                 )
         input_tokens += result.input_tokens
@@ -1108,8 +1111,27 @@ def _load_state(state_path: Path) -> dict:
 
 
 def _save_state(state_path: Path, state: dict) -> None:
+    """Write `state` to `state_path` atomically: a direct write_text leaves
+    a window where a process killed mid-write drops a truncated/invalid
+    JSON file in place of the last good checkpoint -- a real risk now that
+    this is called after every member/chunk, not just once at the end of a
+    run (see issue #78 review). Writing to a temp file in the same
+    directory first and os.replace()-ing it over the real path means every
+    on-disk state file is either the previous checkpoint or the new one in
+    full, never a partial write -- os.replace is atomic on both POSIX and
+    Windows, unlike a plain os.rename on Windows when the destination
+    exists."""
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    fd, tmp_name = tempfile.mkstemp(
+        dir=state_path.parent, prefix=f".{state_path.name}.", suffix=".tmp",
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(state, indent=2))
+        os.replace(tmp_name, state_path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
 
 
 def estimate_cost(
