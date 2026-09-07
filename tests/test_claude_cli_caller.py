@@ -69,66 +69,12 @@ def test_missing_claude_binary_raises_install_hint(monkeypatch):
         ClaudeCLICaller()("ping")
 
 
-def test_timeout_raises_immediately_when_retries_disabled(monkeypatch):
+def test_timeout_raises(monkeypatch):
     def _run(*a, **kw):
         raise subprocess.TimeoutExpired(cmd="claude", timeout=1)
     monkeypatch.setattr(subprocess, "run", _run)
     with pytest.raises(RuntimeError, match="timed out"):
-        ClaudeCLICaller(timeout=1, max_retries=0)("ping")
-
-
-def test_timeout_is_retried_and_can_eventually_succeed(monkeypatch):
-    """A timeout is the one `claude -p` failure this caller treats as
-    transient (#79's review comment: consistency with
-    AnthropicCaller/VertexCaller's retry behavior) -- a network/load blip
-    that a retry might not hit again, unlike a bad prompt or broken
-    install."""
-    attempts = {"n": 0}
-
-    def _run(*a, **kw):
-        attempts["n"] += 1
-        if attempts["n"] < 3:
-            raise subprocess.TimeoutExpired(cmd="claude", timeout=1)
-        return SimpleNamespace(
-            stdout='{"is_error": false, "result": "ok", "usage": {"input_tokens": 1, "output_tokens": 1}}',
-            stderr="", returncode=0,
-        )
-    monkeypatch.setattr(subprocess, "run", _run)
-    monkeypatch.setattr("mfdoc.retry.time.sleep", lambda s: None)
-
-    response = ClaudeCLICaller(timeout=1, max_retries=5)("ping")
-    assert response.text == "ok"
-    assert attempts["n"] == 3
-
-
-def test_timeout_gives_up_after_max_retries(monkeypatch):
-    attempts = {"n": 0}
-
-    def _run(*a, **kw):
-        attempts["n"] += 1
-        raise subprocess.TimeoutExpired(cmd="claude", timeout=1)
-    monkeypatch.setattr(subprocess, "run", _run)
-    monkeypatch.setattr("mfdoc.retry.time.sleep", lambda s: None)
-
-    with pytest.raises(RuntimeError, match="timed out"):
-        ClaudeCLICaller(timeout=1, max_retries=2)("ping")
-    assert attempts["n"] == 3  # initial attempt + 2 retries
-
-
-def test_a_nonzero_exit_is_not_retried_even_with_retries_enabled(monkeypatch):
-    """Only a timeout is treated as transient -- a nonzero exit usually
-    means something genuinely wrong (bad prompt, broken install, auth
-    failure) that a retry would just repeat identically."""
-    attempts = {"n": 0}
-
-    def _run(*a, **kw):
-        attempts["n"] += 1
-        return SimpleNamespace(stdout="", stderr="boom", returncode=1)
-    monkeypatch.setattr(subprocess, "run", _run)
-
-    with pytest.raises(RuntimeError, match="boom"):
-        ClaudeCLICaller(max_retries=5)("ping")
-    assert attempts["n"] == 1
+        ClaudeCLICaller(timeout=1)("ping")
 
 
 def test_model_flag_passed_through(monkeypatch):
