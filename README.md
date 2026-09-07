@@ -45,9 +45,10 @@ engagement is visible without tracking it by hand.
 
 ### What it produces
 
-Seven markdown document types (`templates/`): system overview, module docs,
-data entity docs, process flows, a CRUD/coverage report, and a gap register
-phrased as SME interview questions. Every business rule carries a
+Eight markdown document types (`templates/`): system overview, module docs,
+data entity docs, process flows, a screen-and-key interface matrix (mode x
+panel x map x PF-label x routine x outcome), a CRUD/coverage report, and a
+gap register phrased as SME interview questions. Every business rule carries a
 `[[MEMBER:LINE]]` citation and a confidence flag; `mfdoc validate` fails the
 build on any citation that doesn't resolve or any uncited, unhedged
 assertion. A flat `rules-register` indexes every `MEMBER:BR-nnn` rule ID
@@ -164,6 +165,13 @@ pip install -e .
 cp config/project.example.yml project.yml
 # edit source paths, pin the dialect for each source set
 
+# Every mfdoc command validates the resolved config's known options.* keys
+# (shape/type/range) before doing any work, and exits 2 with a readable
+# message on the first bad project.yml it's pointed at -- so a typo (e.g. a
+# negative options.narrative.max_rules_per_call, an out-of-range
+# quality_gates threshold) is caught immediately rather than partway
+# through a run.
+
 mfdoc ingest   --config project.yml
 mfdoc derive   --config project.yml
 mfdoc coverage --config project.yml     # read this before writing anything
@@ -176,6 +184,10 @@ mfdoc calibrate --config project.yml --dialect mantis
 mfdoc brief --config project.yml --system
 mfdoc brief --config project.yml --module MMP0100
 mfdoc brief --config project.yml --entity MILL-ORDER
+mfdoc brief --config project.yml --interface-matrix
+# whole-system: per screen/map, which module(s) display it, the PF-key (or
+# configured dispatch field) branches those modules dispatch on, and any
+# literal label text recorded on the screen -- see templates/interface-matrix.md
 
 # ... write documents from the briefs, per reference/writing-rules.md ...
 # module docs are high-volume and formulaic; batch them instead of writing
@@ -325,7 +337,7 @@ SKILL.md              the agent definition and workflow
 pyproject.toml        packaging; installs the `mfdoc` console script
 config/               example project configuration
 reference/            dialect packs and writing rules — read before use
-templates/            the seven document types, plus templates/tests/ for generated tests
+templates/            the eight document types, plus templates/tests/ for generated tests
 src/mfdoc/            the extraction pipeline (+ testplan/testadvisor/testoverlay/testbatch)
 tests/                pytest suite (fixtures as golden tests)
 examples/
@@ -333,7 +345,7 @@ examples/
   outputs/             a full, real pipeline run against examples/inputs -- see its own README.md
     docs/<dialect>/<library>/*.md    module docs, mirroring mfdoc batch's own output convention
     docs/{entities,process-flows}/   cross-cutting doc types (no fixed dialect home)
-    docs/{system-overview,gap-register}.md
+    docs/{system-overview,interface-matrix,gap-register}.md
     tests/<dialect>/<library>/<language>/<framework>/*.{md,py}   generated tests + sidecars
     *.json, *.db, *-register.md, *-advisory.md   deterministic artifacts (CI-refreshed)
 evals/                eval prompts (dev-time only; not installed)

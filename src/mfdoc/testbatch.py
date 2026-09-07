@@ -170,14 +170,36 @@ def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: 
     the part of generate_member_test_doc that doesn't care whether `brief`
     covers a member's whole test_case set or just one chunk of it, shared
     by the plain single-call path and _generate_member_test_doc_chunked's
-    per-chunk calls below."""
+    per-chunk calls below.
+
+    `caller(prompt)` is allowed to raise (a `claude -p` timeout is a real
+    `subprocess.TimeoutExpired`/`RuntimeError`, not a hypothetical -- see
+    claude_cli_caller.py's `DEFAULT_TIMEOUT_S`): an uncaught exception here
+    would otherwise propagate out of run_test_batch/generate_member_test_doc
+    and abort the whole batch, discarding every already-completed chunk's
+    result with no record that they finished. Treated exactly like a failed
+    validation instead -- the exception text becomes this attempt's
+    `retry_note`/`problems`, so a retry is attempted the same as any other
+    failure, and a final failure is reported as an ordinary ok=False
+    DocResult rather than an unhandled crash. Every attempt's problems (an
+    exception's message, or a failed validation's problem list) accumulate
+    onto `problems` rather than replacing it, in either direction: a prior
+    validation failure's problems survive a later attempt raising, and a
+    prior exception's message survives a later attempt's response still
+    failing validation -- neither an unguarded `problems = [...]` on the
+    exception branch nor on the validation branch would keep both."""
     retry_note = None
     input_tokens = output_tokens = 0
     problems: list[str] = []
     attempt = 0
     for attempt in range(1, max_attempts + 1):
         prompt = build_test_prompt(brief, writing_rules, template, language, framework, retry_note)
-        response = caller(prompt)
+        try:
+            response = caller(prompt)
+        except Exception as exc:
+            problems = problems + [f"model call raised {exc.__class__.__name__}: {exc}"]
+            retry_note = "\n".join(f"- {p}" for p in problems)
+            continue
         input_tokens += response.input_tokens
         output_tokens += response.output_tokens
         text = _fix_generated_by_version(response.text)
@@ -187,7 +209,7 @@ def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: 
         if result["ok"]:
             write_test_doc_with_sidecar(out_path, text, language)
             return DocResult(member_name, str(out_path), True, attempt, input_tokens, output_tokens, [])
-        problems = result["problems"]
+        problems = problems + result["problems"]
         retry_note = "\n".join(f"- {p}" for p in problems)
     return DocResult(member_name, str(out_path), False, attempt, input_tokens, output_tokens, problems)
 
@@ -285,7 +307,8 @@ def _render_chunk_index(member_name: str, system: str | None, language: str, fra
 def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None, rows: list,
                                        language: str, framework: str, out_path: Path,
                                        caller: ModelCaller, writing_rules: str, template: str,
-                                       redact: Redactor, max_attempts: int, chunk_size: int) -> DocResult:
+                                       redact: Redactor, max_attempts: int, chunk_size: int,
+                                       prior_chunks: dict | None = None) -> DocResult:
     """Render one member as several independent chunk documents plus a
     deterministic index doc at `out_path`, instead of asking one completion
     to cover every scenario. Each chunk goes through the exact same
@@ -298,7 +321,17 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
     re-generation, and (short of a single oversized routine) no chunk's
     prompt is much larger than a normal small member's. A row with no
     rule_candidate_id (rule_line_no is NULL) is treated as belonging to no
-    routine, same as brief.py's main-body facts."""
+    routine, same as brief.py's main-body facts.
+
+    `prior_chunks` (from a previous run's state, keyed by chunk index as a
+    string) lets a chunk whose own rule-range brief is unchanged from that
+    prior run -- and whose file on disk still validates -- skip the model
+    call entirely and reuse the existing file, mirroring
+    batch._generate_module_doc_chunked's identical `prior_chunks` parameter
+    verbatim: this is what makes a fix affecting only one routine's worth
+    of source cheap to pick up on a retry, rather than the member-level
+    resume check's only choice (reuse every chunk, or re-render all of
+    them)."""
     routines = fetch_routines(conn, rows[0]["member_id"])
     line_nos = [r["rule_line_no"] if r["rule_line_no"] is not None else -1 for r in rows]
     ranges = routine_aware_chunk_ranges(line_nos, routines, chunk_size)
@@ -315,6 +348,7 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
     input_tokens = output_tokens = 0
     chunk_entries: list[tuple[int, Path, DocResult]] = []
     problems: list[str] = []
+    chunk_state: dict[str, dict] = {}
 
     chunk_width = len(str(chunk_count))
     expected_chunk_names = {
@@ -327,13 +361,41 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
         brief = test_case_brief_chunk(
             member_name, system, chunk_rows, i, chunk_count, redact=redact, routines=routines,
         )
-        result = _generate_test_doc_from_brief(
-            conn, member_name, brief, language, framework, chunk_path, caller,
-            writing_rules, template, max_attempts=max_attempts,
+        brief_hash = hashlib.sha256(brief.encode("utf-8")).hexdigest()
+        prior_chunk = (prior_chunks or {}).get(str(i))
+        reusable = (
+            isinstance(prior_chunk, dict) and prior_chunk.get("ok") is True
+            and prior_chunk.get("brief_sha256") == brief_hash
+            and chunk_path.exists()
         )
+        result = None
+        if reusable:
+            # Re-validate rather than trust the stored "ok" flag verbatim --
+            # the *content* is cached, but validate_test_doc's own logic can
+            # have changed since it was last checked, and this costs no
+            # model call. Only ever attempted when the prior run's own
+            # record for this chunk was itself ok=True: reusing a
+            # previously-*failed* chunk just because its brief is unchanged
+            # would re-validate the same broken content and report the same
+            # failure forever, with no path back to a real retry -- a
+            # failed chunk must always get a fresh model call instead. And
+            # if re-validation of a genuinely-ok cached chunk still fails
+            # (e.g. validate_test_doc's own logic changed since it was
+            # written), fall back to regenerating rather than reporting a
+            # stale failure for content that was never actually wrong when
+            # it was produced.
+            revalidated = validate_test_doc(conn, chunk_path)
+            if revalidated["ok"]:
+                result = DocResult(member_name, str(chunk_path), True, 0, 0, 0, [])
+        if result is None:
+            result = _generate_test_doc_from_brief(
+                conn, member_name, brief, language, framework, chunk_path, caller,
+                writing_rules, template, max_attempts=max_attempts,
+            )
         input_tokens += result.input_tokens
         output_tokens += result.output_tokens
         chunk_entries.append((i, chunk_path, result))
+        chunk_state[str(i)] = {"ok": result.ok, "brief_sha256": brief_hash}
         if not result.ok:
             density_note = format_density_note(density_metrics[i - 1])
             problems.append(
@@ -356,31 +418,37 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
     if not index_validation["ok"]:
         problems = problems + [f"index document: {p}" for p in index_validation["problems"]]
 
-    return DocResult(member_name, str(out_path), not problems, chunk_count, input_tokens, output_tokens, problems)
+    return DocResult(
+        member_name, str(out_path), not problems, chunk_count, input_tokens, output_tokens,
+        problems, chunked=True, chunk_state=chunk_state,
+    )
 
 
 def generate_member_test_doc(conn, member_name: str, language: str, framework: str,
                               out_path: Path, caller: ModelCaller, writing_rules: str,
                               template: str, redact: Redactor = NULL_REDACTOR,
                               max_attempts: int = 2,
-                              max_scenarios_per_call: int | None = None) -> DocResult:
+                              max_scenarios_per_call: int | None = None,
+                              prior_chunks: dict | None = None) -> DocResult:
     """Single-member version: brief -> call -> validate -> retry once.
     Used directly by `mfdoc test-gen` and by run_test_batch's per-item work.
 
     A member whose test_case set exceeds `max_scenarios_per_call` (default
     DEFAULT_MAX_SCENARIOS_PER_CALL) renders as several independent chunk
-    documents instead -- see _generate_member_test_doc_chunked. The
-    ambiguous-name and no-test_case-rows cases fall through to the
-    original single-call path unchanged (test_case_brief already reports
-    both as prose in the brief itself, which the model then fails to turn
-    into a valid document -- existing, unchanged behaviour, not something
-    this change alters)."""
+    documents instead -- see _generate_member_test_doc_chunked (`prior_chunks`
+    is only meaningful on that path; a single-call member has nothing to
+    reuse per-chunk). The ambiguous-name and no-test_case-rows cases fall
+    through to the original single-call path unchanged (test_case_brief
+    already reports both as prose in the brief itself, which the model then
+    fails to turn into a valid document -- existing, unchanged behaviour,
+    not something this change alters)."""
     system, rows, ambiguous_libs = fetch_test_case_rows(conn, member_name)
     threshold = _resolve_max_scenarios_per_call(max_scenarios_per_call)
     if not ambiguous_libs and rows and len(rows) > threshold:
         return _generate_member_test_doc_chunked(
             conn, member_name, system, rows, language, framework, out_path, caller,
             writing_rules, template, redact, max_attempts, threshold,
+            prior_chunks=prior_chunks,
         )
 
     brief = test_case_brief(conn, member_name, redact=redact)
@@ -428,6 +496,34 @@ def _corpus_signature(conn, language: str, framework: str, threshold: int,
         extra.append(r["scenario_name"])
         extra.append(r["status"])
     return _base_corpus_signature(conn, redact=redact, extra=extra)
+
+
+def _checkpoint(state: dict, state_path: Path | None, corpus_sig: str | None) -> None:
+    """Persist `state` to `state_path` immediately -- called after every
+    member this run finishes (single-call or chunked), not just once at the
+    very end, so a crash partway through (a caller exception this harness
+    doesn't already turn into an ok=False result, or an external kill) loses
+    at most the one member in flight, not every member already completed
+    since the run started. This is member-granular, not chunk-granular: a
+    chunked member's chunks are all rendered by one
+    generate_member_test_doc/_generate_member_test_doc_chunked call before
+    its result is checkpointed here (mirrors batch.py's run_batch, which
+    makes the identical member-wide trade-off for module docs), so a crash
+    partway through one large chunked member's chunks still loses that
+    member's progress on this pass, even though a sibling member's chunk
+    failure is isolated and reported per-chunk within the same call. Folding
+    `corpus_sig` into every checkpoint, not just the final one, is safe, not
+    just convenient: a member this run hasn't reached yet has no "ok": True
+    entry of its own, so a resumed run's corpus-level skip still can't
+    wrongly skip it even though `_corpus_sha256` already matches -- and
+    doing this early is what lets that fast path benefit the members that
+    did finish before a crash, instead of only ones from a run that reached
+    its own end cleanly. No-op when `state_path` is None (resume tracking
+    disabled)."""
+    if state_path is None:
+        return
+    state["_corpus_sha256"] = corpus_sig
+    _save_state(state_path, state)
 
 
 def run_test_batch(conn, members: list[str], language: str, framework: str, out_dir: Path,
@@ -514,26 +610,83 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
         }
         for fut in as_completed(futures):
             name, brief_hash, out_path = futures[fut]
-            response = fut.result()
+            input_tokens = output_tokens = 0
+            attempts = 1
+            # fut.result() re-raises whatever `caller` itself raised (a
+            # `claude -p` timeout is a real subprocess.TimeoutExpired/
+            # RuntimeError, not hypothetical -- see claude_cli_caller.py's
+            # DEFAULT_TIMEOUT_S). Left uncaught, this single member's
+            # exception would propagate out of the as_completed loop and
+            # abort the whole batch -- discarding every other future's
+            # (already-finished, or about to finish) result with no state
+            # saved for any of them. Retried once here, synchronously,
+            # exactly like a validation failure gets retried below -- a
+            # transient timeout on the very first call deserves the same
+            # second chance a bad-but-successful response gets, not an
+            # immediate ok=False. `initial_exc_problem` (kept even when the
+            # retry then produces a response) is prefixed into this
+            # member's final problems on any later failure, so the original
+            # exception is never silently lost the way a plain overwrite
+            # would lose it.
+            initial_exc_problem = None
+            try:
+                response = fut.result()
+            except Exception as exc:
+                initial_exc_problem = f"model call raised {exc.__class__.__name__}: {exc}"
+                retry_prompt = build_test_prompt(
+                    briefs[name], writing_rules, template, language, framework,
+                    f"- {initial_exc_problem}",
+                )
+                try:
+                    response = caller(retry_prompt)
+                except Exception as exc2:
+                    result = DocResult(
+                        name, str(out_path), False, 2, 0, 0,
+                        [initial_exc_problem, f"retry model call raised {exc2.__class__.__name__}: {exc2}"],
+                    )
+                    results.append(result)
+                    state[state_keys[name]] = {
+                        "ok": False, "attempts": 2, "brief_sha256": brief_hash,
+                    }
+                    _checkpoint(state, state_path, corpus_sig)
+                    continue
+                attempts = 2
             input_tokens, output_tokens = response.input_tokens, response.output_tokens
 
             out_path.parent.mkdir(parents=True, exist_ok=True)
             final_text = _fix_generated_by_version(response.text)
             out_path.write_text(final_text, encoding="utf-8")
             validation = validate_test_doc(conn, out_path)
-            attempts = 1
-            if not validation["ok"]:
+            if not validation["ok"] and attempts == 1:
                 retry_note = "\n".join(f"- {p}" for p in validation["problems"])
                 retry_prompt = build_test_prompt(
                     briefs[name], writing_rules, template, language, framework, retry_note
                 )
-                retry_response = caller(retry_prompt)
-                input_tokens += retry_response.input_tokens
-                output_tokens += retry_response.output_tokens
-                final_text = _fix_generated_by_version(retry_response.text)
-                out_path.write_text(final_text, encoding="utf-8")
-                validation = validate_test_doc(conn, out_path)
-                attempts = 2
+                try:
+                    retry_response = caller(retry_prompt)
+                except Exception as exc:
+                    validation = {
+                        "ok": False,
+                        "problems": list(validation["problems"])
+                        + [f"retry model call raised {exc.__class__.__name__}: {exc}"],
+                    }
+                    attempts = 2
+                else:
+                    input_tokens += retry_response.input_tokens
+                    output_tokens += retry_response.output_tokens
+                    final_text = _fix_generated_by_version(retry_response.text)
+                    out_path.write_text(final_text, encoding="utf-8")
+                    validation = validate_test_doc(conn, out_path)
+                    attempts = 2
+            elif not validation["ok"] and initial_exc_problem is not None:
+                # This response already came from the exception-triggered
+                # retry above (attempts == 2 already) -- no third attempt;
+                # just make sure the original exception isn't lost from the
+                # reported problems.
+                validation = {
+                    "ok": False,
+                    "problems": [initial_exc_problem] + list(validation["problems"]),
+                }
 
             if validation["ok"]:
                 write_test_doc_with_sidecar(out_path, final_text, language)
@@ -546,6 +699,7 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
             state[state_keys[name]] = {
                 "ok": result.ok, "attempts": attempts, "brief_sha256": brief_hash,
             }
+            _checkpoint(state, state_path, corpus_sig)
 
     # Large members (chunked) render serially, on this thread, after the
     # pool above closes -- generate_member_test_doc touches `conn`
@@ -556,18 +710,20 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
     # case; trading its concurrency with the other members for correctness
     # here is the right call, not a regression worth chasing.
     for name, brief_hash, out_path in to_run_chunked:
+        prior = state.get(state_keys[name])
+        prior_chunks = prior.get("chunks") if isinstance(prior, dict) else None
         result = generate_member_test_doc(
             conn, name, language, framework, out_path, caller, writing_rules, template,
-            redact=redact, max_scenarios_per_call=threshold,
+            redact=redact, max_scenarios_per_call=threshold, prior_chunks=prior_chunks,
         )
         results.append(result)
         state[state_keys[name]] = {
             "ok": result.ok, "attempts": result.attempts, "brief_sha256": brief_hash,
+            "chunks": result.chunk_state,
         }
+        _checkpoint(state, state_path, corpus_sig)
 
-    if state_path:
-        state["_corpus_sha256"] = corpus_sig
-        _save_state(state_path, state)
+    _checkpoint(state, state_path, corpus_sig)
 
     return TestBatchSummary(
         results=sorted(results, key=lambda r: r.member),

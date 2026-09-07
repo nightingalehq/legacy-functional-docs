@@ -46,6 +46,79 @@ GitHub org.
   chunk boundary actually improves a real model's success rate on it --
   that would need validating against real (or much more elaborate
   synthetic) failure data this change doesn't have.
+- Implemented issue #79: `AnthropicCaller` and `VertexCaller` now retry
+  transient errors (`RateLimitError`, `APIConnectionError`,
+  `InternalServerError`) with bounded exponential backoff and jitter, via a
+  new dependency-free `retry.call_with_retry()` shared by both. Non-retryable
+  errors (bad request, auth, malformed prompt) still propagate immediately —
+  this only defers a bounded number of transient-looking failures, never
+  swallows a real one. `VertexCaller`'s existing lock is now held only
+  around the actual `messages.create()` call, not around backoff's sleep
+  between retries, so a retry waiting out a rate limit doesn't also block
+  every other worker's access to the shared client. Combined with #78's
+  per-member isolation, a transient API error no longer forces a whole
+  member to fail and be re-run from scratch. `ClaudeCLICaller` is
+  intentionally out of scope here -- per issue #79's own text it "already
+  has better timeout handling and can serve as a model for how the others
+  should behave," and its failure mode (a subprocess timing out or exiting
+  non-zero) isn't the same transient-network-error shape this retry helper
+  targets; it already turns a hung/failed `claude -p` call into a clear
+  `RuntimeError` on its own. (A retry addition was briefly tried and
+  reverted for exactly this reason -- see this branch's history.)
+- Implemented issue #80: `AnthropicCaller` and `VertexCaller` now take a
+  configurable `timeout` (seconds), defaulting to 600 -- the same
+  `DEFAULT_TIMEOUT_S` value and None-means-default pattern
+  `claude_cli_caller.ClaudeCLICaller` already used, so a hung request
+  surfaces as a clear timeout instead of blocking a worker thread
+  indefinitely. A new `--api-timeout` CLI flag (mirroring the existing
+  `--claude-code-timeout`) wires it through `classify-rules`/
+  `test-overlay-draft`/`test-batch`/`batch` for `--provider anthropic`
+  and `--provider vertex`.
+- Implemented issue #91: a new document type, `interface-matrix`, for the
+  screen-and-key interface matrix a client review asked for (mode x panel
+  x map x PF-label x routine x outcome). It follows the interactive
+  brief/template pattern (`brief.interface_matrix_brief()`,
+  `templates/interface-matrix.md`, `mfdoc brief --interface-matrix`) like
+  `system_brief`/`executive_brief`, not `batch.py`'s per-member path, so
+  the brief can gather each screen's display reference(s) and the
+  PF-key/dispatch branches found in the same modules that display it.
+  Reuses `structural.dispatch_edges_for_member` (the same derivation
+  `mfdoc dispatch-map` uses) for the PF-key branches, joined against
+  `interaction.target` (dialect-general: Natural's `INPUT USING MAP`,
+  Mantis's `CONVERSE`/`SHOW`) for which module(s) display each screen.
+  Data-model decisions, since the fact store has no table shaped like the
+  target document: "mode(s) reachable from" is every module whose own
+  source displays the screen (no dedicated mode field exists in the fact
+  store); PF-key labels are handed over as candidate literal text found on
+  the screen (Natural `MAP_TEXT` interaction rows / Mantis `HEADING`-format
+  `entity_field` rows on the `mantis_map` entity) rather than pre-matched
+  to a trigger value; "outcome" (exit/navigate/error) is deliberately left
+  for the narrative pass to characterise from the cited routine/call kind,
+  not classified deterministically, since neither a PF-key's number nor a
+  routine's name reliably implies its outcome. The bundled sample codebase
+  has no member that both displays a screen and dispatches on a PF-key/
+  configured field for it, so `examples/outputs/docs/interface-matrix.md`
+  demonstrates the brief's honest "nothing to report" path rather than
+  populated rows; `tests/test_interface_matrix_brief.py` covers populated
+  rows with synthetic facts, for both Natural's `*PF-KEY` and a
+  Mantis-style configured dispatch field.
+- Implemented issue #86: centralized `options.*` config validation.
+  `config_validate.py` is a new, declarative validation pass (`OPTION_SPECS`,
+  a list of `OptionSpec(path, types, check=...)` entries, not an if/elif
+  chain) covering every `options.*` leaf that was previously either
+  validated ad hoc at point of use (`batch._resolve_max_rules_per_call`,
+  `testbatch._resolve_max_scenarios_per_call`, `structural.py`'s
+  `cluster_by`/`direction`/`metric` checks) or not type-checked at all
+  (`options.redact.patterns` regex validity, `options.quality_gates`
+  rate/count ranges). `cli.load_config` calls `raise_if_invalid` on every
+  resolved config before returning it -- since every `cmd_*` calls
+  `load_config` first, this is a single upfront check at CLI startup for
+  every command, and `cli.main` catches the resulting `ConfigError` and
+  exits 2 with a readable, multi-problem message instead of an unhandled
+  traceback partway through a run. The existing point-of-use checks are
+  left in place as a harmless second line of defence for callers that
+  build a config dict without going through `load_config` (e.g. tests
+  calling `batch.run_batch` directly).
 - Implemented issue #85: coverage metrics now persist across runs for trend
   visibility. `db.coverage_history`/`db.record_coverage_history` (new
   `coverage_history` table, append-only, one row per `mfdoc coverage`/
@@ -89,6 +162,25 @@ GitHub org.
   wiring `notes_for()` into `brief.py`'s actual brief-building call sites
   is issue #94's job, kept separate so #94 has a stable, merged foundation
   to build on.
+- Implemented issue #104 (two gate-gap classes miscalibrated as harder than
+  they are): (1) `mantis.py`'s `'`-marked continuation fold recognised only
+  a *leading* marker (continuation line starts with `'`); added the
+  complementary *trailing* shape, where the marker sits at the end of the
+  line being wrapped instead (e.g. a long quoted assignment split as
+  `DESC="text so far '` / `more text"`) — new `_has_open_trailing_marker`
+  helper, distinguishing a genuine trailing marker from an ordinary line
+  that just happens to end with a real, closed literal. (2) new
+  `graph.resolve_interface_literal_calls`, run from `resolve()` before the
+  general callee_id lookup: a `CALL` on a Mantis `INTERFACE handle(...)`
+  bound to a literal at its own declaration (`mantis.py` now also records
+  that binding as a `variable` row, `scope='mantis_interface'`) is
+  reclassified to the literal target instead of being left as a
+  `dynamic_target` gap — that gap kind is reserved for targets genuinely
+  not determinable from source, not ones the extraction-time check just
+  hadn't looked up yet. Neither fixture set exercises either shape yet, so
+  both are covered by new isolated unit tests only (`tests/
+  test_mantis_rules.py`, new `tests/test_dynamic_call_resolution.py`); the
+  bundled fixture pipeline's gap/coverage counts are unchanged.
 
 **Progress (2026-09-06):**
 - Implemented issue #64: an eighth document type, `language-guide`, that

@@ -60,3 +60,18 @@ def test_cmd_validate_reports_omitted_statement_targets_without_failing(indexed_
         assert res["omitted_statement_targets"][0] in captured.out
     else:
         assert "advisory, does not fail validation" not in captured.out
+
+
+def test_sample_citations_accepts_api_timeout_flag(cli_args, tmp_path, capsys):
+    """`sample-citations --judge llm` builds its ModelCaller through the same
+    `_build_model_caller()` as batch/classify-rules/test-batch, so it should
+    accept `--api-timeout` too rather than being the one subcommand where a
+    hung LLM-judge call can't be bounded."""
+    state_path = tmp_path / "citation-sample-state.json"
+    argv = [
+        "sample-citations", "--config", cli_args.config, "--judge", "report",
+        "--state", str(state_path), "--api-timeout", "45",
+    ]
+    assert cli.main(argv) == 0
+    out = capsys.readouterr().out
+    assert "claim(s) sampled" in out

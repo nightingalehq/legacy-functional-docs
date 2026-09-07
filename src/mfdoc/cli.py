@@ -38,6 +38,7 @@ from . import graph, normalise
 from . import structural
 from . import testadvisor as testadvisor_mod
 from . import testplan as testplan_mod
+from .config_validate import ConfigError, raise_if_invalid
 from .db import (
     add_gap, connect, coverage_history, insert, purge_member, purge_member_facts,
     record_coverage_history, set_metric, upsert_member,
@@ -74,10 +75,35 @@ DIALECT_DEFAULT_TYPE = {
 
 
 def load_config(path: str | Path) -> dict:
-    cfg = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    try:
+        cfg = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise ConfigError(
+            f"invalid project config -- 1 problem(s):\n"
+            f"  - invalid YAML: {exc}"
+        ) from exc
+    if cfg is None:
+        cfg = {}
+    if not isinstance(cfg, dict):
+        # A project.yml that parses to a list/string/number/etc (e.g. a
+        # stray leading '-' making the whole file one YAML sequence) has no
+        # keys to .setdefault() below -- raise the same ConfigError shape
+        # everything else here does, rather than letting that call fail
+        # with a raw AttributeError before validation ever runs.
+        raise ConfigError(
+            f"invalid project config -- 1 problem(s):\n"
+            f"  - config root must be a mapping, got {cfg!r}"
+        )
     cfg.setdefault("index_db", ".mfdoc/index.db")
     cfg.setdefault("sources", [])
     cfg.setdefault("options", {})
+    # Validated here, once, before any command does anything else with the
+    # config -- every cmd_* calls load_config first, so this is the single
+    # upfront check point for the whole CLI (see config_validate.py). A
+    # malformed project.yml is then a clear error at startup instead of a
+    # run failing partway through at whichever ad hoc point-of-use check
+    # happens to be reached first.
+    raise_if_invalid(cfg)
     return cfg
 
 
@@ -274,8 +300,14 @@ def cmd_brief(args) -> int:
         out = brief_mod.entity_brief(conn, args.entity, redact=redact, lexicon=lexicon)
     elif args.executive:
         out = brief_mod.executive_brief(conn, args.executive, redact=redact)
+    elif args.interface_matrix:
+        from .conditions import dispatch_field_from_options
+
+        out = brief_mod.interface_matrix_brief(
+            conn, redact=redact, dispatch_field=dispatch_field_from_options(cfg["options"])
+        )
     else:
-        print("specify --module, --entity, --system or --executive", file=sys.stderr)
+        print("specify --module, --entity, --system, --executive or --interface-matrix", file=sys.stderr)
         return 2
     _write_or_print(out, args.out)
     return 0
@@ -528,14 +560,16 @@ def _build_model_caller(args):
                 "current id for this model."
             )
             return None
-        return VertexCaller(model=args.model, project=args.gcp_project, region=args.gcp_region)
+        return VertexCaller(model=args.model, project=args.gcp_project, region=args.gcp_region,
+                            timeout=getattr(args, "api_timeout", None))
     if provider == "claude-code":
         from .claude_cli_caller import ClaudeCLICaller
         # getattr, not args.claude_code_timeout: same bare-namespace
         # backward-compat concern as `provider` above.
         return ClaudeCLICaller(model=args.model, timeout=getattr(args, "claude_code_timeout", None))
     from .anthropic_caller import AnthropicCaller
-    return AnthropicCaller(model=args.model or "claude-sonnet-4-5")
+    return AnthropicCaller(model=args.model or "claude-sonnet-4-5",
+                            timeout=getattr(args, "api_timeout", None))
 
 
 def cmd_test_overlay_draft(args) -> int:
@@ -1196,6 +1230,9 @@ def main(argv=None) -> int:
     p.add_argument("--system", action="store_true")
     p.add_argument("--executive", help="member name; emits the cited-facts brief for the "
                                         "executive-summary narrative template (templates/executive-summary.md)")
+    p.add_argument("--interface-matrix", action="store_true",
+                    help="whole-system cited-facts brief for the screen-and-key interface "
+                         "matrix narrative template (templates/interface-matrix.md)")
     p.add_argument("--out")
     p.set_defaults(func=cmd_brief)
 
@@ -1257,6 +1294,9 @@ def main(argv=None) -> int:
     p.add_argument("--gcp-project")
     p.add_argument("--gcp-region")
     p.add_argument("--claude-code-timeout", type=int, default=None)
+    p.add_argument("--api-timeout", type=int, default=None,
+                    help="request timeout in seconds for --provider anthropic/vertex "
+                    "(default: 600, matching --claude-code-timeout's default)")
     p.set_defaults(func=cmd_classify_rules)
 
     p = sub.add_parser("test-plan")
@@ -1290,6 +1330,9 @@ def main(argv=None) -> int:
                     help="--provider claude-code only; seconds before a `claude -p` call is "
                          "killed as hung, default 600 (claude_cli_caller.DEFAULT_TIMEOUT_S) -- "
                          "raise this for a member with an unusually large fact brief/test-case count")
+    p.add_argument("--api-timeout", type=int, default=None,
+                    help="request timeout in seconds for --provider anthropic/vertex "
+                    "(default: 600, matching --claude-code-timeout's default)")
     p.set_defaults(func=cmd_test_overlay_draft)
 
     p = sub.add_parser("test-advisory")
@@ -1322,6 +1365,9 @@ def main(argv=None) -> int:
                         help="--provider claude-code only; seconds before a `claude -p` call is "
                              "killed as hung, default 600 (claude_cli_caller.DEFAULT_TIMEOUT_S) -- "
                              "raise this for a member with an unusually large fact brief/test-case count")
+        p.add_argument("--api-timeout", type=int, default=None,
+                        help="request timeout in seconds for --provider anthropic/vertex "
+                        "(default: 600, matching --claude-code-timeout's default)")
         p.set_defaults(func=fn)
     sub.choices["test-gen"].add_argument("--member", required=True)
     sub.choices["test-gen"].add_argument("--out", help="default: tests_generated/<language>/<MEMBER>.md")
@@ -1368,6 +1414,9 @@ def main(argv=None) -> int:
                     help="--provider claude-code only; seconds before a `claude -p` call is "
                          "killed as hung, default 600 (claude_cli_caller.DEFAULT_TIMEOUT_S) -- "
                          "raise this for a module with an unusually large fact brief")
+    p.add_argument("--api-timeout", type=int, default=None,
+                    help="request timeout in seconds for --provider anthropic/vertex "
+                    "(default: 600, matching --claude-code-timeout's default)")
     p.set_defaults(func=cmd_batch)
 
     p = sub.add_parser("validate")
@@ -1403,6 +1452,12 @@ def main(argv=None) -> int:
                         "smoke tests")
     p.add_argument("--provider", choices=["anthropic", "vertex", "claude-code"], default="anthropic",
                    help="--judge llm only; which egress path serves the model call")
+    p.add_argument("--claude-code-timeout", type=int, default=None,
+                    help="--provider claude-code only; seconds before a `claude -p` call is "
+                         "killed as hung, default 600 (claude_cli_caller.DEFAULT_TIMEOUT_S)")
+    p.add_argument("--api-timeout", type=int, default=None,
+                    help="request timeout in seconds for --provider anthropic/vertex "
+                    "(default: 600, matching --claude-code-timeout's default)")
     p.add_argument("--gcp-project", help="--judge llm + --provider vertex only")
     p.add_argument("--gcp-region", help="--judge llm + --provider vertex only")
     p.set_defaults(func=cmd_sample_citations)
@@ -1413,7 +1468,15 @@ def main(argv=None) -> int:
     p.set_defaults(func=cmd_export)
 
     args = ap.parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except ConfigError as exc:
+        # Same "clean message, exit 2" idiom as the config-shape checks
+        # cmd_test_gen/cmd_test_batch already do inline (e.g.
+        # _testgen_matrix_error) -- a config problem is a usage error, not
+        # an unhandled traceback.
+        print(str(exc), file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
