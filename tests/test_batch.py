@@ -487,6 +487,8 @@ def test_batch_absorbs_a_transient_caller_retry_while_another_member_succeeds(in
     state_path = tmp_path / "state.json"
     caller = RetryMaskedCaller(retry_once_for_members={"MMP0100"})
 
+    # Keep the normal pool concurrency: the caller synchronizes its shared
+    # counters and retry state, so these assertions remain deterministic.
     summary = batch_mod.run_batch(
         indexed_db, members, tmp_path / "out", caller, "rules", "template",
         state_path=state_path,
