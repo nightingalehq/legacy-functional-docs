@@ -190,20 +190,30 @@ def chunk_density_metrics(line_nos: list[int], ranges: list[tuple[int, int]],
 
     A chunk with fewer than 2 resolvable (>= 0) line numbers in its own
     slice can't have a source span computed (nothing to subtract) -- its
-    `line_span`/`lines_per_item` come back `None` rather than a misleading
-    0 or 1.
+    `line_span` comes back `None` rather than a misleading 0 or 1.
+    `lines_per_item` additionally requires *every* item in the chunk to
+    have a resolvable line number: a `line_span` computed from only some
+    of a chunk's items, then divided by the chunk's full `item_count`,
+    would produce a `lines_per_item` that doesn't correspond to the items
+    used to compute the span and can understate density in the outlier
+    check -- so a mix of resolvable and unresolvable (sentinel) line
+    numbers still yields a `line_span` where possible, but `lines_per_item`
+    comes back `None`.
 
     Each returned dict: `item_count`, `line_span` (inclusive source lines
-    spanned by this chunk's own items, or `None`), `lines_per_item` (or
-    `None`), `avg_depth` (mean of this chunk's non-None depths, or `None`
-    when `depths` wasn't given or none of this chunk's rows have one)."""
+    spanned by this chunk's own items, or `None`), `lines_per_item` (`None`
+    unless every item in the chunk has a resolvable line number), `avg_depth`
+    (mean of this chunk's non-None depths, or `None` when `depths` wasn't
+    given or none of this chunk's rows have one)."""
     metrics: list[dict] = []
     for start, end in ranges:
-        slice_lines = [ln for ln in line_nos[start - 1:end] if ln is not None and ln >= 0]
+        raw_lines = line_nos[start - 1:end]
+        slice_lines = [ln for ln in raw_lines if ln is not None and ln >= 0]
         item_count = end - start + 1
+        all_resolvable = len(slice_lines) == len(raw_lines)
         if len(slice_lines) >= 2:
             line_span = max(slice_lines) - min(slice_lines) + 1
-            lines_per_item = line_span / item_count
+            lines_per_item = line_span / item_count if all_resolvable else None
         else:
             line_span = None
             lines_per_item = None
@@ -245,7 +255,7 @@ def flag_density_outliers(metrics: list[dict], factor: float = 1.5) -> list[dict
         lpi = m.get("lines_per_item")
         if lpi_median and lpi is not None and lpi >= factor * lpi_median:
             reasons.append(
-                f"lines/rule {lpi:.1f} vs run median {lpi_median:.1f} ({lpi / lpi_median:.1f}x)"
+                f"lines/item {lpi:.1f} vs run median {lpi_median:.1f} ({lpi / lpi_median:.1f}x)"
             )
         depth = m.get("avg_depth")
         if depth_median and depth is not None and depth >= factor * depth_median:
@@ -262,7 +272,7 @@ def format_density_note(metrics_entry: dict) -> str:
     entry, meant to be appended to a failed chunk's own diagnostics (see
     batch.py's/testbatch.py's chunked-rendering failure paths) -- e.g.
     "density: 8 item(s), 42.5 lines/item, avg depth 3.4 -- OUTLIER
-    (lines/rule 2.3x vs run median 18.1)". So a human reading a retry
+    (lines/item 2.3x vs run median 18.1)". So a human reading a retry
     report can tell "was this chunk just unlucky, or is it actually
     harder" immediately, rather than reverse-engineering it from a pattern
     of repeated failures across a whole run (issue #105). Never raises on

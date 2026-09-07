@@ -798,7 +798,7 @@ def test_generate_module_doc_failed_chunk_diagnostics_flag_a_rule_dense_outlier(
     dense_problem = dense_problems[0]
     assert "density:" in dense_problem
     assert "OUTLIER" in dense_problem
-    assert "lines/rule" in dense_problem or "nesting depth" in dense_problem
+    assert "lines/item" in dense_problem or "nesting depth" in dense_problem
 
     # The other, ordinary chunks were not flagged as outliers anywhere.
     assert not any("chunk 1" in p and "OUTLIER" in p for p in result.problems)

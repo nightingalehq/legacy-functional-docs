@@ -203,6 +203,19 @@ def test_chunk_density_metrics_handles_unresolvable_line_nos():
     assert metrics[0]["item_count"] == 3
 
 
+def test_chunk_density_metrics_mixed_resolvable_leaves_lines_per_item_none():
+    """testbatch.py's chunks can mix rows tied to a rule/routine (a real
+    line_no) with rows that aren't (the negative sentinel). line_span can
+    still be computed from the resolvable subset, but lines_per_item must
+    come back None rather than dividing that partial span by the chunk's
+    full item_count -- that would understate density for a chunk that
+    isn't fully resolvable (issue #107 review comment)."""
+    metrics = chunk_density_metrics([10, -1, 30, -1], [(1, 4)])
+    assert metrics[0]["item_count"] == 4
+    assert metrics[0]["line_span"] == 21
+    assert metrics[0]["lines_per_item"] is None
+
+
 def test_flag_density_outliers_flags_the_rule_dense_chunk():
     metrics = chunk_density_metrics(_DENSE_LINE_NOS, _DENSE_RANGES, _DENSE_DEPTHS)
     flagged = flag_density_outliers(metrics)
@@ -210,7 +223,7 @@ def test_flag_density_outliers_flags_the_rule_dense_chunk():
     assert flagged[1]["outlier"] is False
     assert flagged[2]["outlier"] is True
     assert flagged[2]["outlier_reasons"], "outlier chunk must explain why"
-    assert any("lines/rule" in r for r in flagged[2]["outlier_reasons"])
+    assert any("lines/item" in r for r in flagged[2]["outlier_reasons"])
     assert any("nesting depth" in r for r in flagged[2]["outlier_reasons"])
 
 
