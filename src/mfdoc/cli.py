@@ -560,14 +560,16 @@ def _build_model_caller(args):
                 "current id for this model."
             )
             return None
-        return VertexCaller(model=args.model, project=args.gcp_project, region=args.gcp_region)
+        return VertexCaller(model=args.model, project=args.gcp_project, region=args.gcp_region,
+                            timeout=getattr(args, "api_timeout", None))
     if provider == "claude-code":
         from .claude_cli_caller import ClaudeCLICaller
         # getattr, not args.claude_code_timeout: same bare-namespace
         # backward-compat concern as `provider` above.
         return ClaudeCLICaller(model=args.model, timeout=getattr(args, "claude_code_timeout", None))
     from .anthropic_caller import AnthropicCaller
-    return AnthropicCaller(model=args.model or "claude-sonnet-4-5")
+    return AnthropicCaller(model=args.model or "claude-sonnet-4-5",
+                            timeout=getattr(args, "api_timeout", None))
 
 
 def cmd_test_overlay_draft(args) -> int:
@@ -1292,6 +1294,9 @@ def main(argv=None) -> int:
     p.add_argument("--gcp-project")
     p.add_argument("--gcp-region")
     p.add_argument("--claude-code-timeout", type=int, default=None)
+    p.add_argument("--api-timeout", type=int, default=None,
+                    help="request timeout in seconds for --provider anthropic/vertex "
+                    "(default: 600, matching --claude-code-timeout's default)")
     p.set_defaults(func=cmd_classify_rules)
 
     p = sub.add_parser("test-plan")
@@ -1325,6 +1330,9 @@ def main(argv=None) -> int:
                     help="--provider claude-code only; seconds before a `claude -p` call is "
                          "killed as hung, default 600 (claude_cli_caller.DEFAULT_TIMEOUT_S) -- "
                          "raise this for a member with an unusually large fact brief/test-case count")
+    p.add_argument("--api-timeout", type=int, default=None,
+                    help="request timeout in seconds for --provider anthropic/vertex "
+                    "(default: 600, matching --claude-code-timeout's default)")
     p.set_defaults(func=cmd_test_overlay_draft)
 
     p = sub.add_parser("test-advisory")
@@ -1357,6 +1365,9 @@ def main(argv=None) -> int:
                         help="--provider claude-code only; seconds before a `claude -p` call is "
                              "killed as hung, default 600 (claude_cli_caller.DEFAULT_TIMEOUT_S) -- "
                              "raise this for a member with an unusually large fact brief/test-case count")
+        p.add_argument("--api-timeout", type=int, default=None,
+                        help="request timeout in seconds for --provider anthropic/vertex "
+                        "(default: 600, matching --claude-code-timeout's default)")
         p.set_defaults(func=fn)
     sub.choices["test-gen"].add_argument("--member", required=True)
     sub.choices["test-gen"].add_argument("--out", help="default: tests_generated/<language>/<MEMBER>.md")
@@ -1403,6 +1414,9 @@ def main(argv=None) -> int:
                     help="--provider claude-code only; seconds before a `claude -p` call is "
                          "killed as hung, default 600 (claude_cli_caller.DEFAULT_TIMEOUT_S) -- "
                          "raise this for a module with an unusually large fact brief")
+    p.add_argument("--api-timeout", type=int, default=None,
+                    help="request timeout in seconds for --provider anthropic/vertex "
+                    "(default: 600, matching --claude-code-timeout's default)")
     p.set_defaults(func=cmd_batch)
 
     p = sub.add_parser("validate")
@@ -1438,6 +1452,12 @@ def main(argv=None) -> int:
                         "smoke tests")
     p.add_argument("--provider", choices=["anthropic", "vertex", "claude-code"], default="anthropic",
                    help="--judge llm only; which egress path serves the model call")
+    p.add_argument("--claude-code-timeout", type=int, default=None,
+                    help="--provider claude-code only; seconds before a `claude -p` call is "
+                         "killed as hung, default 600 (claude_cli_caller.DEFAULT_TIMEOUT_S)")
+    p.add_argument("--api-timeout", type=int, default=None,
+                    help="request timeout in seconds for --provider anthropic/vertex "
+                    "(default: 600, matching --claude-code-timeout's default)")
     p.add_argument("--gcp-project", help="--judge llm + --provider vertex only")
     p.add_argument("--gcp-region", help="--judge llm + --provider vertex only")
     p.set_defaults(func=cmd_sample_citations)

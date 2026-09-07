@@ -39,6 +39,44 @@ def test_missing_project_raises_before_any_client_construction(monkeypatch):
         VertexCaller()
 
 
+def test_default_timeout_is_passed_to_the_anthropic_vertex_client(monkeypatch):
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "some-project")
+    monkeypatch.setitem(sys.modules, "google", SimpleNamespace(auth=SimpleNamespace()))
+    monkeypatch.setitem(sys.modules, "google.auth", SimpleNamespace())
+
+    constructed = {}
+
+    def fake_ctor(**kwargs):
+        constructed.update(kwargs)
+        return SimpleNamespace(messages=SimpleNamespace(create=lambda **kw: None))
+
+    monkeypatch.setitem(sys.modules, "anthropic", SimpleNamespace(AnthropicVertex=fake_ctor))
+
+    from mfdoc.vertex_caller import DEFAULT_TIMEOUT_S
+
+    caller = VertexCaller(project="some-project")
+    assert caller.timeout == DEFAULT_TIMEOUT_S == 600
+    assert constructed["timeout"] == DEFAULT_TIMEOUT_S
+
+
+def test_explicit_timeout_overrides_the_default_for_vertex(monkeypatch):
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "some-project")
+    monkeypatch.setitem(sys.modules, "google", SimpleNamespace(auth=SimpleNamespace()))
+    monkeypatch.setitem(sys.modules, "google.auth", SimpleNamespace())
+
+    constructed = {}
+
+    def fake_ctor(**kwargs):
+        constructed.update(kwargs)
+        return SimpleNamespace(messages=SimpleNamespace(create=lambda **kw: None))
+
+    monkeypatch.setitem(sys.modules, "anthropic", SimpleNamespace(AnthropicVertex=fake_ctor))
+
+    caller = VertexCaller(project="some-project", timeout=30)
+    assert caller.timeout == 30
+    assert constructed["timeout"] == 30
+
+
 def test_cmd_batch_routes_to_vertex_caller_when_provider_is_vertex(cli_args, tmp_path, monkeypatch):
     project_dir = Path(cli_args.config).parent
     if not (project_dir / "reference").exists():
@@ -48,8 +86,8 @@ def test_cmd_batch_routes_to_vertex_caller_when_provider_is_vertex(cli_args, tmp
     constructed = {}
 
     class FakeVertexCaller:
-        def __init__(self, model=None, project=None, region=None):
-            constructed.update(model=model, project=project, region=region)
+        def __init__(self, model=None, project=None, region=None, timeout=None):
+            constructed.update(model=model, project=project, region=region, timeout=timeout)
 
         def __call__(self, prompt):
             from mfdoc.batch import ModelResponse
@@ -63,4 +101,6 @@ def test_cmd_batch_routes_to_vertex_caller_when_provider_is_vertex(cli_args, tmp
         provider="vertex", gcp_project="test-proj", gcp_region="us-east5",
     )
     cli.cmd_batch(args)
-    assert constructed == {"model": "claude-sonnet-4-5", "project": "test-proj", "region": "us-east5"}
+    assert constructed == {
+        "model": "claude-sonnet-4-5", "project": "test-proj", "region": "us-east5", "timeout": None,
+    }
