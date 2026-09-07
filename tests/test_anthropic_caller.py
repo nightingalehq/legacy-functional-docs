@@ -93,29 +93,55 @@ def test_retries_a_transient_error_and_eventually_succeeds(monkeypatch):
     assert result.retries == 2
 
 
-def test_retry_count_is_local_to_each_call_not_shared_across_concurrent_calls(monkeypatch):
+def test_retry_count_stays_correct_when_two_calls_actually_run_concurrently(monkeypatch):
     """`ModelResponse.retries` must reflect only the one `__call__` it came
     from -- not a shared instance attribute that a second, concurrent call
     from another thread could stomp on before the first call reads it back
     (issue #84's design note on why `retries` is tracked via a local
-    closure variable inside `__call__`, not `self.something`)."""
-    calls = {"n": 0}
+    closure variable inside `__call__`, not `self.something`).
+
+    Genuinely runs both calls concurrently (via a real ThreadPoolExecutor),
+    with events forcing call A's retry to be "in flight" (its `on_retry` has
+    already fired, as it would with a shared `self.retries` attribute)
+    at the exact moment call B executes and returns -- rather than two
+    calls made sequentially, which would pass even against a *broken*,
+    shared-attribute implementation and so wouldn't actually catch the
+    regression this test exists to guard against."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    a_failed_once = threading.Event()
+    b_done = threading.Event()
+    calls = {"A": 0, "B": 0}
 
     def create(**kwargs):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise _FakeRateLimitError("simulated 429 on the first call only")
-        return _fake_message()
+        prompt = kwargs["messages"][0]["content"]
+        if prompt == "prompt A":
+            calls["A"] += 1
+            if calls["A"] == 1:
+                a_failed_once.set()
+                assert b_done.wait(timeout=5), "call B never completed"
+                raise _FakeRateLimitError("simulated 429 on A's first attempt")
+            return _fake_message()
+        assert a_failed_once.wait(timeout=5), "call A never reached its first (failing) attempt"
+        calls["B"] += 1
+        response = _fake_message()
+        b_done.set()
+        return response
 
     module, _ = _fake_anthropic_module(create)
     monkeypatch.setitem(sys.modules, "anthropic", module)
     monkeypatch.setattr("mfdoc.retry.time.sleep", lambda s: None)
 
     caller = AnthropicCaller(max_retries=5)
-    first = caller("prompt one")  # needed one retry
-    second = caller("prompt two")  # first-try success
-    assert first.retries == 1
-    assert second.retries == 0
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        fut_a = pool.submit(caller, "prompt A")
+        fut_b = pool.submit(caller, "prompt B")
+        first = fut_a.result(timeout=5)
+        second = fut_b.result(timeout=5)
+
+    assert first.retries == 1  # needed one retry
+    assert second.retries == 0  # first-try success, unaffected by A's in-flight retry
 
 
 def test_gives_up_after_max_retries_on_a_persistent_transient_error(monkeypatch):
