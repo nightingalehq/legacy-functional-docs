@@ -19,6 +19,41 @@ import statistics
 from .citations import _cite, _rule_id
 from .db import GAP_SEVERITY_ORDER_SQL
 from .redact import NULL_REDACTOR, Redactor
+from .sme_notes import Notes, notes_for
+
+
+def _sme_notes_section(redact: Redactor, sme_notes: Notes | None, name: str | None) -> list[str]:
+    """Lines for the advisory-only "SME notes" section shared by
+    module_brief/entity_brief/executive_brief/test_case_brief, or `[]` when
+    there's nothing to say for `name` (no `sme_notes` given, or no general/
+    named section matches it).
+
+    Deliberately its own heading, at the *end* of the brief, in plain prose
+    -- never `[[MEMBER:LINE]]`-cited like everything else here, and never
+    mixed into a section a model might read as sourced fact. This is the
+    one thing a human types free-hand into `sme-notes.md` without it being
+    checked against the fact store, so it must stay visually and
+    structurally distinct from every cited section above it: interpretation
+    and emphasis only, never itself a citable source, never an override of
+    what the fact store says. See `reference/writing-rules.md`'s "SME
+    notes" rule for the corresponding instruction to the narrative pass."""
+    if not sme_notes:
+        return []
+    text = notes_for(sme_notes, name)
+    if not text:
+        return []
+    return [
+        "## SME notes (human-provided context, not verified against source)",
+        "",
+        "These notes were typed by a human SME, not derived from source. They "
+        "may help with interpretation and emphasis, but they are never a "
+        "citable source -- every business-rule claim in the generated "
+        "document must still carry its own [[MEMBER:LINE]] citation from the "
+        "sections above, exactly as if this section didn't exist.",
+        "",
+        redact(text),
+        "",
+    ]
 
 
 def _copycode_rule_candidates(conn, mid: int, _seen: set | None = None) -> list[tuple[int, str, list]]:
@@ -356,7 +391,8 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
                   redact: Redactor = NULL_REDACTOR, lexicon: dict[str, str] | None = None,
                   rule_range: tuple[int, int] | None = None,
                   chunk_info: tuple[int, int] | None = None,
-                  chunk_map: dict[str, int] | None = None) -> str:
+                  chunk_map: dict[str, int] | None = None,
+                  sme_notes: Notes | None = None) -> str:
     """`rule_range` (1-based, inclusive, over this member's own rule_candidate
     rows in the same order they're numbered in) restricts the "Candidate
     business rules" section to that slice -- everything else in the brief
@@ -737,11 +773,14 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
             vocab.append("")
             out[vocab_insert_at:vocab_insert_at] = vocab
 
+    out.extend(_sme_notes_section(redact, sme_notes, name))
+
     return "\n".join(out) + "\n"
 
 
 def entity_brief(conn, entity_name: str, redact: Redactor = NULL_REDACTOR,
-                  lexicon: dict[str, str] | None = None) -> str:
+                  lexicon: dict[str, str] | None = None,
+                  sme_notes: Notes | None = None) -> str:
     e = conn.execute(
         "SELECT * FROM entity WHERE UPPER(name)=UPPER(?) LIMIT 1", (entity_name,)
     ).fetchone()
@@ -827,6 +866,8 @@ def entity_brief(conn, entity_name: str, redact: Redactor = NULL_REDACTOR,
             vocab.append("")
             out[vocab_insert_at:vocab_insert_at] = vocab
 
+    out.extend(_sme_notes_section(redact, sme_notes, e["name"]))
+
     return "\n".join(out) + "\n"
 
 
@@ -902,7 +943,8 @@ def system_brief(conn, redact: Redactor = NULL_REDACTOR) -> str:
     return "\n".join(out) + "\n"
 
 
-def executive_brief(conn, member_name: str, redact: Redactor = NULL_REDACTOR, top_n: int = 10) -> str:
+def executive_brief(conn, member_name: str, redact: Redactor = NULL_REDACTOR, top_n: int = 10,
+                     sme_notes: Notes | None = None) -> str:
     """Cited-facts brief for one program's executive summary: purpose/
     entry data, top rules by theme, I/O, external dependents, risk score.
     Same contract as module_brief/system_brief -- the narrative pass may
@@ -1080,6 +1122,9 @@ def executive_brief(conn, member_name: str, redact: Redactor = NULL_REDACTOR, to
             f"out_degree {match['out_degree']})"
         )
     out.append("")
+
+    out.extend(_sme_notes_section(redact, sme_notes, member["name"]))
+
     return "\n".join(out) + "\n"
 
 

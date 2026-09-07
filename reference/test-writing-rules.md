@@ -17,6 +17,13 @@ absence the same way: write the test up to the branch decision and mark the
 assertion `unresolved`, or omit the assertion and record why, rather than
 inventing a plausible expected value.
 
+A brief may also carry an advisory-only "## SME notes" section (see
+`writing-rules.md`'s [SME notes](writing-rules.md#sme-notes) rule, which
+applies here unchanged) — use it for interpretation and emphasis only. It
+is never a citable source: every scenario's `[[MEMBER:LINE]]` citation
+still comes from the branch facts above, exactly as if the SME notes
+section didn't exist.
+
 ## Output shape
 
 Produce one Markdown document with the front matter fields below, followed

@@ -13,6 +13,7 @@ enforces and the prose failures it cannot catch.
 - [Prose failures to avoid](#prose-failures-to-avoid)
 - [Audience calibration](#audience-calibration)
 - [Naming and the lexicon](#naming-and-the-lexicon)
+- [SME notes](#sme-notes)
 
 ## Citation format
 
@@ -222,3 +223,21 @@ term shown there verbatim; do not invent a different phrasing for the same entry
 When you find a term that ought to be in the lexicon, add it to the config rather
 than deciding case by case — inconsistent vocabulary across a document set makes
 it much harder to review, and reviewers notice.
+
+## SME notes
+
+A brief may carry a "## SME notes (human-provided context, not verified against
+source)" section near the end, sourced from an optional `sme-notes.md` file an SME
+maintains alongside the project (see `options.sme_notes` in `project.yml`). Use it
+to inform interpretation and emphasis — which rules matter most, a piece of
+domain context that makes an otherwise-dry condition make sense, a known gotcha to
+phrase carefully.
+
+It is never itself a citable source and never overrides what the fact store says.
+Every business-rule claim in the generated document must still carry its own
+`[[MEMBER:LINE]]` citation from the cited sections above, exactly as if the SME
+notes section didn't exist — do not cite the SME notes section, do not treat it
+as confirming or superseding a fact, and do not let it justify dropping a
+citation you'd otherwise need. If an SME note contradicts what the cited facts
+show, write the cited facts and raise the discrepancy as a gap-register question;
+never quietly prefer the SME's prose over the source.

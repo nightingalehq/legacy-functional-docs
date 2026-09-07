@@ -877,7 +877,8 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
                                   template: str, redact: Redactor, lexicon: dict[str, str] | None,
                                   max_attempts: int, chunk_size: int,
                                   prior_chunks: dict | None = None,
-                                  index_template: str | None = None) -> DocResult:
+                                  index_template: str | None = None,
+                                  sme_notes: dict | None = None) -> DocResult:
     """Render one member as several independent chunk documents plus a
     deterministic index doc at `out_path`, instead of asking one completion
     to cover the member's whole rule set. Each chunk goes through the exact
@@ -967,6 +968,7 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
         brief = module_brief(
             conn, member_name, redact=redact, lexicon=lexicon,
             rule_range=(start, end), chunk_info=(i, chunk_count), chunk_map=chunk_map,
+            sme_notes=sme_notes,
         )
         brief_hash = hashlib.sha256(brief.encode("utf-8")).hexdigest()
         prior_chunk = (prior_chunks or {}).get(str(i))
@@ -1139,7 +1141,8 @@ def generate_module_doc(conn, member_name: str, out_path: Path, caller: ModelCal
                          max_attempts: int = 2, lexicon: dict[str, str] | None = None,
                          max_rules_per_call: int | None = None,
                          prior_chunks: dict | None = None,
-                         index_template: str | None = None) -> DocResult:
+                         index_template: str | None = None,
+                         sme_notes: dict | None = None) -> DocResult:
     """Single-member version of the harness: brief -> call -> validate ->
     retry once. Used directly for one-off generation and by run_batch's
     per-item work (with the model call itself dispatched to a thread pool
@@ -1160,10 +1163,10 @@ def generate_module_doc(conn, member_name: str, out_path: Path, caller: ModelCal
         return _generate_module_doc_chunked(
             conn, member_name, system["system"] if system else None, rows, out_path, caller,
             writing_rules, template, redact, lexicon, max_attempts, threshold,
-            prior_chunks=prior_chunks, index_template=index_template,
+            prior_chunks=prior_chunks, index_template=index_template, sme_notes=sme_notes,
         )
 
-    brief = module_brief(conn, member_name, redact=redact, lexicon=lexicon)
+    brief = module_brief(conn, member_name, redact=redact, lexicon=lexicon, sme_notes=sme_notes)
     return _generate_module_doc_from_brief(
         conn, member_name, brief, out_path, caller, writing_rules, template, max_attempts=max_attempts,
     )
@@ -1199,18 +1202,24 @@ class BatchSummary:
 
 def _corpus_signature(conn, redact: Redactor = NULL_REDACTOR,
                        lexicon: dict[str, str] | None = None,
+                       sme_notes: dict | None = None,
                        extra: list[str] | None = None) -> str:
     """Fingerprint of every input to module_brief() that isn't the derive
     code itself: every source_file's (path, sha256) (order-independent),
-    the installed mfdoc version, and the effective redact/lexicon policy.
+    the installed mfdoc version, and the effective redact/lexicon/sme_notes
+    policy.
 
     A per-source_file-only check isn't safe on its own even for the source
     dimension: module_brief() also pulls in facts owned by other members
     (inbound callers, copycode-inherited rules), so a member's brief can
     change even when its own file didn't -- hashing the whole corpus at
-    once is what makes it safe. redact/lexicon matter too: both come from
-    project.yml, not from anything a source_file hash can see, so a policy
-    change with no source edits must still be able to invalidate this.
+    once is what makes it safe. redact/lexicon/sme_notes matter too: all
+    three come from project.yml (sme_notes indirectly, via the file it
+    points at), not from anything a source_file hash can see, so a policy
+    or sme-notes.md edit with no source changes must still be able to
+    invalidate this -- otherwise the corpus-level fast path in run_batch
+    would treat an sme-notes.md edit as "nothing changed" and never even
+    reach the per-member brief-hash check that would otherwise catch it.
 
     Folding in `__version__` catches a code upgrade (most commonly a
     dialect-scanner or derive bugfix) picked up via a fresh `pip install`.
@@ -1239,6 +1248,16 @@ def _corpus_signature(conn, redact: Redactor = NULL_REDACTOR,
         digest.update(key.encode("utf-8"))
         digest.update(b"\x00")
         digest.update(lexicon[key].encode("utf-8"))
+        digest.update(b"\x00")
+    # Notes is keyed by lowercased member/entity name, with the general
+    # section keyed by `None` -- sorted with `None` first (via the `(key
+    # is not None, key)` tuple) so the digest is deterministic regardless
+    # of dict insertion order without needing every key to be comparable
+    # to every other (str vs. None can't otherwise be sorted directly).
+    for key in sorted((sme_notes or {}), key=lambda k: (k is not None, k)):
+        digest.update((key or "").encode("utf-8"))
+        digest.update(b"\x00")
+        digest.update(sme_notes[key].encode("utf-8"))
         digest.update(b"\x00")
     for term in extra or []:
         digest.update(term.encode("utf-8"))
@@ -1306,6 +1325,7 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
               lexicon: dict[str, str] | None = None,
               max_rules_per_call: int | None = None,
               index_template: str | None = None,
+              sme_notes: dict | None = None,
               ) -> BatchSummary:
     """Run the harness over `members`, resumable via `state_path`.
 
@@ -1357,7 +1377,7 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
     threshold = _resolve_max_rules_per_call(max_rules_per_call)
     state = _load_state(state_path) if state_path else {}
     corpus_sig = (
-        _corpus_signature(conn, redact, lexicon, extra=[str(threshold)]) if state_path else None
+        _corpus_signature(conn, redact, lexicon, sme_notes, extra=[str(threshold)]) if state_path else None
     )
     corpus_unchanged = bool(state_path) and state.get("_corpus_sha256") == corpus_sig
     if state_path:
@@ -1401,7 +1421,7 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
         # chunked below -- it's only ever used as a content fingerprint for
         # resume/skip, never sent to the model as-is (the chunked path
         # builds its own per-chunk briefs from scratch).
-        brief = module_brief(conn, name, redact=redact, lexicon=lexicon)
+        brief = module_brief(conn, name, redact=redact, lexicon=lexicon, sme_notes=sme_notes)
         brief_hash = hashlib.sha256(f"{brief}\x00{threshold}".encode("utf-8")).hexdigest()
         if prior_ok and prior.get("brief_sha256") == brief_hash:
             logger.debug("skip %s: unchanged (brief hash match, resumed)", name)
@@ -1523,7 +1543,7 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
             result = generate_module_doc(
                 conn, name, out_path, caller, writing_rules, template, redact=redact,
                 lexicon=lexicon, max_rules_per_call=threshold, prior_chunks=prior_chunks,
-                index_template=index_template,
+                index_template=index_template, sme_notes=sme_notes,
             )
         except Exception as exc:
             logger.error(

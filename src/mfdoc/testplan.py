@@ -351,13 +351,18 @@ def _brief_scenarios(rows, redact, routines: list[dict] | None = None) -> list[s
     return out
 
 
-def test_case_brief(conn, member_name: str, redact=None) -> str:
+def test_case_brief(conn, member_name: str, redact=None, sme_notes=None) -> str:
     """The only input the render stage (test-gen/test-batch) sees for one
     member -- plain text, every scenario already cited, mirroring
     brief.module_brief's role for narrative docs. Includes the member's own
     parameter contract once (shared by every scenario) plus a section per
     test_case row.
+
+    `sme_notes` (see `sme_notes.py`), when given, appends the same
+    advisory-only "SME notes" section module_brief/entity_brief/
+    executive_brief do -- see `brief._sme_notes_section`.
     """
+    from .brief import _sme_notes_section
     from .redact import NULL_REDACTOR
     redact = redact or NULL_REDACTOR
 
@@ -378,11 +383,13 @@ def test_case_brief(conn, member_name: str, redact=None) -> str:
     out.append("## Scenarios")
     out.append("")
     out.extend(_brief_scenarios(rows, redact, routines))
+    out.extend(_sme_notes_section(redact, sme_notes, member_name))
     return "\n".join(out) + "\n"
 
 
 def test_case_brief_chunk(member_name: str, system: str | None, rows, chunk_index: int,
-                           chunk_count: int, redact=None, routines: list[dict] | None = None) -> str:
+                           chunk_count: int, redact=None, routines: list[dict] | None = None,
+                           sme_notes=None) -> str:
     """A test brief covering only `rows` -- one slice of this member's full
     test_case set -- for testbatch.py's chunked render path. Same
     Parameters/Dependencies header every chunk of this member shares (any
@@ -392,7 +399,12 @@ def test_case_brief_chunk(member_name: str, system: str | None, rows, chunk_inde
     passed in rather than looked up again, since the caller (testbatch.py's
     chunk-or-not decision) already called fetch_test_case_rows once for
     this member; `routines` likewise, since chunking itself needs the same
-    list (see brief.routine_aware_chunk_ranges) before any brief is built."""
+    list (see brief.routine_aware_chunk_ranges) before any brief is built.
+
+    `sme_notes`, when given, is appended to *every* chunk (not just the
+    last) -- the note is member-scoped, not scenario-scoped, so each chunk
+    still needs it in view of the model narrating that chunk independently."""
+    from .brief import _sme_notes_section
     from .redact import NULL_REDACTOR
     redact = redact or NULL_REDACTOR
 
@@ -400,6 +412,7 @@ def test_case_brief_chunk(member_name: str, system: str | None, rows, chunk_inde
     out.append(f"## Scenarios (this chunk only -- {len(rows)} of the member's full set)")
     out.append("")
     out.extend(_brief_scenarios(rows, redact, routines))
+    out.extend(_sme_notes_section(redact, sme_notes, member_name))
     return "\n".join(out) + "\n"
 
 
