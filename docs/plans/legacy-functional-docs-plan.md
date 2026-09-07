@@ -201,6 +201,24 @@ GitHub org.
   both are covered by new isolated unit tests only (`tests/
   test_mantis_rules.py`, new `tests/test_dynamic_call_resolution.py`); the
   bundled fixture pipeline's gap/coverage counts are unchanged.
+- Implemented issue #84: `DocResult` and `BatchSummary` now track per-call
+  wall-clock duration and transient-error retry counts, so a multi-hundred-
+  module `mfdoc batch` run can tell "is this run stuck or just slow" and
+  which members needed retries. `retry.call_with_retry` (#79) gained an
+  optional `on_retry(attempt, exc)` callback, fired once per retry actually
+  taken -- its own return value and every existing caller are unaffected;
+  `AnthropicCaller`/`VertexCaller` use it to count each call's own retries
+  into a local variable (never a shared instance attribute, so concurrent
+  callers under `run_batch`'s `ThreadPoolExecutor` can't race each other's
+  counts) and set it on the `ModelResponse` they return (`.retries`, default
+  0 for any caller -- `fake-echo`, `ClaudeCLICaller` -- that doesn't retry
+  at all). `batch.py`'s new `_timed_call()` wraps every model call
+  (single-call, pooled, per-chunk, and the whole-module narrative-
+  reconciliation call) with `time.perf_counter()` timing, folded into
+  `DocResult.duration_s`/`.retries` (0.0/0 for a skipped or caller-exception
+  member -- no call to time) and summed onto `BatchSummary.total_duration_s`/
+  `.total_retries`; `cmd_batch` prints both per member and as a run-wide
+  average/total alongside tokens and cost.
 
 **Progress (2026-09-06):**
 - Implemented issue #64: an eighth document type, `language-guide`, that

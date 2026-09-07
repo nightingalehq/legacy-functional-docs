@@ -42,3 +42,24 @@ def test_batch_command_wires_the_configured_lexicon_into_the_prompt(cli_args, tm
     written = (tmp_path / "out" / "natural" / "MILLPROD" / "MMP0100.md").read_text(encoding="utf-8")
     assert "## Business vocabulary" in written
     assert "`CONF` -> confirmed" in written
+
+
+def test_batch_command_reports_per_member_duration_and_retries(cli_args, tmp_path, capsys):
+    """cmd_batch's report must surface issue #84's new per-member
+    duration_s/retries fields (per-line) and the run-wide totals
+    (BatchSummary.total_duration_s/total_retries), not just tokens/cost."""
+    project_dir = Path(cli_args.config).parent
+    if not (project_dir / "reference").exists():
+        shutil.copytree(REPO_ROOT / "reference", project_dir / "reference")
+        shutil.copytree(REPO_ROOT / "templates", project_dir / "templates")
+
+    args = SimpleNamespace(
+        config=cli_args.config, out=str(tmp_path / "out"), members="MMP0100",
+        model="claude-sonnet-4-5", concurrency=1, state="", caller="fake-echo",
+    )
+    cli.cmd_batch(args)
+    out = capsys.readouterr().out
+    assert "duration=" in out
+    assert "retries=" in out
+    assert "call time:" in out
+    assert "transient retries" in out
