@@ -97,6 +97,59 @@ def test_backoff_delay_grows_exponentially_and_is_capped():
         assert ceiling * 0.5 <= observed <= ceiling
 
 
+def test_on_retry_callback_fires_once_per_retry_with_the_1_based_attempt_number():
+    """issue #84's retry-count plumbing: `on_retry(attempt, exc)` is the hook
+    a caller (AnthropicCaller/VertexCaller) uses to learn how many retries
+    `call_with_retry` actually took, without this function's own return
+    value changing. Must fire once per retry actually taken -- not for the
+    initial attempt, and not for the final exhausted attempt that re-raises
+    instead of retrying."""
+    attempts = {"n": 0}
+
+    def fn():
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise _Transient("simulated rate limit")
+        return "ok"
+
+    seen: list[tuple[int, Exception]] = []
+    result = call_with_retry(
+        fn, is_retryable=lambda exc: True, max_retries=5, sleep=lambda s: None,
+        on_retry=lambda attempt, exc: seen.append((attempt, exc)),
+    )
+    assert result == "ok"
+    assert [a for a, _ in seen] == [1, 2]
+    assert all(isinstance(exc, _Transient) for _, exc in seen)
+
+
+def test_on_retry_callback_never_fires_for_the_final_exhausted_attempt():
+    def fn():
+        raise _Transient("always fails")
+
+    seen: list[int] = []
+    with pytest.raises(_Transient):
+        call_with_retry(
+            fn, is_retryable=lambda exc: True, max_retries=2, sleep=lambda s: None,
+            on_retry=lambda attempt, exc: seen.append(attempt),
+        )
+    # 2 retries permitted -> on_retry fires for attempt 1 and 2, then the
+    # 3rd (final) attempt raises without a further retry/on_retry call.
+    assert seen == [1, 2]
+
+
+def test_on_retry_callback_never_fires_when_the_first_call_succeeds():
+    def fn():
+        return "ok"
+
+    seen: list[int] = []
+    result = call_with_retry(
+        fn, is_retryable=lambda exc: True, sleep=lambda s: None,
+        on_retry=lambda attempt, exc: seen.append(attempt),
+    )
+    assert result == "ok"
+    assert seen == []
+
+
 def test_negative_max_retries_raises_value_error_before_any_attempt():
     calls = []
 

@@ -855,13 +855,22 @@ def cmd_batch(args) -> int:
 
     for r in summary.results:
         status = "SKIP" if r.skipped else ("OK  " if r.ok else "FAIL")
-        print(f"{status} {r.member:<20} attempts={r.attempts} in={r.input_tokens} out={r.output_tokens}")
+        print(f"{status} {r.member:<20} attempts={r.attempts} in={r.input_tokens} out={r.output_tokens} "
+              f"duration={r.duration_s:.1f}s retries={r.retries}")
         for p in r.problems:
             print(f"       - {p}")
 
     print(f"\n{summary.ok}/{len(summary.results)} ok, {summary.failed} failed, "
           f"{summary.skipped} skipped (unchanged), {summary.retried} retried")
     print(f"tokens: {summary.total_input_tokens} in, {summary.total_output_tokens} out")
+    # total_duration_s is summed call time, not this run's own elapsed time
+    # (members in the concurrent pool overlap) -- see BatchSummary's own
+    # docstring note. Still the right number for "is this run stuck or just
+    # slow": a per-member average, and total_retries, are what a multi-
+    # hundred-module run needs to tell those apart (issue #84).
+    avg_duration = summary.total_duration_s / len(summary.results) if summary.results else 0.0
+    print(f"call time: {summary.total_duration_s:.1f}s total ({avg_duration:.1f}s avg/member), "
+          f"{summary.total_retries} transient retries")
     if summary.cost_usd is not None:
         print(f"cost: ${summary.cost_usd:.4f}")
     else:

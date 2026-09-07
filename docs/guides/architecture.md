@@ -279,7 +279,13 @@ judgement-heavy documents are deliberately routed differently:
   `batch._render_module_index_doc`) — a whole-module overview to start from,
   distinct from each chunk's own per-rule `doc_type: module` detail. A chunk
   failure skips the reconciliation call entirely and reports it as a plain
-  skipped note instead.
+  skipped note instead. Every model call `run_batch` makes is timed
+  (`batch._timed_call`) and, for `AnthropicCaller`/`VertexCaller`, carries how
+  many of `retry.call_with_retry`'s transient-error retries (#79) it took —
+  both roll up per member onto `DocResult.duration_s`/`.retries` and, run-wide,
+  onto `BatchSummary.total_duration_s`/`.total_retries`, printed by `cmd_batch`
+  alongside tokens/cost so a multi-hundred-module run can tell "is this run
+  stuck or just slow" and which members needed retries (#84).
 - **Interactive, via Claude Code (`SKILL.md`)** — for system overview, data
   entity docs, process flows and the gap register, where grouping and
   narrative structure benefit from a human (or a chat session) holding the

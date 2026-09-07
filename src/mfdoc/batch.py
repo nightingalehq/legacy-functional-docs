@@ -21,6 +21,7 @@ import json
 import os
 import re
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -100,6 +101,14 @@ class ModelResponse:
     text: str
     input_tokens: int
     output_tokens: int
+    # How many transient-error retries (issue #79's call_with_retry, inside
+    # AnthropicCaller/VertexCaller) this one response cost -- 0 for a caller
+    # that doesn't retry at all (the `fake-echo` test caller, ClaudeCLICaller)
+    # or that succeeded on its first attempt. Defaults to 0 so every existing
+    # ModelResponse(...) call site (real or in tests) that doesn't know or
+    # care about retries keeps working unchanged; a retrying caller sets this
+    # on the response it returns (see AnthropicCaller.__call__).
+    retries: int = 0
 
 
 # A caller takes a prompt and returns a ModelResponse. Swap in a fake for
@@ -119,6 +128,28 @@ def model_response_from_message(message) -> ModelResponse:
         input_tokens=message.usage.input_tokens,
         output_tokens=message.usage.output_tokens,
     )
+
+
+def _timed_call(caller: ModelCaller, prompt: str) -> tuple[ModelResponse, float]:
+    """`caller(prompt)`, plus the wall-clock seconds it took -- issue #84's
+    per-call latency tracking. Timed here, once, rather than at each call
+    site, so every model call in this module (the plain single/pooled path,
+    a chunk's own call, and the whole-module narrative-reconciliation call)
+    is measured the same way. Deliberately wraps the call itself, not
+    anything before or after it (prompt assembly, file writes, validate_doc)
+    -- those are cheap, local, and not what "is this run stuck or just
+    slow" is asking about; the model call (including whatever retries
+    AnthropicCaller/VertexCaller made internally per issue #79) is the part
+    with real, externally-caused latency.
+
+    `time.perf_counter` (a monotonic clock, unaffected by wall-clock
+    adjustments) is used rather than `time.time` for the same reason
+    `call_with_retry`'s own timing-sensitive tests avoid `time.time` --
+    duration here is a difference between two points, never a timestamp
+    that needs to mean anything on its own."""
+    start = time.perf_counter()
+    response = caller(prompt)
+    return response, time.perf_counter() - start
 
 
 def select_batch_members(conn) -> list[str]:
@@ -235,6 +266,23 @@ class DocResult:
     # check's all-or-nothing choice between reusing every chunk or
     # re-rendering all of them.
     chunk_state: dict | None = None
+    # Wall-clock seconds spent in model calls for this member -- issue #84.
+    # Sum of every _timed_call() this member's generation made: the
+    # validation-retry-on-failure call's own time is included (attempts=2
+    # means two model calls, both timed), and a chunked member's duration
+    # covers every chunk call plus the one whole-module narrative-
+    # reconciliation call. 0.0 for a skipped (resumed, no model call) or
+    # caller-exception-failed (no response, nothing to time) member.
+    duration_s: float = 0.0
+    # Total transient-error retries (ModelResponse.retries, issue #79) across
+    # every model call this member's generation made -- distinct from
+    # `attempts`/BatchSummary.retried, which count validation-failure retries,
+    # a different (and non-transient) kind of "tried again". A member can be
+    # high in one and zero in the other: a call that needed 3 internal
+    # connection-reset retries but validated clean on the first attempt has
+    # retries=3, attempts=1; a call that validated clean first try but failed
+    # validation once (attempts=2) with no transient errors has retries=0.
+    retries: int = 0
 
 
 def _generate_module_doc_from_brief(conn, member_name: str, brief: str, out_path: Path,
@@ -247,21 +295,31 @@ def _generate_module_doc_from_brief(conn, member_name: str, brief: str, out_path
     below (mirrors testbatch.py's _generate_test_doc_from_brief)."""
     retry_note = None
     input_tokens = output_tokens = 0
+    duration_s = 0.0
+    retries = 0
     problems: list[str] = []
     attempt = 0
     for attempt in range(1, max_attempts + 1):
         prompt = build_prompt(brief, writing_rules, template, retry_note)
-        response = caller(prompt)
+        response, elapsed = _timed_call(caller, prompt)
         input_tokens += response.input_tokens
         output_tokens += response.output_tokens
+        duration_s += elapsed
+        retries += response.retries
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(_fix_generated_by_version(response.text), encoding="utf-8")
         result = validate_doc(conn, out_path)
         if result["ok"]:
-            return DocResult(member_name, str(out_path), True, attempt, input_tokens, output_tokens, [])
+            return DocResult(
+                member_name, str(out_path), True, attempt, input_tokens, output_tokens, [],
+                duration_s=duration_s, retries=retries,
+            )
         problems = result["problems"]
         retry_note = _retry_note(problems)
-    return DocResult(member_name, str(out_path), False, attempt, input_tokens, output_tokens, problems)
+    return DocResult(
+        member_name, str(out_path), False, attempt, input_tokens, output_tokens, problems,
+        duration_s=duration_s, retries=retries,
+    )
 
 
 def _aggregate_chunk_confidence(chunk_paths: list[Path]) -> dict[str, int]:
@@ -608,7 +666,7 @@ def _generate_module_index_narrative(conn, member_name: str, chunk_bodies: list[
                                       caller: ModelCaller, writing_rules: str,
                                       index_template: str | None, out_path: Path,
                                       assemble, max_attempts: int = 2,
-                                      ) -> tuple[bool, int, int, int, list[str], dict[str, str] | None]:
+                                      ) -> tuple[bool, int, int, int, list[str], dict[str, str] | None, float, int]:
     """The one bounded model call per chunked member: reconcile every ok
     chunk's own Purpose/How-invoked/Inputs/Data-used/Outputs-and-effects
     sections into a single whole-module statement per section, then splice
@@ -630,22 +688,29 @@ def _generate_module_index_narrative(conn, member_name: str, chunk_bodies: list[
     `validate_doc`'s own checks, rather than resting on the prompt's own
     instructions. See the design spec for the full reasoning.
 
-    Returns `(ok, attempts, input_tokens, output_tokens, problems, sections)`
-    -- `sections` is the accepted {heading: text} mapping when ok, or None
-    on failure (the last, rejected attempt is not a fact worth caching)."""
+    Returns `(ok, attempts, input_tokens, output_tokens, problems, sections,
+    duration_s, retries)` -- `sections` is the accepted {heading: text}
+    mapping when ok, or None on failure (the last, rejected attempt is not a
+    fact worth caching); `duration_s`/`retries` are this call's own wall-clock
+    time and transient-retry count (issue #84), folded by the caller into
+    the chunked member's overall DocResult totals alongside every chunk's."""
     sources = [_reconciliation_source(i, body) for i, body in chunk_bodies]
     allowed_citations: set[str] = set()
     for body in sources:
         allowed_citations |= _citations_in(body)
     retry_note: str | None = None
     input_tokens = output_tokens = 0
+    duration_s = 0.0
+    retries = 0
     problems: list[str] = []
     attempt = 0
     for attempt in range(1, max_attempts + 1):
         prompt = build_reconciliation_prompt(member_name, sources, writing_rules, index_template, retry_note)
-        response = caller(prompt)
+        response, elapsed = _timed_call(caller, prompt)
         input_tokens += response.input_tokens
         output_tokens += response.output_tokens
+        duration_s += elapsed
+        retries += response.retries
 
         found, missing = _split_reconciled_sections(response.text)
         sections = {
@@ -661,7 +726,7 @@ def _generate_module_index_narrative(conn, member_name: str, chunk_bodies: list[
                 f"narrative synthesis response missing required section(s): {', '.join(missing)}"
             ] + problems
         if not problems:
-            return True, attempt, input_tokens, output_tokens, [], sections
+            return True, attempt, input_tokens, output_tokens, [], sections, duration_s, retries
 
         # `problems` (not just result["problems"]) -- a rejected attempt
         # whose only failure is a provenance violation (an invented-but-
@@ -685,7 +750,7 @@ def _generate_module_index_narrative(conn, member_name: str, chunk_bodies: list[
     # document itself.
     failed_sections = {h: _NARRATIVE_FAILED_NOTE for h in NARRATIVE_SECTIONS}
     out_path.write_text(assemble(failed_sections), encoding="utf-8")
-    return False, attempt, input_tokens, output_tokens, problems, None
+    return False, attempt, input_tokens, output_tokens, problems, None, duration_s, retries
 
 
 def _render_module_index_doc(member_name: str, system: str | None,
@@ -856,6 +921,8 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
                 chunk_map[routine["name"].upper()] = idx
                 break
     input_tokens = output_tokens = 0
+    duration_s = 0.0
+    retries = 0
     chunk_entries: list[tuple[int, tuple[int, int], Path, DocResult]] = []
     problems: list[str] = []
     chunk_state: dict[str, dict] = {}
@@ -916,6 +983,8 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
                 )
         input_tokens += result.input_tokens
         output_tokens += result.output_tokens
+        duration_s += result.duration_s
+        retries += result.retries
         chunk_entries.append((i, (start, end), chunk_path, result))
         chunk_state[str(i)] = {"ok": result.ok, "brief_sha256": brief_hash}
         if not result.ok:
@@ -974,14 +1043,18 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
             revalidated = validate_doc(conn, out_path)
             if revalidated["ok"]:
                 narrative_ok, narrative_problems, n_in, n_out, sections = True, [], 0, 0, prior_sections
+                n_duration, n_retries = 0.0, 0
                 reused = True
         if not reused:
-            narrative_ok, _, n_in, n_out, narrative_problems, sections = _generate_module_index_narrative(
+            (narrative_ok, _, n_in, n_out, narrative_problems, sections,
+             n_duration, n_retries) = _generate_module_index_narrative(
                 conn, member_name, chunk_bodies, caller, writing_rules, index_template, out_path,
                 assemble, max_attempts=max_attempts,
             )
         input_tokens += n_in
         output_tokens += n_out
+        duration_s += n_duration
+        retries += n_retries
         chunk_state["_narrative"] = {
             "ok": narrative_ok, "input_sha256": narrative_input_hash,
             "sections": sections if narrative_ok else None,
@@ -1010,7 +1083,7 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
 
     return DocResult(
         member_name, str(out_path), not problems, chunk_count, input_tokens, output_tokens,
-        problems, chunked=True, chunk_state=chunk_state,
+        problems, chunked=True, chunk_state=chunk_state, duration_s=duration_s, retries=retries,
     )
 
 
@@ -1059,6 +1132,22 @@ class BatchSummary:
     ok: int
     failed: int
     skipped: int
+    # Sum of every result's DocResult.duration_s -- total wall-clock time
+    # spent across every model call this run made. Because to_run members
+    # are dispatched concurrently (ThreadPoolExecutor), this is *not* the
+    # run's own elapsed time -- it's the sum of each member's own call
+    # time, which can exceed real elapsed time whenever concurrency > 1.
+    # What it answers is "how much model-call time did this run actually
+    # spend", the input a per-member average (total_duration_s / len(results))
+    # or a "which members were slow" scan (sorting `results` by duration_s)
+    # both build on -- issue #84.
+    total_duration_s: float = 0.0
+    # Sum of every result's DocResult.retries -- total transient-error
+    # retries (issue #79) across every model call this run made. Distinct
+    # from `retried` above, which counts members that needed a
+    # validation-failure retry, a different and non-transient kind of
+    # "tried again" (see DocResult.retries' own docstring note).
+    total_retries: int = 0
 
 
 def _corpus_signature(conn, redact: Redactor = NULL_REDACTOR,
@@ -1279,7 +1368,7 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
 
     with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
         futures = {
-            pool.submit(caller, build_prompt(briefs[state_key], writing_rules, template)):
+            pool.submit(_timed_call, caller, build_prompt(briefs[state_key], writing_rules, template)):
                 (name, brief_hash, out_path, state_key)
             for name, brief_hash, out_path, state_key in to_run
         }
@@ -1292,7 +1381,7 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
             # re-run's resume check (prior_ok above) re-does exactly this
             # member and nothing else that already succeeded.
             try:
-                response = fut.result()
+                response, elapsed = fut.result()
             except Exception as exc:
                 result = DocResult(
                     name, str(out_path), False, 1, 0, 0,
@@ -1305,6 +1394,8 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
                 continue
 
             input_tokens, output_tokens = response.input_tokens, response.output_tokens
+            duration_s = elapsed
+            retries = response.retries
 
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_text(_fix_generated_by_version(response.text), encoding="utf-8")
@@ -1314,7 +1405,7 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
                 retry_note = _retry_note(validation["problems"])
                 retry_prompt = build_prompt(briefs[state_key], writing_rules, template, retry_note)
                 try:
-                    retry_response = caller(retry_prompt)
+                    retry_response, retry_elapsed = _timed_call(caller, retry_prompt)
                 except Exception as exc:
                     # attempts=2, not 1: the first call already completed
                     # (it just failed validation), and this retry call was
@@ -1325,6 +1416,7 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
                     result = DocResult(
                         name, str(out_path), False, 2, input_tokens, output_tokens,
                         validation["problems"] + [f"retry model call failed: {exc!r}"],
+                        duration_s=duration_s, retries=retries,
                     )
                     results.append(result)
                     state[state_key] = {"ok": False, "attempts": 2, "brief_sha256": brief_hash}
@@ -1333,13 +1425,15 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
                     continue
                 input_tokens += retry_response.input_tokens
                 output_tokens += retry_response.output_tokens
+                duration_s += retry_elapsed
+                retries += retry_response.retries
                 out_path.write_text(_fix_generated_by_version(retry_response.text), encoding="utf-8")
                 validation = validate_doc(conn, out_path)
                 attempts = 2
 
             result = DocResult(
                 name, str(out_path), validation["ok"], attempts, input_tokens, output_tokens,
-                validation.get("problems", []),
+                validation.get("problems", []), duration_s=duration_s, retries=retries,
             )
             results.append(result)
             state[state_key] = {"ok": result.ok, "attempts": attempts, "brief_sha256": brief_hash}
@@ -1408,4 +1502,6 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
         ok=sum(1 for r in results if r.ok),
         failed=sum(1 for r in results if not r.ok),
         skipped=sum(1 for r in results if r.skipped),
+        total_duration_s=sum(r.duration_s for r in results),
+        total_retries=sum(r.retries for r in results),
     )

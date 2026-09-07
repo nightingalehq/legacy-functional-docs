@@ -33,6 +33,7 @@ def call_with_retry(
     base_delay: float = DEFAULT_BASE_DELAY_S,
     max_delay: float = DEFAULT_MAX_DELAY_S,
     sleep: Callable[[float], None] | None = None,
+    on_retry: Callable[[int, Exception], None] | None = None,
 ) -> T:
     """Call `fn()`, retrying up to `max_retries` times (so at most
     `max_retries + 1` attempts total) whenever the raised exception is one
@@ -50,6 +51,18 @@ def call_with_retry(
     `mfdoc.retry.time.sleep` and have it actually take effect) purely so
     tests can assert on backoff timing/attempt counts without a real test
     suite run taking `max_retries` seconds per case.
+
+    `on_retry`, if given, is called once per retry actually taken -- as
+    `on_retry(attempt, exc)`, `attempt` being the 1-based retry number (1 for
+    the first retry, 2 for the second, ...) -- right before that retry's
+    backoff sleep, never for the final exhausted attempt that re-raises.
+    This is the hook issue #84 threads retry counts through: a caller can
+    close over a local counter (or increment a `nonlocal`) to learn how many
+    retries `call_with_retry` actually took for one invocation, without this
+    function itself needing to know or care what its callers do with that
+    count -- keeping `call_with_retry`'s return value unchanged (still just
+    `fn()`'s result) so no existing caller of this function is affected by
+    adding the parameter.
 
     Raises `ValueError` immediately, before any attempt, for a negative
     `max_retries`, `base_delay`, or `max_delay` -- a negative `max_retries`
@@ -74,4 +87,6 @@ def call_with_retry(
                 raise
             delay = min(max_delay, base_delay * (2 ** (attempt - 1)))
             delay *= 0.5 + random.random() / 2  # jitter: 50%-100% of the computed delay
+            if on_retry is not None:
+                on_retry(attempt, exc)
             do_sleep(delay)

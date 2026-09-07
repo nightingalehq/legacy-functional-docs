@@ -68,6 +68,8 @@ def test_succeeds_without_retrying_when_the_call_succeeds_first_try(monkeypatch)
     result = caller("some prompt")
     assert result.text == "a response"
     assert calls["n"] == 1
+    # issue #84: a first-try success reports zero transient retries.
+    assert result.retries == 0
 
 
 def test_retries_a_transient_error_and_eventually_succeeds(monkeypatch):
@@ -87,6 +89,33 @@ def test_retries_a_transient_error_and_eventually_succeeds(monkeypatch):
     result = caller("some prompt")
     assert result.text == "a response"
     assert calls["n"] == 3
+    # issue #84: 2 failed attempts before the 3rd (successful) one -> 2 retries.
+    assert result.retries == 2
+
+
+def test_retry_count_is_local_to_each_call_not_shared_across_concurrent_calls(monkeypatch):
+    """`ModelResponse.retries` must reflect only the one `__call__` it came
+    from -- not a shared instance attribute that a second, concurrent call
+    from another thread could stomp on before the first call reads it back
+    (issue #84's design note on why `retries` is tracked via a local
+    closure variable inside `__call__`, not `self.something`)."""
+    calls = {"n": 0}
+
+    def create(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _FakeRateLimitError("simulated 429 on the first call only")
+        return _fake_message()
+
+    module, _ = _fake_anthropic_module(create)
+    monkeypatch.setitem(sys.modules, "anthropic", module)
+    monkeypatch.setattr("mfdoc.retry.time.sleep", lambda s: None)
+
+    caller = AnthropicCaller(max_retries=5)
+    first = caller("prompt one")  # needed one retry
+    second = caller("prompt two")  # first-try success
+    assert first.retries == 1
+    assert second.retries == 0
 
 
 def test_gives_up_after_max_retries_on_a_persistent_transient_error(monkeypatch):
