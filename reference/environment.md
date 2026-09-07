@@ -55,7 +55,7 @@ per-job only; say so rather than implying the job sequence is known.
 ## CICS CSD
 
 Extracted from a CSD extract listing: `DEFINE TRANSACTION`, `PROGRAM`, `FILE`,
-`MAPSET`, `TDQUEUE`, `TSMODEL`, with attributes.
+`MAPSET`, `TDQUEUE`, `TSMODEL`, `TRANCLASS`, with attributes.
 
 The `TRANSACTION` to `PROGRAM` mapping is the online entry-point list — the
 four-character code a user types, and what it starts. That is the beginning of
@@ -95,3 +95,31 @@ entities exist in both worlds and where they disagree.
 
 A `UNIQUE INDEX` without a declared `PRIMARY KEY` is still a uniqueness business
 rule. Document it as one.
+
+## Known gap-reporting gap in this module
+
+`reference/adding-a-dialect.md`'s extractor contract requires a `gap` for
+anything not understood, on the reasoning that an extractor that silently
+drops what it cannot parse produces an index that looks complete and is not.
+Three of the four extractors in `environment.py` do not honour this today:
+
+- `extract_sql_ddl` — an unrecognised `CREATE TABLE` column definition, or a
+  clause `DDL_NOISE` doesn't match as a constraint, is simply skipped; nothing
+  is recorded in the gap register.
+- `extract_copybook` — a line that doesn't match `RE_COB` (an 01-49-level
+  entry) is silently ignored, with no gap raised.
+- `extract_cics_csd` — a line with no `DEFINE` matching `RE_CSD_DEFINE` is
+  dropped with no trace.
+
+`extract_jcl` is partially compliant: individual unrecognised lines are not
+gapped either (a stray line that is neither `EXEC` nor `DD` nor a `SYSIN`
+delimiter is simply skipped), but the extractor does raise one member-level
+`unparsed_line` gap when a JCL member produces zero `EXEC` steps — a coarse,
+whole-member signal rather than a per-line one.
+
+Treat coverage numbers from these four extractors with that caveat in mind: a
+low or absent gap count from SQL DDL, copybook, or CICS CSD ingestion is not
+evidence the source was fully recognised, only that whatever wasn't recognised
+left no trace to check. This is a real limitation in the code, not a
+documentation gap to be closed by writing around it — fixing the extractors is
+out of scope for this reference.

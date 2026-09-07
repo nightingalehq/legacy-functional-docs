@@ -34,7 +34,7 @@ touching extraction or narrative:
 mfdoc ingest   --config project.yml
 mfdoc derive   --config project.yml
 mfdoc coverage --config project.yml
-mfdoc validate --config project.yml --docs examples
+mfdoc validate --config project.yml --docs examples/outputs
 ```
 
 ## Adding a dialect
@@ -47,9 +47,12 @@ lines, member_name) -> dict`, insert every line (including comments and
 blanks) into `source_line`, and record a `gap` for anything not understood
 rather than skipping it silently. Register the dialect in
 `normalise.DIALECT_SIGNATURES`, `cli.DIALECT_ROUTER` and
-`cli.DIALECT_DEFAULT_TYPE`, then add a fixture — **invented content only,
-never a real client export, even trimmed or genericised-in-place**. See
-`CLAUDE.md`'s "Never commit client-specific content" section before
+`cli.DIALECT_DEFAULT_TYPE`; if the dialect's members can arrive
+concatenated in one physical file (the common case for a mainframe
+unload/listing), also register a splitter with a named `name` group in
+`normalise.DEFAULT_SPLITTERS`. Then add a fixture — **invented content
+only, never a real client export, even trimmed or genericised-in-place**.
+See `CLAUDE.md`'s "Never commit client-specific content" section before
 building a fixture from anything a real engagement produced.
 
 The two rules that matter most, repeated here because they're easy to
@@ -67,9 +70,12 @@ violate accidentally while iterating:
 
 ## Adding a new document type
 
-The seven document types under `templates/` are load-bearing on
+The ten document types under `templates/` (`coverage-report.md`,
+`data-entity.md`, `executive-summary.md`, `gap-register.md`,
+`interface-matrix.md`, `language-guide.md`, `module-index.md`, `module.md`,
+`process-flow.md`, `system-overview.md`) are load-bearing on
 `reference/writing-rules.md` and on `validate.py`'s expectations of front
-matter. To add an eighth:
+matter. To add an eleventh:
 
 1. Add `templates/<name>.md` describing the required front matter and
    section structure — follow the existing templates' shape exactly, since
@@ -88,6 +94,11 @@ matter. To add an eighth:
    `batch.select_batch_members`.
 5. Update `SKILL.md`'s "Suggested document set" if it changes the
    recommended order.
+6. If it introduces a new `options.*` config key (a threshold, a flag
+   controlling how the new document is generated), register it in
+   `config_validate.OPTION_SPECS` — an unregistered `options.*` key is
+   silently accepted and ignored rather than validated, per that module's
+   own docstring.
 
 ## Adding a CLI command
 
@@ -103,6 +114,11 @@ convention (like `mfdoc gate`), print *why* a check failed and what it
 blocks, in the same style as `GATES` in `cli.py` — this project treats a
 failure message as documentation in its own right, since the person
 reading it is often not the person who wrote the check.
+
+If the new command reads a new `options.*` config key, register it in
+`config_validate.OPTION_SPECS` too — otherwise a typo'd or malformed value
+is silently accepted rather than caught at `load_config` time, well before
+the command that actually uses it runs.
 
 ## Working on the narrative stage
 

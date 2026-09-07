@@ -92,6 +92,12 @@ than writing narrative on a weak index.
 - Many `dynamic_target` gaps → the codebase dispatches through variables. Call
   graphs will be incomplete by nature; this is a finding to report, not a defect
   to hide.
+- `min_citation_accuracy_rate`, if configured, is different from the others:
+  it's sampling-derived, not computed from facts, so it fails against 0 until
+  `mfdoc sample-citations --config project.yml --docs docs/functional --judge
+  human` has been run at least once — it shows a random sample of generated
+  claims next to their cited source and records a human yes/no verdict on
+  whether the source actually supports the claim.
 
 Report these numbers to the user honestly, including when they are poor.
 
@@ -274,6 +280,11 @@ src/mfdoc/
   normalise.py        encoding, sequence columns, member splitting, dialect sniffing
   graph.py            derivation: resolution, CRUD matrix, orphans, transaction scopes
   brief.py            fact briefs (module / entity / system / interface-matrix) and JSON export
+  sme_notes.py        parses the optional options.sme_notes file, folds it into briefs
+  batch.py            mfdoc batch's harness: brief -> model call -> write -> validate -> retry, resumable
+  classify.py         mfdoc classify-rules: assigns each rule_candidate a theme (keyword/llm/structural)
+  structural.py       deterministic overview renderers: gap-summary, data-flow, call-graph,
+                      complexity, rules-theme-register, glossary, lang-guide
   testplan.py         test-case derivation + test-plan register (model-free)
   testadvisor.py       testability classification + refactor-seam advisory (model-free)
   testoverlay.py       bug-vs-spec curation overlay (model-drafted, human-promoted)

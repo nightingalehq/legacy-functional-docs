@@ -11,6 +11,7 @@ enforces and the prose failures it cannot catch.
 - [Front matter](#front-matter)
 - [How to turn a rule candidate into a documented rule](#how-to-turn-a-rule-candidate-into-a-documented-rule)
 - [Prose failures to avoid](#prose-failures-to-avoid)
+- [The reversed-condition check](#the-reversed-condition-check)
 - [Audience calibration](#audience-calibration)
 - [Naming and the lexicon](#naming-and-the-lexicon)
 - [SME notes](#sme-notes)
@@ -191,6 +192,76 @@ access on the true branch" / "data access on this branch" against the IF or
 ELSE bullet, every one of those accesses belongs in the generated document,
 attributed to the branch that performs it -- not merged into the surrounding
 narrative as if unconditional, and not dropped.
+
+## The reversed-condition check
+
+The validator does not just resolve citations to real lines — for a narrow
+class of fields it also checks that a narrative sentence's *claimed*
+comparison direction matches what the cited condition actually says. A
+citation can point at a perfectly real line and still narrate the logical
+inverse of it (a reversed comparison on a status/return-code field silently
+swaps a documented pass/fail interpretation), and this needs no model call to
+catch: the operator is already sitting in `rule_candidate.condition` as plain
+text.
+
+This only fires for **outcome fields** — fields whose name matches
+`conditions.OUTCOME_FIELD` (`RETURN-CODE`, `RESP(ONSE)-CODE`, `RET-CODE`,
+`ERROR-CODE`, bare `RC`, `STATUS`, `STAT`, `FLAG`, case-insensitive), or a
+project-supplied replacement via `options.validate.outcome_field_pattern` in
+`project.yml`. It is deliberately narrow: a false positive on an unrelated
+field costs more reviewer trust than a missed reversal elsewhere would.
+
+`conditions.comparisons_in` extracts every outcome-field comparison from a raw
+condition string — a plain scan over the string (not a boolean-structure
+parse), so it finds every comparison in a compound `AND`/`OR` condition without
+attempting to model how they combine. Two shapes are recognised:
+`<outcome-field> <op> <literal>` and `<outcome-field> <op> <other-field>` (the
+latter checked against the *other field's own name* appearing in prose, since
+there's no concrete value to search for). `conditions.prose_polarity` then
+reads the direction a narrative sentence claims about that same
+literal/field, by scanning a 40-character window on either side of its first
+appearance for relational wording (`at least`/`no less than` → `ge`, `at
+most`/`no more than` → `le`, `greater than`/`exceeds` → `gt`, `less than`/`fewer
+than` → `lt`) or a negation marker (`not`, `isn't`, `unless`, `other than`,
+`differs from`, `NE`, `<>`, `!=`, etc. → `ne`), falling back to plain equality
+(`eq`) when nothing of the sort is found. Each side of that window is clipped
+at the nearest `AND`/`OR` conjunction first, so a hedge word belonging to the
+*other* clause of a compound condition ("STAT='FAIL' AND OBS_COUNT>ZERO",
+narrated as "STAT equals 'FAIL' and at least one observation was counted")
+can't be misread as modifying this clause's literal instead.
+
+A citation range spanning a paired `IF`/`ELSE` (a `rule_candidate` row with
+`construct='ELSE'` and a `pair_line_no` pointing back at its `IF`) is resolved
+against **whichever branch the sentence's own wording indicates** —
+`SUCCESS_WORDS` ("success", "succeed(s)/(ed)") versus `FAILURE_WORDS`
+("fail(ure/ed/s)", "error", "reject(ed/s)", "backout", "abort(ed/s/ion)",
+"unsuccessful"). A sentence with a success hint and no failure hint is checked
+against the `ELSE` branch's condition (the `IF`'s condition, logically
+inverted via `conditions.invert`); a failure hint, or no `ELSE` comparisons at
+all, checks against the `IF`'s own condition. With **no hint either way**, only
+the `IF`'s own condition is checked — guessing which branch an ambiguous
+sentence means is worse than not checking it at all. A sentence citing more
+than one location is skipped entirely, since it is usually deliberately
+cross-referencing two conditions rather than narrating one.
+
+**Wrong** (reads as claiming equality, but the source condition is an
+inequality):
+
+> If the return code equals `'0000'`, the update did not complete
+> [[MMP0100:60]].
+
+where `[[MMP0100:60]]` cites `IF #RETURN-CODE NE '0000'` — the sentence claims
+`eq`, the source means `ne`. The validator flags this as
+`comparison direction may be reversed`.
+
+**Correct:**
+
+> If the return code does not equal `'0000'`, the update did not complete
+> [[MMP0100:60]].
+
+now matching the cited condition's `NE` polarity. The same reversal risk
+applies to relational wording — narrating a `<=` condition as "at least" when
+the source says "at most" (or vice versa) trips the same check.
 
 ## Audience calibration
 

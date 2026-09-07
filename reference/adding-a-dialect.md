@@ -24,6 +24,17 @@ Two obligations:
    what it cannot parse produces an index that looks complete and is not, and
    nothing downstream can detect the difference.
 
+   This is not honoured everywhere in the shipped codebase, and a reader
+   calibrating against the source should know that going in: `environment.py`'s
+   `extract_sql_ddl`, `extract_copybook`, and `extract_cics_csd` never call
+   `add_gap` — an unrecognised `CREATE TABLE` clause, copybook line, or CSD
+   `DEFINE` is simply dropped with no trace in the gap register. `extract_jcl` is
+   partially compliant: it does not gap individual unrecognised statements either,
+   but it does raise one member-level `unparsed_line` gap when a JCL member
+   produces zero `EXEC` steps. Do not treat these four as the model to copy; they
+   are the exception, not the convention. See `reference/environment.md` for the
+   detail on each.
+
 ## Registering it
 
 1. Create `src/mfdoc/dialects/<name>.py`.
@@ -35,6 +46,20 @@ Two obligations:
    config.
 5. If members arrive concatenated, add a splitter to `normalise.DEFAULT_SPLITTERS`
    with a named `name` group.
+6. If the dialect needs a calibratable pattern or keyword table a project should
+   be able to override from `project.yml` (rather than editing the module
+   source), wire it into `config_validate.py`'s `OPTION_SPECS` — see
+   `options.validate.outcome_field_pattern` and `options.overview.dispatch_field_pattern`
+   in `conditions.py` for the convention: a dotted config path, a default built
+   from the module-level constant when the key is unset, and a docstring on the
+   `_from_options` accessor explaining that a supplied pattern *replaces* the
+   built-in one rather than merging with it. `OPTION_SPECS` is a flat declarative
+   list (path, accepted type(s), optional check) — adding a new key is one entry,
+   not a new branch of validation logic.
+7. Add a `tests/test_<name>_rules.py` guard file. Every shipped dialect has one
+   (`test_natural_rules.py`, `test_mantis_rules.py`, `test_screen_dialect.py`) —
+   it is what catches a keyword-table or regex change silently breaking
+   recognition of a construct nobody thought to re-check by hand.
 
 ## What to extract, in priority order
 
@@ -64,6 +89,28 @@ about: `IF STATUS NE 'CONF'` becomes meaningless without `CONF`.
 **Resolve entities through `db.resolve_entity`** rather than picking a kind.
 Different inputs know different amounts about the same store, and whichever is
 ingested first must not lock in a guess the other then duplicates.
+
+This is the general convention, but it is not the only pattern in the shipped
+codebase, and a new dialect facing the same problem `resolve_entity` solves
+should not assume it is the only tool available. Adabas is the exception:
+`natural.py`/`adabas.py` register entities with `db.upsert_entity` under a
+guessed kind (`ddm` from a DDM listing, `adabas_file` from an FDT report, or a
+`FILE-nnn` placeholder built from a DDM's DBID/FNR when no name is known yet),
+and reconciliation happens afterwards, once, over the whole index —
+`graph.reconcile_adabas_files` merges each `FILE-nnn` placeholder into the
+correctly-named file from the FDT when the DBID/FNR match is unambiguous, and
+raises an `ambiguous_adabas_file` gap when it is not (more than one named file
+shares the FNR across differing DBIDs). The reason Adabas needs this instead of
+`resolve_entity`'s per-call, name-based merge is that the DDM and the FDT
+frequently *do not name the same physical file the same way at all* — a DDM
+only ever gives you DBID+FNR, not the file's real name — so there is no shared
+name for `resolve_entity` to match on at ingest time; the match has to happen
+later, on DBID/FNR, once both sources are in. Reach for this
+post-hoc-reconciliation pattern (register under a best guess, fix up
+afterwards in a dedicated graph pass) when a new dialect's sources identify
+the same store by *different, non-name keys* that only line up once every
+source has been ingested — not when a shared name is available at
+extraction time, which is what `resolve_entity` is for.
 
 **Use `db.upsert_field`** so a field described twice at different levels of detail
 is enriched rather than duplicated.

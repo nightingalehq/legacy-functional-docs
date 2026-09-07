@@ -195,6 +195,23 @@ documentation** — see `mfdoc calibrate` in the main README and
 [`reference/mantis-supra.md`](../../reference/mantis-supra.md) if you're
 working with Mantis or Supra source, which typically need this step.
 
+One gate, `min_citation_accuracy_rate`, works differently from the rest: it
+fails by default rather than by a measured rate falling short. Every other
+gate is checked against a number `mfdoc coverage` computed from facts;
+citation accuracy — whether the cited source line actually supports the
+claim a generated document makes from it, not just that the citation
+resolves — can't be computed, only sampled by a human (optionally checked
+against an LLM judge afterwards). Until you run
+
+```bash
+mfdoc sample-citations --config project.yml --docs docs/functional --judge human
+```
+
+at least once and record verdicts, there is no `citation_accuracy_rate` to
+check, and the gate correctly treats that as a fail rather than silently
+passing. Run it, judge a sample of claims against their cited source, and
+re-run `mfdoc gate` once you have verdicts recorded.
+
 ### Turning facts into documents
 
 `mfdoc brief` produces a plain-text summary of everything the tool knows
@@ -256,6 +273,7 @@ better brief) rather than deleting the check.
 | JCL | "Job Control Language" — mainframe scripts that run batch jobs |
 | CICS | A mainframe system for running interactive (screen-based) transactions |
 | Dialect | Which of the above languages/formats a given source file is written in — this tool needs to know, either by guessing or by being told |
+| Screen / map | A mainframe interactive form definition (field names, positions, lengths) that a program reads from and writes to — its own dialect (`mantis_screen`) so unused on-screen fields can be flagged like any other data element |
 | Member | One self-contained unit of source — one program, one copybook, one data definition — inside a larger file |
 | Citation | A `[[MEMBER:LINE]]` tag pointing at the exact source line a claim comes from |
 | Gap | Something the tool could not work out; becomes a question for a human expert |

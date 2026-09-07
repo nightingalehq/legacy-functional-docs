@@ -11,6 +11,7 @@ Reference for the `natural`, `ddm` and `adabas_fdt` dialects.
 - [DDM versus FDT — the distinction that matters most](#ddm-versus-fdt--the-distinction-that-matters-most)
 - [DDM listing layout](#ddm-listing-layout)
 - [FDT report layout](#fdt-report-layout)
+- [Recognised no-ops](#recognised-no-ops)
 - [Traps](#traps)
 
 ## Object types
@@ -95,10 +96,35 @@ guessed.
 **Control flow.** `IF`/`END-IF`, `IF NO RECORDS FOUND` (attached to the preceding
 database loop, and easy to miss — it is a business rule about absence),
 `DECIDE ON FIRST/EVERY VALUE`, `DECIDE FOR FIRST/EVERY CONDITION`, `FOR`,
-`REPEAT`, `ESCAPE ROUTINE|TOP|BOTTOM`, `AT BREAK OF`, `AT END OF DATA`, `ON ERROR`.
+`REPEAT`, `ESCAPE ROUTINE|TOP|BOTTOM`, `AT BREAK OF`, `AT START OF DATA`,
+`AT END OF DATA`, `AT TOP OF PAGE`, `AT END OF PAGE`, `ON ERROR`, `REJECT IF`.
 
 `AT BREAK OF` fires on a control-break in a sorted read and is where subtotal and
 grouping logic lives. It is genuine business logic that reads like formatting.
+The other three `AT` events (`AT START OF DATA`, `AT TOP OF PAGE`, `AT END OF
+PAGE`) are recognised by the same `RE_AT_EVENT` pattern and open a block the
+same way.
+
+`REJECT IF <cond>` drops the current `FIND`/`READ` loop iteration when its
+condition is true — a real filtering decision, recorded as a `rule_candidate`
+with `construct='REJECT IF'` the same way `ESCAPE` is, not swallowed as a
+no-op the way `RESET`/`IGNORE` are.
+
+**Bare assignment.** The `ASSIGN` keyword is optional in Natural — `#FIELD :=
+value` is a complete, valid statement on its own, and real source uses this
+short form far more than the explicit `ASSIGN #FIELD := value`. `RE_BARE_ASSIGN`
+recognises it (anchored on a leading identifier followed by `:=`, so it can't
+swallow a `:=` that already matched something else mid-statement) and it is
+captured as an `ASSIGN` rule candidate exactly like `COMPUTE`/`MOVE` when a
+literal is involved, e.g. `#FLAG := 1`.
+
+Natural's two bare logical-field literals, `TRUE` and `FALSE`, are recognised
+too (`BOOL_LITERAL`) even though they are neither a quoted string nor a number —
+`#DEBUG := TRUE` is captured as an `ASSIGN` rule candidate with `literals=TRUE`
+and `fields_used=DEBUG`, the same fixed-value-business-decision treatment a
+status code or return code gets. This also feeds the shadowed-assignment check
+(`tests/test_shadowed_assignments.py`), which depends on a boolean assignment
+being visible as a rule candidate in the first place.
 
 **Invocation.** `CALLNAT 'NAME'` (subprogram, static), `CALLNAT #VAR` (dynamic,
 unresolvable), `PERFORM` (subroutine — internal if a `DEFINE SUBROUTINE` with that
@@ -167,7 +193,15 @@ P 1 AI DELIVERY
 S ORDER-CUST-KEY = AA(1-10),AB(1-8)
 ```
 
-- `T` — `G` group, `M` multiple-value field, `P` periodic group, blank elementary
+- `T` — `G` group, `M` multiple-value field, `P` periodic group, blank elementary.
+  `RE_DDM_FIELD`'s character class also accepts `C` as a valid `T` value, but
+  nothing in the codebase currently gives `C` any special handling — it falls
+  through the same `occurrences`/`descriptor_kind` dispatch as blank/elementary
+  (no `MU`/`PE` mapping, no `group` classification). Treat a `C` row as
+  recognised syntax with no established meaning yet; if a real listing turns
+  one up, confirm what it denotes (candidates worth checking against your own
+  site's ADACMP/PREDICT documentation) before assuming it behaves like any of
+  the other three.
 - `L` — level, `DB` — Adabas short name, `F` — format, `Leng` — length
 - `S` — suppression: `N` null suppression, `F` fixed storage
 - `D` — descriptor (indexed and searchable)
@@ -207,10 +241,36 @@ Super Descriptor Definitions:
 
 Options: `DE` descriptor, `UQ` unique, `NU` null-suppressed, `FI` fixed, `MU`
 multiple-value, `PE` periodic, `NC`/`NN` SQL null handling, `LA`/`LB` large
-alpha/binary.
+alpha/binary, `NB`, `NV`, `HF`, `XI` (all recognised tokens in
+`OPTION_TOKENS`, `adabas.py`, with no further interpretation applied beyond
+recording them).
 
 `UQ` is a uniqueness constraint — a business rule expressed in the physical
 schema, and worth documenting as one.
+
+## Recognised no-ops
+
+Four statements are recognised purely to stop them from being reported as
+`unparsed_line` gaps — none carries a business decision by itself, so none
+produces a `rule_candidate`, but each is structural syntax the scanner needs to
+swallow silently rather than flag as unrecognised:
+
+- **`RESET`** — sets a field back to its initial value.
+- **`IGNORE`** — a no-op, most often seen inside `DELETE`/loop processing.
+- **`SET CONTROL`** — sends terminal/printer control codes (page eject, column
+  ruler, etc.).
+- **`SET KEY`** — governs which PF-keys are active on the next input statement.
+
+This exists because of a real defect found by smoke-testing the scanner
+against a public Natural corpus (SoftwareAG/adabas-natural-code-samples,
+tracked in the codebase as "issue 4.11"): `RESET` turned out to already be a
+pre-existing `unparsed_line` gap sitting in the project's own `MMP0100.nsp`
+fixture, just never named as a pattern until running against a larger, more
+varied corpus made it obvious at scale. Anyone extending this dialect's
+keyword tables should treat "recognised but not a rule" as a legitimate third
+category alongside "recognised as a rule" and "genuinely unrecognised" — not
+every gap in the coverage figure is a missing feature; some are missing
+no-op recognition.
 
 ## Traps
 
