@@ -304,7 +304,8 @@ def _render_chunk_index(member_name: str, system: str | None, language: str, fra
 def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None, rows: list,
                                        language: str, framework: str, out_path: Path,
                                        caller: ModelCaller, writing_rules: str, template: str,
-                                       redact: Redactor, max_attempts: int, chunk_size: int) -> DocResult:
+                                       redact: Redactor, max_attempts: int, chunk_size: int,
+                                       prior_chunks: dict | None = None) -> DocResult:
     """Render one member as several independent chunk documents plus a
     deterministic index doc at `out_path`, instead of asking one completion
     to cover every scenario. Each chunk goes through the exact same
@@ -317,7 +318,17 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
     re-generation, and (short of a single oversized routine) no chunk's
     prompt is much larger than a normal small member's. A row with no
     rule_candidate_id (rule_line_no is NULL) is treated as belonging to no
-    routine, same as brief.py's main-body facts."""
+    routine, same as brief.py's main-body facts.
+
+    `prior_chunks` (from a previous run's state, keyed by chunk index as a
+    string) lets a chunk whose own rule-range brief is unchanged from that
+    prior run -- and whose file on disk still validates -- skip the model
+    call entirely and reuse the existing file, mirroring
+    batch._generate_module_doc_chunked's identical `prior_chunks` parameter
+    verbatim: this is what makes a fix affecting only one routine's worth
+    of source cheap to pick up on a retry, rather than the member-level
+    resume check's only choice (reuse every chunk, or re-render all of
+    them)."""
     routines = fetch_routines(conn, rows[0]["member_id"])
     line_nos = [r["rule_line_no"] if r["rule_line_no"] is not None else -1 for r in rows]
     ranges = routine_aware_chunk_ranges(line_nos, routines, chunk_size)
@@ -325,6 +336,7 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
     input_tokens = output_tokens = 0
     chunk_entries: list[tuple[int, Path, DocResult]] = []
     problems: list[str] = []
+    chunk_state: dict[str, dict] = {}
 
     chunk_width = len(str(chunk_count))
     expected_chunk_names = {
@@ -337,13 +349,41 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
         brief = test_case_brief_chunk(
             member_name, system, chunk_rows, i, chunk_count, redact=redact, routines=routines,
         )
-        result = _generate_test_doc_from_brief(
-            conn, member_name, brief, language, framework, chunk_path, caller,
-            writing_rules, template, max_attempts=max_attempts,
+        brief_hash = hashlib.sha256(brief.encode("utf-8")).hexdigest()
+        prior_chunk = (prior_chunks or {}).get(str(i))
+        reusable = (
+            isinstance(prior_chunk, dict) and prior_chunk.get("ok") is True
+            and prior_chunk.get("brief_sha256") == brief_hash
+            and chunk_path.exists()
         )
+        result = None
+        if reusable:
+            # Re-validate rather than trust the stored "ok" flag verbatim --
+            # the *content* is cached, but validate_test_doc's own logic can
+            # have changed since it was last checked, and this costs no
+            # model call. Only ever attempted when the prior run's own
+            # record for this chunk was itself ok=True: reusing a
+            # previously-*failed* chunk just because its brief is unchanged
+            # would re-validate the same broken content and report the same
+            # failure forever, with no path back to a real retry -- a
+            # failed chunk must always get a fresh model call instead. And
+            # if re-validation of a genuinely-ok cached chunk still fails
+            # (e.g. validate_test_doc's own logic changed since it was
+            # written), fall back to regenerating rather than reporting a
+            # stale failure for content that was never actually wrong when
+            # it was produced.
+            revalidated = validate_test_doc(conn, chunk_path)
+            if revalidated["ok"]:
+                result = DocResult(member_name, str(chunk_path), True, 0, 0, 0, [])
+        if result is None:
+            result = _generate_test_doc_from_brief(
+                conn, member_name, brief, language, framework, chunk_path, caller,
+                writing_rules, template, max_attempts=max_attempts,
+            )
         input_tokens += result.input_tokens
         output_tokens += result.output_tokens
         chunk_entries.append((i, chunk_path, result))
+        chunk_state[str(i)] = {"ok": result.ok, "brief_sha256": brief_hash}
         if not result.ok:
             problems.append(f"chunk {i}/{chunk_count} ({chunk_path.name}) failed: " + "; ".join(result.problems))
 
@@ -362,31 +402,37 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
     if not index_validation["ok"]:
         problems = problems + [f"index document: {p}" for p in index_validation["problems"]]
 
-    return DocResult(member_name, str(out_path), not problems, chunk_count, input_tokens, output_tokens, problems)
+    return DocResult(
+        member_name, str(out_path), not problems, chunk_count, input_tokens, output_tokens,
+        problems, chunked=True, chunk_state=chunk_state,
+    )
 
 
 def generate_member_test_doc(conn, member_name: str, language: str, framework: str,
                               out_path: Path, caller: ModelCaller, writing_rules: str,
                               template: str, redact: Redactor = NULL_REDACTOR,
                               max_attempts: int = 2,
-                              max_scenarios_per_call: int | None = None) -> DocResult:
+                              max_scenarios_per_call: int | None = None,
+                              prior_chunks: dict | None = None) -> DocResult:
     """Single-member version: brief -> call -> validate -> retry once.
     Used directly by `mfdoc test-gen` and by run_test_batch's per-item work.
 
     A member whose test_case set exceeds `max_scenarios_per_call` (default
     DEFAULT_MAX_SCENARIOS_PER_CALL) renders as several independent chunk
-    documents instead -- see _generate_member_test_doc_chunked. The
-    ambiguous-name and no-test_case-rows cases fall through to the
-    original single-call path unchanged (test_case_brief already reports
-    both as prose in the brief itself, which the model then fails to turn
-    into a valid document -- existing, unchanged behaviour, not something
-    this change alters)."""
+    documents instead -- see _generate_member_test_doc_chunked (`prior_chunks`
+    is only meaningful on that path; a single-call member has nothing to
+    reuse per-chunk). The ambiguous-name and no-test_case-rows cases fall
+    through to the original single-call path unchanged (test_case_brief
+    already reports both as prose in the brief itself, which the model then
+    fails to turn into a valid document -- existing, unchanged behaviour,
+    not something this change alters)."""
     system, rows, ambiguous_libs = fetch_test_case_rows(conn, member_name)
     threshold = _resolve_max_scenarios_per_call(max_scenarios_per_call)
     if not ambiguous_libs and rows and len(rows) > threshold:
         return _generate_member_test_doc_chunked(
             conn, member_name, system, rows, language, framework, out_path, caller,
             writing_rules, template, redact, max_attempts, threshold,
+            prior_chunks=prior_chunks,
         )
 
     brief = test_case_brief(conn, member_name, redact=redact)
@@ -648,13 +694,16 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
     # case; trading its concurrency with the other members for correctness
     # here is the right call, not a regression worth chasing.
     for name, brief_hash, out_path in to_run_chunked:
+        prior = state.get(state_keys[name])
+        prior_chunks = prior.get("chunks") if isinstance(prior, dict) else None
         result = generate_member_test_doc(
             conn, name, language, framework, out_path, caller, writing_rules, template,
-            redact=redact, max_scenarios_per_call=threshold,
+            redact=redact, max_scenarios_per_call=threshold, prior_chunks=prior_chunks,
         )
         results.append(result)
         state[state_keys[name]] = {
             "ok": result.ok, "attempts": result.attempts, "brief_sha256": brief_hash,
+            "chunks": result.chunk_state,
         }
         _checkpoint(state, state_path, corpus_sig)
 
