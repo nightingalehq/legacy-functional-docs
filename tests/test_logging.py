@@ -26,6 +26,25 @@ from mfdoc.retry import call_with_retry
 from test_batch import FakeCaller
 
 
+@pytest.fixture
+def preserve_root_logger():
+    """Snapshot and restore the root logger's level/handlers around a test
+    that calls `cli._configure_logging()` -- that function mutates *global*
+    logging state (root level, a StreamHandler/FileHandler attached to the
+    root logger), so a test exercising it must put that state back exactly
+    as it found it, not just reset to some assumed default (`verbose=False,
+    log_file=None`) that may not match whatever the test session's own
+    logging setup actually was before this test ran."""
+    root = logging.getLogger()
+    prev_level = root.level
+    prev_handlers = list(root.handlers)
+    try:
+        yield
+    finally:
+        root.handlers[:] = prev_handlers
+        root.setLevel(prev_level)
+
+
 class _Transient(Exception):
     pass
 
@@ -219,29 +238,17 @@ def test_run_test_batch_logs_warning_when_the_model_call_raises(tmp_path, caplog
     assert any("FAKEMOD" in r.getMessage() and "retrying" in r.getMessage() for r in warnings)
 
 
-def test_configure_logging_writes_to_the_given_log_file(tmp_path):
+def test_configure_logging_writes_to_the_given_log_file(tmp_path, preserve_root_logger):
     log_path = tmp_path / "mfdoc.log"
     cli._configure_logging(verbose=False, log_file=str(log_path))
-    try:
-        logging.getLogger("mfdoc.batch").info("hello from the log-file test")
-    finally:
-        # Restore a clean, handler-less state so this test doesn't leak a
-        # FileHandler (and this file descriptor) into every later test in
-        # the same session -- _configure_logging's own force=True already
-        # replaces handlers on each call, but the very last call in the
-        # suite would otherwise hold this test's temp file open.
-        cli._configure_logging(verbose=False, log_file=None)
+    logging.getLogger("mfdoc.batch").info("hello from the log-file test")
     assert log_path.exists()
     assert "hello from the log-file test" in log_path.read_text(encoding="utf-8")
 
 
-def test_configure_logging_verbose_enables_debug_level():
+def test_configure_logging_verbose_enables_debug_level(preserve_root_logger):
     cli._configure_logging(verbose=True, log_file=None)
-    try:
-        assert logging.getLogger().getEffectiveLevel() == logging.DEBUG
-    finally:
-        cli._configure_logging(verbose=False, log_file=None)
-    assert logging.getLogger().getEffectiveLevel() == logging.INFO
+    assert logging.getLogger().getEffectiveLevel() == logging.DEBUG
 
 
 def test_main_exits_cleanly_when_log_file_parent_dir_is_missing(cli_args, tmp_path, capsys):
@@ -262,15 +269,14 @@ def test_main_exits_cleanly_when_log_file_parent_dir_is_missing(cli_args, tmp_pa
     assert str(bad_log_path) in err
 
 
-def test_main_wires_verbose_and_log_file_flags_before_the_subcommand(cli_args, tmp_path, caplog):
+def test_main_wires_verbose_and_log_file_flags_before_the_subcommand(
+    cli_args, tmp_path, caplog, preserve_root_logger,
+):
     """End-to-end through cli.main()'s own argument parsing -- not just
     cmd_batch called directly -- proving --verbose/--log-file actually reach
     _configure_logging when a real subcommand is dispatched."""
     log_path = tmp_path / "mfdoc.log"
     argv = ["--verbose", "--log-file", str(log_path), "coverage", "--config", cli_args.config]
-    try:
-        rc = cli.main(argv)
-    finally:
-        cli._configure_logging(verbose=False, log_file=None)
+    rc = cli.main(argv)
     assert rc == 0
     assert log_path.exists()
