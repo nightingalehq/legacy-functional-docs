@@ -1012,6 +1012,7 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
                 logger.error(
                     "%s: chunk %d/%d model call failed: %s: %s",
                     member_name, i, chunk_count, exc.__class__.__name__, exc,
+                    exc_info=True,
                 )
                 result = DocResult(
                     member_name, str(chunk_path), False, 1, 0, 0,
@@ -1433,6 +1434,7 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
             except Exception as exc:
                 logger.error(
                     "%s: model call failed: %s: %s", name, exc.__class__.__name__, exc,
+                    exc_info=True,
                 )
                 result = DocResult(
                     name, str(out_path), False, 1, 0, 0,
@@ -1471,6 +1473,7 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
                     logger.error(
                         "%s: retry model call failed: %s: %s",
                         name, exc.__class__.__name__, exc,
+                        exc_info=True,
                     )
                     result = DocResult(
                         name, str(out_path), False, 2, input_tokens, output_tokens,
@@ -1525,6 +1528,7 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
         except Exception as exc:
             logger.error(
                 "%s: chunked generation failed: %s: %s", name, exc.__class__.__name__, exc,
+                exc_info=True,
             )
             result = DocResult(
                 name, str(out_path), False, 0, 0, 0,

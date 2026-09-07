@@ -27,22 +27,29 @@ from test_batch import FakeCaller
 
 
 @pytest.fixture
-def preserve_root_logger():
+def preserve_root_logger(monkeypatch):
     """Snapshot and restore the root logger's level/handlers around a test
     that calls `cli._configure_logging()` -- that function mutates *global*
     logging state (root level, a StreamHandler/FileHandler attached to the
     root logger), so a test exercising it must put that state back exactly
     as it found it, not just reset to some assumed default (`verbose=False,
     log_file=None`) that may not match whatever the test session's own
-    logging setup actually was before this test ran."""
+    logging setup actually was before this test ran. Suppress `force=True`'s
+    close calls for the original handlers, then detach and close only the
+    handlers this test created."""
     root = logging.getLogger()
     prev_level = root.level
     prev_handlers = list(root.handlers)
+    for handler in prev_handlers:
+        monkeypatch.setattr(handler, "close", lambda: None)
     try:
         yield
     finally:
         new_handlers = [handler for handler in root.handlers if handler not in prev_handlers]
-        root.handlers[:] = prev_handlers
+        for handler in new_handlers:
+            root.removeHandler(handler)
+        for handler in prev_handlers:
+            root.addHandler(handler)
         root.setLevel(prev_level)
         for handler in new_handlers:
             handler.close()
@@ -139,6 +146,7 @@ def test_run_batch_logs_error_on_a_model_call_failure(indexed_db, tmp_path, capl
     assert any(
         "MMP0100" in r.getMessage() and "model call failed" in r.getMessage() for r in errors
     )
+    assert any(r.exc_info is not None for r in errors)
 
 
 def _seed_fake_test_case_db():
@@ -239,6 +247,7 @@ def test_run_test_batch_logs_warning_when_the_model_call_raises(tmp_path, caplog
     assert summary.failed == 1
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert any("FAKEMOD" in r.getMessage() and "retrying" in r.getMessage() for r in warnings)
+    assert any(r.levelno == logging.ERROR and r.exc_info is not None for r in caplog.records)
 
 
 def test_configure_logging_writes_to_the_given_log_file(tmp_path, preserve_root_logger):

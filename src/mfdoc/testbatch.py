@@ -667,6 +667,7 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
                 except Exception as exc2:
                     logger.error(
                         "%s: retry model call raised %s: %s", name, exc2.__class__.__name__, exc2,
+                        exc_info=True,
                     )
                     result = DocResult(
                         name, str(out_path), False, 2, 0, 0,
@@ -699,6 +700,7 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
                 except Exception as exc:
                     logger.error(
                         "%s: retry model call raised %s: %s", name, exc.__class__.__name__, exc,
+                        exc_info=True,
                     )
                     validation = {
                         "ok": False,
