@@ -400,6 +400,14 @@ def test_batch_isolates_a_single_member_caller_failure_and_checkpoints_the_rest(
     assert caller.calls == calls_before_rerun + 1
 
 
+class _SimulatedTransientAPIError(Exception):
+    """The specific transient exception RetryMaskedCaller raises on a
+    member's first underlying attempt, and the *only* type its internal
+    retry catches -- a distinct class (not bare Exception/RuntimeError) so
+    the catch below is provably narrow, mirroring call_with_retry's own
+    catch of a specific transient-error type rather than everything."""
+
+
 class RetryMaskedCaller:
     """Simulates what AnthropicCaller/VertexCaller do internally once #79's
     retry/backoff lands (`call_with_retry`): a transient error on the
@@ -416,7 +424,14 @@ class RetryMaskedCaller:
     before run_batch ever learns about it, while a second member succeeds
     normally in the same run -- both members' results must come out clean
     in a single `run_batch` call, with no failure recorded for either and
-    no second run needed to pick up the retried member."""
+    no second run needed to pick up the retried member.
+
+    The first underlying attempt for a member in `retry_once_for_members`
+    genuinely raises `_SimulatedTransientAPIError`; the surrounding loop
+    catches only that type and retries once. If run_batch's (or a future
+    retry helper's) exception handling regressed and let such an error
+    escape unmasked, this test would actually fail rather than silently
+    passing on a counter check alone."""
 
     def __init__(self, retry_once_for_members: set[str]):
         self._inner = FakeCaller()
@@ -432,15 +447,21 @@ class RetryMaskedCaller:
             member = prompt.split("# Fact brief:")[1].splitlines()[0].strip()
         while True:
             self.attempts += 1
-            if (member in self._retry_once_for_members
-                    and member not in self._retried):
-                self._retried.add(member)
-                # A transient error on the first underlying attempt --
-                # caught and retried right here, exactly like
-                # call_with_retry does, so it never propagates to
-                # run_batch's fut.result().
+            try:
+                if (member in self._retry_once_for_members
+                        and member not in self._retried):
+                    self._retried.add(member)
+                    # A transient error on the first underlying attempt --
+                    # a real raise, not just a counter/continue.
+                    raise _SimulatedTransientAPIError(
+                        f"simulated transient error for {member}"
+                    )
+                return self._inner(prompt)
+            except _SimulatedTransientAPIError:
+                # Caught -- and only this type -- and retried right here,
+                # exactly like call_with_retry does, so it never
+                # propagates to run_batch's fut.result().
                 continue
-            return self._inner(prompt)
 
 
 def test_batch_absorbs_a_transient_caller_retry_while_another_member_succeeds(indexed_db, tmp_path):
