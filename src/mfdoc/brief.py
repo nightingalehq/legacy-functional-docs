@@ -48,8 +48,8 @@ def _sme_notes_section(redact: Redactor, sme_notes: Notes | None, name: str | No
         "These notes were typed by a human SME, not derived from source. They "
         "may help with interpretation and emphasis, but they are never a "
         "citable source -- every business-rule claim in the generated "
-        "document must still carry its own [[MEMBER:LINE]] citation from the "
-        "sections above, exactly as if this section didn't exist.",
+        "document must still carry its own line citation from the sections "
+        "above, exactly as if this section didn't exist.",
         "",
         redact(text),
         "",

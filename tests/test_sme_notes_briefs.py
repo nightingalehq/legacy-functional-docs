@@ -10,6 +10,7 @@ derive by default.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 
 from mfdoc import testplan
@@ -64,7 +65,7 @@ def test_module_brief_sme_notes_section_never_carries_a_citation_marker(indexed_
     notes = {"mmp0100": "A plain SME observation with no citation of its own."}
     out = module_brief(indexed_db, "MMP0100", redact=NULL_REDACTOR, sme_notes=notes)
     section = out.split(SME_HEADING, 1)[1]
-    assert "[[MMP0100:" not in section
+    assert not re.search(r"\[\[[A-Za-z0-9_-]+:[^\]]*\]\]", section)
 
 
 # --------------------------------------------------------------- entity_brief
