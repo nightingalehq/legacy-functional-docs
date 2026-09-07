@@ -109,9 +109,13 @@ Joins raw facts into structures no single scanner pass can produce alone:
 - `reconcile_adabas_files` — merges DDM and FDT records of the same
   physical file into one `entity` row (a common source of phantom
   duplicate entities if skipped).
-- `resolve` — resolves `call_edge.callee_name` against known members;
-  unresolved calls become `unresolved_call` gaps, whether the target was a
-  literal with no matching member or a dynamic (variable) target.
+- `resolve` — resolves `call_edge.callee_name` against known members; a
+  literal target with no matching member becomes an `unresolved_call` gap.
+  A dynamic (variable) target is a different case: `resolve` only reclassifies
+  it to `unresolved_call`/resolved if a matching interface-literal call in the
+  same member pins down what the handle was bound to at extraction time —
+  otherwise it's left as the `dynamic_target` gap the dialect scanner already
+  recorded when it first saw the call.
 - `crud_matrix`, `orphans`, `transaction_scopes`, `call_closure` — the
   derived views that feed briefs and, eventually, process-flow documents.
 - `shadowed_assignments`, `label_control_mismatches` — deterministic

@@ -39,9 +39,9 @@ only the values the brief actually states.
 - test_case_id: "{MEMBER}-BR-nnn"
   title: "test_scenario_name_here"
   preconditions:
-    - "Stub dependency per brief's Dependencies-to-mock list"
+    - "Stub dependency per brief's Dependencies to mock list"
   steps:
-    - given: "<fixture state from the brief's Parameters/Dependencies-to-mock>"
+    - given: "<fixture state from the brief's Parameters / Dependencies to mock>"
       when: "<the brief's branch construct and condition, verbatim>"
       then: "<the brief's observed consequence, or 'unresolved' if the brief has none reconstructable>"
   status: characterization  # or spec / bug-current / bug-desired, per the brief's overlay status
