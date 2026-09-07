@@ -9,16 +9,16 @@ Counts of unresolved items by kind and severity. See the per-module docs' inline
 
 | gap_kind | severity | count |
 |---|---|---|
-| `unused_field` | low | 89 |
-| `unresolved_call` | high | 14 |
-| `orphan_module` | medium | 11 |
-| `unparsed_line` | low | 11 |
-| `no_ddl_for_entity` | high | 3 |
+| `unused_field` | low | 122 |
+| `orphan_module` | medium | 12 |
+| `unresolved_call` | high | 12 |
+| `no_ddl_for_entity` | high | 4 |
+| `unparsed_line` | low | 4 |
 | `dynamic_target` | medium | 2 |
+| `map_body_unverified` | medium | 2 |
 | `dynamic_target` | high | 1 |
 | `external_call` | high | 1 |
 | `external_call` | medium | 1 |
-| `map_body_unverified` | medium | 1 |
 | `reporting_mode` | high | 1 |
 | `reporting_mode` | medium | 1 |
 | `sme_question` | high | 1 |

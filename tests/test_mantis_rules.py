@@ -167,13 +167,13 @@ def test_continuation_fold_joins_a_condition_wrapped_with_a_quote_marker(indexed
     )
 
 
-def test_continuation_line_is_still_visited_and_gapped_on_its_own(indexed_db):
-    """The fold only fixes the condition it's merged into -- the continuation
-    line itself must still get its own source_line row and still fail to
-    stand alone as a statement, the same accepted double-visit behaviour
-    Natural's own continuation fold relies on (see test_natural_rules.py).
-    A regression that skips re-visiting it would silently under-count
-    source_lines/code_lines for the member."""
+def test_continuation_line_does_not_also_raise_its_own_gap(indexed_db):
+    """The fold fixes the condition it's merged into -- the continuation
+    line itself still gets its own source_line row (for citations) and
+    still fails to stand alone as a statement when independently visited,
+    but that second visit must not also raise its own unparsed_line gap on
+    top of the first: the content wasn't lost, it's in the statement it
+    folded into (see `folded_lines` in mantis.py's extract())."""
     conn = indexed_db
     row = conn.execute(
         """
@@ -182,7 +182,7 @@ def test_continuation_line_is_still_visited_and_gapped_on_its_own(indexed_db):
         WHERE m.name='ORDENQ' AND g.gap_kind='unparsed_line' AND g.raw LIKE "%CUST_NO%"
         """
     ).fetchone()
-    assert row is not None, "continuation line must still raise its own unparsed_line gap"
+    assert row is None, "a successfully folded continuation line must not also raise its own gap"
 
 
 def test_continuation_fold_joins_an_assignment_wrapped_with_a_trailing_quote_marker():
@@ -211,11 +211,11 @@ def test_continuation_fold_joins_an_assignment_wrapped_with_a_trailing_quote_mar
     )
 
 
-def test_continuation_trailing_marker_line_is_still_visited_and_gapped_on_its_own():
-    """Same accepted double-visit as the leading-marker shape: the fold only
-    fixes the content recorded for the statement it belongs to, the
-    continuation line itself must still get its own source_line row and
-    still fail to stand alone as a statement."""
+def test_continuation_trailing_marker_line_does_not_also_raise_its_own_gap():
+    """Same fold-then-suppress behaviour as the leading-marker shape: the
+    fold fixes the content recorded for the statement it belongs to, and the
+    continuation line's own independent (failed) visit must not also raise
+    a redundant unparsed_line gap."""
     conn = _extract(
         'PROGRAM "TESTMOD"\n'
         "ENTRY MAIN\n"
@@ -226,14 +226,15 @@ def test_continuation_trailing_marker_line_is_still_visited_and_gapped_on_its_ow
     row = conn.execute(
         "SELECT raw FROM gap WHERE gap_kind='unparsed_line' AND raw LIKE '%exceeded on this account%'"
     ).fetchone()
-    assert row is not None, "trailing-marker continuation line must still raise its own unparsed_line gap"
+    assert row is None, "a successfully folded continuation line must not also raise its own gap"
 
 
 def test_orderq_entry_points_recorded_as_routines(indexed_db):
-    """ORDENQ.mantis declares two ENTRY points, MAIN and
-    VALIDATE_CREDIT_LIMIT (see the module docstring on the continuation-fold
-    test above) -- both must land in the `routine` table with resolved
-    boundaries, the same grouping Natural's DEFINE SUBROUTINE gets."""
+    """ORDENQ.mantis declares three ENTRY points -- MAIN, VALIDATE_CREDIT_LIMIT
+    (see the module docstring on the continuation-fold test above), and
+    SCHEDULE_PRODUCTION (2026-09-07's manufacturing scenario, calling the new
+    PRODSCHED program) -- all three must land in the `routine` table with
+    resolved boundaries, the same grouping Natural's DEFINE SUBROUTINE gets."""
     conn = indexed_db
     rows = conn.execute(
         """
@@ -243,7 +244,7 @@ def test_orderq_entry_points_recorded_as_routines(indexed_db):
         """
     ).fetchall()
     names = [r["name"] for r in rows]
-    assert names == ["MAIN", "VALIDATE_CREDIT_LIMIT"]
+    assert names == ["MAIN", "VALIDATE_CREDIT_LIMIT", "SCHEDULE_PRODUCTION"]
     for r in rows:
         assert r["kind"] == "mantis_entry"
         assert r["end_line"] is not None

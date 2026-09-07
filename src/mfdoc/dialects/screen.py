@@ -16,9 +16,15 @@ quoted `HEADING` literal longer than that width gets truncated mid-string,
 sometimes losing its closing quote entirely — a fixed-width slice would
 misread the columns that follow on every truncated row, where anchoring
 on TYPE does not. See `tests/test_screen_dialect.py` for synthetic cases
-exercising this (there is no real export fixture under `examples/inputs`
-for this dialect, deliberately -- see `CLAUDE.md`'s "Never commit
-client-specific content").
+exercising this.
+
+2026-09-07: a worked example (`examples/inputs/screens/ORDSCR1.scr`,
+`ORDSCR2.scr`) was added, resolving `examples/inputs/mantis/ORDENQ.mantis`'s
+own `CONVERSE`/`SHOW` targets of the same names -- fully invented content
+in the same fictional STEELLIB/steel-mill universe every other worked
+example under `examples/inputs` already uses, not a real site's export, so
+it doesn't run into `CLAUDE.md`'s "Never commit client-specific content"
+the way a real one would.
 """
 
 from __future__ import annotations

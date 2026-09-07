@@ -190,6 +190,13 @@ RE_SET_CONTROL = re.compile(r"^\s*SET\s+(?:CONTROL|KEY)\b", re.I)
 # recorded as a rule_candidate the same way ESCAPE is (see _match_rules).
 RE_REJECT = re.compile(r"^\s*REJECT\s+IF\s+(?P<cond>.+)$", re.I)
 
+# DEFINE WINDOW declares a screen window's name; its attribute clauses
+# (SIZE/BASE/FRAMED/FORMAT -- see CONTINUATION_LEAD further down this file)
+# are presentation, not a business decision, so -- like SET CONTROL/SET KEY
+# -- it's recognised as a no-op: enough to stop it and its attribute lines
+# showing up as unparsed_line gaps, without a rule_candidate.
+RE_DEFINE_WINDOW = re.compile(r"^\s*DEFINE\s+WINDOW\b", re.I)
+
 RE_CALLNAT = re.compile(r"^\s*CALLNAT\s+(?P<target>'[^']+'|\"[^\"]+\"|[A-Z0-9#@$&\-_.]+)(?P<args>.*)$", re.I)
 RE_FETCH = re.compile(r"^\s*FETCH\s+(?P<ret>RETURN\s+|REPEAT\s+)?(?P<target>'[^']+'|\"[^\"]+\"|[A-Z0-9#@$&\-_.]+)(?P<args>.*)$", re.I)
 RE_PERFORM = re.compile(r"^\s*PERFORM\s+(?!BREAK)(?P<target>'[^']+'|[A-Z0-9#@$&\-_.]+)(?P<args>.*)$", re.I)
@@ -290,8 +297,15 @@ CONTINUATION_TAIL = re.compile(r"(\b(AND|OR|NOT|THRU|THROUGH|TO|WITH|BY)\s*$)|([
 # checking the *next* line's lead is a safe second signal with no added
 # false-continuation risk. INTO covers the equally common
 # `COMPRESS ... \n INTO target` and `SEPARATE ... \n INTO target` wrap --
-# INTO is never the first word of a genuine new statement either.
-CONTINUATION_LEAD = re.compile(r"^\s*(AND|OR|NOT|THRU|THROUGH|TO|WITH|BY|INTO|SORTED|WHERE)\b", re.I)
+# INTO is never the first word of a genuine new statement either. SORTED/
+# WHERE cover a FIND/READ condition that wraps before its own qualifier
+# clause; SIZE/BASE/FRAMED/FORMAT cover a DEFINE WINDOW's attribute clauses,
+# each of which routinely gets its own line. None of these is a real Natural
+# statement verb in its own right, so, like the rest of this list, adding
+# them carries no false-continuation risk.
+CONTINUATION_LEAD = re.compile(
+    r"^\s*(AND|OR|NOT|THRU|THROUGH|TO|WITH|BY|INTO|SORTED|WHERE"
+    r"|SIZE|BASE|FRAMED|FORMAT)\b", re.I)
 
 # Natural report-writer column-position tokens ("5T" = tab to column 5, "2X"
 # = skip 2 spaces) commonly appear on their own continuation line within a
@@ -534,6 +548,18 @@ def extract(conn, member_id: int, lines: list[tuple[int, str | None, str]], memb
     # behaviour for structured-mode members at all.
     loop_stack: list[tuple[int, int]] = []
 
+    # Line numbers already folded into a *preceding* statement's condition/
+    # operand text (see the fold loop below). Such a line is still visited
+    # again on its own -- source_line has to hold every physical line
+    # unconditionally for citations to work, and the simplest way to
+    # guarantee that is to keep advancing idx by exactly one -- and it
+    # correctly fails to stand alone as a statement there. That second
+    # visit used to always raise its own unparsed_line gap; now it's
+    # suppressed for lines recorded here, since the content was never lost
+    # (it's in the statement it folded into), so flagging it again is noise,
+    # not a real coverage gap.
+    folded_lines: set[int] = set()
+
     idx = 0
     while idx < len(lines):
         line_no, seq, raw = lines[idx]
@@ -563,6 +589,8 @@ def extract(conn, member_id: int, lines: list[tuple[int, str | None, str]], memb
                 break
             look += 1
             stmt = stmt.rstrip() + " " + nxt_code.strip()
+        for folded_idx in range(idx + 1, look + 1):
+            folded_lines.add(lines[folded_idx][0])
         masked, _ = mask_literals(stmt)
 
         matched = False
@@ -668,7 +696,7 @@ def extract(conn, member_id: int, lines: list[tuple[int, str | None, str]], memb
             matched = RE_COMPUTE.match(masked) or RE_END_ANY.match(masked) \
                 or RE_RESET.match(masked) or RE_IGNORE.match(masked) \
                 or RE_SET_CONTROL.match(masked) or RE_BARE_ASSIGN.match(masked) \
-                or RE_BARE_LABEL.match(masked)
+                or RE_BARE_LABEL.match(masked) or RE_DEFINE_WINDOW.match(masked)
 
         # ---------------------------------------------- labelled statements
         # Last resort: a generic statement label ("SETA. SETTIME") defeats
@@ -703,7 +731,11 @@ def extract(conn, member_id: int, lines: list[tuple[int, str | None, str]], memb
                     or RE_RESET.match(masked2) or RE_IGNORE.match(masked2) \
                     or RE_SET_CONTROL.match(masked2) or RE_BARE_ASSIGN.match(masked2)
 
-        if not matched:
+        if not matched and line_no in folded_lines:
+            # Already folded into the statement it continues -- see
+            # folded_lines above. Not a gap: the content wasn't lost.
+            pass
+        elif not matched:
             stats["unparsed"] += 1
             if len(masked.strip()) > 3:
                 add_gap(conn, "unparsed_line",

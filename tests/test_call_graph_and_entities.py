@@ -19,8 +19,11 @@ def test_mill_order_adabas_file_is_merged_not_duplicated(indexed_db, derive_resu
 
     2026-08-05: TEST-COUPLE.ddm/.fdt (issue 4.7's coupling fixture) is the
     same shape -- DDM-only FNR 090, reconciled against its own FDT -- so
-    this now merges two pairs, not one."""
-    assert derive_result["adabas_entities_merged"] == 2
+    this now merges two pairs, not one.
+
+    2026-09-07: QUALITY-HOLD.ddm/.fdt (the MMP0400 quality-hold manufacturing
+    scenario) is the same shape again -- FNR 046 -- so three pairs now."""
+    assert derive_result["adabas_entities_merged"] == 3
     conn = indexed_db
     placeholder = conn.execute(
         "SELECT 1 FROM entity WHERE kind='adabas_file' AND name LIKE 'FILE-%'"

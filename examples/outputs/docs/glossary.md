@@ -98,6 +98,73 @@ Every known entity (Adabas file, DDM, table, dataset, ...) and its fields, dedup
 | `LINE-WT` | P | 9.3 |  |
 | `ORDER-NO` | A | 10 | control key from directory |
 
+### ORDSCR1
+
+- kind: `mantis_map`
+- notes: ORDER ENQUIRY ENTRY
+
+| field | format | length | remark |
+|---|---|---|---|
+| `CUST_NO` | TEXT | 8 | row 4 col 2 |
+| `MSG` | TEXT | 60 | row 22 col 2 |
+| `ORDER ENQUIRY` | HEADING | 13 | row 1 col 30 |
+| `ORDER_NO` | TEXT | 10 | row 3 col 2 |
+| `ORDER_WT` | NUMERIC | 9 | row 5 col 2 |
+
+### ORDSCR2
+
+- kind: `mantis_map`
+- notes: ORDER ENQUIRY CONFIRMATION
+
+| field | format | length | remark |
+|---|---|---|---|
+| `MSG` | TEXT | 60 | row 22 col 2 |
+| `ORDER CONFIRMED` | HEADING | 16 | row 1 col 30 |
+| `ORDER_NO` | TEXT | 10 | row 3 col 2 |
+| `ORDER_WT` | NUMERIC | 9 | row 4 col 2 |
+
+### PRODSCHED
+
+- kind: `supra_master`
+
+| field | format | length | remark |
+|---|---|---|---|
+| `LINE-ID` | A | 4 |  |
+| `ORDER-NO` | A | 10 | control key from directory |
+| `SCHED-DATE` | N | 6 |  |
+| `SCHED-STATUS` | A | 4 |  |
+
+### QUALITY-HOLD (adabas_file)
+
+- kind: `adabas_file`
+
+| field | format | length | remark |
+|---|---|---|---|
+| `AA` | A | 10 |  |
+| `AB` | A | 30 |  |
+| `AC` | A | 6 |  |
+| `AD` | A | 8 |  |
+| `AE` | A | 4 |  |
+| `S1` |  |  |  |
+
+### QUALITY-HOLD (ddm)
+
+- kind: `ddm`
+- notes: default sequence: AA
+
+| field | format | length | remark |
+|---|---|---|---|
+| `HOLD-DATE` | D | 6 | D |
+| `HOLD-REASON` | A | 30 |  |
+| `HOLD-STATUS` | A | 4 | N D |
+| `INSPECTOR-ID` | A | 8 | N |
+| `ORDER-HOLD-KEY` |  |  |  |
+| `ORDER-NO` | A | 10 | D order under hold |
+
+### SCHEDVIEW
+
+- kind: `supra_master`
+
 ### STEEL.PROD.MILLORD
 
 - kind: `vsam`

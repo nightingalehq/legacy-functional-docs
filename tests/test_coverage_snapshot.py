@@ -201,6 +201,59 @@ orphan_module/gaps_total (uncalled by design, as usual for these
 regression-only fixtures) and +1 unresolved_call/gaps_high/gaps_total (SHOW
 MAP's screen reference, unresolved same as any other screen-only target).
 
+2026-09-07: natural.py's extract() stopped double-counting a continuation
+line as its own unparsed_line gap once it has already been folded into the
+statement it continues (tracked in the new `folded_lines` set) -- the
+"accepted double-visit" convention described in several entries above (the
+folded "AND ..."/colspec/INTO/etc lines each still independently visited
+and correctly not recognised on their own) is no longer accepted: the
+content was never lost, so flagging it again was noise, not a real gap.
+Against this fixture set, every one of those now-suppressed gaps was
+exactly the folded continuation lines MMP9000/MMP9500/MMP9800 added above
+to exercise folding in the first place -- -6 unparsed_line/gaps_total (line
+recognition rises to 0.9888). Same-session natural.py calibration fixes
+(bare UPDATE/DELETE, SET KEY, REJECT IF, SORTED/WHERE continuation,
+#/&-prefixed relabelled labels, DEFINE WINDOW) don't move this fixture set
+at all -- none of those shapes happen to occur in it -- so they're
+exercised by their own fixtures in test_natural_rules.py instead.
+
+2026-09-07b: mantis.py's extract() got the same folded_lines fix as
+natural.py's just above, for the same reason -- a `'`-marked continuation
+line (leading or trailing shape) that already folded successfully into the
+statement it continues no longer also raises its own unparsed_line gap when
+independently (and correctly) failing to stand alone. Against this fixture
+set, that's exactly the one continuation line SCRNENT.mantis/ORDENQ.mantis's
+own fixtures add to exercise the fold -- -1 unparsed_line/gaps_total (line
+recognition rises to 0.991).
+
+2026-09-07c: a connected manufacturing scenario was added, spanning Natural
+and Mantis, to demo cross-file/cross-dialect linkage beyond the previous
+regression-only fixtures: MMP0400.nsp (quality inspection hold) shares
+MILL-ORDER and the MMN0900 CALLNAT target with MMP0100, is entered via a
+new Natural map (MMM0150.nsm), and stores against a new QUALITY-HOLD
+entity (QUALITY-HOLD.ddm/.fdt, reconciled the same DDM+FDT way as
+MILL-ORDER/TEST-COUPLE -- see test_call_graph_and_entities.py); ORDENQ.mantis
+gained a third entry point (SCHEDULE_PRODUCTION) calling a new Mantis
+program (PRODSCHED.mantis) against a new PRODSCHED dataset+linkpath
+appended to STEELDB.dir; and ORDSCR1/ORDSCR2 -- ORDENQ's own CONVERSE/SHOW
+targets, previously always unresolved -- now resolve against new
+mantis_screen exports (ORDSCR1.scr/ORDSCR2.scr, a new source set in
+project.yml), the first examples/inputs fixture for that dialect (see
+dialects/screen.py's docstring for why that's now safe to do). Net:
++7 members/+3 code_members, +165 source_lines, +6 entities/+5
+entities_with_definition (QUALITY-HOLD, PRODSCHED, ORDSCR1, ORDSCR2, plus
+QUALITY-HOLD's DDM+FDT reconciliation collapsing to one definition),
++1 adabas_entities_merged, +25 entity_fields, +4 data_accesses,
++9 rule_candidates, +2 invocation_edges/+1 invocations_resolved (PRODSCHED
+call resolves; MMN0900 stays a deliberately-shared unresolved external
+target), +1 include_edges/+6 includes_resolved (MMM0150's map INCLUDE, both
+screens' CONVERSE/SHOW resolving for the first time), +33 unused_field (the
+two new entities' own fields, plus ORDSCR1/ORDSCR2's), and net 0
+unparsed_line/line_recognition_rate change -- the same-session natural.py/
+mantis.py calibration fixes above handle every construct this scenario
+uses, including the labelled `UPDATE(F1.)` no-space form and `REJECT IF` on
+the Natural side.
+
 2026-09-04: graph.unused_entity_fields added -- for every Natural/Mantis
 member, the fields of every entity it's known to touch (data_access,
 a view, an INCLUDEd screen) that never turn up as a whole word anywhere
@@ -219,26 +272,26 @@ from __future__ import annotations
 from mfdoc import graph
 
 EXPECTED_COVERAGE = {
-    "members": 23,
-    "code_members": 15,
-    "source_lines": 446,
-    "unparsed_lines": 11,
-    "line_recognition_rate": 0.9753,
-    "entities": 13,
-    "entities_with_definition": 9,
-    "entity_definition_rate": 0.6923,
-    "entity_fields": 46,
-    "data_accesses": 14,
-    "rule_candidates": 44,
-    "invocation_edges": 13,
-    "invocations_resolved": 2,
-    "call_resolution_rate": 0.1538,
+    "members": 30,
+    "code_members": 18,
+    "source_lines": 611,
+    "unparsed_lines": 4,
+    "line_recognition_rate": 0.9935,
+    "entities": 19,
+    "entities_with_definition": 14,
+    "entity_definition_rate": 0.7368,
+    "entity_fields": 71,
+    "data_accesses": 18,
+    "rule_candidates": 53,
+    "invocation_edges": 15,
+    "invocations_resolved": 3,
+    "call_resolution_rate": 0.2,
     "dynamic_call_edges": 1,
-    "include_edges": 10,
-    "includes_resolved": 1,
-    "include_resolution_rate": 0.1,
-    "gaps_high": 21,
-    "gaps_total": 137,
+    "include_edges": 11,
+    "includes_resolved": 7,
+    "include_resolution_rate": 0.6364,
+    "gaps_high": 20,
+    "gaps_total": 164,
 }
 
 
@@ -252,8 +305,8 @@ def test_coverage_matches_snapshot(indexed_db, derive_result):
 
 
 def test_run_all_summary_matches_snapshot(derive_result):
-    assert derive_result["unresolved_calls"] == 14
-    assert derive_result["undefined_entities"] == 3
-    assert derive_result["adabas_entities_merged"] == 2
-    assert derive_result["orphans"] == 11
-    assert derive_result["transaction_scopes"] == 3
+    assert derive_result["unresolved_calls"] == 12
+    assert derive_result["undefined_entities"] == 4
+    assert derive_result["adabas_entities_merged"] == 3
+    assert derive_result["orphans"] == 12
+    assert derive_result["transaction_scopes"] == 5

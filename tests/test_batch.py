@@ -136,8 +136,8 @@ class FakeCaller:
 def test_select_batch_members_returns_only_natural_and_mantis_programs(indexed_db):
     members = batch_mod.select_batch_members(indexed_db)
     assert set(members) == {
-        "MMP0100", "MMP0200", "MMP9000", "MMP9100", "MMP9200", "MMP9300", "MMP9400", "MMP9500",
-        "MMP9600", "MMP9700", "MMP9800", "MMC0100", "ORDENQ", "SCRNENT",
+        "MMP0100", "MMP0200", "MMP0400", "MMP9000", "MMP9100", "MMP9200", "MMP9300", "MMP9400",
+        "MMP9500", "MMP9600", "MMP9700", "MMP9800", "MMC0100", "ORDENQ", "SCRNENT", "PRODSCHED",
     }
 
 
@@ -150,11 +150,11 @@ def test_batch_generates_valid_docs_for_all_batchable_members(indexed_db, tmp_pa
         indexed_db, members, tmp_path / "out", caller, writing_rules, template,
         redact=NULL_REDACTOR, concurrency=2, state_path=None,
     )
-    assert summary.ok == len(members) == 14
+    assert summary.ok == len(members) == 16
     assert summary.failed == 0
     assert summary.retried == 0
-    assert summary.total_input_tokens == 1400
-    assert summary.total_output_tokens == 2800
+    assert summary.total_input_tokens == 1600
+    assert summary.total_output_tokens == 3200
     for member in members:
         subdir = batch_mod._output_subdir(indexed_db, member)
         assert (tmp_path / "out" / subdir / f"{member}.md").exists()
@@ -228,7 +228,7 @@ def test_batch_reports_cost_only_when_pricing_configured(indexed_db, tmp_path):
         indexed_db, members, tmp_path / "out2", caller2, "rules", "template",
         cost_per_mtok_in=3.0, cost_per_mtok_out=15.0,
     )
-    expected = (1400 / 1_000_000) * 3.0 + (2800 / 1_000_000) * 15.0
+    expected = (1600 / 1_000_000) * 3.0 + (3200 / 1_000_000) * 15.0
     assert summary_priced.cost_usd == expected
 
 

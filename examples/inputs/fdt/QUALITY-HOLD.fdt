@@ -1,0 +1,14 @@
+ADAREP  UTILITY REPORT                        DATABASE 012
+FILE NUMBER: 046   FILE NAME: QUALITY-HOLD
+
+Field Definition Table:
+ Level I Name I Length I Format I Options
+-------I------I--------I--------I-------------------
+   1   I  AA  I   10   I   A    I  DE,UQ
+   1   I  AB  I   30   I   A    I
+   1   I  AC  I    6   I   A    I  DE
+   1   I  AD  I    8   I   A    I  NU
+   1   I  AE  I    4   I   A    I  NU,DE
+
+Super Descriptor Definitions:
+  S1 = AA(1-10),AE(1-4)

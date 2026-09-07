@@ -51,6 +51,12 @@ sources:
     dialect: supra_dir
     system: OE
 
+  - path: examples/inputs/screens
+    glob: ["*.scr", "*.txt"]
+    dialect: mantis_screen
+    library: STEELLIB
+    system: OE
+
   - path: examples/inputs/ddl
     glob: ["*.sql", "*.ddl"]
     dialect: sql_ddl

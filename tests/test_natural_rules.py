@@ -472,3 +472,34 @@ def test_bare_label_line_with_nothing_after_it_is_not_a_gap():
     next line) must not read as an unparsed_line gap."""
     conn = _extract("MYLABEL.\nRESET #FLAG\n")
     assert conn.execute("SELECT 1 FROM gap WHERE gap_kind='unparsed_line' AND line_no=1").fetchone() is None
+
+
+def test_define_window_and_its_attribute_lines_are_not_a_gap():
+    """DEFINE WINDOW and its attribute clauses (SIZE/BASE/FRAMED/FORMAT,
+    routinely one per line) are presentation, not a business decision --
+    recognised as a no-op the same way SET CONTROL/SET KEY are."""
+    conn = _extract(
+        "DEFINE WINDOW WIN1\n"
+        "  SIZE 12*46\n"
+        "  BASE 7/18\n"
+        "  FRAMED ON POSITION TEXT MORE\n"
+        "  FORMAT CD=BL\n"
+    )
+    assert conn.execute("SELECT 1 FROM gap WHERE gap_kind='unparsed_line'").fetchone() is None
+
+
+def test_a_line_folded_into_a_preceding_statement_does_not_also_gap_on_its_own():
+    """A continuation line that already folded successfully into the
+    statement it continues (here: the IF's wrapped `AND` clause) must not
+    also be flagged as its own unparsed_line gap -- its content wasn't
+    lost, so a second, independent gap for the same line is just noise."""
+    conn = _extract(
+        "IF ORDER-STATUS NE 'A'\n"
+        "  AND ORDER-STATUS NE 'B'\n"
+        "  MOVE 'HOLD' TO STATUS\n"
+        "END-IF\n"
+    )
+    assert conn.execute("SELECT 1 FROM gap WHERE gap_kind='unparsed_line' AND line_no=2").fetchone() is None
+    row = conn.execute("SELECT condition FROM rule_candidate WHERE construct='IF'").fetchone()
+    assert row is not None
+    assert "ORDER-STATUS NE 'B'" in row["condition"]

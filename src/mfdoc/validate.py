@@ -929,8 +929,13 @@ def _call_graph_artifact_problems(conn, path: Path, body: str, fm: dict) -> list
     apply to; the full per-cluster files it points at
     (`call-graph-<cluster>.md`) are not checked here since a cluster's own
     node set additionally depends on config (`cluster_by`), not just
-    `call_edge` -- too fragile a heuristic for the exact node count."""
-    if fm.get("title") == "Call graph (collapsed)":
+    `call_edge` -- too fragile a heuristic for the exact node count. Same
+    exemption for "Call graph (index)": when the graph has 2+ disconnected
+    components, `call_graph_diagram` renders one node per *component*
+    instead, which is legitimately far fewer than call_edge's real node
+    count and checked the same fragile-heuristic way per-component files
+    already aren't."""
+    if fm.get("title") in ("Call graph (collapsed)", "Call graph (index)"):
         return []
     nodes: set[tuple[str, object]] = set()
     for r in conn.execute("SELECT caller_id, callee_id, callee_name FROM call_edge"):

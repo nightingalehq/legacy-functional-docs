@@ -527,7 +527,12 @@ def call_graph_diagram(
         index_lines.append(f'    {_mermaid_id(name)}["{index_label}"]')
     index_lines.append("```")
     result["inline"] = (
-        '---\ntitle: "Call graph"\ndoc_type: register\n---\n\n'
+        # Distinct title (like "(collapsed)" above) so validate.py's
+        # _call_graph_artifact_problems can tell this index -- one node per
+        # component, deliberately far fewer than call_edge's real node
+        # count -- apart from a genuine single-component render, instead of
+        # flagging every multi-component corpus as permanently stale.
+        '---\ntitle: "Call graph (index)"\ndoc_type: register\n---\n\n'
         "# Call graph\n\n"
         "The call graph splits into multiple independent components -- one "
         "node per component below; see the standalone file for each "

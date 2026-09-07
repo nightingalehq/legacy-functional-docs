@@ -40,6 +40,11 @@ Classification of every batchable member for test generation, derived from data_
 - callees to mock: -
 - seam: Extract the `MILL-ORDER` access (first seen at [[MMP9700:7]], `FIND`) behind a seam (a lookup/repository call this unit takes as a parameter or can have substituted) so a unit test can supply fixture data for `MILL-ORDER` instead of a live database call.
 
+### `PRODSCHED`
+- entities to mock: SCHEDVIEW
+- callees to mock: -
+- seam: Extract the `SCHEDVIEW` access (first seen at [[PRODSCHED:15]], `ADD-M`) behind a seam (a lookup/repository call this unit takes as a parameter or can have substituted) so a unit test can supply fixture data for `SCHEDVIEW` instead of a live database call.
+
 ## Blocked — dynamic/unresolved call, confirm before testing
 
 ### `MMP0100`
@@ -54,6 +59,12 @@ Classification of every batchable member for test generation, derived from data_
 - gap: [[MMP0200:22]] `FETCH RETURN` target is dynamic (a variable, not a literal) -- the callee set is unknown, so no fixed seam/mock can be named; a test can only be written once the possible targets are confirmed with an SME.
 - gap: [[MMP0200:23]] `CALL` target `PDFGEN` has no source in the ingested set -- its behaviour can't be characterized, so this call can only be stubbed opaquely (assert it was invoked with X), not verified against real logic.
 
+### `MMP0400`
+- entities to mock: MILL-ORDER, QUALITY-HOLD
+- callees to mock: MMN0900
+- transaction scope entities: MILL-ORDER, QUALITY-HOLD (commit at line 48)
+- gap: [[MMP0400:50]] `CALLNAT` target `MMN0900` has no source in the ingested set -- its behaviour can't be characterized, so this call can only be stubbed opaquely (assert it was invoked with X), not verified against real logic.
+
 ### `MMP9400`
 - entities to mock: -
 - callees to mock: PROGA
@@ -61,7 +72,7 @@ Classification of every batchable member for test generation, derived from data_
 
 ### `ORDENQ`
 - entities to mock: ORDERMST, ORDLINE
-- callees to mock: PRICECALC
-- gap: [[ORDENQ:8]] `CALL` target `PRICECALC` has no source in the ingested set -- its behaviour can't be characterized, so this call can only be stubbed opaquely (assert it was invoked with X), not verified against real logic.
-- gap: [[ORDENQ:27]] `CALL` target `PRICECALC` has no source in the ingested set -- its behaviour can't be characterized, so this call can only be stubbed opaquely (assert it was invoked with X), not verified against real logic.
+- callees to mock: PRICECALC, PRODSCHED
+- gap: [[ORDENQ:10]] `CALL` target `PRICECALC` has no source in the ingested set -- its behaviour can't be characterized, so this call can only be stubbed opaquely (assert it was invoked with X), not verified against real logic.
+- gap: [[ORDENQ:29]] `CALL` target `PRICECALC` has no source in the ingested set -- its behaviour can't be characterized, so this call can only be stubbed opaquely (assert it was invoked with X), not verified against real logic.
 

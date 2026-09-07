@@ -17,14 +17,16 @@ def _run_calibrate(project_config, indexed_db, dialect, capsys):
 
 def test_calibrate_ranks_unparsed_shapes_for_natural(project_config, indexed_db, capsys):
     """RESET is now recognised (issue 4.11), so MMP0100 no longer has an
-    unparsed line. MMP9000's own continuation-fold fixture still has one by
-    design -- its "AND ..." line is folded correctly into the preceding IF
-    but is also visited (and not recognised) on its own once folded; see
-    that fixture's comment. The command must surface it, labelled by its
-    leading keyword."""
+    unparsed line. MMP9000's own continuation-fold fixture's "AND ..." line
+    folds correctly into the preceding IF and, since it's tracked in
+    `folded_lines`, no longer raises its own gap on top of that (previously
+    an accepted-by-design double-visit -- see natural.py's `extract()`). A
+    genuinely unrecognised construct (SETD. FROBNICATE, a made-up statement
+    label + verb) must still surface, labelled by its leading keyword."""
     rc, out = _run_calibrate(project_config, indexed_db, "natural", capsys)
     assert rc == 0
-    assert "AND" in out
+    assert "AND" not in out
+    assert "SETD" in out
     assert "src/mfdoc/dialects/natural.py" in out
 
 

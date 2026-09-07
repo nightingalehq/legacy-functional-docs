@@ -1,0 +1,52 @@
+**********************************************************************
+** MMP0400 - QUALITY INSPECTION HOLD                                **
+** New (2026-09) manufacturing scenario: an inspector places a mill  **
+** order on quality hold. Shares MILL-ORDER with MMP0100 and calls   **
+** the same MMN0900 audit routine, so the two programs' call graphs  **
+** and data-flow connect through both. Records the hold against the  **
+** new QUALITY-HOLD entity, entered via the MMM0150 map.             **
+**********************************************************************
+DEFINE DATA
+PARAMETER
+1 #ORDER-NO          (A10)
+1 #RETURN-CODE       (N2)
+LOCAL
+1 ORDER-VIEW VIEW OF MILL-ORDER
+  2 ORDER-NO
+  2 ORDER-STATUS
+1 HOLD-VIEW VIEW OF QUALITY-HOLD
+  2 ORDER-NO
+  2 HOLD-REASON
+  2 HOLD-DATE
+  2 INSPECTOR-ID
+  2 HOLD-STATUS
+1 #HOLD-REASON       (A30)
+1 #INSPECTOR-ID      (A8)
+1 #TODAY             (D) INIT <*DATX>
+END-DEFINE
+*
+RESET #RETURN-CODE
+*
+INPUT USING MAP 'MMM0150'
+*
+F1. FIND ORDER-VIEW WITH ORDER-NO = #ORDER-NO
+  IF NO RECORDS FOUND
+    MOVE 40 TO #RETURN-CODE
+    ESCAPE ROUTINE
+  END-NOREC
+  REJECT IF ORDER-VIEW.ORDER-STATUS = 'HELD'
+  MOVE 'HELD' TO ORDER-VIEW.ORDER-STATUS
+  UPDATE(F1.)
+END-FIND
+*
+MOVE #ORDER-NO TO HOLD-VIEW.ORDER-NO
+MOVE #HOLD-REASON TO HOLD-VIEW.HOLD-REASON
+MOVE #TODAY TO HOLD-VIEW.HOLD-DATE
+MOVE #INSPECTOR-ID TO HOLD-VIEW.INSPECTOR-ID
+MOVE 'OPEN' TO HOLD-VIEW.HOLD-STATUS
+STORE HOLD-VIEW
+END TRANSACTION
+*
+CALLNAT 'MMN0900' #ORDER-NO
+*
+END
