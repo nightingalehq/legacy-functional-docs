@@ -64,6 +64,15 @@ def call_with_retry(
     `fn()`'s result) so no existing caller of this function is affected by
     adding the parameter.
 
+    A `on_retry` that itself raises is swallowed (not propagated) and never
+    aborts the retry it was reporting on -- this is an observability-only
+    hook, and a bug in it (or in whatever a caller's callback does with the
+    count, e.g. a full disk on a metrics write) must never turn into a
+    *harder* failure than the transient error retrying was already
+    recovering from. `is_retryable`/`fn` themselves are not protected this
+    way: those are load-bearing to the retry decision itself, not passive
+    observers of it.
+
     Raises `ValueError` immediately, before any attempt, for a negative
     `max_retries`, `base_delay`, or `max_delay` -- a negative `max_retries`
     would silently disable retries with no signal to the caller, and a
@@ -88,5 +97,11 @@ def call_with_retry(
             delay = min(max_delay, base_delay * (2 ** (attempt - 1)))
             delay *= 0.5 + random.random() / 2  # jitter: 50%-100% of the computed delay
             if on_retry is not None:
-                on_retry(attempt, exc)
+                try:
+                    on_retry(attempt, exc)
+                except Exception:
+                    # Observability-only: a broken callback must never abort
+                    # (or replace the exception of) the retry it was just
+                    # reporting on -- see the docstring note above.
+                    pass
             do_sleep(delay)

@@ -150,6 +150,31 @@ def test_on_retry_callback_never_fires_when_the_first_call_succeeds():
     assert seen == []
 
 
+def test_on_retry_callback_raising_never_aborts_the_retry_it_reported_on():
+    """A broken `on_retry` (a bug in it, or in whatever a caller's callback
+    does with the count -- e.g. a metrics write hitting a full disk) is
+    observability-only and must never turn into a *harder* failure than the
+    transient error retrying was already recovering from -- Copilot review
+    on PR #116/issue #84."""
+    attempts = {"n": 0}
+
+    def fn():
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise _Transient("simulated rate limit")
+        return "ok"
+
+    def broken_on_retry(attempt, exc):
+        raise RuntimeError("simulated bug in the observability hook itself")
+
+    result = call_with_retry(
+        fn, is_retryable=lambda exc: True, max_retries=5, sleep=lambda s: None,
+        on_retry=broken_on_retry,
+    )
+    assert result == "ok"
+    assert attempts["n"] == 3
+
+
 def test_negative_max_retries_raises_value_error_before_any_attempt():
     calls = []
 
