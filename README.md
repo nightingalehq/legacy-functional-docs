@@ -294,9 +294,11 @@ silently truncated response reported as success. See
 mfdoc test-plan     --config project.yml
 mfdoc test-advisory --config project.yml
 mfdoc test-gen      --config project.yml --member MMP0100 --language python --framework pytest
-# output nests as <out_dir>/<dialect>/<library>/<language>/<framework>/<member>.md,
-# same convention as `mfdoc batch` above -- e.g.
-# tests_generated/natural/MILLPROD/python/pytest/MMP0100.md
+# output nests as <out_dir>/<project-namespace>/<dialect>/<library>/<language>/<framework>/<member>.md
+# (same <dialect>/<library>/<language>/<framework> convention as `mfdoc batch` above,
+# plus a namespace segment -- project.yml's `system`, else `project`, else "default" --
+# so two configs sharing a working directory don't share one output tree) -- e.g.
+# tests_generated/mom/natural/MILLPROD/python/pytest/MMP0100.md
 mfdoc test-validate --config project.yml --docs tests_generated
 ```
 

@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -473,6 +474,44 @@ def _testgen_config(cfg: dict) -> dict:
     return (cfg["options"] or {}).get("testgen") or {}
 
 
+def _project_namespace(cfg: dict) -> str:
+    """Filesystem-safe slug identifying this project config -- used to
+    namespace `mfdoc test-batch`'s default resume-state file path and
+    generated-test output subdirectory, so two project configs that happen
+    to point at the same working directory (e.g. two `project.yml` files
+    documenting different systems from one shared checkout, each run with
+    its own `--config`) get genuinely separate `tests_generated/` trees and
+    `.mfdoc/test-batch-state.json`-shaped resume-state files instead of
+    silently sharing -- and clobbering -- one another's.
+
+    Mirrors the existing per-project `index_db` convention (each
+    `project.yml` sets its own `index_db` path so two configs never share
+    one fact store) rather than inventing a new one: keyed by `system` (a
+    project's short code, e.g. "MOM") when present, else `project` (the
+    human-readable name), else the literal string "default" when neither
+    is set. Deliberately never derived from `index_db` itself -- a bare
+    default `index_db` of ".mfdoc/index.db" is itself the *un*-namespaced
+    default every project starts from, so using it as the namespace key
+    would just move today's collision from one shared name to another,
+    not actually separate the two configs.
+
+    Applied to `--state`'s default and to test-batch/test-gen's output
+    directory (whether that comes from `options.testgen.out_dir` in
+    --config or its own bare "tests_generated" fallback) -- but never to a
+    full path a caller gave explicitly (`--out`/`--state` on the command
+    line), which is used exactly as given, the same as `index_db` itself
+    always is. `options.testgen.out_dir` doesn't get index_db's same
+    "explicit means distinguishing" treatment: unlike index_db, which a
+    project.yml essentially always sets to something genuinely
+    project-specific, out_dir is commonly left at (or copy-pasted as) the
+    same literal "tests_generated" the checked-in project.yml.example
+    itself uses -- exempting it from namespacing would leave the exact
+    collision this function exists to prevent."""
+    raw = cfg.get("system") or cfg.get("project") or "default"
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", str(raw).strip()).strip("-").lower()
+    return slug or "default"
+
+
 def _testgen_matrix(testgen_cfg: dict) -> list[dict]:
     """options.testgen.matrix entries, or [] if absent -- each a
     {"language": ..., "framework": ..., "template": optional} dict, read
@@ -671,7 +710,16 @@ def cmd_test_gen(args) -> int:
     from .batch import _output_subdir
 
     member = args.member.strip().upper()
-    out_dir = testgen_cfg.get("out_dir") or "tests_generated"
+    # Only used below when --out isn't given (a per-target default path).
+    # Namespaced per project config (see _project_namespace) regardless of
+    # whether options.testgen.out_dir is configured or falls back to the
+    # bare "tests_generated" default: unlike index_db (which a project.yml
+    # essentially always sets to something genuinely distinguishing),
+    # out_dir is commonly left at (or copy-pasted as) the same literal
+    # "tests_generated" the checked-in project.yml.example itself uses --
+    # so treating an explicit-but-still-shared out_dir as exempt would
+    # leave the exact collision this namespacing exists to prevent.
+    out_dir = Path(testgen_cfg.get("out_dir") or "tests_generated") / _project_namespace(cfg)
     any_failed = False
     for target in targets:
         language, framework = target["language"], target["framework"]
@@ -742,7 +790,31 @@ def cmd_test_batch(args) -> int:
             return 2
         targets = [{"language": language, "framework": framework}]
 
-    out_dir = args.out or testgen_cfg.get("out_dir") or "tests_generated"
+    # An explicit --out (a full override, like index_db) is respected
+    # exactly as given; otherwise mirror cmd_test_gen's default out_dir --
+    # namespaced per project config (see _project_namespace) regardless of
+    # whether options.testgen.out_dir is configured or falls back to the
+    # bare "tests_generated" default, since out_dir is commonly left at (or
+    # copy-pasted as) the same literal value the checked-in
+    # project.yml.example itself uses -- an "explicit but still shared"
+    # out_dir would otherwise leave the exact collision this namespacing
+    # exists to prevent.
+    out_dir = (
+        Path(args.out) if args.out
+        else Path(testgen_cfg.get("out_dir") or "tests_generated") / _project_namespace(cfg)
+    )
+
+    # --state similarly: empty string disables resume tracking (unchanged);
+    # an explicit path is used exactly as given; not given at all (None,
+    # the argparse default) falls back to a state file namespaced per
+    # project config, so two configs sharing a working directory don't
+    # silently share (and clobber) one resume-state file.
+    if args.state is None:
+        state_rel = f".mfdoc/{_project_namespace(cfg)}-test-batch-state.json"
+    elif args.state == "":
+        state_rel = None
+    else:
+        state_rel = args.state
 
     members = ([m.strip().upper() for m in args.members.split(",")] if args.members
                else testbatch_mod.select_test_batch_members(conn))
@@ -778,7 +850,7 @@ def cmd_test_batch(args) -> int:
         summary = testbatch_mod.run_test_batch(
             conn, members, language, framework, base / out_dir, caller,
             writing_rules, template, redact=redact, concurrency=args.concurrency,
-            state_path=(base / args.state) if args.state else None,
+            state_path=(base / state_rel) if state_rel else None,
             max_scenarios_per_call=testgen_cfg.get("max_scenarios_per_call"),
         )
         for r in summary.results:
@@ -1370,16 +1442,23 @@ def main(argv=None) -> int:
                         "(default: 600, matching --claude-code-timeout's default)")
         p.set_defaults(func=fn)
     sub.choices["test-gen"].add_argument("--member", required=True)
-    sub.choices["test-gen"].add_argument("--out", help="default: tests_generated/<language>/<MEMBER>.md")
+    sub.choices["test-gen"].add_argument(
+        "--out", help="default: tests_generated/<project-namespace>/<language>/<MEMBER>.md "
+                      "(see options.testgen.out_dir/--config's system or project key)")
     sub.choices["test-batch"].add_argument(
         "--out", default=None,
-        help="default: options.testgen.out_dir from --config, else tests_generated")
+        help="default: options.testgen.out_dir from --config (else tests_generated), "
+             "then /<project-namespace> (see --config's system or project key -- namespaced "
+             "so two configs sharing a working directory don't share one output tree)")
     sub.choices["test-batch"].add_argument(
         "--members", help="comma-separated member names; default: every member with test_case rows")
     sub.choices["test-batch"].add_argument("--concurrency", type=int, default=4)
     sub.choices["test-batch"].add_argument(
-        "--state", default=".mfdoc/test-batch-state.json",
-        help="resume-state file path, relative to --config's directory; empty string disables resume tracking")
+        "--state", default=None,
+        help="resume-state file path, relative to --config's directory; empty string disables "
+             "resume tracking; default: .mfdoc/<project-namespace>-test-batch-state.json (see "
+             "--config's system or project key -- namespaced so two configs sharing a working "
+             "directory don't share, and clobber, one resume-state file)")
 
     p = sub.add_parser("batch")
     p.add_argument("--config", required=True)

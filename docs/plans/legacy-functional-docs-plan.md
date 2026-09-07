@@ -13,6 +13,26 @@ GitHub org.
   flows and the gap register, where judgement matters most.
 
 **Progress (2026-09-07):**
+- Implemented issues #87/#88/#89, giving `testbatch.py`'s harness the same
+  checkpoint/retry/reuse discipline `batch.py` already has for module docs:
+  (#87) every `caller()` call site now catches an exception instead of
+  letting it propagate and crash the whole run with zero state saved, and
+  state is checkpointed after every finished member/chunk (a new
+  `_checkpoint` helper) rather than only once at the end; (#88) ported
+  `batch._generate_module_doc_chunked`'s `prior_chunks` content-hash
+  skip/reuse mechanism into `testbatch._generate_member_test_doc_chunked`,
+  so a retry only regenerates the chunk(s) whose own brief actually
+  changed (or that failed last run -- reuse requires the prior record's
+  own `ok` to have been `True`, so a previously-failed chunk always gets a
+  fresh model call rather than re-validating the same broken content
+  forever); (#89) `mfdoc test-batch`/`test-gen`'s default resume-state
+  file and output directory are now namespaced per project config (`cli.
+  _project_namespace`, keyed by `system`, else `project`, else "default"),
+  so two `project.yml` files sharing a working directory no longer
+  silently share -- and a `rm -f` on one no longer clobbers -- the other's
+  resume-state/output tree. An explicit `--out`/`--state` is still used
+  exactly as given, matching how `index_db` itself is always an explicit,
+  project-specific choice.
 - Implemented issue #79: `AnthropicCaller` and `VertexCaller` now retry
   transient errors (`RateLimitError`, `APIConnectionError`,
   `InternalServerError`) with bounded exponential backoff and jitter, via a
@@ -148,6 +168,27 @@ GitHub org.
   both are covered by new isolated unit tests only (`tests/
   test_mantis_rules.py`, new `tests/test_dynamic_call_resolution.py`); the
   bundled fixture pipeline's gap/coverage counts are unchanged.
+- Implemented issue #89: `mfdoc test-gen`/`mfdoc test-batch`'s default
+  output subdirectory and `test-batch`'s default resume-state file are now
+  namespaced per project config, via a new `cli._project_namespace(cfg)`
+  helper -- keyed on `system` (falling back to `project`, then the literal
+  string `"default"`), sluggified to a filesystem-safe token. Previously
+  both defaulted to a single fixed path (`tests_generated`,
+  `.mfdoc/test-batch-state.json`) regardless of which project config was
+  in use, so two `project.yml` files sharing a working directory (a common
+  setup for documenting more than one system from one checkout) would
+  silently share -- and a `rm -f` meant to force a clean retry for one
+  project could silently clobber -- the other's resume-state file. The
+  namespace segment is inserted even when `options.testgen.out_dir` is
+  explicitly configured (only a CLI-level `--out`/`--state` bypasses it),
+  since `out_dir` is commonly left at, or copy-pasted as, the same literal
+  value across projects. This is a clean break, not a migration: pre-1.0
+  (`pyproject.toml` is still `0.1.0`) with no backward-compatibility
+  promise in `CLAUDE.md`, so a project upgrading past this change simply
+  gets a fresh default state file on its next `test-batch` run (a one-time
+  full re-render, not data loss) -- `--out`/`--state` still let a project
+  pin the old shared path explicitly if that's ever wanted. See
+  `tests/test_test_batch.py`'s "Issue #89" section.
 
 **Progress (2026-09-06):**
 - Implemented issue #64: an eighth document type, `language-guide`, that
