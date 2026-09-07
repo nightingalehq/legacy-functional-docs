@@ -13,6 +13,30 @@ GitHub org.
   flows and the gap register, where judgement matters most.
 
 **Progress (2026-09-07):**
+- Implemented issue #95 (docs + example for `sme-notes.md`, closing out the
+  SME memory-file epic, #96, after #93/#94): `README.md` gets a new "SME
+  notes (optional)" section explaining the schema, that it's optional, and
+  that it's advisory-only, never a citable source; `CLAUDE.md`'s "Brief
+  generation" bullet now mentions `sme_notes.py`/`_sme_notes_section`;
+  `SKILL.md`'s interactive-writing step now tells a session to check for
+  `options.sme_notes` and read it directly when writing `system-overview.md`/
+  `processes/*.md`/`gap-register.md` from the system brief, since #94's
+  wiring only covers `module_brief`/`entity_brief`/`executive_brief`/
+  `test_case_brief`, not `system_brief`/`interface_matrix_brief`.
+  `project.yml`'s `options.sme_notes` comment was already added by #93 --
+  verified complete, no change needed. Added a worked example,
+  `examples/sme-notes.md` (general section plus two member-scoped
+  sections, all invented content against this repo's own MOM/MILLPROD
+  fixture), linked from the new README section. Since `mfdoc validate`
+  walks every `.md` file under a `--docs` root expecting pipeline-output
+  front matter, the new example under `examples/` needed
+  `validate._is_pipeline_doc` extended (alongside its existing `README.md`
+  exception) to also skip `sme-notes.md`, or the bundled-fixture smoke test
+  (`mfdoc validate --docs examples`) would fail on it -- covered by a new
+  `test_validate_tree_skips_sme_notes_files` test, plus a
+  `test_worked_example_parses_with_expected_sections` test in
+  `test_sme_notes.py` asserting the checked-in example actually parses into
+  the sections it claims to demonstrate.
 - Implemented issue #94: wired issue #93's `sme_notes.py` parser into the
   actual brief-then-prompt path every document type already uses.
   `brief.module_brief`/`entity_brief`/`executive_brief` and

@@ -211,6 +211,20 @@ def test_validate_tree_skips_readme_files(indexed_db, tmp_path):
     assert res["documents_ok"] == 1
 
 
+def test_validate_tree_skips_sme_notes_files(indexed_db, tmp_path):
+    """`sme-notes.md` (options.sme_notes, sme_notes.py) is an SME-authored
+    input file, not pipeline output -- it has no front matter either, same
+    exception as README.md above, so a tree walk over a project directory
+    that happens to contain one (as examples/ does) must skip it too."""
+    (tmp_path / "sme-notes.md").write_text("## General\n\nSome advisory note.\n", encoding="utf-8")
+    (tmp_path / "doc.md").write_text(
+        GOOD_FRONTMATTER + "\nThe program resets the return code [[MMP0100:31]].\n"
+    )
+    res = validate_tree(indexed_db, tmp_path)
+    assert res["documents"] == 1
+    assert res["documents_ok"] == 1
+
+
 def test_validator_accepts_the_worked_example_unchanged(indexed_db):
     """A false positive here trains people to ignore the validator, which is
     worse than not having one."""

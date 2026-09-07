@@ -788,12 +788,20 @@ def validate_test_doc(conn, path: Path) -> dict:
     return result
 
 
+_NON_PIPELINE_DOC_NAMES = frozenset({"README.MD", "SME-NOTES.MD"})
+
+
 def _is_pipeline_doc(path: Path) -> bool:
     """`README.md` is project documentation, not pipeline output -- it has
     no front matter and was never meant to satisfy this contract, so a
     tree walk must skip it rather than reporting a false failure on the
-    one file everyone browsing the directory expects to be different."""
-    return path.name.upper() != "README.MD"
+    one file everyone browsing the directory expects to be different.
+    `sme-notes.md` (see `sme_notes.py`, `options.sme_notes`) is the same
+    kind of exception: an SME-authored input file, not pipeline output, so
+    it has no front matter either -- `examples/sme-notes.md`'s worked
+    example would otherwise fail a `--docs examples` tree walk that isn't
+    aware of it."""
+    return path.name.upper() not in _NON_PIPELINE_DOC_NAMES
 
 
 def validate_tests_tree(conn, root: Path) -> dict:
