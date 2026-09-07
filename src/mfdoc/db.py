@@ -118,7 +118,8 @@ CREATE TABLE IF NOT EXISTS entity_link (
 CREATE TABLE IF NOT EXISTS variable (
     id            INTEGER PRIMARY KEY,
     member_id     INTEGER NOT NULL REFERENCES member(id),
-    scope         TEXT,                   -- local | parameter | global | independent | view | mantis_local | mantis_shared | mantis_interface
+    scope         TEXT,                   -- local | parameter | global | independent | view | entry
+                                          -- | screen | mantis_local | mantis_shared | mantis_interface
     level         INTEGER,
     name          TEXT NOT NULL,
     format        TEXT,

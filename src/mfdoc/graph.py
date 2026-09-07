@@ -108,7 +108,12 @@ def resolve_interface_literal_calls(conn) -> int:
           JOIN variable v
             ON v.member_id = ce.caller_id
            AND v.scope = 'mantis_interface'
-           AND UPPER(v.name) = UPPER(ce.callee_name)
+           -- Direct comparison, not UPPER()=UPPER(): mantis.py already
+           -- upper()s both the handle name (v.name) and the CALL target
+           -- (ce.callee_name) at insert time, so wrapping either side here
+           -- would only cost the expression index without changing which
+           -- rows match.
+           AND v.name = ce.callee_name
          WHERE ce.dynamic = 1 AND ce.call_kind = 'CALL'
         """
     ).fetchall()
