@@ -1443,6 +1443,12 @@ def main(argv=None) -> int:
                         "smoke tests")
     p.add_argument("--provider", choices=["anthropic", "vertex", "claude-code"], default="anthropic",
                    help="--judge llm only; which egress path serves the model call")
+    p.add_argument("--claude-code-timeout", type=int, default=None,
+                    help="--provider claude-code only; seconds before a `claude -p` call is "
+                         "killed as hung, default 600 (claude_cli_caller.DEFAULT_TIMEOUT_S)")
+    p.add_argument("--api-timeout", type=int, default=None,
+                    help="request timeout in seconds for --provider anthropic/vertex "
+                    "(default: 600, matching --claude-code-timeout's default)")
     p.add_argument("--gcp-project", help="--judge llm + --provider vertex only")
     p.add_argument("--gcp-region", help="--judge llm + --provider vertex only")
     p.set_defaults(func=cmd_sample_citations)
