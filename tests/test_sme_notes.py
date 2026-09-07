@@ -109,6 +109,24 @@ def test_explicit_general_heading(tmp_path):
     assert sme_notes.notes_for(parsed, "MODULE-ALPHA") == "Explicit general section.\n\nMODULE-ALPHA note."
 
 
+def test_closing_atx_heading_markers_are_ignored(tmp_path):
+    path = tmp_path / "sme-notes.md"
+    path.write_text(
+        "## General ##\n"
+        "\n"
+        "Explicit general section.\n"
+        "\n"
+        "## MODULE-ALPHA ###\n"
+        "\n"
+        "MODULE-ALPHA note.\n",
+        encoding="utf-8",
+    )
+    parsed = sme_notes.parse(path)
+    assert parsed[None] == "Explicit general section."
+    assert parsed["module-alpha"] == "MODULE-ALPHA note."
+    assert sme_notes.notes_for(parsed, "MODULE-ALPHA") == "Explicit general section.\n\nMODULE-ALPHA note."
+
+
 def test_unknown_heading_names_are_parsed_and_match_only_when_looked_up(tmp_path):
     path = tmp_path / "sme-notes.md"
     path.write_text(

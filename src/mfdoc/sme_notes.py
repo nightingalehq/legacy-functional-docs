@@ -31,7 +31,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-_HEADING_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
+_HEADING_RE = re.compile(r"^##[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$", re.MULTILINE)
 
 # Sections keyed by lowercased heading text; the general section (content
 # before the first heading, or an explicit `## General` heading) is keyed by
