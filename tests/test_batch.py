@@ -486,13 +486,9 @@ def test_batch_absorbs_a_transient_caller_retry_while_another_member_succeeds(in
     state_path = tmp_path / "state.json"
     caller = RetryMaskedCaller(retry_once_for_members={"MMP0100"})
 
-    # concurrency=1 keeps this deterministic: RetryMaskedCaller's shared
-    # calls/attempts counters are plain, unlocked `+= 1`s, which would be
-    # racy (and the assertions below flaky) if run_batch's default
-    # ThreadPoolExecutor concurrency let both members' calls interleave.
     summary = batch_mod.run_batch(
         indexed_db, members, tmp_path / "out", caller, "rules", "template",
-        state_path=state_path, concurrency=1,
+        state_path=state_path,
     )
 
     # Nothing fails -- the retry was fully absorbed inside the caller
