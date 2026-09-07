@@ -13,6 +13,28 @@ GitHub org.
   flows and the gap register, where judgement matters most.
 
 **Progress (2026-09-07):**
+- Added a regression test (`test_batch_absorbs_a_transient_caller_retry_while_another_member_succeeds`
+  in `tests/test_batch.py`) exercising issue #79's internal retry and issue
+  #78's per-future isolation *together* in one `run_batch` pass, which
+  `tests/test_batch.py` didn't yet cover -- the existing isolation test
+  (`FlakyCaller`) only covers a caller exception that *propagates out* to
+  run_batch across two separate `run_batch` calls, not a transient failure
+  a caller absorbs internally (as `AnthropicCaller`/`VertexCaller` do via
+  `call_with_retry`) while a different member succeeds normally in the
+  same pool. The new `RetryMaskedCaller` test double calls the real
+  `mfdoc.retry.call_with_retry` directly (rather than hand-rolling an
+  equivalent retry loop, per review feedback -- avoids the test drifting
+  from the production retry helper's actual behavior over time) and
+  asserts: no failure recorded for the retried member, its batch-level
+  `attempts` stays 1 (the retry is invisible to run_batch), the other
+  member's result is untouched, and no second `run_batch` call is needed
+  to pick up the retried member.
+  Issue #81 was investigated and closed without a code change: `VertexCaller`
+  narrows its lock to wrap only the single `messages.create()` call inside
+  each retry attempt (acquired and released fresh per attempt, never held
+  across `call_with_retry`'s backoff sleep) -- the narrowest scope that's
+  still safe given `AnthropicVertex`'s in-place credential refresh. See the
+  closing comment on #81 for the full analysis.
 - Implemented issues #87/#88/#89, giving `testbatch.py`'s harness the same
   checkpoint/retry/reuse discipline `batch.py` already has for module docs:
   (#87) every `caller()` call site now catches an exception instead of

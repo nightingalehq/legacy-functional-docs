@@ -14,11 +14,13 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from pathlib import Path
 
 import pytest
 
 from mfdoc import batch as batch_mod
+from mfdoc import retry as retry_mod
 from mfdoc.redact import NULL_REDACTOR, Redactor
 from mfdoc.validate import CITATION
 
@@ -423,15 +425,22 @@ class FlakyCaller:
         self._inner = FakeCaller()
         self._fail_for_members = set(fail_for_members)
         self._failed_once: set[str] = set()
+        self._lock = threading.Lock()
         self.calls = 0
 
     def __call__(self, prompt: str) -> "batch_mod.ModelResponse":
-        self.calls += 1
-        if "# Fact brief:" in prompt:
-            member = prompt.split("# Fact brief:")[1].splitlines()[0].strip()
-            if member in self._fail_for_members and member not in self._failed_once:
+        with self._lock:
+            self.calls += 1
+            member = None
+            if "# Fact brief:" in prompt:
+                member = prompt.split("# Fact brief:")[1].splitlines()[0].strip()
+            should_fail = (
+                member in self._fail_for_members and member not in self._failed_once
+            )
+            if should_fail:
                 self._failed_once.add(member)
-                raise RuntimeError(f"simulated transient error for {member}")
+        if should_fail:
+            raise RuntimeError(f"simulated transient error for {member}")
         return self._inner(prompt)
 
 
@@ -546,6 +555,127 @@ def test_batch_isolates_a_single_member_caller_failure_and_checkpoints_the_rest(
     # Only MMP0200's own prompt (one fresh attempt) should have gone through
     # the caller on the re-run -- the other two members made no new calls.
     assert caller.calls == calls_before_rerun + 1
+
+
+class _SimulatedTransientAPIError(Exception):
+    """The specific transient exception RetryMaskedCaller raises on a
+    member's first underlying attempt, and the *only* type its internal
+    retry catches -- a distinct class (not bare Exception/RuntimeError) so
+    the catch below is provably narrow, mirroring call_with_retry's own
+    catch of a specific transient-error type rather than everything."""
+
+
+class RetryMaskedCaller:
+    """Simulates what AnthropicCaller/VertexCaller do internally via #79's
+    retry/backoff implementation: a transient error on the underlying API
+    call is caught and retried *inside the caller itself*, via the real
+    `mfdoc.retry.call_with_retry` helper (not a hand-rolled re-implementation
+    -- so this test can't drift from the production retry helper's actual
+    behavior), so run_batch's ThreadPoolExecutor loop never sees an
+    exception for that member at all -- unlike FlakyCaller above, which
+    raises *out* to run_batch and relies on #78's per-future isolation to
+    survive it.
+
+    Exercises #79 (retry) and #78 (isolation) *together*, in one pass: one
+    member's transient failure is fully absorbed by the caller's own retry
+    before run_batch ever learns about it, while a second member succeeds
+    normally in the same run -- both members' results must come out clean
+    in a single `run_batch` call, with no failure recorded for either and
+    no second run needed to pick up the retried member.
+
+    The first underlying attempt for a member in `retry_once_for_members`
+    genuinely raises `_SimulatedTransientAPIError`; `call_with_retry`
+    (`max_retries=1`, real `is_retryable` gate, injected no-op `sleep`)
+    catches only that type and retries once. If run_batch's (or
+    `call_with_retry`'s own) exception handling regressed and let such an
+    error escape unmasked, this test would actually fail rather than
+    silently passing on a counter check alone."""
+
+    def __init__(self, retry_once_for_members: set[str]):
+        self._inner = FakeCaller()
+        self._retry_once_for_members = set(retry_once_for_members)
+        self._retried: set[str] = set()
+        self._lock = threading.Lock()
+        self.calls = 0
+        self.attempts = 0
+
+    def __call__(self, prompt: str) -> "batch_mod.ModelResponse":
+        with self._lock:
+            self.calls += 1
+        member = None
+        if "# Fact brief:" in prompt:
+            member = prompt.split("# Fact brief:")[1].splitlines()[0].strip()
+
+        def do_call():
+            with self._lock:
+                self.attempts += 1
+                should_raise = (member in self._retry_once_for_members
+                                and member not in self._retried)
+                if should_raise:
+                    self._retried.add(member)
+            if should_raise:
+                # A transient error on the first underlying attempt -- a
+                # real raise, not just a counter/continue.
+                raise _SimulatedTransientAPIError(
+                    f"simulated transient error for {member}"
+                )
+            return self._inner(prompt)
+
+        return retry_mod.call_with_retry(
+            do_call,
+            is_retryable=lambda exc: isinstance(exc, _SimulatedTransientAPIError),
+            max_retries=1,
+            sleep=lambda s: None,
+        )
+
+
+def test_batch_absorbs_a_transient_caller_retry_while_another_member_succeeds(indexed_db, tmp_path):
+    """Regression test for the #79/#78 interaction: #79's internal retry and #78's
+    per-member isolation must cooperate correctly in one run, not just be
+    covered by separate tests of each in isolation. A caller that retries a
+    transient failure internally for one member, while a second member
+    succeeds normally in the same batch pool, must produce a single clean
+    pass -- no failure recorded for the retried member, no re-run needed,
+    and the other member's result completely unaffected."""
+    members = ["MMP0100", "MMP0200"]
+    state_path = tmp_path / "state.json"
+    caller = RetryMaskedCaller(retry_once_for_members={"MMP0100"})
+
+    # Keep the normal pool concurrency: the caller synchronizes its shared
+    # counters and retry state, so these assertions remain deterministic.
+    summary = batch_mod.run_batch(
+        indexed_db, members, tmp_path / "out", caller, "rules", "template",
+        state_path=state_path,
+    )
+
+    # Nothing fails -- the retry was fully absorbed inside the caller
+    # before run_batch's per-future isolation (#78) ever had anything to
+    # catch, so it never needed to.
+    assert summary.ok == 2
+    assert summary.failed == 0
+
+    retried_result = next(r for r in summary.results if r.member == "MMP0100")
+    other_result = next(r for r in summary.results if r.member == "MMP0200")
+    assert retried_result.ok is True
+    # From run_batch's perspective this was one clean call -- the caller's
+    # internal retry is invisible to the batch-level attempts counter,
+    # which only tracks run_batch's own validation-retry path.
+    assert retried_result.attempts == 1
+    assert retried_result.problems == []
+    assert other_result.ok is True
+    assert other_result.attempts == 1
+    assert other_result.problems == []
+
+    # The caller really did retry once for MMP0100: underlying attempts are
+    # exactly one higher than run_batch-visible calls, regardless of how the
+    # batch implementation groups or reconciles those calls.
+    assert caller.attempts == caller.calls + 1
+
+    # Both members' success is checkpointed -- no second run_batch call is
+    # needed to "pick up" the retried member; it's already done.
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["natural/MILLPROD/MMP0100"]["ok"] is True
+    assert state["natural/MILLPROD/MMP0200"]["ok"] is True
 
 
 def test_batch_skips_unchanged_members_on_resume(indexed_db, tmp_path):
