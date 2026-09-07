@@ -98,6 +98,8 @@ def test_call_retries_a_transient_error_and_eventually_succeeds(monkeypatch):
 
     assert attempts["n"] == 3
     assert result.text == "ok"
+    # issue #84: 2 failed attempts before the 3rd (successful) one -> 2 retries.
+    assert result.retries == 2
 
 
 def test_call_does_not_retry_a_non_transient_error(monkeypatch):

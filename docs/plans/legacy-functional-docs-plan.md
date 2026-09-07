@@ -35,6 +35,26 @@ GitHub org.
   across `call_with_retry`'s backoff sleep) -- the narrowest scope that's
   still safe given `AnthropicVertex`'s in-place credential refresh. See the
   closing comment on #81 for the full analysis.
+- Implemented issues #87/#88/#89, giving `testbatch.py`'s harness the same
+  checkpoint/retry/reuse discipline `batch.py` already has for module docs:
+  (#87) every `caller()` call site now catches an exception instead of
+  letting it propagate and crash the whole run with zero state saved, and
+  state is checkpointed after every finished member/chunk (a new
+  `_checkpoint` helper) rather than only once at the end; (#88) ported
+  `batch._generate_module_doc_chunked`'s `prior_chunks` content-hash
+  skip/reuse mechanism into `testbatch._generate_member_test_doc_chunked`,
+  so a retry only regenerates the chunk(s) whose own brief actually
+  changed (or that failed last run -- reuse requires the prior record's
+  own `ok` to have been `True`, so a previously-failed chunk always gets a
+  fresh model call rather than re-validating the same broken content
+  forever); (#89) `mfdoc test-batch`/`test-gen`'s default resume-state
+  file and output directory are now namespaced per project config (`cli.
+  _project_namespace`, keyed by `system`, else `project`, else "default"),
+  so two `project.yml` files sharing a working directory no longer
+  silently share -- and a `rm -f` on one no longer clobbers -- the other's
+  resume-state/output tree. An explicit `--out`/`--state` is still used
+  exactly as given, matching how `index_db` itself is always an explicit,
+  project-specific choice.
 - Follow-up to issue #105 (PR #107 review): `flag_density_outliers`'s
   `avg_depth` comparison left a chunk unflagged whenever the run's other
   chunks' median depth was 0, on the same "a multiple of 0 is meaningless"
@@ -203,6 +223,24 @@ GitHub org.
   both are covered by new isolated unit tests only (`tests/
   test_mantis_rules.py`, new `tests/test_dynamic_call_resolution.py`); the
   bundled fixture pipeline's gap/coverage counts are unchanged.
+- Implemented issue #84: `DocResult` and `BatchSummary` now track per-call
+  wall-clock duration and transient-error retry counts, so a multi-hundred-
+  module `mfdoc batch` run can tell "is this run stuck or just slow" and
+  which members needed retries. `retry.call_with_retry` (#79) gained an
+  optional `on_retry(attempt, exc)` callback, fired once per retry actually
+  taken -- its own return value and every existing caller are unaffected;
+  `AnthropicCaller`/`VertexCaller` use it to count each call's own retries
+  into a local variable (never a shared instance attribute, so concurrent
+  callers under `run_batch`'s `ThreadPoolExecutor` can't race each other's
+  counts) and set it on the `ModelResponse` they return (`.retries`, default
+  0 for any caller -- `fake-echo`, `ClaudeCLICaller` -- that doesn't retry
+  at all). `batch.py`'s new `_timed_call()` wraps every model call
+  (single-call, pooled, per-chunk, and the whole-module narrative-
+  reconciliation call) with `time.perf_counter()` timing, folded into
+  `DocResult.duration_s`/`.retries` (0.0/0 for a skipped or caller-exception
+  member -- no call to time) and summed onto `BatchSummary.total_duration_s`/
+  `.total_retries`; `cmd_batch` prints both per member and as a run-wide
+  average/total alongside tokens and cost.
 
 **Progress (2026-09-06):**
 - Implemented issue #64: an eighth document type, `language-guide`, that
