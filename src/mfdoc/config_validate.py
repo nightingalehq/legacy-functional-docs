@@ -106,6 +106,14 @@ def _regex_list(value: list) -> str | None:
     return None
 
 
+def _valid_regex(value: str) -> str | None:
+    try:
+        re.compile(value)
+    except re.error as exc:
+        return f"is not a valid regex: {exc}"
+    return None
+
+
 @dataclass(frozen=True)
 class OptionSpec:
     path: str
@@ -153,6 +161,17 @@ OPTION_SPECS: list[OptionSpec] = [
     OptionSpec("options.redact.enabled", (bool,), "a boolean"),
     OptionSpec("options.redact.patterns", (list,),
                "a list of valid regex strings", check=_regex_list),
+
+    # Single-pattern, replace-not-merge config regexes (conditions.py's
+    # outcome_field_from_options/dispatch_field_from_options) -- same
+    # "compiled lazily at point of use, so an invalid pattern would
+    # otherwise only surface as a raw re.error deep in mfdoc validate/
+    # classify-rules/dispatch-map" reasoning as options.redact.patterns
+    # above, just one string instead of a list of them.
+    OptionSpec("options.validate.outcome_field_pattern", (str,), "a string",
+               check=_valid_regex),
+    OptionSpec("options.overview.dispatch_field_pattern", (str,), "a string",
+               check=_valid_regex),
 
     OptionSpec("options.overview.themes.llm_fallback", (bool,), "a boolean"),
     OptionSpec("options.overview.complexity.metric", (str,), "a string",

@@ -48,10 +48,12 @@ def test_fully_populated_valid_config_has_no_problems():
             "max_high_severity_gaps": 50,
         },
         "redact": {"enabled": True, "patterns": [r"\bSECRET\d+\b", "literal-value"]},
+        "validate": {"outcome_field_pattern": r"\bRESULT\b"},
         "overview": {
             "themes": {"llm_fallback": False},
             "complexity": {"metric": "rule_depth"},
             "diagrams": {"cluster_by": "subsystem", "max_nodes_inline": 40, "direction": "TD"},
+            "dispatch_field_pattern": r"MENU-OPT\b",
         },
     }
     assert validate_config(cfg) == []
@@ -212,6 +214,22 @@ def test_overview_diagrams_enum_fields(field, bad_value):
                for p in problems)
 
 
+def test_outcome_field_pattern_must_be_a_valid_regex():
+    cfg = _base_cfg()
+    cfg["options"] = {"validate": {"outcome_field_pattern": "(unclosed"}}
+    problems = validate_config(cfg)
+    assert any("options.validate.outcome_field_pattern" in p and "not a valid regex" in p
+               for p in problems)
+
+
+def test_dispatch_field_pattern_must_be_a_valid_regex():
+    cfg = _base_cfg()
+    cfg["options"] = {"overview": {"dispatch_field_pattern": "(unclosed"}}
+    problems = validate_config(cfg)
+    assert any("options.overview.dispatch_field_pattern" in p and "not a valid regex" in p
+               for p in problems)
+
+
 def test_overview_complexity_metric_only_rule_depth_supported():
     cfg = _base_cfg()
     cfg["options"] = {"overview": {"complexity": {"metric": "cyclomatic"}}}
@@ -285,6 +303,21 @@ def test_load_config_raises_config_error_for_malformed_project_yml(tmp_path):
         encoding="utf-8",
     )
     with pytest.raises(ConfigError, match="max_rules_per_call"):
+        cli.load_config(str(config_path))
+
+
+@pytest.mark.parametrize("bad_root", [
+    ["not", "a", "mapping"],
+    "just a string",
+    42,
+])
+def test_load_config_raises_config_error_for_non_mapping_yaml_root(tmp_path, bad_root):
+    """A project.yml that parses to a list/string/number (e.g. a stray
+    leading '-') must fail with the same clean ConfigError, not a raw
+    AttributeError from cfg.setdefault() on a non-dict."""
+    config_path = tmp_path / "project.yml"
+    config_path.write_text(yaml.safe_dump(bad_root), encoding="utf-8")
+    with pytest.raises(ConfigError, match="config root must be a mapping"):
         cli.load_config(str(config_path))
 
 

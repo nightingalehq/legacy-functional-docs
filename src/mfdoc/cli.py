@@ -71,7 +71,19 @@ DIALECT_DEFAULT_TYPE = {
 
 
 def load_config(path: str | Path) -> dict:
-    cfg = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    cfg = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    if cfg is None:
+        cfg = {}
+    if not isinstance(cfg, dict):
+        # A project.yml that parses to a list/string/number/etc (e.g. a
+        # stray leading '-' making the whole file one YAML sequence) has no
+        # keys to .setdefault() below -- raise the same ConfigError shape
+        # everything else here does, rather than letting that call fail
+        # with a raw AttributeError before validation ever runs.
+        raise ConfigError(
+            f"invalid project config -- 1 problem(s):\n"
+            f"  - config root must be a mapping, got {cfg!r}"
+        )
     cfg.setdefault("index_db", ".mfdoc/index.db")
     cfg.setdefault("sources", [])
     cfg.setdefault("options", {})
