@@ -1176,6 +1176,168 @@ def test_generate_member_test_doc_chunked_validates_the_index_document(tmp_path,
     assert any("index document" in p for p in result.problems)
 
 
+# --- Issue #88: port batch.py's content-hash chunk-skip/reuse logic into
+# testbatch.py's chunked path, mirroring batch.py's own
+# test_chunk_resume_*/test_run_batch_persists_chunk_state_and_reuses_it_
+# across_calls tests (tests/test_batch.py) verbatim in spirit. ---
+
+def _counting_caller(caller):
+    """Wraps any ModelCaller to also expose a `.calls` count -- used to
+    prove a resumed chunk generation makes zero (or exactly the expected
+    number of) model calls, not just that it produces the right output.
+    (Mirrors tests/test_batch.py's helper of the same name.)"""
+    def counted(prompt: str) -> ModelResponse:
+        counted.calls += 1
+        return caller(prompt)
+    counted.calls = 0
+    return counted
+
+
+def test_chunk_resume_makes_no_model_calls_when_every_chunk_brief_is_unchanged(tmp_path):
+    import sqlite3
+
+    from mfdoc import testbatch
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_scenarios(conn, 5)
+
+    out_path = tmp_path / "FAKEMOD.md"
+    first_caller = _counting_caller(_chunk_aware_caller("python", "pytest"))
+    first = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, first_caller,
+        "writing rules text", "template text", max_scenarios_per_call=2,
+    )
+    assert first.ok is True
+    assert first_caller.calls == 3  # ceil(5 / 2) chunks, no whole-member narrative step
+    assert first.chunk_state is not None and set(first.chunk_state) == {"1", "2", "3"}
+
+    def exploding_caller(prompt: str) -> ModelResponse:
+        raise AssertionError("must not call the model for an unchanged chunk")
+
+    second = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, exploding_caller,
+        "writing rules text", "template text", max_scenarios_per_call=2,
+        prior_chunks=first.chunk_state,
+    )
+    assert second.ok is True
+    assert second.chunk_state == first.chunk_state
+
+
+def test_chunk_resume_only_regenerates_the_chunk_whose_own_test_case_changed(tmp_path):
+    """Changing one test_case row's condition text only changes the brief --
+    and so only the model call -- for the chunk that row's own rule falls
+    in; the other chunks must be reused untouched."""
+    import sqlite3
+
+    from mfdoc import testbatch
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_scenarios_with_routines(conn, {"X": 3, "Y": 2})
+
+    out_path = tmp_path / "FAKEMOD.md"
+    first_caller = _counting_caller(_chunk_aware_caller("python", "pytest"))
+    first = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, first_caller,
+        "writing rules text", "template text", max_scenarios_per_call=2,
+    )
+    assert first.ok is True
+    assert first_caller.calls == 2  # X (3 scenarios) and Y (2 scenarios) pack as two chunks
+    chunk1_before = (tmp_path / "FAKEMOD.chunk1.md").read_text(encoding="utf-8")
+
+    # BR-004 is Y's first scenario, in chunk 2's range -- change its
+    # condition so only that chunk's brief hash changes.
+    conn.execute(
+        "UPDATE test_case SET when_json=json_set(when_json, '$.condition', 'COND-4-CHANGED') "
+        "WHERE scenario_name='FAKEMOD:BR-004'"
+    )
+    conn.commit()
+
+    second_caller = _counting_caller(_chunk_aware_caller("python", "pytest"))
+    second = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, second_caller,
+        "writing rules text", "template text", max_scenarios_per_call=2,
+        prior_chunks=first.chunk_state,
+    )
+    assert second.ok is True
+    assert second_caller.calls == 1, "only the chunk covering the changed scenario should re-render"
+    assert (tmp_path / "FAKEMOD.chunk1.md").read_text(encoding="utf-8") == chunk1_before, (
+        "chunk 1 (routine X, unaffected by the BR-004 change) must be reused untouched"
+    )
+
+
+def test_chunk_resume_falls_back_to_regenerating_a_chunk_whose_cached_file_is_gone(tmp_path):
+    import sqlite3
+
+    from mfdoc import testbatch
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_scenarios(conn, 5)
+
+    out_path = tmp_path / "FAKEMOD.md"
+    first = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, _chunk_aware_caller("python", "pytest"),
+        "writing rules text", "template text", max_scenarios_per_call=2,
+    )
+    (tmp_path / "FAKEMOD.chunk2.md").unlink()
+
+    second_caller = _counting_caller(_chunk_aware_caller("python", "pytest"))
+    second = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, second_caller,
+        "writing rules text", "template text", max_scenarios_per_call=2,
+        prior_chunks=first.chunk_state,
+    )
+    assert second.ok is True
+    assert second_caller.calls == 1
+    assert (tmp_path / "FAKEMOD.chunk2.md").exists()
+
+
+def test_run_test_batch_persists_chunk_state_and_reuses_it_across_calls(tmp_path):
+    """End-to-end through run_test_batch's own state file, not just the
+    lower-level generate_member_test_doc -- a second run against unchanged
+    facts must make zero model calls for the already-chunked member's
+    chunks."""
+    import json
+    import sqlite3
+
+    from mfdoc import testbatch
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_scenarios(conn, 5)
+
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+    first_caller = _counting_caller(_chunk_aware_caller("python", "pytest"))
+    summary1 = testbatch.run_test_batch(
+        conn, ["FAKEMOD"], "python", "pytest", out_dir, first_caller,
+        "writing rules text", "template text", state_path=state_path, max_scenarios_per_call=2,
+    )
+    assert summary1.failed == 0
+    saved = json.loads(state_path.read_text(encoding="utf-8"))
+    state_key = "natural::FAKEMOD::python::pytest"
+    assert "chunks" in saved[state_key]
+    assert first_caller.calls > 0
+
+    second_caller = _counting_caller(_chunk_aware_caller("python", "pytest"))
+    summary2 = testbatch.run_test_batch(
+        conn, ["FAKEMOD"], "python", "pytest", out_dir, second_caller,
+        "writing rules text", "template text", state_path=state_path, max_scenarios_per_call=2,
+    )
+    assert summary2.failed == 0
+    assert second_caller.calls == 0, "every chunk should be reused, not re-rendered"
+
+
 def test_run_test_batch_chunks_a_large_member_and_still_batches_small_ones(tmp_path):
     """End-to-end through run_test_batch (the `mfdoc test-batch` path, not
     just single-member test-gen): a large member routes to the serial
