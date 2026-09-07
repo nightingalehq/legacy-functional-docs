@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from pathlib import Path
 
 import pytest
@@ -451,9 +452,12 @@ class RetryMaskedCaller:
             with self._lock:
                 self.attempts += 1
             try:
-                if (member in self._retry_once_for_members
-                        and member not in self._retried):
-                    self._retried.add(member)
+                with self._lock:
+                    should_raise = (member in self._retry_once_for_members
+                                    and member not in self._retried)
+                    if should_raise:
+                        self._retried.add(member)
+                if should_raise:
                     # A transient error on the first underlying attempt --
                     # a real raise, not just a counter/continue.
                     raise _SimulatedTransientAPIError(
