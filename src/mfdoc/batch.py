@@ -18,6 +18,7 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
+import logging
 import os
 import re
 import tempfile
@@ -35,6 +36,16 @@ from .citations import _cite, _rule_id
 from .db import GAP_SEVERITY_ORDER_SQL
 from .redact import NULL_REDACTOR, Redactor
 from .validate import CITATION, _split_frontmatter, validate_doc
+
+# Progress/diagnostic output for a long (potentially thousands-of-members,
+# hours-long) `mfdoc batch` run -- issue #83. This is deliberately *not*
+# stdout: cli.py's cmd_batch still prints the final per-member OK/FAIL/SKIP
+# table and summary line itself (that's real, scriptable CLI output), this
+# logger only carries the in-flight, per-event noise (a member skipped on
+# resume, a retry, a failed model call) a person watching a long run wants
+# visibility into as it happens, at whatever level --verbose/--log-file asks
+# for.
+logger = logging.getLogger("mfdoc.batch")
 
 # The example `generated_by` value in reference/writing-rules.md's worked
 # example and templates/module.md's front matter block is a literal,
@@ -259,6 +270,10 @@ def _generate_module_doc_from_brief(conn, member_name: str, brief: str, out_path
         result = validate_doc(conn, out_path)
         if result["ok"]:
             return DocResult(member_name, str(out_path), True, attempt, input_tokens, output_tokens, [])
+        logger.warning(
+            "%s: validation failed on attempt %d/%d (%d problem(s))",
+            member_name, attempt, max_attempts, len(result["problems"]),
+        )
         problems = result["problems"]
         retry_note = _retry_note(problems)
     return DocResult(member_name, str(out_path), False, attempt, input_tokens, output_tokens, problems)
@@ -892,7 +907,9 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
             revalidated = validate_doc(conn, chunk_path)
             if revalidated["ok"]:
                 result = DocResult(member_name, str(chunk_path), True, 0, 0, 0, [])
+                logger.debug("%s: chunk %d/%d reused (unchanged)", member_name, i, chunk_count)
         if result is None:
+            logger.info("%s: chunk %d/%d generating", member_name, i, chunk_count)
             # A caller exception here (transient network error, rate limit,
             # timeout, ...) must isolate to this one chunk, not propagate out
             # of this whole function and discard every already-completed
@@ -910,6 +927,7 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
                     max_attempts=max_attempts,
                 )
             except Exception as exc:
+                logger.error("%s: chunk %d/%d model call failed: %r", member_name, i, chunk_count, exc)
                 result = DocResult(
                     member_name, str(chunk_path), False, 1, 0, 0,
                     [f"model call failed: {exc!r}"],
@@ -919,7 +937,12 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
         chunk_entries.append((i, (start, end), chunk_path, result))
         chunk_state[str(i)] = {"ok": result.ok, "brief_sha256": brief_hash}
         if not result.ok:
+            logger.warning(
+                "%s: chunk %d/%d failed: %s", member_name, i, chunk_count, "; ".join(result.problems),
+            )
             problems.append(f"chunk {i}/{chunk_count} ({chunk_path.name}) failed: " + "; ".join(result.problems))
+        else:
+            logger.debug("%s: chunk %d/%d complete", member_name, i, chunk_count)
 
     confidence = _aggregate_chunk_confidence([p for _, _, p, r in chunk_entries if r.ok])
     routine_labels = _chunk_processing_labels(rule_rows, routines, ranges)
@@ -1257,6 +1280,7 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
         prior_ok = isinstance(prior, dict) and prior.get("ok") and out_path.exists()
 
         if corpus_unchanged and prior_ok:
+            logger.debug("skip %s: unchanged (corpus signature match, resumed)", name)
             results.append(_skip_result(name, out_path, prior))
             continue
 
@@ -1267,6 +1291,7 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
         brief = module_brief(conn, name, redact=redact, lexicon=lexicon)
         brief_hash = hashlib.sha256(f"{brief}\x00{threshold}".encode("utf-8")).hexdigest()
         if prior_ok and prior.get("brief_sha256") == brief_hash:
+            logger.debug("skip %s: unchanged (brief hash match, resumed)", name)
             results.append(_skip_result(name, out_path, prior))
             continue
 
@@ -1294,6 +1319,7 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
             try:
                 response = fut.result()
             except Exception as exc:
+                logger.error("%s: model call failed: %r", name, exc)
                 result = DocResult(
                     name, str(out_path), False, 1, 0, 0,
                     [f"model call failed: {exc!r}"],
@@ -1311,6 +1337,10 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
             validation = validate_doc(conn, out_path)
             attempts = 1
             if not validation["ok"]:
+                logger.warning(
+                    "%s: validation failed (%d problem(s)), retrying once",
+                    name, len(validation["problems"]),
+                )
                 retry_note = _retry_note(validation["problems"])
                 retry_prompt = build_prompt(briefs[state_key], writing_rules, template, retry_note)
                 try:
@@ -1322,6 +1352,7 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
                     # retry-on-validation-failure path's attempts=2 below,
                     # so BatchSummary/resume state isn't misreported as a
                     # single-attempt failure. See issue #78 review.
+                    logger.error("%s: retry model call failed: %r", name, exc)
                     result = DocResult(
                         name, str(out_path), False, 2, input_tokens, output_tokens,
                         validation["problems"] + [f"retry model call failed: {exc!r}"],
@@ -1370,6 +1401,7 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
                 index_template=index_template,
             )
         except Exception as exc:
+            logger.error("%s: chunked generation failed: %r", name, exc)
             result = DocResult(
                 name, str(out_path), False, 0, 0, 0,
                 [f"model call failed: {exc!r}"], chunked=True, chunk_state=prior_chunks,

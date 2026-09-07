@@ -189,6 +189,17 @@ mfdoc batch --config project.yml --out docs/functional/modules
 # facts actually on record for a member -- e.g.
 # docs/functional/modules/natural/MILLPROD/MMP0100.md
 
+# an engagement-scale batch/test-batch run is long enough that the routine
+# progress (a member skipped on resume, a chunk completing, a transient
+# error being retried) is worth watching or keeping: --verbose (-v) raises
+# that from INFO to DEBUG, --log-file also writes it to a file (in addition
+# to stderr) -- both are top-level `mfdoc` flags, given *before* the
+# subcommand:
+mfdoc --verbose --log-file batch.log batch --config project.yml --out docs/functional/modules
+# the per-member OK/FAIL/SKIP table and cost summary `mfdoc batch` prints at
+# the end are unaffected either way -- that's real, scriptable output on
+# stdout, not diagnostic logging
+
 mfdoc rules-register --config project.yml --out docs/functional/rules-register.md
 # a flat, greppable index of every MEMBER:BR-nnn rule ID -- look one up here
 # without already knowing which module doc it lives in; regenerate any time,
