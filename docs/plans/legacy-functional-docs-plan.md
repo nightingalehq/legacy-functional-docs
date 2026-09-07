@@ -12,6 +12,44 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-07b):**
+- Natural dialect calibration pass, driven by `mfdoc calibrate --dialect natural`
+  against two engagement codebases (no client content in this repo — findings
+  generalised into invented fixtures/tests). Fixes in `dialects/natural.py`:
+  - `RE_UPDATE`/`RE_DELETE` required `\s+` right after the verb, so the very
+    common no-target form (`UPDATE`/`DELETE` alone, acting on whatever record
+    the enclosing FIND/READ loop currently holds) and the no-space loop-label
+    form (`UPDATE(R1.)`) both silently fell through as `unparsed_line` gaps
+    instead of reaching the existing loop-label resolution path. Relaxed to
+    `\s*` behind a `(?=[\s(]|$)` lookahead so a longer identifier starting
+    with the same letters (`UPDATED-FLAG`) still can't false-match.
+  - Same shape of bug in `RE_FIND`/`RE_READ` for the no-space occurrence-count
+    form (`FIND(1) VIEW ...`, `READ(1) VIEW ...`).
+  - `RE_SET_CONTROL` only matched `SET CONTROL`, not `SET KEY` (PF-key
+    activation) — same presentation-not-business-decision no-op, extended
+    the pattern to cover both.
+  - Added `RE_REJECT` (`REJECT IF <cond>`, a real loop-filtering decision)
+    as a recognised `rule_candidate` construct in `_match_rules`, alongside
+    `ESCAPE`.
+  - `CONTINUATION_LEAD` didn't include `SORTED`/`WHERE`, so a `FIND ... WITH`
+    condition wrapped onto its own `SORTED BY`/`WHERE` line lost that clause
+    from the folded condition text instead of being preserved the way
+    `AND`/`OR`/`WITH`/`INTO` already are.
+  - `RE_GENERIC_LABEL` only matched labels starting with a letter; some
+    export/conversion tooling renumbers statement labels with a leading
+    `#`/`&` (e.g. `##L100.`), which was previously an unconditional
+    `unparsed_line` gap. Extended the label-start character class, and added
+    `RE_BARE_LABEL` for a label alone on its own line (nothing after it) so
+    that doesn't gap either.
+  - New tests in `test_natural_rules.py` cover all of the above against
+    invented fixtures. Full suite green (710 passed, 2 skipped); bundled
+    fixture pipeline clean (64/64 docs, 0 invalid citations).
+  - Left for a future pass, evidenced but lower-frequency/higher-risk to
+    generalise safely: `DEFINE WINDOW` and its attribute lines
+    (`SIZE`/`BASE`/`FRAMED`/`FORMAT`), and multi-line `WRITE`/`DISPLAY`
+    operand lists that wrap with no leading keyword at all (only the
+    report-writer column-position case is currently folded).
+
 **Progress (2026-09-07):**
 - Implemented issue #95 (docs + example for `sme-notes.md`, closing out the
   SME memory-file epic, #96, after #93/#94): `README.md` gets a new "SME

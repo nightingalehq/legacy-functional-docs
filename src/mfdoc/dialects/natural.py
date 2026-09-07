@@ -72,7 +72,18 @@ def strip_comment(text: str) -> tuple[str, bool]:
 # the label, and Natural identifiers with a qualifying dot (VIEW.FIELD, e.g.
 # "CERT-VIEW.HEAT-NO") never have whitespace right after that dot, whereas a
 # label always does -- `\.\s+` is what tells the two apart.
-RE_GENERIC_LABEL = re.compile(r"^\s*(?P<label>[A-Z][A-Z0-9#@$&\-_]*)\.\s+(?P<rest>.+)$", re.I)
+# Some sites number/rename statement labels through a conversion tool that
+# prefixes them with "#" or "&" (e.g. "##L4266. FIND ..."), which collides
+# with nothing else since a bare "#"/"&" token is never itself a legal label
+# start in hand-written Natural -- so allowing it here doesn't risk mistaking
+# a variable reference for a label.
+RE_GENERIC_LABEL = re.compile(r"^\s*(?P<label>[A-Z#&][A-Z0-9#@$&\-_]*)\.\s+(?P<rest>.+)$", re.I)
+
+# A label with nothing after it on the same line -- the statement it targets
+# is on the following line(s). Recognised as a no-op (like RESET/IGNORE
+# above) purely so the label line itself doesn't read as an unparsed_line gap;
+# the code it precedes is still scanned normally on its own line.
+RE_BARE_LABEL = re.compile(r"^\s*[A-Z#&][A-Z0-9#@$&\-_]*\.\s*$", re.I)
 
 
 def strip_generic_label(stmt: str, masked: str) -> tuple[str, str, str] | None:
@@ -111,13 +122,19 @@ RE_INIT = re.compile(r"\bINIT\s*(?:<(?P<v1>[^>]*)>|\((?P<v2>[^)]*)\))", re.I)
 
 # Data access. `view` may be a view name defined in DEFINE DATA, which is then
 # mapped back to its DDM.
+# READ/FIND's optional "(n)"/"(limit)" occurrence qualifier is sometimes
+# written with no space before the parenthesis (e.g. "FIND(1) ORDER ...").
+# The lookahead (whitespace, "(", or end-of-line) keeps the verb-to-qualifier
+# gap collapsible to zero for that case without opening the verb itself up to
+# a false match against a longer identifier that merely starts with the same
+# letters (e.g. "READY", "FINDER").
 RE_READ = re.compile(
-    r"^\s*(?:(?P<label>R\d+)\.\s*)?READ\s+(?:\((?P<limit>[^)]*)\)\s+)?"
+    r"^\s*(?:(?P<label>R\d+)\.\s*)?READ(?=[\s(]|$)\s*(?:\((?P<limit>[^)]*)\)\s*)?"
     r"(?P<rest>.*)$", re.I)
 RE_READ_WORK = re.compile(r"^\s*READ\s+WORK\s+(?:FILE\s+)?(?P<num>\d+)(?P<rest>.*)$", re.I)
 RE_WRITE_WORK = re.compile(r"^\s*WRITE\s+WORK\s+(?:FILE\s+)?(?P<num>\d+)(?P<rest>.*)$", re.I)
 RE_FIND = re.compile(
-    r"^\s*(?:(?P<label>F\d+)\.\s*)?FIND\s+(?:\((?P<limit>[^)]*)\)\s+)?"
+    r"^\s*(?:(?P<label>F\d+)\.\s*)?FIND(?=[\s(]|$)\s*(?:\((?P<limit>[^)]*)\)\s*)?"
     r"(?P<mods>(?:NUMBER|FIRST|UNIQUE|ALL)\s+)?"
     r"(?:RECORDS?\s+IN\s+(?:FILE\s+)?)?(?P<view>[A-Z0-9#@$&\-_.]+)(?P<rest>.*)$", re.I)
 RE_HISTOGRAM = re.compile(
@@ -132,8 +149,14 @@ RE_HISTOGRAM = re.compile(
 RE_LOOP_LABEL_REF = re.compile(r"^[A-Z]\d+$", re.I)
 RE_GET = re.compile(r"^\s*GET\s+(?P<mods>SAME|TRANSACTION\s+DATA|)\s*(?P<view>[A-Z0-9#@$&\-_.]*)(?P<rest>.*)$", re.I)
 RE_STORE = re.compile(r"^\s*STORE\s+(?:RECORD\s+)?(?:IN\s+(?:FILE\s+)?)?(?P<view>[A-Z0-9#@$&\-_.]+)(?P<rest>.*)$", re.I)
-RE_UPDATE = re.compile(r"^\s*UPDATE\s+(?:RECORD\s+)?(?:IN\s+(?:FILE\s+)?)?(?P<view>[A-Z0-9#@$&\-_.(]*)(?P<rest>.*)$", re.I)
-RE_DELETE = re.compile(r"^\s*DELETE\s+(?:RECORD\s+)?(?:IN\s+(?:FILE\s+)?)?(?P<view>[A-Z0-9#@$&\-_.(]*)(?P<rest>.*)$", re.I)
+# UPDATE/DELETE with nothing after them at all -- no view, no trailing
+# whitespace -- are legal and common: they act on whatever record the
+# enclosing FIND/READ loop currently holds. The verb-to-view gap is `\s*`
+# (not `\s+`) so that bare form, and the no-space "UPDATE(R1.)" loop-label
+# form above, both still match; the lookahead keeps a longer identifier that
+# merely starts with the same letters (e.g. "UPDATED-FLAG") from matching.
+RE_UPDATE = re.compile(r"^\s*UPDATE(?=[\s(]|$)\s*(?:RECORD\s+)?(?:IN\s+(?:FILE\s+)?)?(?P<view>[A-Z0-9#@$&\-_.(]*)(?P<rest>.*)$", re.I)
+RE_DELETE = re.compile(r"^\s*DELETE(?=[\s(]|$)\s*(?:RECORD\s+)?(?:IN\s+(?:FILE\s+)?)?(?P<view>[A-Z0-9#@$&\-_.(]*)(?P<rest>.*)$", re.I)
 
 RE_SQL_SELECT = re.compile(r"\bSELECT\b(?P<cols>.*?)\bFROM\s+(?P<tbl>[A-Z0-9_.\"]+)", re.I | re.S)
 RE_SQL_INSERT = re.compile(r"\bINSERT\s+INTO\s+(?P<tbl>[A-Z0-9_.\"]+)", re.I)
@@ -156,10 +179,16 @@ RE_RESET = re.compile(r"^\s*RESET\b(?P<rest>.*)$", re.I)
 RE_IGNORE = re.compile(r"^\s*IGNORE\s*$", re.I)
 
 # SET CONTROL sends terminal/printer control codes (page eject, column
-# ruler, etc.) -- presentation, not a business decision, so it's recognised
-# the same way as RESET/IGNORE above: no rule_candidate, just enough to stop
-# it showing up as an unparsed_line gap.
-RE_SET_CONTROL = re.compile(r"^\s*SET\s+CONTROL\b", re.I)
+# ruler, etc.); SET KEY governs which PF-keys are active on the next input
+# statement. Neither is a business decision, so both are recognised the same
+# way as RESET/IGNORE above: no rule_candidate, just enough to stop them
+# showing up as an unparsed_line gap.
+RE_SET_CONTROL = re.compile(r"^\s*SET\s+(?:CONTROL|KEY)\b", re.I)
+
+# REJECT IF drops the current FIND/READ loop iteration when its condition is
+# true -- a real filtering decision (unlike SET/RESET/IGNORE above), so it is
+# recorded as a rule_candidate the same way ESCAPE is (see _match_rules).
+RE_REJECT = re.compile(r"^\s*REJECT\s+IF\s+(?P<cond>.+)$", re.I)
 
 RE_CALLNAT = re.compile(r"^\s*CALLNAT\s+(?P<target>'[^']+'|\"[^\"]+\"|[A-Z0-9#@$&\-_.]+)(?P<args>.*)$", re.I)
 RE_FETCH = re.compile(r"^\s*FETCH\s+(?P<ret>RETURN\s+|REPEAT\s+)?(?P<target>'[^']+'|\"[^\"]+\"|[A-Z0-9#@$&\-_.]+)(?P<args>.*)$", re.I)
@@ -262,7 +291,7 @@ CONTINUATION_TAIL = re.compile(r"(\b(AND|OR|NOT|THRU|THROUGH|TO|WITH|BY)\s*$)|([
 # false-continuation risk. INTO covers the equally common
 # `COMPRESS ... \n INTO target` and `SEPARATE ... \n INTO target` wrap --
 # INTO is never the first word of a genuine new statement either.
-CONTINUATION_LEAD = re.compile(r"^\s*(AND|OR|NOT|THRU|THROUGH|TO|WITH|BY|INTO)\b", re.I)
+CONTINUATION_LEAD = re.compile(r"^\s*(AND|OR|NOT|THRU|THROUGH|TO|WITH|BY|INTO|SORTED|WHERE)\b", re.I)
 
 # Natural report-writer column-position tokens ("5T" = tab to column 5, "2X"
 # = skip 2 spaces) commonly appear on their own continuation line within a
@@ -638,7 +667,8 @@ def extract(conn, member_id: int, lines: list[tuple[int, str | None, str]], memb
         if not matched:
             matched = RE_COMPUTE.match(masked) or RE_END_ANY.match(masked) \
                 or RE_RESET.match(masked) or RE_IGNORE.match(masked) \
-                or RE_SET_CONTROL.match(masked) or RE_BARE_ASSIGN.match(masked)
+                or RE_SET_CONTROL.match(masked) or RE_BARE_ASSIGN.match(masked) \
+                or RE_BARE_LABEL.match(masked)
 
         # ---------------------------------------------- labelled statements
         # Last resort: a generic statement label ("SETA. SETTIME") defeats
@@ -1076,6 +1106,9 @@ def _match_rules(conn, member_id, line_no, stmt, masked, depth, open_blocks,
         # target as a condition makes the rule register read as though the
         # program tested a field called ROUTINE.
         rec(f"ESCAPE {target.split()[0].upper()}" if target else "ESCAPE", None)
+        return True, depth, open_blocks
+    if (m := RE_REJECT.match(masked)):
+        rec("REJECT IF", orig(stmt, m, "cond"))
         return True, depth, open_blocks
     if (m := RE_AT_EVENT.match(masked)):
         rec(f"AT {m.group('ev').upper()}", (orig(stmt, m, "rest") or "").strip())
