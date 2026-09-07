@@ -86,8 +86,8 @@ def _parse_text(text: str) -> Notes:
 
 def notes_for(notes: Notes, member_name: str | None) -> str | None:
     """Combine the general section with `member_name`'s section, general
-    first then specific, in document order. Returns None if there is
-    nothing to say for this member (no general text and no match)."""
+    first then specific. Returns None if there is nothing to say for this
+    member (no general text and no match)."""
     parts = []
     general = notes.get(None)
     if general:
