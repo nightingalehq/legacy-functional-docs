@@ -191,10 +191,10 @@ RE_SET_CONTROL = re.compile(r"^\s*SET\s+(?:CONTROL|KEY)\b", re.I)
 RE_REJECT = re.compile(r"^\s*REJECT\s+IF\s+(?P<cond>.+)$", re.I)
 
 # DEFINE WINDOW declares a screen window's name; its attribute clauses
-# (SIZE/BASE/FRAMED/FORMAT -- see CONTINUATION_LEAD above) are presentation,
-# not a business decision, so -- like SET CONTROL/SET KEY -- it's recognised
-# as a no-op: enough to stop it and its attribute lines showing up as
-# unparsed_line gaps, without a rule_candidate.
+# (SIZE/BASE/FRAMED/FORMAT -- see CONTINUATION_LEAD further down this file)
+# are presentation, not a business decision, so -- like SET CONTROL/SET KEY
+# -- it's recognised as a no-op: enough to stop it and its attribute lines
+# showing up as unparsed_line gaps, without a rule_candidate.
 RE_DEFINE_WINDOW = re.compile(r"^\s*DEFINE\s+WINDOW\b", re.I)
 
 RE_CALLNAT = re.compile(r"^\s*CALLNAT\s+(?P<target>'[^']+'|\"[^\"]+\"|[A-Z0-9#@$&\-_.]+)(?P<args>.*)$", re.I)
