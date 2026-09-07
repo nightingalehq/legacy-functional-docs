@@ -2,7 +2,16 @@
 
 from __future__ import annotations
 
-from mfdoc.brief import _rule_id, entity_brief, module_brief, routine_aware_chunk_ranges, routine_for_line
+from mfdoc.brief import (
+    _rule_id,
+    chunk_density_metrics,
+    entity_brief,
+    flag_density_outliers,
+    format_density_note,
+    module_brief,
+    routine_aware_chunk_ranges,
+    routine_for_line,
+)
 from mfdoc.redact import NULL_REDACTOR
 
 
@@ -151,6 +160,86 @@ def test_chunk_ranges_splits_main_body_rules_by_count():
 
 def test_chunk_ranges_empty_input():
     assert routine_aware_chunk_ranges([], [], chunk_size=3) == []
+
+
+# --- chunk_density_metrics / flag_density_outliers / format_density_note --
+# Synthetic fixture (issue #105): two ordinary chunks (3 rules each, packed
+# tightly, shallow nesting) plus one deliberately rule-dense chunk (only 2
+# rules, but its source sprawls across 41 lines with much deeper nesting) --
+# same shape as the real regression the issue describes: a chunk that looks
+# unremarkable by rule count alone but is genuinely harder to narrate.
+
+_DENSE_RANGES = [(1, 3), (4, 6), (7, 8)]
+_DENSE_LINE_NOS = [1, 2, 3, 10, 11, 12, 20, 60]
+_DENSE_DEPTHS = [1, 1, 1, 1, 1, 2, 4, 5]
+
+
+def test_chunk_density_metrics_computes_span_and_lines_per_item():
+    metrics = chunk_density_metrics(_DENSE_LINE_NOS, _DENSE_RANGES, _DENSE_DEPTHS)
+    assert len(metrics) == 3
+    assert metrics[0]["item_count"] == 3
+    assert metrics[0]["line_span"] == 3
+    assert metrics[0]["lines_per_item"] == 1.0
+    assert metrics[0]["avg_depth"] == 1.0
+    # the dense chunk: only 2 rules, but they span 41 source lines
+    assert metrics[2]["item_count"] == 2
+    assert metrics[2]["line_span"] == 41
+    assert metrics[2]["lines_per_item"] == 20.5
+    assert metrics[2]["avg_depth"] == 4.5
+
+
+def test_chunk_density_metrics_without_depths_leaves_avg_depth_none():
+    metrics = chunk_density_metrics(_DENSE_LINE_NOS, _DENSE_RANGES)
+    assert all(m["avg_depth"] is None for m in metrics)
+
+
+def test_chunk_density_metrics_handles_unresolvable_line_nos():
+    """testbatch.py's rows use a negative sentinel for items belonging to no
+    rule/routine -- fewer than 2 resolvable line numbers in a chunk must not
+    produce a misleading span, just None."""
+    metrics = chunk_density_metrics([-1, -1, -1], [(1, 3)])
+    assert metrics[0]["line_span"] is None
+    assert metrics[0]["lines_per_item"] is None
+    assert metrics[0]["item_count"] == 3
+
+
+def test_flag_density_outliers_flags_the_rule_dense_chunk():
+    metrics = chunk_density_metrics(_DENSE_LINE_NOS, _DENSE_RANGES, _DENSE_DEPTHS)
+    flagged = flag_density_outliers(metrics)
+    assert flagged[0]["outlier"] is False
+    assert flagged[1]["outlier"] is False
+    assert flagged[2]["outlier"] is True
+    assert flagged[2]["outlier_reasons"], "outlier chunk must explain why"
+    assert any("lines/rule" in r for r in flagged[2]["outlier_reasons"])
+    assert any("nesting depth" in r for r in flagged[2]["outlier_reasons"])
+
+
+def test_flag_density_outliers_needs_at_least_two_chunks_to_compare():
+    """A single chunk has no siblings to be an outlier relative to."""
+    metrics = chunk_density_metrics(_DENSE_LINE_NOS[:2], [(1, 2)], _DENSE_DEPTHS[:2])
+    flagged = flag_density_outliers(metrics)
+    assert flagged[0]["outlier"] is False
+    assert flagged[0]["outlier_reasons"] == []
+
+
+def test_format_density_note_reports_metrics_and_outlier_flag():
+    metrics = chunk_density_metrics(_DENSE_LINE_NOS, _DENSE_RANGES, _DENSE_DEPTHS)
+    flagged = flag_density_outliers(metrics)
+    normal_note = format_density_note(flagged[0])
+    assert "density:" in normal_note
+    assert "OUTLIER" not in normal_note
+
+    dense_note = format_density_note(flagged[2])
+    assert "20.5 lines/item" in dense_note
+    assert "avg depth 4.5" in dense_note
+    assert "OUTLIER" in dense_note
+
+
+def test_format_density_note_handles_missing_fields_gracefully():
+    """No exception on a partial entry (e.g. line_span unresolvable, no
+    depth data supplied) -- the diagnostic must never itself fail."""
+    note = format_density_note({"item_count": 2, "line_span": None, "lines_per_item": None, "avg_depth": None})
+    assert note == "density: 2 item(s)"
 
 
 def test_module_brief_surfaces_else_branch_data_access_next_to_the_rule():

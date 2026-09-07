@@ -32,7 +32,10 @@ from .batch import (
     _save_state,
     _skip_result,
 )
-from .brief import fetch_routines, routine_aware_chunk_ranges
+from .brief import (
+    chunk_density_metrics, fetch_routines, flag_density_outliers, format_density_note,
+    routine_aware_chunk_ranges,
+)
 from .redact import NULL_REDACTOR, Redactor
 from .testlang import sidecar_path_for
 from .testplan import fetch_test_case_rows, test_case_brief, test_case_brief_chunk
@@ -300,6 +303,15 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
     line_nos = [r["rule_line_no"] if r["rule_line_no"] is not None else -1 for r in rows]
     ranges = routine_aware_chunk_ranges(line_nos, routines, chunk_size)
     chunk_count = len(ranges)
+    # Source-density estimate per chunk (issue #105) -- same rationale and
+    # shared implementation as batch.py's module-doc chunking: scenario
+    # count alone (what `ranges` is packed by) doesn't say how content-dense
+    # a chunk's *source* actually is. No rule_candidate.depth is joined into
+    # `rows` here (see fetch_test_case_rows), so this uses only the
+    # lines-per-item signal, not nesting depth -- still enough to flag a
+    # chunk whose scenarios are packed far more sparsely across source than
+    # its siblings.
+    density_metrics = flag_density_outliers(chunk_density_metrics(line_nos, ranges))
     input_tokens = output_tokens = 0
     chunk_entries: list[tuple[int, Path, DocResult]] = []
     problems: list[str] = []
@@ -323,7 +335,11 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
         output_tokens += result.output_tokens
         chunk_entries.append((i, chunk_path, result))
         if not result.ok:
-            problems.append(f"chunk {i}/{chunk_count} ({chunk_path.name}) failed: " + "; ".join(result.problems))
+            density_note = format_density_note(density_metrics[i - 1])
+            problems.append(
+                f"chunk {i}/{chunk_count} ({chunk_path.name}) failed: "
+                + "; ".join(result.problems) + f" -- {density_note}"
+            )
 
     confidence = _aggregate_chunk_confidence([p for _, p, r in chunk_entries if r.ok])
     index_text = _render_chunk_index(member_name, system, language, framework, chunk_entries, confidence)

@@ -553,6 +553,24 @@ def _seed_fakemod_rules(conn, count: int):
     conn.commit()
 
 
+def _seed_fakemod_rules_with_lines(conn, specs: list[tuple[int, int]]):
+    """Like _seed_fakemod_rules, but with an explicit (line_no, depth) per
+    rule -- lets a test control source-line spacing and nesting depth
+    directly, to build a deliberately rule-dense chunk alongside ordinary
+    ones (issue #105)."""
+    from mfdoc.db import insert
+
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    max_line = max(line_no for line_no, _ in specs)
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, ?, 'irrelevant')", (max_line,))
+    for n, (line_no, depth) in enumerate(specs, start=1):
+        insert(
+            conn, "rule_candidate", member_id=1, line_no=line_no, construct="IF",
+            condition=f"COND-{n}", raw=f"IF COND-{n}", depth=depth,
+        )
+    conn.commit()
+
+
 def _chunk_aware_module_caller():
     """A fake caller that returns a fully valid single-chunk module doc,
     citing exactly the FAKEMOD:BR-nnn ids present in the prompt it was
@@ -739,6 +757,52 @@ def test_generate_module_doc_isolates_a_caller_exception_to_one_chunk(tmp_path):
     assert validate_doc(conn, tmp_path / "FAKEMOD.chunk1.md")["ok"]
     # Chunk 2 never got a response written, so it's not mistakable for done.
     assert not (tmp_path / "FAKEMOD.chunk2.md").exists()
+
+
+def test_generate_module_doc_failed_chunk_diagnostics_flag_a_rule_dense_outlier(tmp_path):
+    """Issue #105: two ordinary chunks (2 rules each, tightly packed,
+    shallow) plus one deliberately rule-dense chunk (2 rules, but spanning
+    far more source lines with much deeper nesting) -- when the dense
+    chunk is the one that fails, its own reported problem must carry a
+    density diagnostic marking it an outlier relative to its siblings, so
+    a human doesn't have to notice "every other chunk passed cleanly, only
+    this one keeps failing" across several runs before suspecting it's a
+    genuine complexity problem rather than bad luck."""
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_rules_with_lines(conn, [
+        (1, 1), (2, 1),      # chunk 1: tight, shallow
+        (10, 1), (11, 1),    # chunk 2: tight, shallow
+        (20, 5), (90, 6),    # chunk 3: sprawling source, deep nesting -- the outlier
+    ])
+
+    good_caller = _chunk_aware_module_caller()
+
+    def flaky_caller(prompt: str) -> batch_mod.ModelResponse:
+        if "# Fact brief:" in prompt and "BR-005" in prompt:
+            return batch_mod.ModelResponse(text="not a valid document", input_tokens=1, output_tokens=1)
+        return good_caller(prompt)
+
+    out_path = tmp_path / "FAKEMOD.md"
+    result = batch_mod.generate_module_doc(
+        conn, "FAKEMOD", out_path, flaky_caller,
+        "writing rules text", "template text", max_rules_per_call=2,
+    )
+    assert result.ok is False
+    dense_problems = [p for p in result.problems if "chunk 3" in p]
+    assert dense_problems, result.problems
+    dense_problem = dense_problems[0]
+    assert "density:" in dense_problem
+    assert "OUTLIER" in dense_problem
+    assert "lines/rule" in dense_problem or "nesting depth" in dense_problem
+
+    # The other, ordinary chunks were not flagged as outliers anywhere.
+    assert not any("chunk 1" in p and "OUTLIER" in p for p in result.problems)
+    assert not any("chunk 2" in p and "OUTLIER" in p for p in result.problems)
 
 
 def test_chunked_brief_names_the_chunk_a_routine_in_another_chunk_is_documented_in(tmp_path):

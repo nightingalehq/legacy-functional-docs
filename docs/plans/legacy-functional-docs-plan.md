@@ -13,6 +13,29 @@ GitHub org.
   flows and the gap register, where judgement matters most.
 
 **Progress (2026-09-07):**
+- Implemented issue #105: chunk-boundary logic (`brief.
+  routine_aware_chunk_ranges`, shared by `batch.py`/`testbatch.py`) chose
+  chunks purely by rule/scenario count, blind to how content-dense a
+  chunk's *source* actually is -- a chunk could match its siblings' rule
+  count while its source was far harder to narrate (more lines, deeper
+  nesting per rule), and the only symptom was repeated retry failures on
+  that one chunk. Added `brief.chunk_density_metrics`/
+  `flag_density_outliers`/`format_density_note`: a cheap lines-per-rule and
+  average-nesting-depth estimate per chunk from facts already at hand
+  (`rule_candidate.line_no`/`.depth`), flagging a chunk well above the
+  run's own median for either metric. Wired into both `_generate_module_
+  doc_chunked` (batch.py) and `_generate_member_test_doc_chunked`
+  (testbatch.py, lines-per-rule only -- no depth is joined onto test_case
+  rows): a failed chunk's own reported problem now carries a `density: ...
+  -- OUTLIER (...)` note when it's a density outlier, so that distinction
+  is visible immediately rather than requiring a human to notice the
+  pattern across several failed runs. Chose surfacing the estimate in
+  diagnostics (approach (b) from the issue) over auto-splitting a dense
+  chunk further (approach (a)): a synthetic fixture can demonstrate the
+  estimate correctly flags a rule-dense chunk, but not that a smaller
+  chunk boundary actually improves a real model's success rate on it --
+  that would need validating against real (or much more elaborate
+  synthetic) failure data this change doesn't have.
 - Implemented issue #85: coverage metrics now persist across runs for trend
   visibility. `db.coverage_history`/`db.record_coverage_history` (new
   `coverage_history` table, append-only, one row per `mfdoc coverage`/

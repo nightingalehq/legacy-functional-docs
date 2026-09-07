@@ -67,7 +67,15 @@ renders as several independent chunk documents plus a deterministic index
 doc at the normal path, instead of one — a single non-streaming completion
 asked to narrate a large module's whole rule set in one pass risks running
 out of room partway through and silently covering only some of it. See
-`src/mfdoc/batch.py`'s `DEFAULT_MAX_RULES_PER_CALL`.
+`src/mfdoc/batch.py`'s `DEFAULT_MAX_RULES_PER_CALL`. Chunk boundaries are
+chosen by rule count alone, which says nothing about how content-dense a
+chunk's *source* actually is; when a chunk fails, its reported problem is
+annotated with a lines-per-rule/nesting-depth density estimate and flagged
+as an outlier if it's well above the run's own median — so a chunk that
+keeps failing for a genuine complexity reason is distinguishable from one
+that was just unlucky, without waiting for the pattern to repeat across
+several runs. See `src/mfdoc/brief.py`'s `chunk_density_metrics`/
+`flag_density_outliers`/`format_density_note`.
 
 ### Test generation (optional)
 
