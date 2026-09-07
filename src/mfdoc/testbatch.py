@@ -322,7 +322,8 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
                                        language: str, framework: str, out_path: Path,
                                        caller: ModelCaller, writing_rules: str, template: str,
                                        redact: Redactor, max_attempts: int, chunk_size: int,
-                                       prior_chunks: dict | None = None) -> DocResult:
+                                       prior_chunks: dict | None = None,
+                                       sme_notes: dict | None = None) -> DocResult:
     """Render one member as several independent chunk documents plus a
     deterministic index doc at `out_path`, instead of asking one completion
     to cover every scenario. Each chunk goes through the exact same
@@ -374,6 +375,7 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
         chunk_path = out_path.with_name(f"{out_path.stem}.chunk{i:0{chunk_width}d}{out_path.suffix}")
         brief = test_case_brief_chunk(
             member_name, system, chunk_rows, i, chunk_count, redact=redact, routines=routines,
+            sme_notes=sme_notes,
         )
         brief_hash = hashlib.sha256(brief.encode("utf-8")).hexdigest()
         prior_chunk = (prior_chunks or {}).get(str(i))
@@ -451,7 +453,8 @@ def generate_member_test_doc(conn, member_name: str, language: str, framework: s
                               template: str, redact: Redactor = NULL_REDACTOR,
                               max_attempts: int = 2,
                               max_scenarios_per_call: int | None = None,
-                              prior_chunks: dict | None = None) -> DocResult:
+                              prior_chunks: dict | None = None,
+                              sme_notes: dict | None = None) -> DocResult:
     """Single-member version: brief -> call -> validate -> retry once.
     Used directly by `mfdoc test-gen` and by run_test_batch's per-item work.
 
@@ -470,10 +473,10 @@ def generate_member_test_doc(conn, member_name: str, language: str, framework: s
         return _generate_member_test_doc_chunked(
             conn, member_name, system, rows, language, framework, out_path, caller,
             writing_rules, template, redact, max_attempts, threshold,
-            prior_chunks=prior_chunks,
+            prior_chunks=prior_chunks, sme_notes=sme_notes,
         )
 
-    brief = test_case_brief(conn, member_name, redact=redact)
+    brief = test_case_brief(conn, member_name, redact=redact, sme_notes=sme_notes)
     return _generate_test_doc_from_brief(
         conn, member_name, brief, language, framework, out_path, caller, writing_rules,
         template, max_attempts=max_attempts,
@@ -491,7 +494,8 @@ class TestBatchSummary:
 
 
 def _corpus_signature(conn, language: str, framework: str, threshold: int,
-                       redact: Redactor = NULL_REDACTOR) -> str:
+                       redact: Redactor = NULL_REDACTOR,
+                       sme_notes: dict | None = None) -> str:
     """Fingerprint of every input to test_case_brief() that isn't the derive
     code itself, via batch._corpus_signature's `extra` hook, plus:
 
@@ -517,7 +521,7 @@ def _corpus_signature(conn, language: str, framework: str, threshold: int,
     for r in status_rows:
         extra.append(r["scenario_name"])
         extra.append(r["status"])
-    return _base_corpus_signature(conn, redact=redact, extra=extra)
+    return _base_corpus_signature(conn, redact=redact, sme_notes=sme_notes, extra=extra)
 
 
 def _checkpoint(state: dict, state_path: Path | None, corpus_sig: str | None) -> None:
@@ -552,7 +556,8 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
                     caller: ModelCaller, writing_rules: str, template: str,
                     redact: Redactor = NULL_REDACTOR, concurrency: int = 4,
                     state_path: Path | None = None,
-                    max_scenarios_per_call: int | None = None) -> TestBatchSummary:
+                    max_scenarios_per_call: int | None = None,
+                    sme_notes: dict | None = None) -> TestBatchSummary:
     """Resumable render over `members` for one language/framework target --
     NOTE on `--matrix` + a shared `--state` file: per-member state keys
     (`f"{subdir}::{member}::{language}::{framework}"`, see below) already
@@ -582,7 +587,9 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
     share a bare name across libraries/dialects."""
     threshold = _resolve_max_scenarios_per_call(max_scenarios_per_call)
     state = _load_state(state_path) if state_path else {}
-    corpus_sig = _corpus_signature(conn, language, framework, threshold, redact) if state_path else None
+    corpus_sig = (
+        _corpus_signature(conn, language, framework, threshold, redact, sme_notes) if state_path else None
+    )
     corpus_unchanged = bool(state_path) and state.get("_corpus_sha256") == corpus_sig
     results: list[DocResult] = []
     briefs: dict[str, str] = {}
@@ -611,7 +618,7 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
         # single-doc and chunked output shapes, and the per-member skip
         # must not treat that as "nothing changed" (see _corpus_signature's
         # docstring for the same reasoning at the corpus level).
-        brief = test_case_brief(conn, name, redact=redact)
+        brief = test_case_brief(conn, name, redact=redact, sme_notes=sme_notes)
         brief_hash = hashlib.sha256(f"{brief}\x00{threshold}".encode("utf-8")).hexdigest()
         if prior_ok and prior.get("brief_sha256") == brief_hash:
             logger.debug("skip %s: unchanged (brief hash match, resumed)", name)
@@ -752,6 +759,7 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
         result = generate_member_test_doc(
             conn, name, language, framework, out_path, caller, writing_rules, template,
             redact=redact, max_scenarios_per_call=threshold, prior_chunks=prior_chunks,
+            sme_notes=sme_notes,
         )
         results.append(result)
         state[state_keys[name]] = {

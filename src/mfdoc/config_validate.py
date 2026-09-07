@@ -157,6 +157,9 @@ OPTION_SPECS: list[OptionSpec] = [
     OptionSpec("options.narrative.pricing.output_per_mtok", (int, float),
                "a non-negative number", check=_non_negative),
 
+    OptionSpec("options.sme_notes", (str,),
+               "a string (path to an sme-notes.md file, relative to this config)"),
+
     OptionSpec("options.testgen.max_scenarios_per_call", (int,),
                "a positive integer", check=_positive_int),
     OptionSpec("options.testgen.default_language", (str,), "a string"),

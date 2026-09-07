@@ -290,18 +290,22 @@ def _write_or_print(out: str, out_path: str | None) -> None:
 
 
 def cmd_brief(args) -> int:
+    from . import sme_notes as sme_notes_mod
+
     cfg = load_config(args.config)
-    conn = connect(Path(args.config).parent / cfg["index_db"])
+    base = Path(args.config).parent
+    conn = connect(base / cfg["index_db"])
     redact = Redactor.from_options(cfg["options"])
     lexicon = ((cfg["options"] or {}).get("narrative") or {}).get("lexicon") or {}
+    notes = sme_notes_mod.load(cfg, base)
     if args.system:
         out = brief_mod.system_brief(conn, redact=redact)
     elif args.module:
-        out = brief_mod.module_brief(conn, args.module, redact=redact, lexicon=lexicon)
+        out = brief_mod.module_brief(conn, args.module, redact=redact, lexicon=lexicon, sme_notes=notes)
     elif args.entity:
-        out = brief_mod.entity_brief(conn, args.entity, redact=redact, lexicon=lexicon)
+        out = brief_mod.entity_brief(conn, args.entity, redact=redact, lexicon=lexicon, sme_notes=notes)
     elif args.executive:
-        out = brief_mod.executive_brief(conn, args.executive, redact=redact)
+        out = brief_mod.executive_brief(conn, args.executive, redact=redact, sme_notes=notes)
     elif args.interface_matrix:
         from .conditions import dispatch_field_from_options
 
@@ -674,6 +678,7 @@ def _test_template_path(base: Path, language: str, framework: str, override: str
 
 
 def cmd_test_gen(args) -> int:
+    from . import sme_notes as sme_notes_mod
     from . import testbatch as testbatch_mod
 
     cfg = load_config(args.config)
@@ -681,6 +686,7 @@ def cmd_test_gen(args) -> int:
     conn = connect(base / cfg["index_db"])
     redact = Redactor.from_options(cfg["options"])
     testgen_cfg = _testgen_config(cfg)
+    sme_notes = sme_notes_mod.load(cfg, base)
 
     if args.matrix and (args.language or args.framework):
         print("--matrix and --language/--framework are mutually exclusive -- "
@@ -752,6 +758,7 @@ def cmd_test_gen(args) -> int:
             conn, member, language, framework, out_path, caller,
             writing_rules, template, redact=redact,
             max_scenarios_per_call=testgen_cfg.get("max_scenarios_per_call"),
+            sme_notes=sme_notes,
         )
         status = "OK" if result.ok else "FAIL"
         print(f"{status} {result.member} [{language}/{framework}] -> {result.path} "
@@ -766,6 +773,7 @@ def cmd_test_batch(args) -> int:
     """Batch harness for generated tests -- the same option-C treatment
     `mfdoc batch` gives module docs, applied to test_case rows instead of
     module facts. Run `mfdoc test-plan` first; this never derives facts."""
+    from . import sme_notes as sme_notes_mod
     from . import testbatch as testbatch_mod
 
     cfg = load_config(args.config)
@@ -773,6 +781,7 @@ def cmd_test_batch(args) -> int:
     conn = connect(base / cfg["index_db"])
     redact = Redactor.from_options(cfg["options"])
     testgen_cfg = _testgen_config(cfg)
+    sme_notes = sme_notes_mod.load(cfg, base)
 
     if args.matrix and (args.language or args.framework):
         print("--matrix and --language/--framework are mutually exclusive -- "
@@ -860,6 +869,7 @@ def cmd_test_batch(args) -> int:
             writing_rules, template, redact=redact, concurrency=args.concurrency,
             state_path=(base / state_rel) if state_rel else None,
             max_scenarios_per_call=testgen_cfg.get("max_scenarios_per_call"),
+            sme_notes=sme_notes,
         )
         for r in summary.results:
             status = "SKIP" if r.skipped else ("OK  " if r.ok else "FAIL")
@@ -890,11 +900,13 @@ def cmd_batch(args) -> int:
     narrative structure matter more than throughput.
     """
     from . import batch as batch_mod
+    from . import sme_notes as sme_notes_mod
 
     cfg = load_config(args.config)
     base = Path(args.config).parent
     conn = connect(base / cfg["index_db"])
     redact = Redactor.from_options(cfg["options"])
+    sme_notes = sme_notes_mod.load(cfg, base)
 
     # Normalise the same way ingest does (normalise.derive_member_name /
     # split_members both .upper() the stored name) -- an un-normalised
@@ -931,6 +943,7 @@ def cmd_batch(args) -> int:
         cost_per_mtok_out=pricing.get("output_per_mtok"),
         lexicon=lexicon,
         max_rules_per_call=narrative_opts.get("max_rules_per_call"),
+        sme_notes=sme_notes,
     )
 
     for r in summary.results:

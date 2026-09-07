@@ -13,6 +13,40 @@ GitHub org.
   flows and the gap register, where judgement matters most.
 
 **Progress (2026-09-07):**
+- Implemented issue #94: wired issue #93's `sme_notes.py` parser into the
+  actual brief-then-prompt path every document type already uses.
+  `brief.module_brief`/`entity_brief`/`executive_brief` and
+  `testplan.test_case_brief`/`test_case_brief_chunk` now take an optional
+  `sme_notes` (the `Notes` dict `sme_notes.load()`/`parse()` returns);
+  when a general and/or member/entity-scoped note matches, a new
+  `brief._sme_notes_section` helper appends a
+  "## SME notes (human-provided context, not verified against source)"
+  section at the very *end* of the brief -- deliberately last, in plain
+  prose with its own explanatory sentence, never `[[MEMBER:LINE]]`-cited
+  like everything above it, so it can't be mistaken for cited fact-store
+  content. The same `Redactor` already threaded through these functions is
+  applied to the note text before inclusion, same as every other section.
+  Wired end-to-end: `cmd_brief`/`cmd_batch`/`cmd_test_gen`/`cmd_test_batch`
+  in `cli.py` all now call `sme_notes.load(cfg, base)` and pass it through
+  `batch.run_batch`/`generate_module_doc`/`_generate_module_doc_chunked`
+  and `testbatch.run_test_batch`/`generate_member_test_doc`/
+  `_generate_member_test_doc_chunked` (mirroring the existing `lexicon`
+  plumbing throughout) -- including folding it into both modules'
+  `_corpus_signature` fingerprint, so an sme-notes.md edit with no source
+  change still invalidates `mfdoc batch`/`mfdoc test-batch`'s resumable
+  state instead of being silently skipped by the corpus-level fast path.
+  Added `OptionSpec("options.sme_notes", ...)` to `config_validate.py`
+  (missed by #93). `reference/writing-rules.md` gets a new "SME notes"
+  rule (linked from `reference/test-writing-rules.md`): notes may inform
+  interpretation/emphasis, but every business-rule claim still needs its
+  normal citation -- SME notes are never themselves a citable source, and
+  a note that contradicts the cited facts must lose to the facts (raised
+  as a gap-register question instead). New `tests/test_sme_notes_briefs.py`
+  covers all four brief functions (section present on match, absent
+  otherwise, redaction applied, no citation marker inside the section) plus
+  an end-to-end-ish check that `batch.build_prompt` carries the section
+  through unchanged. Issue #95 (docs/example for `sme-notes.md`) is the
+  follow-on, now that this has a stable, merged foundation.
 - Added a regression test (`test_batch_absorbs_a_transient_caller_retry_while_another_member_succeeds`
   in `tests/test_batch.py`) exercising issue #79's internal retry and issue
   #78's per-future isolation *together* in one `run_batch` pass, which
