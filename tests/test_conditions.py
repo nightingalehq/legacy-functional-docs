@@ -187,3 +187,31 @@ def test_prose_polarity_no_more_than_reads_as_at_most_not_greater_than():
 
 def test_prose_polarity_no_less_than_reads_as_at_least_not_less_than():
     assert prose_polarity("the code is no less than '4'", "4") == "ge"
+
+
+def test_prose_polarity_ignores_hedge_word_across_an_and_boundary():
+    """Issue #90: a compound `AND` condition narrated as two clauses in one
+    sentence must not let a hedge word ('at least') that modifies the
+    *other* clause's operand bleed across the conjunction into this
+    literal's own reading. Real example: source `STAT="FAIL" AND
+    OBS_COUNT>ZERO`, narrated as "STAT equals 'FAIL' and at least one
+    observation was counted" -- "at least" describes OBS_COUNT, not STAT,
+    so STAT's own literal ('FAIL') must still read as plain equality."""
+    assert prose_polarity(
+        "if STAT equals 'FAIL' and at least one observation was counted", "FAIL"
+    ) == "eq"
+
+
+def test_prose_polarity_ignores_hedge_word_across_an_or_boundary():
+    assert prose_polarity(
+        "if STAT equals 'FAIL' or at least one observation was counted", "FAIL"
+    ) == "eq"
+
+
+def test_prose_polarity_still_reads_hedge_word_on_the_same_side_of_an_and_clause():
+    """The AND-boundary clipping above must not blanket-suppress hedge-word
+    detection for a clause it genuinely belongs to -- only clip the side of
+    the literal that's on the *other* side of the conjunction from it."""
+    assert prose_polarity(
+        "the count is at least '4' and STAT equals 'FAIL'", "4"
+    ) == "ge"
