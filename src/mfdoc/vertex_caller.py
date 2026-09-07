@@ -20,6 +20,7 @@ import os
 import threading
 
 from .batch import ModelResponse, model_response_from_message
+from .retry import DEFAULT_MAX_RETRIES, call_with_retry
 
 DEFAULT_MODEL = "claude-sonnet-4-5"
 DEFAULT_MAX_TOKENS = 8192
@@ -33,8 +34,9 @@ DEFAULT_TIMEOUT_S = 600
 class VertexCaller:
     def __init__(self, model: str = DEFAULT_MODEL, max_tokens: int = DEFAULT_MAX_TOKENS,
                  project: str | None = None, region: str | None = None,
-                 timeout: float | None = None):
+                 timeout: float | None = None, max_retries: int = DEFAULT_MAX_RETRIES):
         try:
+            import anthropic
             from anthropic import AnthropicVertex
         except ImportError as exc:
             raise RuntimeError(
@@ -104,12 +106,29 @@ class VertexCaller:
         # state) with no locking of its own -- serialize requests through
         # this one client so concurrent workers can't race a token refresh.
         self._lock = threading.Lock()
+        self.max_retries = max_retries
+        # Same transient-error set as AnthropicCaller (issue #79) -- both
+        # callers are built on the same `anthropic` SDK response/exception
+        # shape, just a different transport.
+        self._retryable_errors = (
+            anthropic.RateLimitError, anthropic.APIConnectionError, anthropic.InternalServerError,
+        )
 
     def __call__(self, prompt: str) -> ModelResponse:
-        with self._lock:
-            message = self._client.messages.create(
-                model=self.model,
-                max_tokens=self.max_tokens,
-                messages=[{"role": "user", "content": prompt}],
-            )
-        return model_response_from_message(message)
+        def do_call() -> ModelResponse:
+            # Lock held only around the actual call, not around backoff's
+            # sleep between retries -- a retry waiting out a rate limit has
+            # no reason to also block every other worker's credential-safe
+            # access to this client in the meantime.
+            with self._lock:
+                message = self._client.messages.create(
+                    model=self.model,
+                    max_tokens=self.max_tokens,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+            return model_response_from_message(message)
+
+        return call_with_retry(
+            do_call, lambda exc: isinstance(exc, self._retryable_errors),
+            max_retries=self.max_retries,
+        )

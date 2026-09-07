@@ -13,6 +13,25 @@ GitHub org.
   flows and the gap register, where judgement matters most.
 
 **Progress (2026-09-07):**
+- Implemented issue #79: `AnthropicCaller` and `VertexCaller` now retry
+  transient errors (`RateLimitError`, `APIConnectionError`,
+  `InternalServerError`) with bounded exponential backoff and jitter, via a
+  new dependency-free `retry.call_with_retry()` shared by both. Non-retryable
+  errors (bad request, auth, malformed prompt) still propagate immediately —
+  this only defers a bounded number of transient-looking failures, never
+  swallows a real one. `VertexCaller`'s existing lock is now held only
+  around the actual `messages.create()` call, not around backoff's sleep
+  between retries, so a retry waiting out a rate limit doesn't also block
+  every other worker's access to the shared client. Combined with #78's
+  per-member isolation, a transient API error no longer forces a whole
+  member to fail and be re-run from scratch. `ClaudeCLICaller` is
+  intentionally out of scope here -- per issue #79's own text it "already
+  has better timeout handling and can serve as a model for how the others
+  should behave," and its failure mode (a subprocess timing out or exiting
+  non-zero) isn't the same transient-network-error shape this retry helper
+  targets; it already turns a hung/failed `claude -p` call into a clear
+  `RuntimeError` on its own. (A retry addition was briefly tried and
+  reverted for exactly this reason -- see this branch's history.)
 - Implemented issue #80: `AnthropicCaller` and `VertexCaller` now take a
   configurable `timeout` (seconds), defaulting to 600 -- the same
   `DEFAULT_TIMEOUT_S` value and None-means-default pattern

@@ -8,6 +8,7 @@ requires it installed.
 from __future__ import annotations
 
 from .batch import ModelResponse, model_response_from_message
+from .retry import DEFAULT_MAX_RETRIES, call_with_retry
 
 DEFAULT_MODEL = "claude-sonnet-4-5"
 DEFAULT_MAX_TOKENS = 8192
@@ -19,7 +20,8 @@ DEFAULT_TIMEOUT_S = 600
 
 class AnthropicCaller:
     def __init__(self, model: str = DEFAULT_MODEL, max_tokens: int = DEFAULT_MAX_TOKENS,
-                 api_key: str | None = None, timeout: float | None = None):
+                 api_key: str | None = None, timeout: float | None = None,
+                 max_retries: int = DEFAULT_MAX_RETRIES):
         try:
             import anthropic
         except ImportError as exc:
@@ -33,11 +35,27 @@ class AnthropicCaller:
         )
         self.model = model
         self.max_tokens = max_tokens
+        self.max_retries = max_retries
+        # Rate limits, transient connection failures, and 5xx responses are
+        # exactly the failure modes issue #79 exists to make survivable
+        # without propagating into run_batch's per-member isolation (#78)
+        # as a hard, whole-member failure -- everything else (bad request,
+        # auth, a genuinely malformed prompt) is a real failure and must
+        # not be retried into a longer, equally-doomed run.
+        self._retryable_errors = (
+            anthropic.RateLimitError, anthropic.APIConnectionError, anthropic.InternalServerError,
+        )
 
     def __call__(self, prompt: str) -> ModelResponse:
-        message = self._client.messages.create(
-            model=self.model,
-            max_tokens=self.max_tokens,
-            messages=[{"role": "user", "content": prompt}],
+        def do_call() -> ModelResponse:
+            message = self._client.messages.create(
+                model=self.model,
+                max_tokens=self.max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return model_response_from_message(message)
+
+        return call_with_retry(
+            do_call, lambda exc: isinstance(exc, self._retryable_errors),
+            max_retries=self.max_retries,
         )
-        return model_response_from_message(message)
