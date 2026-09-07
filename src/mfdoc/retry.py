@@ -1,0 +1,64 @@
+"""Small, dependency-free bounded exponential backoff for transient
+ModelCaller errors (rate limits, connection resets, 5xx) -- issue #79.
+
+`ClaudeCLICaller` (claude_cli_caller.py) already turns a hung/failed `claude
+-p` subprocess into a clear `RuntimeError`, but neither `AnthropicCaller` nor
+`VertexCaller` retried on a transient API error before this -- every one
+became a hard failure that propagated straight up into `run_batch`'s
+per-member isolation (see issue #78), forcing a whole member to be marked
+failed and re-run from scratch for something a short wait would have
+resolved. This is deliberately generic (no dependency on `anthropic`'s own
+exception types) so both callers -- and anything else that ever needs the
+same shape of retry -- can reuse it, each supplying its own `is_retryable`
+predicate for what "transient" means to it.
+"""
+
+from __future__ import annotations
+
+import random
+import time
+from typing import Callable, TypeVar
+
+T = TypeVar("T")
+
+DEFAULT_MAX_RETRIES = 5
+DEFAULT_BASE_DELAY_S = 1.0
+DEFAULT_MAX_DELAY_S = 20.0
+
+
+def call_with_retry(
+    fn: Callable[[], T],
+    is_retryable: Callable[[Exception], bool],
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    base_delay: float = DEFAULT_BASE_DELAY_S,
+    max_delay: float = DEFAULT_MAX_DELAY_S,
+    sleep: Callable[[float], None] | None = None,
+) -> T:
+    """Call `fn()`, retrying up to `max_retries` times (so at most
+    `max_retries + 1` attempts total) whenever the raised exception is one
+    `is_retryable` accepts as transient. Delay between attempts grows
+    exponentially (`base_delay * 2**attempt`, capped at `max_delay`) with
+    +/-50% jitter, so many concurrent workers hitting the same rate limit
+    don't all retry in lockstep. A non-retryable exception, or the last
+    permitted attempt's exception, propagates immediately and normally --
+    this never swallows a genuine failure, only defers it past a bounded
+    number of transient-looking ones.
+
+    `sleep` is injectable (defaults to `time.sleep`, looked up at call time
+    rather than bound as a literal default value, so a test can monkeypatch
+    `mfdoc.retry.time.sleep` and have it actually take effect) purely so
+    tests can assert on backoff timing/attempt counts without a real test
+    suite run taking `max_retries` seconds per case.
+    """
+    do_sleep = sleep if sleep is not None else time.sleep
+    attempt = 0
+    while True:
+        try:
+            return fn()
+        except Exception as exc:
+            attempt += 1
+            if attempt > max_retries or not is_retryable(exc):
+                raise
+            delay = min(max_delay, base_delay * (2 ** (attempt - 1)))
+            delay *= 0.5 + random.random() / 2  # jitter: 50%-100% of the computed delay
+            do_sleep(delay)

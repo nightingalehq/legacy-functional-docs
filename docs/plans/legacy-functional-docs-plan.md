@@ -13,6 +13,18 @@ GitHub org.
   flows and the gap register, where judgement matters most.
 
 **Progress (2026-09-07):**
+- Implemented issue #79: `AnthropicCaller` and `VertexCaller` now retry
+  transient errors (`RateLimitError`, `APIConnectionError`,
+  `InternalServerError`) with bounded exponential backoff and jitter, via a
+  new dependency-free `retry.call_with_retry()` shared by both. Non-retryable
+  errors (bad request, auth, malformed prompt) still propagate immediately —
+  this only defers a bounded number of transient-looking failures, never
+  swallows a real one. `VertexCaller`'s existing lock is now held only
+  around the actual `messages.create()` call, not around backoff's sleep
+  between retries, so a retry waiting out a rate limit doesn't also block
+  every other worker's access to the shared client. Combined with #78's
+  per-member isolation, a transient API error no longer forces a whole
+  member to fail and be re-run from scratch.
 - Implemented issue #85: coverage metrics now persist across runs for trend
   visibility. `db.coverage_history`/`db.record_coverage_history` (new
   `coverage_history` table, append-only, one row per `mfdoc coverage`/

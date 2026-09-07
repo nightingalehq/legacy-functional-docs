@@ -39,6 +39,90 @@ def test_missing_project_raises_before_any_client_construction(monkeypatch):
         VertexCaller()
 
 
+def test_call_retries_a_transient_error_and_eventually_succeeds(monkeypatch):
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "some-project")
+
+    class _RateLimitError(Exception):
+        pass
+
+    class _APIConnectionError(Exception):
+        pass
+
+    class _InternalServerError(Exception):
+        pass
+
+    attempts = {"n": 0}
+
+    class FakeMessages:
+        def create(self, **kw):
+            attempts["n"] += 1
+            if attempts["n"] < 3:
+                raise _RateLimitError("simulated rate limit")
+            return SimpleNamespace(
+                content=[SimpleNamespace(text="ok", type="text")],
+                usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+            )
+
+    fake_client = SimpleNamespace(messages=FakeMessages())
+    fake_anthropic = SimpleNamespace(
+        AnthropicVertex=lambda **kw: fake_client,
+        RateLimitError=_RateLimitError,
+        APIConnectionError=_APIConnectionError,
+        InternalServerError=_InternalServerError,
+    )
+    monkeypatch.setitem(sys.modules, "anthropic", fake_anthropic)
+    monkeypatch.setitem(sys.modules, "google", SimpleNamespace(auth=SimpleNamespace()))
+    monkeypatch.setitem(sys.modules, "google.auth", SimpleNamespace())
+
+    # call_with_retry's real backoff would sleep ~1s+2s here; patch it out
+    # so the test doesn't pay for real wall-clock retry delay.
+    monkeypatch.setattr("mfdoc.retry.time.sleep", lambda s: None)
+    caller = VertexCaller(project="some-project")
+    result = caller("some prompt")
+
+    assert attempts["n"] == 3
+    assert result.text == "ok"
+
+
+def test_call_does_not_retry_a_non_transient_error(monkeypatch):
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "some-project")
+
+    class _RateLimitError(Exception):
+        pass
+
+    class _APIConnectionError(Exception):
+        pass
+
+    class _InternalServerError(Exception):
+        pass
+
+    class _BadRequestError(Exception):
+        pass
+
+    attempts = {"n": 0}
+
+    class FakeMessages:
+        def create(self, **kw):
+            attempts["n"] += 1
+            raise _BadRequestError("malformed prompt, never retry this")
+
+    fake_client = SimpleNamespace(messages=FakeMessages())
+    fake_anthropic = SimpleNamespace(
+        AnthropicVertex=lambda **kw: fake_client,
+        RateLimitError=_RateLimitError,
+        APIConnectionError=_APIConnectionError,
+        InternalServerError=_InternalServerError,
+    )
+    monkeypatch.setitem(sys.modules, "anthropic", fake_anthropic)
+    monkeypatch.setitem(sys.modules, "google", SimpleNamespace(auth=SimpleNamespace()))
+    monkeypatch.setitem(sys.modules, "google.auth", SimpleNamespace())
+
+    caller = VertexCaller(project="some-project")
+    with pytest.raises(_BadRequestError):
+        caller("some prompt")
+    assert attempts["n"] == 1
+
+
 def test_cmd_batch_routes_to_vertex_caller_when_provider_is_vertex(cli_args, tmp_path, monkeypatch):
     project_dir = Path(cli_args.config).parent
     if not (project_dir / "reference").exists():
