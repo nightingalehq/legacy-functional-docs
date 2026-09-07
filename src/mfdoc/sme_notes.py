@@ -12,8 +12,8 @@ Schema:
   heading) applies to every member/entity generated for the project.
 - Each subsequent `## <member-or-entity-name>` heading scopes its content
   to just that member/entity, matched case-insensitively against
-  `member_name`/entity names used elsewhere in the tool (e.g. `LMCORE`,
-  `TTPL021P`).
+  `member_name`/entity names used elsewhere in the tool (e.g. `MODULE-ALPHA`,
+  `MODULE-BETA`).
 - Body text under each heading is freeform prose/bullets -- no further
   structure required. This is intentionally *semi*-structured (heading =
   scope, body = free text), not a rigid record format, so SMEs don't need
@@ -40,7 +40,7 @@ Notes = dict[str | None, str]
 
 
 def parse(path: str | Path) -> Notes:
-    """Parse an sme-notes.md file into `{None: general_text, "lmcore": ...}`.
+    """Parse an sme-notes.md file into `{None: general_text, "module-alpha": ...}`.
 
     Returns `{}` if the file is missing or empty -- absence is a no-op, not
     an error, since the whole file is optional.

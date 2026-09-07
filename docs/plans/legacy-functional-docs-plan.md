@@ -47,7 +47,7 @@ GitHub org.
   explicit `## General` heading) is general context applied to every
   member/entity; each `## <name>` heading afterwards scopes its body to
   just that member/entity, matched case-insensitively. `parse()` returns
-  `{None: general_text, "lmcore": ..., ...}`; `notes_for(notes, member_name)`
+  `{None: general_text, "module-alpha": ..., ...}`; `notes_for(notes, member_name)`
   combines the general section with the member's own section, general
   first. A missing or empty file parses to `{}` with no error, keeping the
   whole thing optional. `load(cfg, base)` is the convenience entry point
