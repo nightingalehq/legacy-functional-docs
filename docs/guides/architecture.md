@@ -279,7 +279,21 @@ judgement-heavy documents are deliberately routed differently:
   `batch._render_module_index_doc`) — a whole-module overview to start from,
   distinct from each chunk's own per-rule `doc_type: module` detail. A chunk
   failure skips the reconciliation call entirely and reports it as a plain
-  skipped note instead.
+  skipped note instead. A chunk boundary is chosen by
+  `brief.routine_aware_chunk_ranges`, which preserves routine boundaries while
+  packing by rule count within them; that count says nothing about how
+  content-dense a chunk's *source* actually is — two chunks can carry the
+  same rule count while one's source is far harder to narrate correctly
+  (more source lines, more nested branches, per rule). `brief.
+  chunk_density_metrics`/`flag_density_outliers`/`format_density_note`
+  (shared by `batch.py` and `test-batch`'s equivalent chunking) compute a
+  cheap lines-per-rule and average-nesting-depth estimate per chunk from
+  facts already at hand, flag any chunk well above the run's own median for
+  either metric, and append a `density: ... -- OUTLIER (...)` note to that
+  chunk's own reported problem when (and only when) it fails — so a chunk
+  that keeps failing its retries for a genuine content-density reason is
+  distinguishable, immediately, from one that was just unlucky, instead of
+  requiring a human to notice the pattern across several failed runs.
 - **Interactive, via Claude Code (`SKILL.md`)** — for system overview, data
   entity docs, process flows and the gap register, where grouping and
   narrative structure benefit from a human (or a chat session) holding the

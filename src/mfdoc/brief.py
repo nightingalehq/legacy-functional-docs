@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import re
+import statistics
 
 from .citations import _cite, _rule_id
 from .db import GAP_SEVERITY_ORDER_SQL
@@ -161,6 +162,169 @@ def routine_aware_chunk_ranges(rule_line_nos: list[int], routines: list[dict],
     if cur is not None:
         ranges.append(cur)
     return ranges
+
+
+def chunk_density_metrics(line_nos: list[int | None], ranges: list[tuple[int, int]],
+                           depths: list[int | None] | None = None) -> list[dict]:
+    """Per-chunk source-density metrics, computed from facts already at
+    hand at chunk-boundary time -- cheap, and shared by batch.py's and
+    testbatch.py's chunked-rendering paths so a rule-dense chunk's failure
+    diagnostics look the same no matter which harness produced it (issue
+    #105). Routine-aware chunking packs by rule count within routine
+    # boundaries, but that count is blind to how content-dense a chunk's
+    # *source* actually is: two chunks can carry the same rule count
+    while one's source is far harder for the model to narrate correctly
+    (more source lines, more nested branches, per rule) -- these metrics
+    make that difference visible instead of only showing up, after the
+    fact, as a chunk that just happens to fail its retries too.
+
+    `line_nos`/`ranges` follow exactly routine_aware_chunk_ranges's own
+    convention: `line_nos` is one entry per item in source order (a
+    rule_candidate's line_no for batch.py; a test_case's originating
+    rule's line_no -- or a sentinel below 0 when it belongs to no rule/
+    routine -- for testbatch.py), and each `(start, end)` in `ranges` is a
+    1-based, inclusive ordinal slice into it, the same slices
+    routine_aware_chunk_ranges itself returned. `depths` (optional, same
+    length/order as `line_nos`) supplies a nesting-depth proxy when the
+    caller has one at hand (rule_candidate.depth) -- omitted entirely by
+    callers that don't (test_case rows carry no depth of their own).
+
+    A chunk with fewer than 2 resolvable (>= 0) line numbers in its own
+    slice can't have a source span computed (nothing to subtract) -- its
+    `line_span` comes back `None` rather than a misleading 0 or 1.
+    `lines_per_item` additionally requires *every* item in the chunk to
+    have a resolvable line number: a `line_span` computed from only some
+    of a chunk's items, then divided by the chunk's full `item_count`,
+    would produce a `lines_per_item` that doesn't correspond to the items
+    used to compute the span and can understate density in the outlier
+    check -- so a mix of resolvable and unresolvable (sentinel) line
+    numbers still yields a `line_span` where possible, but `lines_per_item`
+    comes back `None`.
+
+    Each returned dict: `item_count`, `line_span` (inclusive source lines
+    spanned by this chunk's own items, or `None`), `lines_per_item` (`None`
+    unless every item in the chunk has a resolvable line number), `avg_depth`
+    (mean of this chunk's non-None depths, or `None` when `depths` wasn't
+    given or none of this chunk's rows have one)."""
+    metrics: list[dict] = []
+    for start, end in ranges:
+        raw_lines = line_nos[start - 1:end]
+        slice_lines = [ln for ln in raw_lines if ln is not None and ln >= 0]
+        item_count = end - start + 1
+        all_resolvable = len(slice_lines) == len(raw_lines)
+        if len(slice_lines) >= 2:
+            line_span = max(slice_lines) - min(slice_lines) + 1
+            lines_per_item = line_span / item_count if all_resolvable else None
+        else:
+            line_span = None
+            lines_per_item = None
+        avg_depth = None
+        if depths is not None:
+            slice_depths = [d for d in depths[start - 1:end] if d is not None]
+            if slice_depths:
+                avg_depth = sum(slice_depths) / len(slice_depths)
+        metrics.append({
+            "item_count": item_count,
+            "line_span": line_span,
+            "lines_per_item": lines_per_item,
+            "avg_depth": avg_depth,
+        })
+    return metrics
+
+
+def flag_density_outliers(metrics: list[dict], factor: float = 1.5) -> list[dict]:
+    """A new list (input `metrics` untouched), each entry the corresponding
+    input dict plus `outlier` (bool) and `outlier_reasons` (list[str]):
+    flags a chunk whose `lines_per_item` or `avg_depth` is at least
+    `factor` times this *run's* median for that metric across its other
+    chunks -- "well above the run's median" (issue #105's own phrasing),
+    not a fixed absolute threshold, since what counts as dense varies by
+    codebase and dialect. Needs at least 2 chunks with a usable value for
+    a given metric to have a median to compare against at all; a
+    `lines_per_item` median of 0 is left unflagged for that metric (a
+    multiple of 0 is meaningless, and a 0 `lines_per_item` shouldn't occur
+    in practice). `avg_depth` is different: it's 0-based (top-level depth
+    is often 0), so a run whose other chunks are all flat (median 0) would
+    never flag a genuinely nested chunk under the usual "factor x median"
+    rule -- a chunk with `avg_depth > 0` against a 0 median is flagged
+    directly instead."""
+    def _usable(key):
+        return [(i, m[key]) for i, m in enumerate(metrics) if m.get(key) is not None]
+
+    def _median_excluding(usable, idx):
+        # Median of the OTHER chunks' values only -- excluding this chunk's
+        # own entry by position, not by value, so two chunks that happen to
+        # share a value don't cancel each other out of each other's medians.
+        # A candidate chunk's own (often extreme) value must never pull the
+        # median it's being compared against toward itself, or a run with
+        # multiple dense chunks (e.g. [1, 100, 100] lines/item) can dilute
+        # the median enough that none of them clear `factor` (issue #105
+        # review feedback).
+        others = [v for i, v in usable if i != idx]
+        return statistics.median(others) if others else None
+
+    lpi_usable = _usable("lines_per_item")
+    depth_usable = _usable("avg_depth")
+
+    out: list[dict] = []
+    for i, m in enumerate(metrics):
+        reasons = []
+        lpi = m.get("lines_per_item")
+        if lpi is not None:
+            lpi_median = _median_excluding(lpi_usable, i)
+            # A 0 (or absent) median is left unflagged: a multiple of 0 is
+            # meaningless, and there's nothing to divide by.
+            if lpi_median and lpi >= factor * lpi_median:
+                reasons.append(
+                    f"lines/item {lpi:.1f} vs run median {lpi_median:.1f} ({lpi / lpi_median:.1f}x)"
+                )
+        depth = m.get("avg_depth")
+        if depth is not None:
+            depth_median = _median_excluding(depth_usable, i)
+            if depth_median is not None:
+                if depth_median == 0:
+                    # depth is 0-based (top-level depth is often 0), so a run
+                    # where every other chunk is flat has a median of 0 --
+                    # leaving that unflagged (as a 0 lines_per_item median is)
+                    # would mean a genuinely nested chunk never gets flagged
+                    # against an all-flat baseline. Flag it directly instead
+                    # of dividing by a 0 median.
+                    if depth > 0:
+                        reasons.append(
+                            f"avg nesting depth {depth:.1f} vs run median 0.0 "
+                            f"(run's other chunks are flat)"
+                        )
+                elif depth >= factor * depth_median:
+                    reasons.append(
+                        f"avg nesting depth {depth:.1f} vs run median {depth_median:.1f} "
+                        f"({depth / depth_median:.1f}x)"
+                    )
+        out.append({**m, "outlier": bool(reasons), "outlier_reasons": reasons})
+    return out
+
+
+def format_density_note(metrics_entry: dict) -> str:
+    """One-line rendering of a chunk_density_metrics/flag_density_outliers
+    entry, meant to be appended to a failed chunk's own diagnostics (see
+    batch.py's/testbatch.py's chunked-rendering failure paths) -- e.g.
+    "density: 8 item(s), 42.5 lines/item, avg depth 3.4 -- OUTLIER
+    (lines/item 2.3x vs run median 18.1)". So a human reading a retry
+    report can tell "was this chunk just unlucky, or is it actually
+    harder" immediately, rather than reverse-engineering it from a pattern
+    of repeated failures across a whole run (issue #105). Never raises on
+    a partially-populated entry (no `line_span` when too few line numbers
+    were resolvable, no `avg_depth` when the caller passed none) -- it
+    prints what's known instead of failing the diagnostic that exists
+    specifically to help debug a failure."""
+    bits = [f"{metrics_entry['item_count']} item(s)"]
+    if metrics_entry.get("lines_per_item") is not None:
+        bits.append(f"{metrics_entry['lines_per_item']:.1f} lines/item")
+    if metrics_entry.get("avg_depth") is not None:
+        bits.append(f"avg depth {metrics_entry['avg_depth']:.1f}")
+    note = "density: " + ", ".join(bits)
+    if metrics_entry.get("outlier_reasons"):
+        note += " -- OUTLIER (" + "; ".join(metrics_entry["outlier_reasons"]) + ")"
+    return note
 
 
 def fetch_rule_candidate_rows(conn, member_name: str):
