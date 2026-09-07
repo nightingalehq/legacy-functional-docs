@@ -265,6 +265,18 @@ entity, field) combination where the fixtures' own Adabas/Supra entity
 definitions list more fields than any single program happens to
 reference -- no new source, no new entity, so nothing else in this
 table moves.
+
+2026-09-07: numbers moved again when MMP9550.nsp was added (sibling of
+4.11a/#24's MMP9500.nsp): its WRITE statement's operand list wraps across
+three lines the same way, but without any column-spec token on the
+continuation lines -- instead a quoted-literal lead
+(CONTINUATION_LEAD_QUOTE), a bare "/" lead (CONTINUATION_LEAD_SLASH), and a
+bare field-reference lead (CONTINUATION_LEAD_FIELD) fold them into the
+WRITE, all newly scoped to WRITE/DISPLAY/PRINT/INPUT/REINPUT the same way
+CONTINUATION_LEAD_COLSPEC already is. +1 member/code_member, +23
+source_lines, unparsed_lines unchanged (the continuation lines fold instead
+of gapping, which is the point of the fixture), +1 orphan_module/gaps_total
+(uncalled by design, as usual for these regression-only fixtures).
 """
 
 from __future__ import annotations
@@ -272,11 +284,11 @@ from __future__ import annotations
 from mfdoc import graph
 
 EXPECTED_COVERAGE = {
-    "members": 30,
-    "code_members": 18,
-    "source_lines": 611,
+    "members": 31,
+    "code_members": 19,
+    "source_lines": 634,
     "unparsed_lines": 4,
-    "line_recognition_rate": 0.9935,
+    "line_recognition_rate": 0.9937,
     "entities": 19,
     "entities_with_definition": 14,
     "entity_definition_rate": 0.7368,
@@ -291,7 +303,7 @@ EXPECTED_COVERAGE = {
     "includes_resolved": 7,
     "include_resolution_rate": 0.6364,
     "gaps_high": 20,
-    "gaps_total": 164,
+    "gaps_total": 165,
 }
 
 
@@ -308,5 +320,5 @@ def test_run_all_summary_matches_snapshot(derive_result):
     assert derive_result["unresolved_calls"] == 12
     assert derive_result["undefined_entities"] == 4
     assert derive_result["adabas_entities_merged"] == 3
-    assert derive_result["orphans"] == 12
+    assert derive_result["orphans"] == 13
     assert derive_result["transaction_scopes"] == 5

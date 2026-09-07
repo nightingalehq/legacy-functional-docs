@@ -307,6 +307,14 @@ CONTINUATION_LEAD = re.compile(
     r"^\s*(AND|OR|NOT|THRU|THROUGH|TO|WITH|BY|INTO|SORTED|WHERE"
     r"|SIZE|BASE|FRAMED|FORMAT)\b", re.I)
 
+# A continuation line that opens with a quoted literal (e.g. a WRITE/DISPLAY
+# operand list wrapping right at the start of its next literal) is never the
+# first word of a genuine new Natural statement either -- every real
+# statement starts with a keyword or a field reference, never a bare literal
+# -- so, unlike CONTINUATION_LEAD_FIELD below, this is safe to check
+# unconditionally rather than scoping it to a particular verb.
+CONTINUATION_LEAD_QUOTE = re.compile(r"^\s*['\"]")
+
 # Natural report-writer column-position tokens ("5T" = tab to column 5, "2X"
 # = skip 2 spaces) commonly appear on their own continuation line within a
 # multi-line WRITE/DISPLAY/PRINT/INPUT/REINPUT operand list -- CONTINUATION_LEAD
@@ -320,6 +328,24 @@ CONTINUATION_LEAD = re.compile(
 # next-line/skip-a-line marker, routinely paired with a column-position token
 # on the same continuation line (e.g. "// 1X #MESSAGE").
 CONTINUATION_LEAD_COLSPEC = re.compile(r"^\s*/{0,2}\s*\d+[TX]\b", re.I)
+
+# A bare "/" or "//" with nothing else on the line is the same next-line/
+# skip-a-line marker as above, just without a column-spec token riding
+# along with it on that particular continuation line. Scoped the same way
+# as CONTINUATION_LEAD_COLSPEC.
+CONTINUATION_LEAD_SLASH = re.compile(r"^\s*/{1,2}\s*$")
+
+# A continuation line that's one or more bare field references (optionally
+# array-indexed, e.g. "#IDN(#I)" or "#LINE-UP(*)"), themselves further
+# operands of the same WRITE/DISPLAY/PRINT/INPUT/REINPUT statement's operand
+# list. Restricted to a leading "#" specifically because Natural's own
+# naming convention reserves that sigil for user-defined variables -- no
+# statement verb ever starts with "#" -- *except* a bare assignment
+# ("#FIELD := ..."), which this scan excludes via the ":=" check at its call
+# site below, since that's a genuine new statement, not another operand.
+# Scoped to WRITE/DISPLAY/PRINT/INPUT/REINPUT the same way as
+# CONTINUATION_LEAD_COLSPEC, for the same reason.
+CONTINUATION_LEAD_FIELD = re.compile(r"^\s*#[A-Z]", re.I)
 
 # Bounds how far the continuation-fold below will look ahead per line. Without
 # this, a source file where most lines end in a continuation token (adversarial
@@ -580,12 +606,13 @@ def extract(conn, member_id: int, lines: list[tuple[int, str | None, str]], memb
             if nxt_comment:
                 look += 1
                 continue
-            is_colspec_continuation = (
-                (RE_WRITE.match(stmt) or RE_INPUT.match(stmt) or RE_REINPUT.match(stmt))
-                and CONTINUATION_LEAD_COLSPEC.match(nxt_code)
+            is_write_family = RE_WRITE.match(stmt) or RE_INPUT.match(stmt) or RE_REINPUT.match(stmt)
+            is_write_operand_continuation = is_write_family and (
+                CONTINUATION_LEAD_COLSPEC.match(nxt_code) or CONTINUATION_LEAD_SLASH.match(nxt_code)
+                or (CONTINUATION_LEAD_FIELD.match(nxt_code) and ":=" not in nxt_code)
             )
             if not (CONTINUATION_TAIL.search(stmt.rstrip()) or CONTINUATION_LEAD.match(nxt_code)
-                    or is_colspec_continuation):
+                    or CONTINUATION_LEAD_QUOTE.match(nxt_code) or is_write_operand_continuation):
                 break
             look += 1
             stmt = stmt.rstrip() + " " + nxt_code.strip()

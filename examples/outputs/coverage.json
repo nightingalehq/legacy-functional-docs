@@ -1,9 +1,9 @@
 {
-  "members": 30,
-  "code_members": 18,
-  "source_lines": 611,
+  "members": 31,
+  "code_members": 19,
+  "source_lines": 634,
   "unparsed_lines": 4,
-  "line_recognition_rate": 0.9935,
+  "line_recognition_rate": 0.9937,
   "entities": 19,
   "entities_with_definition": 14,
   "entity_definition_rate": 0.7368,
@@ -18,5 +18,5 @@
   "includes_resolved": 7,
   "include_resolution_rate": 0.6364,
   "gaps_high": 20,
-  "gaps_total": 164
+  "gaps_total": 165
 }

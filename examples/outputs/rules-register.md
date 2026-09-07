@@ -63,5 +63,5 @@ Every candidate business rule found across the index, keyed by its stable `MEMBE
 | **PRODSCHED:BR-003** | `PRODSCHED` | [[PRODSCHED:17]] | 1 | `ASSIGN` | `MSG = "Schedule could not be added"` | `Schedule could not be added` |
 | **SCRNENT:BR-001** | `SCRNENT` | [[SCRNENT:7]] | 0 | `IF` | `CH_UNIT = " "` | ` ` |
 
-Total: 53 rule candidate(s) across 16 batchable module(s).
+Total: 53 rule candidate(s) across 17 batchable module(s).
 

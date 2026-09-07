@@ -12,6 +12,31 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-07c):**
+- Closed out the two items 2026-09-07b left for a future pass:
+  - `DEFINE WINDOW` and its `SIZE`/`BASE`/`FRAMED`/`FORMAT` attribute lines
+    are now recognised as a presentation no-op (`RE_DEFINE_WINDOW`,
+    `CONTINUATION_LEAD` extended), the same way `SET CONTROL`/`SET KEY`
+    already were. Also: a continuation line already folded into a
+    preceding statement was still raising its own redundant
+    `unparsed_line` gap on its second visit (both `natural.py` and
+    `mantis.py`) — now suppressed via a `folded_lines` set, since the
+    content wasn't lost. (PR #120.)
+  - Multi-line `WRITE`/`DISPLAY`/`PRINT`/`INPUT`/`REINPUT` operand lists
+    that wrap with no column-spec token and no leading keyword: a
+    continuation line opening with a quoted literal
+    (`CONTINUATION_LEAD_QUOTE`, unconditional — no statement verb ever
+    starts with a bare literal), a bare `/`/`//` with nothing else on it
+    (`CONTINUATION_LEAD_SLASH`), or a bare field reference
+    (`CONTINUATION_LEAD_FIELD`, restricted to a leading `#` and excluding
+    `:=` so a genuine bare assignment isn't folded in as another operand)
+    now fold the same way the column-spec case already did. New fixture
+    `MMP9550.nsp` plus `test_write_operand_continuations.py` (including a
+    false-positive guard: a `#FIELD := ...` assignment right after a
+    `WRITE` must not be swallowed by it).
+  - Full suite green (715 passed, 2 skipped); bundled fixture pipeline
+    clean (33/33 docs, 0 invalid citations of 548).
+
 **Progress (2026-09-07b):**
 - Natural dialect calibration pass, driven by `mfdoc calibrate --dialect natural`
   against two engagement codebases (no client content in this repo — findings
