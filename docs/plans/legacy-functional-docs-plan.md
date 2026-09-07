@@ -13,6 +13,15 @@ GitHub org.
   flows and the gap register, where judgement matters most.
 
 **Progress (2026-09-07):**
+- Implemented issue #80: `AnthropicCaller` and `VertexCaller` now take a
+  configurable `timeout` (seconds), defaulting to 600 -- the same
+  `DEFAULT_TIMEOUT_S` value and None-means-default pattern
+  `claude_cli_caller.ClaudeCLICaller` already used, so a hung request
+  surfaces as a clear timeout instead of blocking a worker thread
+  indefinitely. A new `--api-timeout` CLI flag (mirroring the existing
+  `--claude-code-timeout`) wires it through `classify-rules`/
+  `test-overlay-draft`/`test-batch`/`batch` for `--provider anthropic`
+  and `--provider vertex`.
 - Implemented issue #85: coverage metrics now persist across runs for trend
   visibility. `db.coverage_history`/`db.record_coverage_history` (new
   `coverage_history` table, append-only, one row per `mfdoc coverage`/

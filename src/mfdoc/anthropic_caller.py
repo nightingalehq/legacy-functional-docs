@@ -11,18 +11,26 @@ from .batch import ModelResponse, model_response_from_message
 
 DEFAULT_MODEL = "claude-sonnet-4-5"
 DEFAULT_MAX_TOKENS = 8192
+# Matches ClaudeCLICaller's DEFAULT_TIMEOUT_S (claude_cli_caller.py) -- a
+# hung request should surface as a clear timeout, not block a worker
+# thread indefinitely with no visibility into why a run has stalled.
+DEFAULT_TIMEOUT_S = 600
 
 
 class AnthropicCaller:
     def __init__(self, model: str = DEFAULT_MODEL, max_tokens: int = DEFAULT_MAX_TOKENS,
-                 api_key: str | None = None):
+                 api_key: str | None = None, timeout: float | None = None):
         try:
             import anthropic
         except ImportError as exc:
             raise RuntimeError(
                 "`mfdoc batch` needs the `anthropic` package: pip install 'mfdoc[batch]'"
             ) from exc
-        self._client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
+        self.timeout = timeout if timeout is not None else DEFAULT_TIMEOUT_S
+        self._client = (
+            anthropic.Anthropic(api_key=api_key, timeout=self.timeout) if api_key
+            else anthropic.Anthropic(timeout=self.timeout)
+        )
         self.model = model
         self.max_tokens = max_tokens
 

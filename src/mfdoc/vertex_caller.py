@@ -24,11 +24,16 @@ from .batch import ModelResponse, model_response_from_message
 DEFAULT_MODEL = "claude-sonnet-4-5"
 DEFAULT_MAX_TOKENS = 8192
 DEFAULT_REGION = "us-east5"
+# Matches ClaudeCLICaller's DEFAULT_TIMEOUT_S (claude_cli_caller.py) -- a
+# hung request should surface as a clear timeout, not block a worker
+# thread indefinitely with no visibility into why a run has stalled.
+DEFAULT_TIMEOUT_S = 600
 
 
 class VertexCaller:
     def __init__(self, model: str = DEFAULT_MODEL, max_tokens: int = DEFAULT_MAX_TOKENS,
-                 project: str | None = None, region: str | None = None):
+                 project: str | None = None, region: str | None = None,
+                 timeout: float | None = None):
         try:
             from anthropic import AnthropicVertex
         except ImportError as exc:
@@ -88,7 +93,8 @@ class VertexCaller:
         # application-default login`, a service account, or workload identity)
         # the same way any other Vertex client picks them up -- this caller
         # never handles a key file itself.
-        self._client = AnthropicVertex(project_id=project, region=region)
+        self.timeout = timeout if timeout is not None else DEFAULT_TIMEOUT_S
+        self._client = AnthropicVertex(project_id=project, region=region, timeout=self.timeout)
         self.model = model
         self.max_tokens = max_tokens
         # `run_batch` invokes callers concurrently from a ThreadPoolExecutor.
