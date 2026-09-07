@@ -1233,7 +1233,25 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
         }
         for fut in as_completed(futures):
             name, brief_hash, out_path, state_key = futures[fut]
-            response = fut.result()
+            # A caller exception here (transient network error, rate limit,
+            # timeout, ...) must isolate to this one member, not propagate
+            # and kill every other in-flight/queued future in the pool --
+            # see issue #78. Recorded as a failed DocResult (ok=False) so a
+            # re-run's resume check (prior_ok above) re-does exactly this
+            # member and nothing else that already succeeded.
+            try:
+                response = fut.result()
+            except Exception as exc:
+                result = DocResult(
+                    name, str(out_path), False, 1, 0, 0,
+                    [f"model call failed: {exc!r}"],
+                )
+                results.append(result)
+                state[state_key] = {"ok": False, "attempts": 1, "brief_sha256": brief_hash}
+                if state_path:
+                    _save_state(state_path, state)
+                continue
+
             input_tokens, output_tokens = response.input_tokens, response.output_tokens
 
             out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1243,7 +1261,18 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
             if not validation["ok"]:
                 retry_note = _retry_note(validation["problems"])
                 retry_prompt = build_prompt(briefs[state_key], writing_rules, template, retry_note)
-                retry_response = caller(retry_prompt)
+                try:
+                    retry_response = caller(retry_prompt)
+                except Exception as exc:
+                    result = DocResult(
+                        name, str(out_path), False, 1, input_tokens, output_tokens,
+                        validation["problems"] + [f"retry model call failed: {exc!r}"],
+                    )
+                    results.append(result)
+                    state[state_key] = {"ok": False, "attempts": 1, "brief_sha256": brief_hash}
+                    if state_path:
+                        _save_state(state_path, state)
+                    continue
                 input_tokens += retry_response.input_tokens
                 output_tokens += retry_response.output_tokens
                 out_path.write_text(_fix_generated_by_version(retry_response.text), encoding="utf-8")
@@ -1256,20 +1285,46 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
             )
             results.append(result)
             state[state_key] = {"ok": result.ok, "attempts": attempts, "brief_sha256": brief_hash}
+            # Checkpoint after every completed/failed member, not only once
+            # at the very end -- otherwise a later member's failure (or the
+            # process being killed mid-run) loses every already-completed
+            # member's state from this same pass too, forcing a full re-run
+            # instead of just re-doing what actually failed. See issue #78.
+            if state_path:
+                _save_state(state_path, state)
 
     for name, brief_hash, out_path, state_key in to_run_chunked:
         prior = state.get(state_key)
         prior_chunks = prior.get("chunks") if isinstance(prior, dict) else None
-        result = generate_module_doc(
-            conn, name, out_path, caller, writing_rules, template, redact=redact,
-            lexicon=lexicon, max_rules_per_call=threshold, prior_chunks=prior_chunks,
-            index_template=index_template,
-        )
+        # Same isolation as the single-call pool above: a caller exception
+        # partway through a chunked member's several model calls must not
+        # abort every other (already-run or still-queued) chunked member,
+        # and the already-checkpointed prior_chunks are preserved so a
+        # re-run only re-renders the chunk(s) that actually failed to
+        # complete, not the whole member from scratch -- see issue #78.
+        try:
+            result = generate_module_doc(
+                conn, name, out_path, caller, writing_rules, template, redact=redact,
+                lexicon=lexicon, max_rules_per_call=threshold, prior_chunks=prior_chunks,
+                index_template=index_template,
+            )
+        except Exception as exc:
+            result = DocResult(
+                name, str(out_path), False, 0, 0, 0,
+                [f"model call failed: {exc!r}"], chunked=True, chunk_state=prior_chunks,
+            )
         results.append(result)
         state[state_key] = {
             "ok": result.ok, "attempts": result.attempts, "brief_sha256": brief_hash,
             "chunks": result.chunk_state,
         }
+        # Checkpoint after every chunked member too -- these are rendered
+        # serially and can each involve several model calls of their own, so
+        # this is exactly the same "don't lose already-completed work" case
+        # the pool above guards against, just one member wide instead of
+        # scoped to a single call.
+        if state_path:
+            _save_state(state_path, state)
 
     if state_path:
         state["_corpus_sha256"] = corpus_sig

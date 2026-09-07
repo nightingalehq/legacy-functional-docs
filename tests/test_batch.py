@@ -226,6 +226,74 @@ def test_batch_retries_once_on_validation_failure_then_reports(indexed_db, tmp_p
     assert "Previous attempt failed validation" in caller.prompts[1]
 
 
+class FlakyCaller:
+    """Wraps a FakeCaller, raising a transient-looking exception for every
+    prompt whose brief is for one of `fail_for_members`, on their first call
+    only -- simulates a real network blip/rate-limit hitting exactly one
+    member mid-batch, the failure mode #78/#79 exist to make survivable.
+    Every other member (and a previously-failed member's later retry-run
+    call) goes through to the wrapped FakeCaller normally."""
+
+    def __init__(self, fail_for_members: set[str]):
+        self._inner = FakeCaller()
+        self._fail_for_members = set(fail_for_members)
+        self._failed_once: set[str] = set()
+        self.calls = 0
+
+    def __call__(self, prompt: str) -> "batch_mod.ModelResponse":
+        self.calls += 1
+        if "# Fact brief:" in prompt:
+            member = prompt.split("# Fact brief:")[1].splitlines()[0].strip()
+            if member in self._fail_for_members and member not in self._failed_once:
+                self._failed_once.add(member)
+                raise RuntimeError(f"simulated transient error for {member}")
+        return self._inner(prompt)
+
+
+def test_batch_isolates_a_single_member_caller_failure_and_checkpoints_the_rest(indexed_db, tmp_path):
+    """A caller exception for one member (ThreadPoolExecutor's fut.result())
+    must not crash the whole run or lose the other members' already-
+    completed state -- see issue #78. The failed member is reported as
+    failed, not silently dropped, and a re-run only needs to redo it."""
+    members = ["MMP0100", "MMP0200", "MMC0100"]
+    state_path = tmp_path / "state.json"
+    caller = FlakyCaller(fail_for_members={"MMP0200"})
+
+    summary = batch_mod.run_batch(
+        indexed_db, members, tmp_path / "out", caller, "rules", "template",
+        state_path=state_path,
+    )
+
+    assert summary.ok == 2
+    assert summary.failed == 1
+    failed = [r for r in summary.results if not r.ok]
+    assert [r.member for r in failed] == ["MMP0200"]
+    assert any("simulated transient error" in p for p in failed[0].problems)
+
+    # The two members the caller never raised for must have their success
+    # checkpointed to state -- not lost because the run as a whole also
+    # contained a failure.
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["natural/MILLPROD/MMP0100"]["ok"] is True
+    assert state["natural/MILLPROD/MMC0100"]["ok"] is True
+    assert state["natural/MILLPROD/MMP0200"]["ok"] is False
+
+    # A re-run must only redo the failed member: the two ok members are
+    # skipped (their briefs are unchanged), and MMP0200 -- which no longer
+    # raises -- succeeds without needing to touch the others again.
+    calls_before_rerun = caller.calls
+    second = batch_mod.run_batch(
+        indexed_db, members, tmp_path / "out", caller, "rules", "template",
+        state_path=state_path,
+    )
+    assert second.ok == 3
+    assert second.failed == 0
+    assert second.skipped == 2
+    # Only MMP0200's own prompt (one fresh attempt) should have gone through
+    # the caller on the re-run -- the other two members made no new calls.
+    assert caller.calls == calls_before_rerun + 1
+
+
 def test_batch_skips_unchanged_members_on_resume(indexed_db, tmp_path):
     members = ["MMP0100"]
     state_path = tmp_path / "state.json"
