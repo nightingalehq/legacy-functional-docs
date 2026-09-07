@@ -101,6 +101,34 @@ gitignored local fact store, and a documented default posture of no network
 access except the two model-calling paths above. See
 [`docs/guides/security-and-compliance.md`](docs/guides/security-and-compliance.md).
 
+### SME notes (optional)
+
+An SME reviewing generated docs can leave free-text business context,
+gotchas, or corrections in a single semi-structured markdown file (`sme-
+notes.md` by default, path configurable via `options.sme_notes` in
+`project.yml`) that folds into later generation runs — no code or fact-store
+changes needed. See [`examples/sme-notes.md`](examples/sme-notes.md) for a
+worked example. Schema, parsed by `src/mfdoc/sme_notes.py`:
+
+- Content before the first `##` heading (or under an explicit `## General`
+  heading) applies to every module/entity document generated for the
+  project.
+- Each `## <member-or-entity-name>` heading scopes its body to just that
+  member or entity, matched case-insensitively against the same
+  `member_name`/entity names used elsewhere in the tool. Body text is
+  freeform prose or bullets — no further structure required.
+- The file, and the config key that points at it, are both entirely
+  optional; a missing file is a no-op.
+
+Notes are advisory context only: `mfdoc brief`/`mfdoc batch`/`mfdoc
+test-batch` append a matching note as its own clearly-labeled, uncited
+section at the end of `module_brief`/`entity_brief`/`executive_brief`/
+`test_case_brief`, redacted the same as everything else in the brief. They
+may inform interpretation and emphasis, but they are never a citable
+source — every business-rule claim in the generated output still needs its
+own `[[MEMBER:LINE]]` citation, and a note that contradicts the cited facts
+loses to the facts (see `reference/writing-rules.md`'s "SME notes" rule).
+
 ## Why two stages
 
 An LLM reading raw 4GL source will produce fluent documentation containing business

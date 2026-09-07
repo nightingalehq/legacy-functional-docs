@@ -139,6 +139,18 @@ Write from the brief. Read `reference/writing-rules.md` before the first
 document — it defines the citation format, the confidence taxonomy, and the
 specific prose failures to avoid. Use the templates in `templates/`.
 
+Check whether this project has an SME notes file (`options.sme_notes` in
+`project.yml`, `sme-notes.md` by default — see `README.md`'s "SME notes"
+section). `mfdoc brief --entity`/`--module`/`--executive` already fold a
+matching note into the brief text for you, but `--system` and
+`--interface-matrix` don't (that wiring is scoped to module/entity/
+executive/test briefs only) — so when writing `system-overview.md`,
+`processes/*.md`, or `gap-register.md` from the system brief, read
+`sme-notes.md` yourself (general section plus anything scoped to a member
+you're covering) and weigh it the same way: advisory context only, never a
+substitute for a `[[MEMBER:LINE]]` citation, and never something that
+overrides a generated fact.
+
 Suggested document set, in this order (each builds vocabulary the next needs):
 
 1. `system-overview.md` — from the system brief

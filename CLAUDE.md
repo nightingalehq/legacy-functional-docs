@@ -183,7 +183,12 @@ source ─▶ [0 Ingest: normalise.py] ─▶ [1 Extract: dialects/*.py] ─▶ 
   transaction scopes, and the `coverage()` numbers `mfdoc gate` checks.
 - **Brief generation** (`brief.py`): the only input the narrative stage
   sees — plain text, every line already cited. `redact.py` runs here, before
-  anything is written to a file or sent anywhere.
+  anything is written to a file or sent anywhere. `sme_notes.py` parses an
+  optional, project-specific `options.sme_notes` file (`sme-notes.md` by
+  default -- see `README.md`'s "SME notes" section and `SKILL.md`'s note on
+  which brief types fold it in automatically) and `brief._sme_notes_section`
+  appends a matching note as its own uncited, advisory-only section --
+  never a substitute for a `[[MEMBER:LINE]]` citation.
 - **Structural overview** (`classify.py`, `structural.py`): optional layer
   between derive and narrate, split the same way as brief/narrate — one
   module that can call a model, the rest deterministic. `classify.py`'s

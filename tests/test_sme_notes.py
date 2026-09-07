@@ -214,3 +214,30 @@ def test_options_sme_notes_readable_via_cli_load_config(tmp_path):
 
     parsed = sme_notes.load(cfg, config_path.parent)
     assert parsed == {"module-alpha": "A note."}
+
+
+def test_worked_example_parses_with_expected_sections():
+    """examples/sme-notes.md (see #95) is the worked example linked from
+    README.md's "SME notes" section -- it must actually parse into the
+    general + per-member sections it claims to demonstrate, or the example
+    is misleading."""
+    example = REPO_ROOT / "examples" / "sme-notes.md"
+    parsed = sme_notes.parse(example)
+
+    assert set(parsed) == {None, "mmp0100", "mill-order"}
+
+    general = sme_notes.notes_for(parsed, None)
+    assert general is not None
+    assert "reconciliation" in general
+
+    mmp0100 = sme_notes.notes_for(parsed, "MMP0100")
+    assert mmp0100 is not None
+    assert "CONF" in mmp0100
+    # General text always precedes member-specific text, in that order.
+    assert mmp0100.index("reconciliation") < mmp0100.index("CONF")
+
+    mill_order = sme_notes.notes_for(parsed, "MILL-ORDER")
+    assert mill_order is not None
+    assert "GRADE-CODE" in mill_order
+
+    assert sme_notes.notes_for(parsed, "SOME-UNRELATED-MEMBER") == general
