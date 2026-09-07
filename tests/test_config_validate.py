@@ -49,8 +49,9 @@ def test_fully_populated_valid_config_has_no_problems():
         },
         "redact": {"enabled": True, "patterns": [r"\bSECRET\d+\b", "literal-value"]},
         "validate": {"outcome_field_pattern": r"\bRESULT\b"},
+        "splitters": {"natural": [r"^\*{5,}\s*PROGRAM\b"]},
         "overview": {
-            "themes": {"llm_fallback": False},
+            "themes": {"llm_fallback": False, "taxonomy": {"Posting": [r"\bPOST\b", "literal-value"]}},
             "complexity": {"metric": "rule_depth"},
             "diagrams": {"cluster_by": "subsystem", "max_nodes_inline": 40, "direction": "TD"},
             "dispatch_field_pattern": r"MENU-OPT\b",
@@ -228,6 +229,38 @@ def test_dispatch_field_pattern_must_be_a_valid_regex():
     problems = validate_config(cfg)
     assert any("options.overview.dispatch_field_pattern" in p and "not a valid regex" in p
                for p in problems)
+
+
+def test_splitters_entry_must_be_a_list():
+    cfg = _base_cfg()
+    cfg["options"] = {"splitters": {"natural": "not-a-list"}}
+    problems = validate_config(cfg)
+    assert any("options.splitters" in p and "'natural'" in p and "must be a list" in p
+               for p in problems)
+
+
+def test_splitters_entry_must_be_valid_regexes():
+    cfg = _base_cfg()
+    cfg["options"] = {"splitters": {"natural": ["(unclosed"]}}
+    problems = validate_config(cfg)
+    assert any("options.splitters" in p and "'natural'" in p and "not a valid regex" in p
+               for p in problems)
+
+
+def test_taxonomy_entry_must_be_a_list():
+    cfg = _base_cfg()
+    cfg["options"] = {"overview": {"themes": {"taxonomy": {"Posting": "not-a-list"}}}}
+    problems = validate_config(cfg)
+    assert any("options.overview.themes.taxonomy" in p and "'Posting'" in p
+               and "must be a list" in p for p in problems)
+
+
+def test_taxonomy_entry_must_be_valid_regexes():
+    cfg = _base_cfg()
+    cfg["options"] = {"overview": {"themes": {"taxonomy": {"Posting": ["(unclosed"]}}}}
+    problems = validate_config(cfg)
+    assert any("options.overview.themes.taxonomy" in p and "'Posting'" in p
+               and "not a valid regex" in p for p in problems)
 
 
 def test_overview_complexity_metric_only_rule_depth_supported():

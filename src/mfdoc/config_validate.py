@@ -114,6 +114,23 @@ def _valid_regex(value: str) -> str | None:
     return None
 
 
+def _dict_of_regex_lists(value: dict) -> str | None:
+    """For a config leaf shaped `{key: [pattern, ...], ...}` -- the shape
+    both `options.splitters` (dialect name -> patterns, consumed by
+    `normalise.split_members`) and `options.overview.themes.taxonomy`
+    (theme name -> patterns, consumed by `classify.classify_rules_deterministic`)
+    share. Keys are project-chosen names (a dialect, a theme), not a fixed
+    set OPTION_SPECS can enumerate up front, so this is one check applied to
+    the whole mapping rather than a per-key OptionSpec."""
+    for key, patterns in value.items():
+        if not isinstance(patterns, list):
+            return f"[{key!r}] must be a list, got {patterns!r}"
+        err = _regex_list(patterns)
+        if err:
+            return f"[{key!r}] {err}"
+    return None
+
+
 @dataclass(frozen=True)
 class OptionSpec:
     path: str
@@ -172,6 +189,19 @@ OPTION_SPECS: list[OptionSpec] = [
                check=_valid_regex),
     OptionSpec("options.overview.dispatch_field_pattern", (str,), "a string",
                check=_valid_regex),
+
+    # Dialect-keyed and theme-keyed regex lists (cli.py's cmd_ingest folds
+    # options.splitters into normalise.split_members's splitters dict;
+    # cmd_classify_rules passes options.overview.themes.taxonomy straight
+    # into classify.classify_rules_deterministic) -- same lazily-compiled-
+    # at-point-of-use gap as the single-pattern keys above, just keyed by a
+    # project-chosen dialect/theme name instead of a fixed leaf.
+    OptionSpec("options.splitters", (dict,),
+               "a mapping of dialect name to a list of regex strings",
+               check=_dict_of_regex_lists),
+    OptionSpec("options.overview.themes.taxonomy", (dict,),
+               "a mapping of theme name to a list of regex strings",
+               check=_dict_of_regex_lists),
 
     OptionSpec("options.overview.themes.llm_fallback", (bool,), "a boolean"),
     OptionSpec("options.overview.complexity.metric", (str,), "a string",
