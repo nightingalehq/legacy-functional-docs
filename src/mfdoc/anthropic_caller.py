@@ -55,7 +55,20 @@ class AnthropicCaller:
             )
             return model_response_from_message(message)
 
-        return call_with_retry(
+        # `retries` is local to this one `__call__` -- never a shared
+        # instance attribute -- so it stays correct under run_batch's
+        # concurrent ThreadPoolExecutor callers (issue #84): each thread's
+        # own call gets its own counter via `on_retry`'s closure, with no
+        # cross-thread state to race.
+        retries = 0
+
+        def on_retry(attempt: int, exc: Exception) -> None:
+            nonlocal retries
+            retries = attempt
+
+        response = call_with_retry(
             do_call, lambda exc: isinstance(exc, self._retryable_errors),
-            max_retries=self.max_retries,
+            max_retries=self.max_retries, on_retry=on_retry,
         )
+        response.retries = retries
+        return response

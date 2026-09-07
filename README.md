@@ -314,11 +314,21 @@ silently truncated response reported as success. See
 mfdoc test-plan     --config project.yml
 mfdoc test-advisory --config project.yml
 mfdoc test-gen      --config project.yml --member MMP0100 --language python --framework pytest
-# output nests as <out_dir>/<dialect>/<library>/<language>/<framework>/<member>.md,
-# same convention as `mfdoc batch` above -- e.g.
-# tests_generated/natural/MILLPROD/python/pytest/MMP0100.md
+# output nests as <out_dir>/<project-namespace>/<dialect>/<library>/<language>/<framework>/<member>.md
+# (same <dialect>/<library>/<language>/<framework> convention as `mfdoc batch` above,
+# plus a namespace segment -- project.yml's `system`, else `project`, else "default" --
+# so two configs sharing a working directory don't share one output tree) -- e.g.
+# tests_generated/mom/natural/MILLPROD/python/pytest/MMP0100.md
 mfdoc test-validate --config project.yml --docs tests_generated
 ```
+
+If multiple `project.yml` configs share the same `out_dir` (the common case
+once namespacing is in play), point `mfdoc test-validate --docs` at the
+namespaced subdirectory for the config you're validating (e.g.
+`tests_generated/mom`) rather than the bare `out_dir` -- pointed at the bare
+`out_dir` it walks every project's namespace subdirectory it finds there and
+attempts to validate their generated test docs too, not just the one config
+you ran it for.
 
 ## Worked examples
 

@@ -597,9 +597,13 @@ def test_test_gen_matrix_renders_every_configured_target(cli_args, indexed_db, t
     # validate_test_doc's front-matter check -- generate_member_test_doc
     # still writes it to disk on every attempt, which is what's under test
     # here: that --matrix iterates every configured target and writes each
-    # to its own per-target path.
-    python_out = (tmp_path / "out" / "natural" / "MILLPROD" / "python" / "pytest" / "MMP0100.md")
-    natural_out = (tmp_path / "out" / "natural" / "MILLPROD" / "natural" / "natunit" / "MMP0100.md")
+    # to its own per-target path. "mom" is this fixture project.yml's own
+    # `system` -- out_dir gets a project-namespace subdirectory even when
+    # explicitly configured (see cli._project_namespace's docstring for why
+    # an explicit-but-still-shared out_dir doesn't get index_db's
+    # "explicit means distinguishing" exemption).
+    python_out = (tmp_path / "out" / "mom" / "natural" / "MILLPROD" / "python" / "pytest" / "MMP0100.md")
+    natural_out = (tmp_path / "out" / "mom" / "natural" / "MILLPROD" / "natural" / "natunit" / "MMP0100.md")
     assert python_out.exists()
     assert natural_out.exists()
     assert "python/pytest" in python_out.read_text(encoding="utf-8")
@@ -1967,3 +1971,167 @@ def test_checkpoint_is_member_granular_not_chunk_granular_for_chunked_members(tm
     assert len(save_calls) == 2, (
         f"expected exactly 2 _save_state calls (per-member checkpoint + final), got {len(save_calls)}"
     )
+
+
+# --- Issue #89: namespace test-batch state/output per project, so two
+# project configs pointing at the same working directory don't silently
+# share (and clobber) one another's resume-state/output tree. ---
+
+def test_project_namespace_derives_from_system_then_project_then_default():
+    from mfdoc.cli import _project_namespace
+
+    assert _project_namespace({"system": "MOM"}) == "mom"
+    assert _project_namespace({"project": "Mill Order Management"}) == "mill-order-management"
+    # `system` wins over `project` when both are set -- the shorter code is
+    # the more filesystem-friendly of the two, and matches which one a
+    # human would actually use to tell two configs apart at a glance.
+    assert _project_namespace({"system": "MOM", "project": "Mill Order Management"}) == "mom"
+    assert _project_namespace({}) == "default"
+    # Non-alphanumeric characters (spaces, slashes, punctuation) collapse to
+    # single hyphens rather than propagating into a path segment that could
+    # be misread as introducing a subdirectory or trailing/leading noise.
+    assert _project_namespace({"system": "  Weird/Chars!! "}) == "weird-chars"
+
+
+def test_project_namespace_never_produces_a_path_traversal_segment():
+    """A `system`/`project` value that slugifies to "." or ".." must not be
+    used as-is: as a single path segment (no "/" survives the sub above),
+    either one still means "this directory" / "the parent directory" to
+    the filesystem, which would silently point test-batch's output/state
+    at an unrelated location instead of a real per-project subfolder --
+    the opposite of what this namespacing exists to guarantee."""
+    from mfdoc.cli import _project_namespace
+
+    assert _project_namespace({"system": "."}) == "default"
+    assert _project_namespace({"system": ".."}) == "default"
+    assert _project_namespace({"system": "..."}) not in (".", "..")
+    assert _project_namespace({"system": "  ..  "}) == "default"
+    # A leading/trailing run of dots around otherwise-real content must be
+    # trimmed, not just rejected wholesale -- ".." isn't the *only*
+    # substring that must never survive to become the whole segment.
+    assert _project_namespace({"system": "..sysa.."}) == "sysa"
+
+
+def _seed_fakemod_for_cli(config_path: Path) -> None:
+    """Minimal index_db content for one config: a single FAKEMOD member
+    with one derived test_case row -- just enough for `cmd_test_batch` to
+    find a batchable member and actually write output/state, without
+    running the full ingest/derive/test-plan pipeline."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA, insert
+
+    cfg = cli.load_config(str(config_path))
+    db_path = config_path.parent / cfg["index_db"]
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
+    insert(
+        conn, "test_case", member_id=1, kind="unit", scenario_name="FAKEMOD:BR-001",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+        then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:1", confidence="verified",
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_two_project_configs_sharing_a_working_directory_get_separate_state_and_output(tmp_path):
+    """Two project.yml files in the very same directory, differing only in
+    `system` (and, per the existing index_db convention, their own
+    index_db path) -- neither --out nor --state given for either run, so
+    both rely entirely on the computed defaults. Must produce two distinct
+    output trees and two distinct resume-state files: a `rm -f` intended to
+    force a clean retry for one project must never touch the other's."""
+    import json
+
+    import yaml
+
+    project_dir = tmp_path / "shared-workdir"
+    shutil.copytree(REPO_ROOT / "reference", project_dir / "reference")
+    shutil.copytree(REPO_ROOT / "templates", project_dir / "templates")
+    base_cfg = yaml.safe_load((REPO_ROOT / "project.yml").read_text(encoding="utf-8"))
+
+    def write_config(name: str, system: str) -> Path:
+        cfg = dict(base_cfg)
+        cfg["system"] = system
+        cfg["sources"] = []
+        cfg["index_db"] = f".mfdoc/{name}.db"
+        path = project_dir / f"{name}.yml"
+        path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+        return path
+
+    config_a = write_config("project-a", "SYSA")
+    config_b = write_config("project-b", "SYSB")
+    _seed_fakemod_for_cli(config_a)
+    _seed_fakemod_for_cli(config_b)
+
+    def run(config_path: Path) -> int:
+        args = SimpleNamespace(
+            config=str(config_path), out=None, members=None,
+            language="python", framework="pytest", template=None, model=None,
+            caller="fake-echo", provider="anthropic", gcp_project=None, gcp_region=None,
+            concurrency=1, state=None, matrix=False,
+        )
+        return cli.cmd_test_batch(args)
+
+    run(config_a)
+    run(config_b)
+
+    ns_a, ns_b = "sysa", "sysb"
+    assert ns_a != ns_b
+
+    out_a = project_dir / "tests_generated" / ns_a / "natural" / "python" / "pytest" / "FAKEMOD.md"
+    out_b = project_dir / "tests_generated" / ns_b / "natural" / "python" / "pytest" / "FAKEMOD.md"
+    assert out_a.exists()
+    assert out_b.exists()
+    assert out_a != out_b
+
+    state_a = project_dir / ".mfdoc" / f"{ns_a}-test-batch-state.json"
+    state_b = project_dir / ".mfdoc" / f"{ns_b}-test-batch-state.json"
+    assert state_a.exists()
+    assert state_b.exists()
+    saved_a = json.loads(state_a.read_text(encoding="utf-8"))
+    saved_b = json.loads(state_b.read_text(encoding="utf-8"))
+    assert "natural::FAKEMOD::python::pytest" in saved_a
+    assert "natural::FAKEMOD::python::pytest" in saved_b
+
+    # The crux of the bug this closes: deleting one project's resume-state
+    # file (a common "force a clean retry" move) must never remove or
+    # otherwise disturb the other project's.
+    state_a.unlink()
+    assert state_b.exists()
+    assert json.loads(state_b.read_text(encoding="utf-8")) == saved_b
+
+
+def test_test_batch_explicit_out_and_state_are_never_namespaced(tmp_path):
+    """An explicit --out/--state is a full override, like index_db always
+    is -- it must be used exactly as given, with no project-namespace
+    subdirectory/prefix inserted, regardless of --config's system/project."""
+    shutil.copytree(REPO_ROOT / "reference", tmp_path / "reference")
+    shutil.copytree(REPO_ROOT / "templates", tmp_path / "templates")
+    import yaml
+
+    base_cfg = yaml.safe_load((REPO_ROOT / "project.yml").read_text(encoding="utf-8"))
+    base_cfg["system"] = "SYSA"
+    base_cfg["sources"] = []
+    base_cfg["index_db"] = ".mfdoc/index.db"
+    config_path = tmp_path / "project.yml"
+    config_path.write_text(yaml.safe_dump(base_cfg), encoding="utf-8")
+    _seed_fakemod_for_cli(config_path)
+
+    args = SimpleNamespace(
+        config=str(config_path), out=str(tmp_path / "explicit-out"), members=None,
+        language="python", framework="pytest", template=None, model=None,
+        caller="fake-echo", provider="anthropic", gcp_project=None, gcp_region=None,
+        concurrency=1, state=str(tmp_path / "explicit-state.json"), matrix=False,
+    )
+    cli.cmd_test_batch(args)
+
+    assert (tmp_path / "explicit-out" / "natural" / "python" / "pytest" / "FAKEMOD.md").exists()
+    assert (tmp_path / "explicit-state.json").exists()
+    assert not (tmp_path / "explicit-out" / "sysa").exists()

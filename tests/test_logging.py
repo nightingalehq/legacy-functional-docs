@@ -50,8 +50,8 @@ def test_call_with_retry_logs_a_warning_for_each_transient_retry(caplog):
     assert result == "ok"
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 2  # attempts 1 and 2 failed transiently, attempt 3 succeeded
-    assert "retrying" in warnings[0].message
-    assert "simulated rate limit" in warnings[0].message
+    assert "retrying" in warnings[0].getMessage()
+    assert "simulated rate limit" in warnings[0].getMessage()
 
 
 def test_call_with_retry_logs_nothing_when_the_first_call_succeeds(caplog):
@@ -83,7 +83,7 @@ def test_run_batch_logs_debug_on_a_resumed_skip(indexed_db, tmp_path, caplog):
         )
     assert second.skipped == 1
     debug_records = [r for r in caplog.records if r.levelno == logging.DEBUG]
-    assert any("skip MMP0100" in r.message and "resumed" in r.message for r in debug_records)
+    assert any("skip MMP0100" in r.getMessage() and "resumed" in r.getMessage() for r in debug_records)
 
 
 def test_run_batch_logs_warning_on_a_validation_retry(indexed_db, tmp_path, caplog):
@@ -97,7 +97,7 @@ def test_run_batch_logs_warning_on_a_validation_retry(indexed_db, tmp_path, capl
     assert summary.retried == 1
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert any(
-        "MMP0100" in r.message and "validation failed" in r.message and "retrying" in r.message
+        "MMP0100" in r.getMessage() and "validation failed" in r.getMessage() and "retrying" in r.getMessage()
         for r in warnings
     )
 
@@ -115,7 +115,7 @@ def test_run_batch_logs_error_on_a_model_call_failure(indexed_db, tmp_path, capl
     assert summary.failed == 1
     errors = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert any(
-        "MMP0100" in r.message and "model call failed" in r.message for r in errors
+        "MMP0100" in r.getMessage() and "model call failed" in r.getMessage() for r in errors
     )
 
 
@@ -198,7 +198,7 @@ def test_run_test_batch_logs_debug_on_a_resumed_skip(tmp_path, caplog):
         )
     assert second.skipped == 1
     debug_records = [r for r in caplog.records if r.levelno == logging.DEBUG]
-    assert any("skip FAKEMOD" in r.message and "resumed" in r.message for r in debug_records)
+    assert any("skip FAKEMOD" in r.getMessage() and "resumed" in r.getMessage() for r in debug_records)
 
 
 def test_run_test_batch_logs_warning_when_the_model_call_raises(tmp_path, caplog):
@@ -216,7 +216,7 @@ def test_run_test_batch_logs_warning_when_the_model_call_raises(tmp_path, caplog
         )
     assert summary.failed == 1
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert any("FAKEMOD" in r.message and "retrying" in r.message for r in warnings)
+    assert any("FAKEMOD" in r.getMessage() and "retrying" in r.getMessage() for r in warnings)
 
 
 def test_configure_logging_writes_to_the_given_log_file(tmp_path):

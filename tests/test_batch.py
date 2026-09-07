@@ -23,6 +23,25 @@ from mfdoc.redact import NULL_REDACTOR, Redactor
 from mfdoc.validate import CITATION
 
 
+def _fake_clock(monkeypatch) -> None:
+    """Monkeypatch batch_mod.time.perf_counter to a deterministic, always-
+    advancing-by-0.1-seconds fake, so tests asserting on DocResult/
+    BatchSummary duration_s (issue #84) don't depend on real wall-clock
+    timing (flaky under CI load) or need real sleeps to produce a
+    measurable, non-zero duration. Every _timed_call() does exactly one
+    start-tick/end-tick pair around one model call with nothing else in
+    this module reading the clock in between, so each timed model call
+    reads as exactly 0.1s elapsed under this fake, regardless of how many
+    calls a test's caller makes."""
+    ticks = {"t": 0.0}
+
+    def fake_perf_counter() -> float:
+        ticks["t"] += 0.1
+        return ticks["t"]
+
+    monkeypatch.setattr(batch_mod.time, "perf_counter", fake_perf_counter)
+
+
 def _track_module_brief_calls(monkeypatch) -> list[str]:
     """Wrap batch_mod.module_brief to record every member name it's called
     with, while still delegating to the real implementation -- shared by
@@ -261,6 +280,135 @@ def test_batch_reports_two_attempts_when_the_retry_call_itself_raises(indexed_db
 
     state = json.loads(state_path.read_text(encoding="utf-8"))
     assert state["natural/MILLPROD/MMP0100"]["attempts"] == 2
+
+
+def test_generate_module_doc_from_brief_tracks_duration_and_retries_across_attempts(monkeypatch, indexed_db, tmp_path):
+    """DocResult.duration_s sums each attempt's own call time and
+    DocResult.retries sums each response's own ModelResponse.retries
+    (issue #79's transient-retry count) -- both across every model call
+    this one member's generation made, not just the last attempt. Uses a
+    first-attempt-fails/second-attempt-succeeds member so both the
+    duration and retries accumulation (not just a single-call passthrough)
+    is actually exercised."""
+    _fake_clock(monkeypatch)
+    calls = {"n": 0}
+
+    def caller(prompt: str) -> batch_mod.ModelResponse:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # Fails validation (no front matter) -- forces a retry -- but
+            # still simulates having needed 2 transient retries to get even
+            # this far, so `retries` must count it despite the eventual
+            # validation failure.
+            return batch_mod.ModelResponse(text="not even front matter", input_tokens=1, output_tokens=1, retries=2)
+        text = GOOD_FRONTMATTER.format(member="MMP0100") + "\n# MMP0100\n\nDoes something [[MMP0100:1]].\n"
+        return batch_mod.ModelResponse(text=text, input_tokens=1, output_tokens=1, retries=1)
+
+    out_path = tmp_path / "MMP0100.md"
+    brief = "# Fact brief: MMP0100\n\nSome brief text [[MMP0100:1]].\n"
+    result = batch_mod._generate_module_doc_from_brief(
+        indexed_db, "MMP0100", brief, out_path, caller, "cite everything", "module template",
+    )
+    assert result.ok, result.problems
+    assert result.attempts == 2
+    assert result.retries == 3  # 2 (attempt 1) + 1 (attempt 2)
+    assert result.duration_s == pytest.approx(0.2)  # 0.1s/call (fake clock) * 2 calls
+
+
+def test_run_batch_tracks_duration_and_retries_for_a_mixed_run(monkeypatch, indexed_db, tmp_path):
+    """End-to-end through run_batch(): one member succeeds first try (with
+    transient retries along the way), one raises on its only call, and one
+    needs (and gets) a validation retry -- BatchSummary.total_duration_s/
+    total_retries must sum every member's own DocResult.duration_s/retries,
+    and each DocResult itself must carry its own correct per-member figures,
+    not just an aggregate total.
+
+    Concurrency is pinned to 1, and the one member needing a second
+    (validation-retry) call is placed last: run_batch's pool dispatches the
+    *next* queued member's call on the worker thread independently of the
+    main thread's per-future retry-call handling, so a retry call for a
+    member with more members still queued behind it could race the fake
+    clock's shared tick counter against the next member's own call. Putting
+    the only retrying member last means nothing is left queued by the time
+    its retry runs, so this holds deterministically rather than relying on
+    real timing to avoid the race."""
+    _fake_clock(monkeypatch)
+
+    def caller(prompt: str) -> batch_mod.ModelResponse:
+        if "MMP0100" in prompt:
+            # First-try success, but simulates 3 transient retries en route.
+            member = "MMP0100"
+            text = GOOD_FRONTMATTER.format(member=member) + f"\n# {member}\n\nDoes something [[{member}:1]].\n"
+            return batch_mod.ModelResponse(text=text, input_tokens=1, output_tokens=1, retries=3)
+        if "MMP9000" in prompt:
+            raise RuntimeError("simulated transient error, retries already exhausted inside the caller")
+        # MMP0200: fails validation on the first call, succeeds on the retry.
+        is_retry = "Previous attempt failed validation" in prompt
+        if not is_retry:
+            return batch_mod.ModelResponse(text="not even front matter", input_tokens=1, output_tokens=1)
+        member = "MMP0200"
+        text = GOOD_FRONTMATTER.format(member=member) + f"\n# {member}\n\nDoes something [[{member}:1]].\n"
+        return batch_mod.ModelResponse(text=text, input_tokens=1, output_tokens=1, retries=1)
+
+    summary = batch_mod.run_batch(
+        indexed_db, ["MMP0100", "MMP9000", "MMP0200"], tmp_path / "out", caller,
+        "rules", "template", concurrency=1,
+    )
+    by_member = {r.member: r for r in summary.results}
+
+    first_try = by_member["MMP0100"]
+    assert first_try.ok and first_try.attempts == 1
+    assert first_try.retries == 3
+    assert first_try.duration_s == pytest.approx(0.1)
+
+    failed = by_member["MMP9000"]
+    assert not failed.ok and failed.attempts == 1
+    assert failed.retries == 0
+    assert failed.duration_s == 0.0  # no timing to report for a call that raised
+
+    retried = by_member["MMP0200"]
+    assert retried.ok and retried.attempts == 2
+    assert retried.retries == 1  # only the (successful) retry call reported transient retries
+    assert retried.duration_s == pytest.approx(0.2)
+
+    assert summary.total_retries == 3 + 0 + 1
+    assert summary.total_duration_s == pytest.approx(0.1 + 0.0 + 0.2)
+
+
+def test_generate_module_doc_chunked_aggregates_duration_and_retries_across_chunks_and_narrative(monkeypatch, tmp_path):
+    """A chunked member's DocResult.duration_s/retries must fold in every
+    chunk's own call plus the one whole-module narrative-reconciliation
+    call -- not just the last chunk, and not omitting the narrative call
+    that only runs once every chunk validated ok."""
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    _fake_clock(monkeypatch)
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_rules(conn, 5)  # -> 3 chunks with max_rules_per_call=2
+
+    good_caller = _chunk_aware_module_caller()
+
+    def caller(prompt: str) -> batch_mod.ModelResponse:
+        response = good_caller(prompt)
+        # Attribute one transient retry to each chunk call (never to the
+        # narrative-reconciliation call, distinguished the same way the
+        # rest of this module tells them apart) so the aggregate is
+        # unambiguous: 3 chunks * 1 retry each = 3, narrative contributes 0.
+        if "# Fact brief:" in prompt:
+            response.retries = 1
+        return response
+
+    out_path = tmp_path / "FAKEMOD.md"
+    result = batch_mod.generate_module_doc(
+        conn, "FAKEMOD", out_path, caller, "writing rules text", "template text", max_rules_per_call=2,
+    )
+    assert result.ok, result.problems
+    assert result.chunked is True
+    assert result.retries == 3  # one per chunk call, none from the narrative call
+    assert result.duration_s == pytest.approx(0.4)  # 4 timed calls (3 chunks + 1 narrative) * 0.1s
 
 
 class FlakyCaller:
@@ -1410,7 +1558,7 @@ def test_generate_module_index_narrative_succeeds_first_try(tmp_path):
             f"\n# FAKEMOD\n\n{body}"
         )
 
-    ok, attempts, in_tok, out_tok, problems, sections = batch_mod._generate_module_index_narrative(
+    ok, attempts, in_tok, out_tok, problems, sections, duration_s, retries = batch_mod._generate_module_index_narrative(
         conn, "FAKEMOD", [(1, "## Purpose\n\nSomething [[FAKEMOD:1]].")], caller,
         "writing rules", None, out_path, assemble, max_attempts=2,
     )
@@ -1456,7 +1604,7 @@ def test_generate_module_index_narrative_retries_once_on_missing_section(tmp_pat
             f"\n# FAKEMOD\n\n{body}"
         )
 
-    ok, attempts, in_tok, out_tok, problems, sections = batch_mod._generate_module_index_narrative(
+    ok, attempts, in_tok, out_tok, problems, sections, duration_s, retries = batch_mod._generate_module_index_narrative(
         conn, "FAKEMOD", [(1, "## Purpose\n\nSomething [[FAKEMOD:1]].")], caller,
         "writing rules", None, out_path, assemble, max_attempts=2,
     )
@@ -1498,7 +1646,7 @@ def test_generate_module_index_narrative_fails_after_max_attempts(tmp_path):
             f"\n# FAKEMOD\n\n{body}"
         )
 
-    ok, attempts, in_tok, out_tok, problems, sections = batch_mod._generate_module_index_narrative(
+    ok, attempts, in_tok, out_tok, problems, sections, duration_s, retries = batch_mod._generate_module_index_narrative(
         conn, "FAKEMOD", [(1, "## Purpose\n\nSomething [[FAKEMOD:1]].")], caller,
         "writing rules", None, out_path, assemble, max_attempts=2,
     )
@@ -1660,7 +1808,7 @@ def test_generate_module_index_narrative_rejects_a_citation_not_in_any_excerpt(t
             f"\n# FAKEMOD\n\n{body}"
         )
 
-    ok, attempts, in_tok, out_tok, problems, sections = batch_mod._generate_module_index_narrative(
+    ok, attempts, in_tok, out_tok, problems, sections, duration_s, retries = batch_mod._generate_module_index_narrative(
         conn, "FAKEMOD", [(1, "## Purpose\n\nSomething [[FAKEMOD:1]].")], caller,
         "writing rules", None, out_path, assemble, max_attempts=2,
     )

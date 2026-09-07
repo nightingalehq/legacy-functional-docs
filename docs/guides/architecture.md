@@ -287,13 +287,20 @@ judgement-heavy documents are deliberately routed differently:
   (more source lines, more nested branches, per rule). `brief.
   chunk_density_metrics`/`flag_density_outliers`/`format_density_note`
   (shared by `batch.py` and `test-batch`'s equivalent chunking) compute a
-  cheap lines-per-rule and average-nesting-depth estimate per chunk from
+  cheap lines-per-item and average-nesting-depth estimate per chunk from
   facts already at hand, flag any chunk well above the run's own median for
   either metric, and append a `density: ... -- OUTLIER (...)` note to that
   chunk's own reported problem when (and only when) it fails — so a chunk
   that keeps failing its retries for a genuine content-density reason is
   distinguishable, immediately, from one that was just unlucky, instead of
-  requiring a human to notice the pattern across several failed runs.
+  requiring a human to notice the pattern across several failed runs. Every
+  model call `run_batch` makes is timed (`batch._timed_call`) and, for
+  `AnthropicCaller`/`VertexCaller`, carries how many of
+  `retry.call_with_retry`'s transient-error retries (#79) it took — both
+  roll up per member onto `DocResult.duration_s`/`.retries` and, run-wide,
+  onto `BatchSummary.total_duration_s`/`.total_retries`, printed by
+  `cmd_batch` alongside tokens/cost so a multi-hundred-module run can tell
+  "is this run stuck or just slow" and which members needed retries (#84).
 - **Interactive, via Claude Code (`SKILL.md`)** — for system overview, data
   entity docs, process flows and the gap register, where grouping and
   narrative structure benefit from a human (or a chat session) holding the
