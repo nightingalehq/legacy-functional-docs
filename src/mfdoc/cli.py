@@ -71,7 +71,13 @@ DIALECT_DEFAULT_TYPE = {
 
 
 def load_config(path: str | Path) -> dict:
-    cfg = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    try:
+        cfg = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise ConfigError(
+            f"invalid project config -- 1 problem(s):\n"
+            f"  - invalid YAML: {exc}"
+        ) from exc
     if cfg is None:
         cfg = {}
     if not isinstance(cfg, dict):

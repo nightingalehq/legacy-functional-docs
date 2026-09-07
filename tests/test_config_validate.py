@@ -354,6 +354,13 @@ def test_load_config_raises_config_error_for_non_mapping_yaml_root(tmp_path, bad
         cli.load_config(str(config_path))
 
 
+def test_load_config_raises_config_error_for_invalid_yaml(tmp_path):
+    config_path = tmp_path / "project.yml"
+    config_path.write_text("sources: [\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="invalid YAML"):
+        cli.load_config(str(config_path))
+
+
 def test_load_config_accepts_a_config_with_no_options_block(tmp_path):
     """Every OPTION_SPECS entry is optional -- a project.yml that configures
     none of them (the common case) must still load cleanly."""
@@ -384,3 +391,12 @@ def test_main_exits_cleanly_with_message_on_malformed_config(tmp_path, capsys):
     assert rc == 2
     captured = capsys.readouterr()
     assert "max_high_severity_gaps" in captured.err
+
+
+def test_main_exits_cleanly_with_message_on_invalid_yaml(tmp_path, capsys):
+    config_path = tmp_path / "project.yml"
+    config_path.write_text("sources: [\n", encoding="utf-8")
+    rc = cli.main(["gate", "--config", str(config_path)])
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "invalid YAML" in captured.err
