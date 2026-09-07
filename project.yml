@@ -76,6 +76,11 @@ options:
   #   natural:
   #     - '^\*+\s*>{2,}\s*(?P<type>\w+)?\s*(?P<name>[A-Z0-9#\-_&$]{1,32})\s*<{2,}'
 
+  # Path (relative to this config) to an optional SME-authored notes file --
+  # free-text business context/gotchas an SME wants weighed during doc
+  # generation, parsed by sme_notes.py. Omit to skip entirely; see #93.
+  # sme_notes: sme-notes.md
+
   # mfdoc validate's reversed-condition check (conditions.py). Deliberately
   # no default here beyond the built-in RETURN-CODE/RESPONSE-CODE/STATUS/
   # STAT/FLAG/RC denylist -- set this only if this codebase's outcome fields
