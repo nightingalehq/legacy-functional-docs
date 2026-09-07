@@ -615,16 +615,16 @@ def extract(conn, member_id: int, lines: list[tuple[int, str | None, str]], memb
             if nxt_comment:
                 look += 1
                 continue
-            is_write_family = (
+            is_operand_list_verb = (
                 RE_WRITE.match(stmt) or RE_INPUT.match(stmt) or RE_REINPUT.match(stmt)
                 or RE_COMPRESS_SEPARATE.match(stmt)
             )
-            is_write_operand_continuation = is_write_family and (
+            is_operand_list_continuation = is_operand_list_verb and (
                 CONTINUATION_LEAD_COLSPEC.match(nxt_code) or CONTINUATION_LEAD_SLASH.match(nxt_code)
                 or (CONTINUATION_LEAD_FIELD.match(nxt_code) and ":=" not in nxt_code)
             )
             if not (CONTINUATION_TAIL.search(stmt.rstrip()) or CONTINUATION_LEAD.match(nxt_code)
-                    or CONTINUATION_LEAD_QUOTE.match(nxt_code) or is_write_operand_continuation):
+                    or CONTINUATION_LEAD_QUOTE.match(nxt_code) or is_operand_list_continuation):
                 break
             look += 1
             stmt = stmt.rstrip() + " " + nxt_code.strip()
