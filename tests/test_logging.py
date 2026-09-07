@@ -17,7 +17,6 @@ reused nowhere else but could be.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 import logging
 
 import pytest
@@ -27,23 +26,30 @@ from mfdoc.retry import call_with_retry
 from test_batch import FakeCaller
 
 
-class _Transient(Exception):
-    pass
-
-
-@contextmanager
-def _preserve_root_logging():
+@pytest.fixture
+def preserve_root_logger():
+    """Snapshot and restore the root logger's level/handlers around a test
+    that calls `cli._configure_logging()` -- that function mutates *global*
+    logging state (root level, a StreamHandler/FileHandler attached to the
+    root logger), so a test exercising it must put that state back exactly
+    as it found it, not just reset to some assumed default (`verbose=False,
+    log_file=None`) that may not match whatever the test session's own
+    logging setup actually was before this test ran."""
     root = logging.getLogger()
-    handlers = root.handlers[:]
-    level = root.level
+    prev_level = root.level
+    prev_handlers = list(root.handlers)
     try:
         yield
     finally:
-        for handler in root.handlers[:]:
-            root.removeHandler(handler)
+        new_handlers = [handler for handler in root.handlers if handler not in prev_handlers]
+        root.handlers[:] = prev_handlers
+        root.setLevel(prev_level)
+        for handler in new_handlers:
             handler.close()
-        root.handlers[:] = handlers
-        root.setLevel(level)
+
+
+class _Transient(Exception):
+    pass
 
 
 def test_call_with_retry_logs_a_warning_for_each_transient_retry(caplog):
@@ -235,19 +241,17 @@ def test_run_test_batch_logs_warning_when_the_model_call_raises(tmp_path, caplog
     assert any("FAKEMOD" in r.getMessage() and "retrying" in r.getMessage() for r in warnings)
 
 
-def test_configure_logging_writes_to_the_given_log_file(tmp_path):
+def test_configure_logging_writes_to_the_given_log_file(tmp_path, preserve_root_logger):
     log_path = tmp_path / "mfdoc.log"
-    with _preserve_root_logging():
-        cli._configure_logging(verbose=False, log_file=str(log_path))
-        logging.getLogger("mfdoc.batch").info("hello from the log-file test")
+    cli._configure_logging(verbose=False, log_file=str(log_path))
+    logging.getLogger("mfdoc.batch").info("hello from the log-file test")
     assert log_path.exists()
     assert "hello from the log-file test" in log_path.read_text(encoding="utf-8")
 
 
-def test_configure_logging_verbose_enables_debug_level():
-    with _preserve_root_logging():
-        cli._configure_logging(verbose=True, log_file=None)
-        assert logging.getLogger().getEffectiveLevel() == logging.DEBUG
+def test_configure_logging_verbose_enables_debug_level(preserve_root_logger):
+    cli._configure_logging(verbose=True, log_file=None)
+    assert logging.getLogger().getEffectiveLevel() == logging.DEBUG
 
 
 def test_main_exits_cleanly_when_log_file_parent_dir_is_missing(cli_args, tmp_path, capsys):
@@ -268,13 +272,14 @@ def test_main_exits_cleanly_when_log_file_parent_dir_is_missing(cli_args, tmp_pa
     assert str(bad_log_path) in err
 
 
-def test_main_wires_verbose_and_log_file_flags_before_the_subcommand(cli_args, tmp_path, caplog):
+def test_main_wires_verbose_and_log_file_flags_before_the_subcommand(
+    cli_args, tmp_path, caplog, preserve_root_logger,
+):
     """End-to-end through cli.main()'s own argument parsing -- not just
     cmd_batch called directly -- proving --verbose/--log-file actually reach
     _configure_logging when a real subcommand is dispatched."""
     log_path = tmp_path / "mfdoc.log"
     argv = ["--verbose", "--log-file", str(log_path), "coverage", "--config", cli_args.config]
-    with _preserve_root_logging():
-        rc = cli.main(argv)
+    rc = cli.main(argv)
     assert rc == 0
     assert log_path.exists()
