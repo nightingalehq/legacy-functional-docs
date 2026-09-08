@@ -66,7 +66,6 @@ CREATE TABLE GADGET (
 CREATE VIEW GADGET_VIEW AS SELECT * FROM GADGET;
 """
 
-
 def test_sql_ddl_unrecognised_column_records_gap():
     conn = _conn()
     environment.extract_sql_ddl(conn, 1, _lines(DDL_WITH_UNRECOGNISED_COLUMN), "FAKEMEM")

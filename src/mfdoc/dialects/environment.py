@@ -51,22 +51,20 @@ def extract_sql_ddl(conn, member_id, lines, member_name="?") -> dict:
     def first_nonspace_offset(s: str) -> int:
         return re.match(r"\s*", s).end()
 
-    def content_start(chunk: str) -> int:
-        """Offset in ``chunk`` where the first line of actual statement
-        content begins, skipping leading blank lines and leading ``--``
-        comment lines (same comment convention as the comment-only-chunk
-        check below) so a gap anchors to the statement, not to blank lines
-        or comments preceding it."""
+    def first_statement_offset(s: str) -> int | None:
+        """Offset in ``s`` where the first line of actual statement content
+        begins, skipping leading blank lines and leading ``--`` comment
+        lines, or ``None`` if ``s`` is entirely blank/comment lines -- so a
+        gap anchors to the statement itself, not to blank lines or comments
+        preceding it."""
         pos = 0
-        while pos < len(chunk):
-            if (m := re.match(r"[ \t]*\n", chunk[pos:])):
-                pos += m.end()
+        for line in s.splitlines(keepends=True):
+            stripped = line.strip()
+            if not stripped or stripped.startswith("--"):
+                pos += len(line)
                 continue
-            if (m := re.match(r"[ \t]*--[^\n]*\n", chunk[pos:])):
-                pos += m.end()
-                continue
-            break
-        return pos + first_nonspace_offset(chunk[pos:])
+            return pos + first_nonspace_offset(line)
+        return None
 
     tables = cols = 0
     for m in RE_CREATE_TABLE.finditer(text):
@@ -118,19 +116,19 @@ def extract_sql_ddl(conn, member_id, lines, member_name="?") -> dict:
     for chunk in text.split(";"):
         this_start = chunk_start
         chunk_start += len(chunk) + 1
-        body = chunk.strip()
-        if not body or re.fullmatch(r"(--[^\n]*\n?\s*)+", body):
+        stmt_offset = first_statement_offset(chunk)
+        if stmt_offset is None:
             continue
+        body = chunk[stmt_offset:].strip()
         # RE_CREATE_TABLE's pattern requires the trailing ';' that text.split
         # just consumed as the delimiter -- put one back before checking.
         if RE_CREATE_TABLE.search(chunk + ";") or RE_CREATE_INDEX.search(chunk):
             continue
-        skip = content_start(chunk)
-        stmt_start = this_start + skip
+        stmt_start = this_start + stmt_offset
         add_gap(conn, "unparsed_line",
                 f"Statement not recognised by the SQL DDL scanner in {member_name}.",
                 member_id=member_id, line_no=line_of(stmt_start), severity="low",
-                raw=chunk[skip:].strip()[:400])
+                raw=body[:400])
 
     set_metric(conn, member_name, "sqlddl.tables", tables)
     set_metric(conn, member_name, "sqlddl.columns", cols)
