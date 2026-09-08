@@ -224,16 +224,22 @@ OPTION_SPECS: list[OptionSpec] = [
                "a list of valid regex strings", check=_regex_list),
 
     # Single-pattern, replace-not-merge config regexes (conditions.py's
-    # outcome_field_from_options/dispatch_field_from_options) -- same
-    # "compiled lazily at point of use, so an invalid pattern would
-    # otherwise only surface as a raw re.error deep in mfdoc validate/
-    # classify-rules/dispatch-map" reasoning as options.redact.patterns
-    # above, just one string instead of a list of them.
-    OptionSpec("options.validate.outcome_field_pattern", (str,), "a string",
+    # outcome_field_from_options/dispatch_field_from_options/
+    # mode_field_from_options) -- same "compiled lazily at point of use, so
+    # an invalid pattern would otherwise only surface as a raw re.error deep
+    # in mfdoc validate/classify-rules/dispatch-map" reasoning as
+    # options.redact.patterns above, just one string instead of a list of
+    # them. README.md documents each of these as settable to `null` to mean
+    # "unset, use the default/omit" (matching what the *_from_options
+    # helpers already do for a missing key) -- `(str, type(None))` accepts
+    # that explicit null the same as the key being absent; the loop below
+    # skips the regex-validity check for a None value rather than calling
+    # `_valid_regex(None)`, which isn't a string.
+    OptionSpec("options.validate.outcome_field_pattern", (str, type(None)), "a string, or null",
                check=_valid_regex),
-    OptionSpec("options.overview.dispatch_field_pattern", (str,), "a string",
+    OptionSpec("options.overview.dispatch_field_pattern", (str, type(None)), "a string, or null",
                check=_valid_regex),
-    OptionSpec("options.overview.mode_field_pattern", (str,), "a string",
+    OptionSpec("options.overview.mode_field_pattern", (str, type(None)), "a string, or null",
                check=_valid_regex),
 
     # Dialect-keyed and theme-keyed regex lists (cli.py's cmd_ingest folds
@@ -311,6 +317,13 @@ def validate_config(cfg: dict) -> list[str]:
             continue
         if not _type_ok(value, spec.types):
             problems.append(f"{spec.path} must be {spec.type_label}, got {value!r}")
+            continue
+        # An explicit `null` in an OptionSpec whose types accept `type(None)`
+        # means "unset" -- there's nothing for `spec.check` to validate (a
+        # None value wouldn't satisfy the check's own type signature, e.g.
+        # _valid_regex expects a str), so it's skipped the same way a
+        # missing key already is above.
+        if value is None:
             continue
         if spec.check is not None:
             msg = spec.check(value)
