@@ -72,7 +72,7 @@ Two ways to calibrate them:
     dialects:
       supra:
         labels:
-          dataset: '(?:FILE-ID|DATA\s*-?\s*SET)\s*[:=]\s*(?P<v>[A-Z0-9\-_#$]{1,32})'
+          dataset: '^\s*(?:FILE-ID|DATA\s*-?\s*SET)\s*[:=]\s*(?P<v>[A-Z0-9\-_#$]{1,32})'
   ```
 
 - If the shipped defaults are wrong for every codebase this project will ever

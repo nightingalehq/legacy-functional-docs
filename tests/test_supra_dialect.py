@@ -65,7 +65,7 @@ def test_project_config_override_makes_the_nonstandard_label_recognised():
         "dialects": {
             "supra": {
                 "labels": {
-                    "dataset": r"FILE-ID\s*[:=]\s*(?P<v>[A-Z0-9\-_#$]{1,32})",
+                    "dataset": r"^\s*FILE-ID\s*[:=]\s*(?P<v>[A-Z0-9\-_#$]{1,32})",
                 }
             }
         }
