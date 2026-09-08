@@ -442,8 +442,6 @@ GitHub org.
     nothing produces it yet.
   - Full suite green (782 passed, 2 skipped); bundled fixture pipeline
     clean (71/71 docs, 0 invalid citations of 739, `mfdoc validate` exit 0).
-
-**Progress (2026-09-08b):**
 - Follow-up to issue #141 (PR #146), from automated review comments on the
   new "Program variables and screen/MAP fields" section: Natural's
   `DEFINE DATA <scope> USING <LDA/PDA/GDA>` records a synthetic `variable`
