@@ -2135,3 +2135,107 @@ def test_test_batch_explicit_out_and_state_are_never_namespaced(tmp_path):
     assert (tmp_path / "explicit-out" / "natural" / "python" / "pytest" / "FAKEMOD.md").exists()
     assert (tmp_path / "explicit-state.json").exists()
     assert not (tmp_path / "explicit-out" / "sysa").exists()
+
+
+def test_testgen_default_out_dir_nests_under_docs_root_when_set():
+    """See #142: a project.yml that sets docs_root should get its generated
+    tests nested under it, not siblinged off in an unrelated top-level
+    tests_generated/ tree."""
+    from mfdoc.cli import _testgen_default_out_dir
+
+    assert _testgen_default_out_dir({"docs_root": "docs/functional"}) == "docs/functional/tests"
+
+
+def test_testgen_default_out_dir_falls_back_to_tests_generated_without_docs_root():
+    """A config that never sets docs_root at all must keep today's bare
+    top-level literal, unchanged -- this is a default-only change, not a
+    breaking one for existing setups."""
+    from mfdoc.cli import _testgen_default_out_dir
+
+    assert _testgen_default_out_dir({}) == "tests_generated"
+    assert _testgen_default_out_dir({"docs_root": None}) == "tests_generated"
+
+
+def _write_config_for_default_out_dir_case(
+    project_dir: Path, *, set_docs_root: bool, out_dir: str | None,
+) -> Path:
+    import yaml
+
+    shutil.copytree(REPO_ROOT / "reference", project_dir / "reference")
+    shutil.copytree(REPO_ROOT / "templates", project_dir / "templates")
+    base_cfg = yaml.safe_load((REPO_ROOT / "project.yml").read_text(encoding="utf-8"))
+    base_cfg["system"] = "SYSA"
+    base_cfg["sources"] = []
+    base_cfg["index_db"] = ".mfdoc/index.db"
+    if set_docs_root:
+        base_cfg["docs_root"] = "docs/functional"
+    else:
+        base_cfg.pop("docs_root", None)
+    if out_dir is None:
+        base_cfg["options"]["testgen"].pop("out_dir", None)
+    else:
+        base_cfg["options"]["testgen"]["out_dir"] = out_dir
+    config_path = project_dir / "project.yml"
+    config_path.write_text(yaml.safe_dump(base_cfg), encoding="utf-8")
+    _seed_fakemod_for_cli(config_path)
+    return config_path
+
+
+def _run_test_batch_default(config_path: Path) -> int:
+    args = SimpleNamespace(
+        config=str(config_path), out=None, members=None,
+        language="python", framework="pytest", template=None, model=None,
+        caller="fake-echo", provider="anthropic", gcp_project=None, gcp_region=None,
+        concurrency=1, state=None, matrix=False,
+    )
+    return cli.cmd_test_batch(args)
+
+
+def test_test_batch_nests_default_out_dir_under_docs_root(tmp_path):
+    """docs_root set, options.testgen.out_dir NOT set, no --out -- the
+    default output tree must land under <docs_root>/tests instead of the
+    disconnected top-level tests_generated/ (see #142)."""
+    project_dir = tmp_path / "nested-docs-root"
+    config_path = _write_config_for_default_out_dir_case(
+        project_dir, set_docs_root=True, out_dir=None,
+    )
+
+    _run_test_batch_default(config_path)
+
+    out = (project_dir / "docs" / "functional" / "tests" / "sysa"
+           / "natural" / "python" / "pytest" / "FAKEMOD.md")
+    assert out.exists()
+    assert not (project_dir / "tests_generated").exists()
+
+
+def test_test_batch_default_out_dir_stays_top_level_without_docs_root(tmp_path):
+    """docs_root unset entirely (and options.testgen.out_dir also unset), no
+    --out -- must preserve today's bare top-level tests_generated/ default
+    unchanged, so a config without docs_root sees no behavior change."""
+    project_dir = tmp_path / "no-docs-root"
+    config_path = _write_config_for_default_out_dir_case(
+        project_dir, set_docs_root=False, out_dir=None,
+    )
+
+    _run_test_batch_default(config_path)
+
+    out = (project_dir / "tests_generated" / "sysa"
+           / "natural" / "python" / "pytest" / "FAKEMOD.md")
+    assert out.exists()
+
+
+def test_test_batch_explicit_out_dir_wins_over_docs_root_default(tmp_path):
+    """options.testgen.out_dir, when explicitly set, always wins over the
+    docs_root-derived default -- exactly as an explicit out_dir already won
+    over the old bare "tests_generated" default before this change."""
+    project_dir = tmp_path / "explicit-out-dir-wins"
+    config_path = _write_config_for_default_out_dir_case(
+        project_dir, set_docs_root=True, out_dir="explicit-tests",
+    )
+
+    _run_test_batch_default(config_path)
+
+    out = (project_dir / "explicit-tests" / "sysa"
+           / "natural" / "python" / "pytest" / "FAKEMOD.md")
+    assert out.exists()
+    assert not (project_dir / "docs" / "functional" / "tests").exists()

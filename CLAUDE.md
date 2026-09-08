@@ -129,6 +129,8 @@ mfdoc lang-guide           --config project.yml --dialect mantis --out docs/func
 # --overlay/--language/--framework/--out below default to options.testgen in
 # project.yml (overlay_path/default_language/default_framework/out_dir) --
 # the flags shown here are overrides, not requirements, once that's set.
+# out_dir itself, left unset, defaults to <docs_root>/tests when this
+# config's top-level docs_root is set, else the bare tests_generated below.
 mfdoc test-plan     --config project.yml --overlay test-overlay.yml
 mfdoc test-advisory --config project.yml
 mfdoc test-overlay-draft --config project.yml --out test-overlay.yml    # needs mfdoc[batch]
