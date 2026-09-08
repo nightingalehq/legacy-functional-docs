@@ -392,7 +392,8 @@ def test_near_miss_uncited_assertion_gets_a_targeted_patch_not_a_full_retry(inde
     assert calls["n"] == 2
     assert result.attempts == 1  # the patch call doesn't count as a full-retry attempt
     patch_prompt = prompts[1]
-    assert "Flagged sentences (fix only these)" in patch_prompt
+    assert "Flagged snippets (locate the matching sentence; fix only these)" in patch_prompt
+    assert "truncated to 140 characters" in patch_prompt
     assert "Previous attempt failed validation" not in patch_prompt
     assert "cite everything" not in patch_prompt  # writing rules not resent
     assert "module template" not in patch_prompt  # template not resent
