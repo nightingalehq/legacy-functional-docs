@@ -191,6 +191,14 @@ class OptionSpec:
 # already falls back on a default for. New config keys: add a row here, not
 # a new branch of logic.
 OPTION_SPECS: list[OptionSpec] = [
+    # Top-level (not options.*) key, but validated the same way:
+    # _testgen_default_out_dir (#142) reads this directly and joins it into
+    # a path (Path(docs_root) / "tests") with no type check of its own -- a
+    # malformed value (a list, a number) would otherwise surface as a raw,
+    # uncaught TypeError deep inside `mfdoc test-gen`/`mfdoc test-batch`
+    # rather than a clean config error at startup.
+    OptionSpec("docs_root", (str,), "a string"),
+
     OptionSpec("options.narrative.max_rules_per_call", (int,),
                "a positive integer", check=_positive_int),
     OptionSpec("options.narrative.pricing.input_per_mtok", (int, float),
