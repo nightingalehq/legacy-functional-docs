@@ -1042,22 +1042,66 @@ def _out_of_scope_sources(fm: dict | None, known_members: set[str]) -> list[str]
     member names, per `docs/guides/architecture.md`) does use real member
     names there, so this exclusion is deliberately narrow to the one type
     that doesn't, rather than an allowlist that would wrongly re-enable
-    cross-project contamination for those."""
+    cross-project contamination for those.
+
+    Also returns `None` (don't skip) whenever `doc_type` itself is missing
+    or isn't a non-empty string. `doc_type` is a `REQUIRED_FRONTMATTER` key
+    (and, for a register doc, a `REQUIRED_REGISTER_FRONTMATTER` one) --
+    `validate_doc` already enforces its presence the same way for every
+    other required key (`for key in REQUIRED_FRONTMATTER: if key not in
+    fm`), so a document with missing/malformed `doc_type` already has a
+    reported front-matter violation independent of `sources`. Treating
+    `sources` as a cross-project skip signal on top of that would let this
+    out-of-scope partition paper over that violation by skipping the file
+    entirely instead of letting it fall through to the check that already
+    exists for it -- and there is deliberately no separate enumerated list
+    of "valid" doc_type strings to check against here (there isn't one
+    anywhere else in this codebase either -- doc_type values are recognised
+    ad hoc, per call site, e.g. `in ("module", "module_index")` above and in
+    `validate_doc`), so this only guards against the shapes that indicate a
+    genuinely broken/missing value (absent, `None`, empty/whitespace, or a
+    non-string like a list or number), not against some closed vocabulary.
+
+    Callers must never invoke this with an empty `known_members` -- an empty
+    fact store isn't "no signal" the way an empty/absent `sources` is, it's
+    the strongest possible signal that something is badly wrong (`mfdoc
+    ingest` was never run, or `--config` points at an empty or wrong
+    project), and it's a signal about the fact store, not about any one
+    document. Under the matching rule below, an empty `known_members` would
+    make every document with a non-empty `sources` list look "out of scope"
+    simultaneously, since nothing could ever match -- silently skipping the
+    entire tree and letting `mfdoc validate` report a false green run
+    instead of the real "member is not in the index" failures a broken
+    setup should surface. `_partition_pipeline_docs` guards this before
+    calling here, once per tree walk, rather than this function re-checking
+    it per file."""
     if not fm:
         return None
-    if fm.get("doc_type") == "language-guide":
+    doc_type = fm.get("doc_type")
+    if not isinstance(doc_type, str) or not doc_type.strip():
+        return None
+    if doc_type == "language-guide":
         return None
     sources = fm.get("sources")
     if not sources:
         return None
     if not isinstance(sources, list):
         return None
+    if not all(isinstance(s, str) for s in sources):
+        # A `sources` list containing a non-string item (a number, a nested
+        # list/dict someone wrote by mistake) is the same kind of
+        # front-matter contract violation as `sources` not being a list at
+        # all, above -- `str(s).strip()` on a non-string item would coerce
+        # it into something that (almost) never matches `known_members`,
+        # turning what should be a reported malformed-`sources` failure into
+        # a silent out-of-scope skip instead.
+        return None
     # Strip whitespace before the membership check -- a front-matter value
     # like "MMP0100 " (easy to introduce hand-editing YAML) must still match
     # `known_members` the way the unpadded name would, or a same-project doc
     # gets misclassified as out of scope over pure formatting. An
     # all-whitespace/empty entry filters out rather than comparing as "".
-    normalized = [str(s).strip() for s in sources]
+    normalized = [s.strip() for s in sources]
     normalized = [s for s in normalized if s]
     if not normalized:
         return None
@@ -1075,7 +1119,19 @@ def _partition_pipeline_docs(conn, root: Path) -> tuple[list[Path], list[str]]:
     project's fact store when `--docs` points at a directory shared by more
     than one project (issue #130) -- a malformed/unparseable front matter
     is deliberately still handed to the real validator rather than silently
-    dropped here, so that failure is reported exactly as before."""
+    dropped here, so that failure is reported exactly as before.
+
+    If `known_members` comes back empty -- no `mfdoc ingest` has ever been
+    run against the loaded config, or `--config` points at the wrong/an
+    empty project -- every file is handed through untouched (nothing goes
+    into `skipped`) rather than partitioned by `_out_of_scope_sources` at
+    all. An empty fact store can't provide the cross-project signal that
+    function relies on: every document with a non-empty `sources` list
+    would spuriously "match" the out-of-scope shape (nothing to compare
+    against), which would skip the *entire* tree and let `mfdoc validate`
+    exit 0 over a broken/misconfigured setup instead of surfacing the real
+    "member is not in the index" failures normal validation exists to
+    catch -- exactly the case this whole partition must never hide."""
     known_members = {
         (row[0] or "").upper() for row in conn.execute("SELECT name FROM member").fetchall()
     }
@@ -1083,6 +1139,9 @@ def _partition_pipeline_docs(conn, root: Path) -> tuple[list[Path], list[str]]:
     skipped: list[str] = []
     for path in sorted(root.rglob("*.md")):
         if not _is_pipeline_doc(path):
+            continue
+        if not known_members:
+            in_scope.append(path)
             continue
         fm, _, fm_err = _split_frontmatter(path.read_text(encoding="utf-8"))
         bad_sources = None if fm_err else _out_of_scope_sources(fm, known_members)

@@ -347,6 +347,75 @@ def test_validate_tree_still_validates_a_language_guide_doc_with_placeholder_sou
     assert res["documents_ok"] == 1
 
 
+def test_validate_tree_does_not_skip_anything_against_an_empty_fact_store(tmp_path):
+    """An empty fact store (no `mfdoc ingest` ever run against the loaded
+    config, or `--config` pointing at the wrong/an empty project) is the
+    strongest possible signal that something is badly wrong -- not "no
+    signal". With `known_members` empty, every document naming any
+    `sources` would otherwise spuriously look "out of scope" (nothing could
+    ever match), silently skipping the whole tree and letting `mfdoc
+    validate` exit 0 instead of reporting the real member-not-found citation
+    failure below."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        GOOD_FRONTMATTER + "\nThe program resets the return code [[MMP0100:31]].\n"
+    )
+    res = validate_tree(conn, tmp_path)
+    assert res["documents"] == 1
+    assert res["out_of_scope_documents"] == []
+    assert res["documents_ok"] == 0
+    assert res["invalid_citations"] == 1
+
+
+def test_validate_tree_does_not_skip_a_doc_with_missing_doc_type(indexed_db, tmp_path):
+    """A document with missing `doc_type` front matter is itself a contract
+    violation (`doc_type` is a `REQUIRED_FRONTMATTER`/
+    `REQUIRED_REGISTER_FRONTMATTER` key) -- letting the out-of-scope check
+    treat its `sources` as a cross-project skip signal regardless would
+    paper over that violation by skipping the file instead of letting
+    normal front-matter validation report it."""
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        GOOD_FRONTMATTER.replace("doc_type: module\n", "")
+        + "\nThe program resets the return code [[MMP0100:31]].\n"
+    )
+    res = validate_tree(indexed_db, tmp_path)
+    assert res["documents"] == 1
+    assert res["out_of_scope_documents"] == []
+    assert res["documents_ok"] == 0
+    assert any("doc_type" in p for p in res["results"][0]["problems"])
+
+
+def test_validate_tree_does_not_skip_a_doc_with_a_non_string_sources_item(indexed_db, tmp_path):
+    """A `sources` list containing a non-string item (a number, here) is a
+    front-matter contract violation, the same as `sources` not being a list
+    at all -- `str(s).strip()` coercion would otherwise turn it into
+    something that (almost) never matches `known_members`, silently
+    misclassifying it as belonging to a different project rather than
+    falling through to whatever validation already exists for a malformed
+    `sources` shape."""
+    # doc_type: process (not module/module_index) -- this document is
+    # deliberately not shaped to also exercise the doc_type-scoped aggregate
+    # completeness checks (module_completeness_problems,
+    # statement_citation_coverage_problems), which assume `sources` is
+    # already a list of strings for a `doc_type: module` document; that is
+    # an existing, separate assumption unrelated to this out-of-scope fix.
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        GOOD_FRONTMATTER.replace("doc_type: module\n", "doc_type: process\n")
+        .replace("sources:\n  - MMP0100\n", "sources:\n  - 12345\n")
+        + "\nThe program resets the return code [[NOPE:1]].\n"
+    )
+    res = validate_tree(indexed_db, tmp_path)
+    assert res["documents"] == 1
+    assert res["out_of_scope_documents"] == []
+    assert res["documents_ok"] == 0
+    assert res["invalid_citations"] == 1
+
+
 def test_validator_accepts_the_worked_example_unchanged(indexed_db):
     """A false positive here trains people to ignore the validator, which is
     worse than not having one."""
