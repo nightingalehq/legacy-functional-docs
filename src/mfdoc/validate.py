@@ -1017,11 +1017,25 @@ def _out_of_scope_sources(fm: dict | None, known_members: set[str]) -> list[str]
     `doc_type: register` documents (gap-summary.md, glossary.md, ...) and
     `interface-matrix.md` legitimately carry no (or an empty) `sources`
     list despite belonging to this project, and must validate exactly as
-    before rather than being silently skipped for lack of a signal."""
+    before rather than being silently skipped for lack of a signal.
+
+    Also returns `None` (don't skip) when `sources` isn't a list at all --
+    a bare string, a mapping, or any other YAML shape someone wrote by
+    mistake instead of a list. That's a genuine front-matter contract
+    violation (`sources` is a `REQUIRED_FRONTMATTER` key), not a cross-
+    project signal, and this out-of-scope partition has no business
+    swallowing it: iterating a malformed value character-by-character (a
+    string) or key-by-key (a mapping) can easily produce zero matches
+    against `known_members` and get misclassified as belonging to a
+    different project, silently skipping the document instead of letting
+    whatever front-matter validation already runs elsewhere flag the real
+    problem."""
     if not fm:
         return None
     sources = fm.get("sources")
     if not sources:
+        return None
+    if not isinstance(sources, list):
         return None
     if any(str(s).upper() in known_members for s in sources):
         return None

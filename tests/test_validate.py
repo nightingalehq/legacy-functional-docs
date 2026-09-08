@@ -289,6 +289,28 @@ def test_validate_tree_still_validates_a_doc_with_an_empty_sources_list(indexed_
     assert res["out_of_scope_documents"] == []
 
 
+def test_validate_tree_does_not_skip_a_doc_with_malformed_sources(indexed_db, tmp_path):
+    """`sources` is a `REQUIRED_FRONTMATTER` key that's supposed to be a
+    list of member names -- if someone writes it as a bare string (or any
+    other non-list YAML shape) instead, that's a real front-matter
+    contract violation, not a signal that the document belongs to a
+    different project. Iterating a string character-by-character against
+    `known_members` produces no matches, which could otherwise get it
+    wrongly classified as out of scope and skipped -- silently swallowing
+    a document that also has a real, unrelated validation failure (here,
+    a citation to a member the fact store has never heard of)."""
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        GOOD_FRONTMATTER.replace("sources:\n  - MMP0100\n", "sources: MMP0100\n")
+        + "\nThe program resets the return code [[NOPE:1]].\n"
+    )
+    res = validate_tree(indexed_db, tmp_path)
+    assert res["documents"] == 1
+    assert res["out_of_scope_documents"] == []
+    assert res["documents_ok"] == 0
+    assert res["invalid_citations"] == 1
+
+
 def test_validator_accepts_the_worked_example_unchanged(indexed_db):
     """A false positive here trains people to ignore the validator, which is
     worse than not having one."""
