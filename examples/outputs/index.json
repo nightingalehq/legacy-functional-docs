@@ -1618,7 +1618,7 @@
       "descriptor_kind": "primary_key",
       "options": "NOT NULL",
       "parent_fields": null,
-      "defined_line": 1,
+      "defined_line": 2,
       "remark": "NOT NULL"
     },
     {
@@ -1634,7 +1634,7 @@
       "descriptor_kind": null,
       "options": "NOT NULL",
       "parent_fields": null,
-      "defined_line": 1,
+      "defined_line": 3,
       "remark": "NOT NULL"
     },
     {
@@ -1650,7 +1650,7 @@
       "descriptor_kind": null,
       "options": null,
       "parent_fields": null,
-      "defined_line": 1,
+      "defined_line": 4,
       "remark": null
     },
     {
@@ -1666,7 +1666,7 @@
       "descriptor_kind": null,
       "options": "NOT NULL",
       "parent_fields": null,
-      "defined_line": 1,
+      "defined_line": 5,
       "remark": "NOT NULL"
     },
     {
@@ -1682,7 +1682,7 @@
       "descriptor_kind": null,
       "options": null,
       "parent_fields": null,
-      "defined_line": 1,
+      "defined_line": 6,
       "remark": null
     },
     {
@@ -1698,7 +1698,7 @@
       "descriptor_kind": "primary_key",
       "options": "NOT NULL",
       "parent_fields": null,
-      "defined_line": 11,
+      "defined_line": 12,
       "remark": "NOT NULL"
     },
     {
@@ -1714,7 +1714,7 @@
       "descriptor_kind": null,
       "options": null,
       "parent_fields": null,
-      "defined_line": 11,
+      "defined_line": 13,
       "remark": null
     },
     {
