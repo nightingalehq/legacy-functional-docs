@@ -500,16 +500,16 @@ def _testgen_default_out_dir(cfg: dict) -> str:
     so an existing setup that relies on the current default (or has
     `docs_root` unset) sees no behavior change. An explicit
     `options.testgen.out_dir` (or `--out`) always overrides this, exactly
-    as before this function existed."""
+    as before this function existed.
+
+    Doesn't type-check `docs_root` itself -- `load_config` already runs it
+    through `config_validate.py`'s `OPTION_SPECS` before any command reaches
+    this function, the same "validate the whole config once at startup,
+    trust it everywhere after" convention `dispatch_field_from_options`/
+    `mode_field_from_options` (`conditions.py`) already follow for their own
+    config-driven values."""
     docs_root = cfg.get("docs_root")
-    if docs_root is None or docs_root == "":
-        return "tests_generated"
-    if not isinstance(docs_root, str):
-        raise ConfigError(
-            "invalid project config -- 1 problem(s):\n"
-            f"  - docs_root must be a string, got {docs_root!r}"
-        )
-    return str(Path(docs_root) / "tests")
+    return str(Path(docs_root) / "tests") if docs_root else "tests_generated"
 
 
 def _project_namespace(cfg: dict) -> str:

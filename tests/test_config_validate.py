@@ -37,6 +37,16 @@ def test_docs_root_must_be_a_string():
     assert any("docs_root" in p and "a string" in p for p in problems)
 
 
+def test_docs_root_null_has_no_problems():
+    """An explicit `docs_root: null` means "unset" the same way an absent
+    key does -- `_testgen_default_out_dir`'s own `if docs_root` fallback
+    already treats both identically, so config validation must accept
+    both, not just the absent-key case."""
+    cfg = _base_cfg()
+    cfg["docs_root"] = None
+    assert validate_config(cfg) == []
+
+
 def test_docs_root_as_a_string_has_no_problems():
     cfg = _base_cfg()
     cfg["docs_root"] = "docs/functional"

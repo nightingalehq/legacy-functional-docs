@@ -2143,7 +2143,7 @@ def test_testgen_default_out_dir_nests_under_docs_root_when_set():
     tests_generated/ tree."""
     from mfdoc.cli import _testgen_default_out_dir
 
-    assert _testgen_default_out_dir({"docs_root": "docs/functional"}) == "docs/functional/tests"
+    assert Path(_testgen_default_out_dir({"docs_root": "docs/functional"})) == Path("docs/functional/tests")
 
 
 def test_testgen_default_out_dir_falls_back_to_tests_generated_without_docs_root():
@@ -2157,16 +2157,14 @@ def test_testgen_default_out_dir_falls_back_to_tests_generated_without_docs_root
     assert _testgen_default_out_dir({"docs_root": ""}) == "tests_generated"
 
 
-def test_testgen_default_out_dir_rejects_malformed_docs_root():
-    from mfdoc.cli import _testgen_default_out_dir
-    from mfdoc.config_validate import ConfigError
-
-    try:
-        _testgen_default_out_dir({"docs_root": {"not": "a path"}})
-    except ConfigError as exc:
-        assert "docs_root must be a string" in str(exc)
-    else:
-        raise AssertionError("expected malformed docs_root to raise ConfigError")
+# A malformed docs_root (a non-string, non-None value) is rejected by
+# config_validate.py's OPTION_SPECS at load_config time, before any command
+# reaches _testgen_default_out_dir -- see
+# test_config_validate.py::test_docs_root_must_be_a_string. This function
+# itself does no type-checking of its own, the same "validate once, trust
+# everywhere after" convention dispatch_field_from_options/
+# mode_field_from_options already follow, so there's no equivalent case to
+# test at this layer.
 
 
 def _write_config_for_default_out_dir_case(

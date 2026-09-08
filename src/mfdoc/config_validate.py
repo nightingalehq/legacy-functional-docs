@@ -193,11 +193,16 @@ class OptionSpec:
 OPTION_SPECS: list[OptionSpec] = [
     # Top-level (not options.*) key, but validated the same way:
     # _testgen_default_out_dir (#142) reads this directly and joins it into
-    # a path (Path(docs_root) / "tests") with no type check of its own -- a
-    # malformed value (a list, a number) would otherwise surface as a raw,
-    # uncaught TypeError deep inside `mfdoc test-gen`/`mfdoc test-batch`
-    # rather than a clean config error at startup.
-    OptionSpec("docs_root", (str,), "a string"),
+    # a path (Path(docs_root) / "tests") with no type check of its own --
+    # trusting this centralized check the same "validate once at startup"
+    # way dispatch_field_from_options/mode_field_from_options already do for
+    # their own config-driven values. A malformed value (a list, a number)
+    # would otherwise surface as a raw, uncaught TypeError deep inside
+    # `mfdoc test-gen`/`mfdoc test-batch` rather than a clean config error
+    # at startup. `(str, type(None))`: an explicit `docs_root: null` means
+    # "unset" the same way an absent key does (see `_testgen_default_out_dir`'s
+    # `if docs_root` fallback), not a violation.
+    OptionSpec("docs_root", (str, type(None)), "a string, or null"),
 
     OptionSpec("options.narrative.max_rules_per_call", (int,),
                "a positive integer", check=_positive_int),
