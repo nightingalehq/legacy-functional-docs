@@ -932,15 +932,24 @@ def statement_citation_coverage_problems(conn, results: list[dict]) -> list[str]
         fm = r.get("_fm")
         if not fm or fm.get("doc_type") != "module":
             continue
-        for src in fm.get("sources") or []:
-            members.add(src)
+        doc_sources = {src.upper() for src in (fm.get("sources") or [])}
+        members.update(fm.get("sources") or [])
         for m in CITATION.finditer(r.get("_body") or ""):
             lf = m.group("from")
             if lf is None:
                 continue
+            cited_member = m.group("member").upper()
+            # Only a citation to a member this document actually declares as
+            # one of its own `sources` counts toward that member's coverage
+            # -- a module doc can legitimately cite a *different* member in
+            # passing (e.g. a caller referencing a callee's line), and that
+            # must not let an unrelated document's citation satisfy this
+            # gate for a member it isn't actually documenting.
+            if cited_member not in doc_sources:
+                continue
             lf = int(lf)
             lt = int(m.group("to")) if m.group("to") else lf
-            cited_ranges[m.group("member").upper()].append((lf, lt))
+            cited_ranges[cited_member].append((lf, lt))
 
     problems = []
     for member in sorted(members):

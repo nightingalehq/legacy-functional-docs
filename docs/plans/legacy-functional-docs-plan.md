@@ -12,7 +12,7 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
-**Progress (2026-09-08b):**
+**Progress (2026-09-08):**
 - Fixed issue #133: neither completeness mechanism caught a whole
   `call_edge`/`interaction` statement (a `DO`/`PERFORM` subroutine call, a
   `PROGRAM`+`DO` external call, a `RELEASE`, a `PROMPT`, a `CHAIN`/
