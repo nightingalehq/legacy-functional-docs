@@ -450,12 +450,14 @@ namespacing convention — see `cli._project_namespace`). Pointing `--docs`
 at that shared parent instead of one project's own subtree makes `mfdoc
 validate`/`mfdoc test-validate` visit every project's files, with nothing
 in the directory structure itself saying which file belongs to which
-project — a document's `sources` front matter (required on every
-narrative/generated-test document) already names the real member(s) it was
-generated from, so `_out_of_scope_sources` cross-checks it against the
-currently loaded fact store's own `member` table: a document whose
-`sources` names at least one member, but none of them exist here, was
-generated against a *different* project's fact store, and is skipped
+project — a member-scoped document's `sources` front matter (required on
+every narrative/generated-test document; `doc_type: language-guide` is the
+one exception, populating it with descriptive placeholder text instead)
+already names the real member(s) it was generated from, so
+`_out_of_scope_sources` cross-checks it against the currently loaded fact
+store's own `member` table: a document whose `sources` names at least one
+member, but none of them exist here, was generated against a *different*
+project's fact store, and is skipped
 (reported separately, advisory, never counted against `documents`/
 `documents_ok` or the exit code) rather than silently cross-checked
 against the wrong one — which previously surfaced as a wall of "member is

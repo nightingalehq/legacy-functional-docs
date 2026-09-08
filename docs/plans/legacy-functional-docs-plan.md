@@ -315,14 +315,17 @@ GitHub org.
   store, reported as ordinary "member is not in the index"/"not a known
   test_case scenario" failures indistinguishable from a real regression.
   - Added `_out_of_scope_sources`/`_partition_pipeline_docs` (`validate.py`):
-    every document's `sources` front matter (required on every narrative/
-    generated-test document) is cross-checked against the currently loaded
-    fact store's own `member` table before validation runs -- a document
-    naming at least one source, but none of them present in this store, is
-    skipped rather than validated against the wrong project's fact store.
-    A document with no `sources` key or an empty list (`doc_type: register`
-    documents, `interface-matrix.md`'s legitimately empty list) carries no
-    signal either way and validates exactly as before.
+    a member-scoped document's `sources` front matter (required on every
+    narrative/generated-test document) is cross-checked against the
+    currently loaded fact store's own `member` table before validation
+    runs -- a document naming at least one source, but none of them present
+    in this store, is skipped rather than validated against the wrong
+    project's fact store. A document with no `sources` key, an empty list
+    (`doc_type: register` documents, `interface-matrix.md`'s legitimately
+    empty list), a malformed non-list value, or `doc_type: language-guide`
+    (whose `sources` is descriptive placeholder text, not a member name --
+    the one doc type where this front matter isn't member provenance)
+    carries no signal either way and validates exactly as before.
   - Wired into both `validate_tree` and `validate_tests_tree` as a new
     `out_of_scope_documents` result key -- advisory only, never subtracted
     from `documents`/`documents_ok` and never affecting either command's

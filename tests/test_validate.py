@@ -329,6 +329,24 @@ def test_validate_tree_ignores_whitespace_when_matching_sources_to_known_members
     assert res["invalid_citations"] == 0
 
 
+def test_validate_tree_still_validates_a_language_guide_doc_with_placeholder_sources(indexed_db, tmp_path):
+    """`doc_type: language-guide` populates `sources` with a descriptive
+    placeholder (`["{DIALECT} source files"]` per `templates/
+    language-guide.md`), not a member name -- the one doc type in this
+    codebase where `sources` isn't member provenance. It must not be
+    misclassified as belonging to a different project just because that
+    placeholder text never matches known_members."""
+    doc = tmp_path / "natural-language-guide.md"
+    doc.write_text(
+        GOOD_FRONTMATTER.replace("doc_type: module\n", "doc_type: language-guide\n")
+        .replace("sources:\n  - MMP0100\n", 'sources: ["natural source files"]\n')
+    )
+    res = validate_tree(indexed_db, tmp_path)
+    assert res["documents"] == 1
+    assert res["out_of_scope_documents"] == []
+    assert res["documents_ok"] == 1
+
+
 def test_validator_accepts_the_worked_example_unchanged(indexed_db):
     """A false positive here trains people to ignore the validator, which is
     worse than not having one."""

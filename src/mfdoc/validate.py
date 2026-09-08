@@ -1029,8 +1029,23 @@ def _out_of_scope_sources(fm: dict | None, known_members: set[str]) -> list[str]
     against `known_members` and get misclassified as belonging to a
     different project, silently skipping the document instead of letting
     whatever front-matter validation already runs elsewhere flag the real
-    problem."""
+    problem.
+
+    And returns `None` (don't skip) for `doc_type: language-guide`
+    specifically: `templates/language-guide.md` populates `sources` with a
+    descriptive placeholder (`["{DIALECT} source files"]`), not a member
+    name, per its own design (issue #91) -- the only doc type in this
+    codebase where `sources` isn't member provenance. Every other doc type
+    that carries a non-empty `sources` list (`module`, `module_index`,
+    `generated_test`, and also `data-entity`/`process`, whose templates
+    default to `sources: []` but whose real generated instances list actual
+    member names, per `docs/guides/architecture.md`) does use real member
+    names there, so this exclusion is deliberately narrow to the one type
+    that doesn't, rather than an allowlist that would wrongly re-enable
+    cross-project contamination for those."""
     if not fm:
+        return None
+    if fm.get("doc_type") == "language-guide":
         return None
     sources = fm.get("sources")
     if not sources:
