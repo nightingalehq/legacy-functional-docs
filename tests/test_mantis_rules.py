@@ -120,6 +120,88 @@ def test_if_else_branch_extent_and_pairing_is_recorded():
     assert else_row["end_line"] == 8
 
 
+def test_case_when_branch_extent_is_recorded():
+    """Issue #132's shape: a CASE/WHEN dispatch where one WHEN branch holds
+    a guarded database read (a GET followed by an IF...FOUND check) and the
+    sibling WHEN branches hold unrelated assignments. Before the fix, only
+    IF got end_line back-filled -- WHILE/FOR/CASE/WHEN never did, so
+    nothing told a reader which WHEN branch the GET actually belonged to,
+    and it could be (and, on a real engagement codebase, was) narrated as
+    running unconditionally across every branch.
+
+    Each WHEN's end_line must stop at the next sibling WHEN (or, for the
+    last one, at the enclosing CASE's own END) -- so the GET at line 7,
+    which sits strictly between the WHEN at line 6 and the WHEN at line
+    11, resolves to exactly the branch that contains it and no other."""
+    conn = _extract(
+        'PROGRAM "TESTMOD"\n'
+        "ENTRY MAIN\n"
+        "  CASE ORDER_TYPE\n"
+        "  WHEN 1\n"
+        "    X=1\n"
+        "  WHEN 2\n"
+        "    GET WIDGETFILE01(LOOKUP_KEY)FIRST\n"
+        "    IF FOUND_FLAG = 1\n"
+        "      Y=2\n"
+        "    END\n"
+        "  WHEN 3\n"
+        "    Z=3\n"
+        "  END\n"
+        "EXIT\n"
+    )
+    case_row = conn.execute(
+        "SELECT line_no, end_line FROM rule_candidate WHERE construct='CASE'"
+    ).fetchone()
+    when_rows = conn.execute(
+        "SELECT line_no, end_line FROM rule_candidate WHERE construct='WHEN' ORDER BY line_no"
+    ).fetchall()
+    if_row = conn.execute(
+        "SELECT line_no, end_line FROM rule_candidate WHERE construct='IF'"
+    ).fetchone()
+    get_row = conn.execute(
+        "SELECT line_no FROM data_access WHERE verb='GET'"
+    ).fetchone()
+
+    assert case_row["line_no"] == 3
+    assert case_row["end_line"] == 13, "CASE's end_line must reach its own END"
+
+    assert [r["line_no"] for r in when_rows] == [4, 6, 11]
+    branch1, branch2, branch3 = when_rows
+    assert branch1["end_line"] == 6, "first WHEN's extent must stop at the next WHEN"
+    assert branch2["end_line"] == 11, "the GET's WHEN must stop at the next sibling WHEN"
+    assert branch3["end_line"] == 13, "the last WHEN's extent must reach the enclosing CASE's END"
+
+    # The guarded GET's own nested IF gets its own extent too, unaffected
+    # by the enclosing CASE/WHEN change.
+    assert if_row["line_no"] == 8
+    assert if_row["end_line"] == 10
+
+    # The load-bearing check: the GET at line 7 falls strictly inside the
+    # second WHEN's [line_no, end_line) extent and no other branch's.
+    get_line = get_row["line_no"]
+    assert branch2["line_no"] < get_line < branch2["end_line"]
+    assert not (branch1["line_no"] < get_line < branch1["end_line"])
+    assert not (branch3["line_no"] < get_line < branch3["end_line"])
+
+
+def test_while_loop_extent_is_recorded():
+    """WHILE must get the same end_line treatment as IF -- a loop body's
+    facts need a resolvable extent too, not just a branch's."""
+    conn = _extract(
+        'PROGRAM "TESTMOD"\n'
+        "ENTRY MAIN\n"
+        "  WHILE MORE_RECORDS = 1\n"
+        "    GET WIDGETFILE01(NEXT_KEY)NEXT\n"
+        "  END\n"
+        "EXIT\n"
+    )
+    row = conn.execute(
+        "SELECT line_no, end_line FROM rule_candidate WHERE construct='WHILE'"
+    ).fetchone()
+    assert row["line_no"] == 3
+    assert row["end_line"] == 5
+
+
 def test_supra_dml_key_arg_is_also_traced():
     """The same backward-trace applies to Supra DML calls
     (`READM(ORDERMST, ORDER_NO)`), not only GET -- the key argument there is

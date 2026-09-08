@@ -12,6 +12,44 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-08):**
+- Fixed issue #132: `mantis.py`'s `extract()` only back-filled
+  `rule_candidate.end_line` (and, for `IF`, its paired `ELSE`'s
+  `pair_line_no`) when the popped block was an `IF` — `WHILE`/`FOR`/`CASE`
+  opened and depth-tracked correctly but never remembered their own
+  `rule_candidate.id`, so their `end_line` stayed `NULL` forever, and a
+  `CASE`'s `WHEN` branches (which don't open their own `open_blocks` entry
+  at all) had no extent tracked whatsoever. Observed effect on a real
+  engagement codebase (no client content here — reproduced with an
+  invented fixture): a guarded database read that lexically belonged to
+  one `WHEN` branch got narrated as running unconditionally across every
+  branch of the dispatch, because nothing in the fact store said which
+  branch it was inside.
+  - Generalised the old IF-only `if_rule_ids` dict into `block_rule_ids`
+    (keyed by the opening line, same as before) so `WHILE`/`FOR`/`CASE`
+    get `end_line` back-filled at their matching `END` the same way `IF`
+    already did. Added a parallel `when_stack`, pushed/popped in lockstep
+    with `open_blocks`, so each `WHEN`'s extent resolves to wherever comes
+    first: the next sibling `WHEN`, or the enclosing `CASE`'s own `END`.
+  - New tests in `tests/test_mantis_rules.py`:
+    `test_case_when_branch_extent_is_recorded` (the exact reported shape —
+    a `CASE`/`WHEN` dispatch with a guarded `GET`+`IF FOUND` in one branch
+    and unrelated statements in its siblings; verified to fail against the
+    pre-fix code) and `test_while_loop_extent_is_recorded`.
+  - `natural.py`'s `_match_rules` has the same gap for its own multi-way
+    dispatch (`DECIDE ON`/`DECIDE FOR` + `VALUE OF`), and additionally for
+    `FOR`/`REPEAT`/`AT-EVENT`/`ON ERROR`/`IF NO RECORDS FOUND` — none of
+    those get `end_line` populated today either. Left unfixed here: unlike
+    Mantis's single `extract()` function, Natural's `_match_rules` is
+    called from two sites in `extract()` and threads `if_rule_ids`/
+    `else_rule_ids` through both, so generalising it touches every
+    block-opening branch across both call sites — a real, scoped follow-up
+    (not "Natural-only, defer forever"), but bigger than this issue's fix
+    and deliberately left as a documented gap rather than scope-creeping
+    this PR.
+  - Full suite green (719 passed, 2 skipped); bundled fixture pipeline
+    clean (71/71 docs, 0 invalid citations of 739).
+
 **Progress (2026-09-07c):**
 - Closed out the two items 2026-09-07b left for a future pass:
   - `DEFINE WINDOW` and its `SIZE`/`BASE`/`FRAMED`/`FORMAT` attribute lines
