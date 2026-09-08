@@ -396,7 +396,7 @@ def _generate_module_doc_from_brief(conn, member_name: str, brief: str, out_path
         out_path.parent.mkdir(parents=True, exist_ok=True)
         text = _fix_generated_by_version(response.text)
         out_path.write_text(text, encoding="utf-8")
-        result = validate_doc(conn, out_path)
+        result = validate_doc(conn, out_path, _text=text)
         if result["ok"]:
             return DocResult(
                 member_name, str(out_path), True, attempt, input_tokens, output_tokens, [],
@@ -418,7 +418,7 @@ def _generate_module_doc_from_brief(conn, member_name: str, brief: str, out_path
             retries += patch_response.retries
             text = _fix_generated_by_version(patch_response.text)
             out_path.write_text(text, encoding="utf-8")
-            result = validate_doc(conn, out_path)
+            result = validate_doc(conn, out_path, _text=text)
             if result["ok"]:
                 return DocResult(
                     member_name, str(out_path), True, attempt, input_tokens, output_tokens, [],
