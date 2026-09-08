@@ -48,6 +48,16 @@ def extract_sql_ddl(conn, member_id, lines, member_name="?") -> dict:
     def first_nonspace_offset(s: str) -> int:
         return re.match(r"\s*", s).end()
 
+    def first_statement_offset(s: str) -> int | None:
+        pos = 0
+        for line in s.splitlines(keepends=True):
+            stripped = line.strip()
+            if not stripped or stripped.startswith("--"):
+                pos += len(line)
+                continue
+            return pos + first_nonspace_offset(line)
+        return None
+
     tables = cols = 0
     for m in RE_CREATE_TABLE.finditer(text):
         name = m.group("name").strip('"').upper()
@@ -98,14 +108,15 @@ def extract_sql_ddl(conn, member_id, lines, member_name="?") -> dict:
     for chunk in text.split(";"):
         this_start = chunk_start
         chunk_start += len(chunk) + 1
-        body = chunk.strip()
-        if not body or re.fullmatch(r"(--[^\n]*\n?\s*)+", body):
+        stmt_offset = first_statement_offset(chunk)
+        if stmt_offset is None:
             continue
+        body = chunk[stmt_offset:].strip()
         # RE_CREATE_TABLE's pattern requires the trailing ';' that text.split
         # just consumed as the delimiter -- put one back before checking.
         if RE_CREATE_TABLE.search(chunk + ";") or RE_CREATE_INDEX.search(chunk):
             continue
-        stmt_start = this_start + first_nonspace_offset(chunk)
+        stmt_start = this_start + stmt_offset
         add_gap(conn, "unparsed_line",
                 f"Statement not recognised by the SQL DDL scanner in {member_name}.",
                 member_id=member_id, line_no=line_of(stmt_start), severity="low",

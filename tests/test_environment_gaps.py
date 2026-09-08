@@ -66,6 +66,19 @@ CREATE TABLE GADGET (
 CREATE VIEW GADGET_VIEW AS SELECT * FROM GADGET;
 """
 
+# Unrecognised statement preceded by leading SQL comments in the same
+# semicolon-delimited chunk -- the gap should point at and include the
+# statement content, not the comments.
+DDL_STATEMENT_AFTER_COMMENTS = """\
+CREATE TABLE GADGET (
+    GADGET_ID INTEGER NOT NULL
+);
+-- This invented comment describes a follow-on statement.
+
+-- This invented comment is also not the statement.
+CREATE VIEW GADGET_VIEW AS SELECT * FROM GADGET;
+"""
+
 
 def test_sql_ddl_unrecognised_column_records_gap():
     conn = _conn()
@@ -105,6 +118,18 @@ def test_sql_ddl_unrecognised_statement_after_blank_lines_gap_points_at_statemen
     matches = [g for g in gaps if "CREATE VIEW" in (g["raw"] or "")]
     assert len(matches) == 1
     assert matches[0]["line_no"] == 6
+
+
+def test_sql_ddl_unrecognised_statement_after_comments_gap_points_at_statement_line():
+    conn = _conn()
+    environment.extract_sql_ddl(conn, 1, _lines(DDL_STATEMENT_AFTER_COMMENTS), "FAKEMEM")
+    gaps = conn.execute(
+        "SELECT line_no, raw FROM gap WHERE member_id=1 AND gap_kind='unparsed_line'"
+    ).fetchall()
+    matches = [g for g in gaps if "CREATE VIEW" in (g["raw"] or "")]
+    assert len(matches) == 1
+    assert matches[0]["line_no"] == 7
+    assert not matches[0]["raw"].startswith("--")
 
 
 def test_sql_ddl_recognised_input_records_no_gap():
