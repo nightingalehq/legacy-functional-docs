@@ -511,9 +511,11 @@ def _project_namespace(cfg: dict) -> str:
     generated-test output subdirectory, so two project configs that happen
     to point at the same working directory (e.g. two `project.yml` files
     documenting different systems from one shared checkout, each run with
-    its own `--config`) get genuinely separate `tests_generated/` trees and
-    `.mfdoc/test-batch-state.json`-shaped resume-state files instead of
-    silently sharing -- and clobbering -- one another's.
+    its own `--config`) get genuinely separate generated-test output trees
+    (`tests_generated/`, or `<docs_root>/tests` when `docs_root` is set --
+    see `_testgen_default_out_dir`) and `.mfdoc/test-batch-state.json`-shaped
+    resume-state files instead of silently sharing -- and clobbering --
+    one another's.
 
     Mirrors the existing per-project `index_db` convention (each
     `project.yml` sets its own `index_db` path so two configs never share
