@@ -347,6 +347,60 @@ GitHub org.
     -- the bundled fixtures are a single project, so nothing is newly
     flagged out of scope against them; the fix's behaviour is exercised by
     the new unit tests' synthetic two-project fixtures.
+- Fixed issue #131: `mfdoc batch`'s per-chunk retry loop
+  (`_generate_module_doc_from_brief`, shared by the plain single-call path
+  and `_generate_module_doc_chunked`'s per-chunk calls) always regenerated
+  an entire chunk from scratch on any validation failure, even when the
+  only problem was a small number of uncited-and-unhedged assertive
+  statements in a chunk that was otherwise already valid -- across two real
+  regenerations this near-miss pattern accounted for 60-75% of the
+  module-doc generation step's total token spend, since fixing 1-2
+  sentences out of a 40-rule chunk cost the same full re-narration as a
+  chunk that was genuinely broken.
+  - Added `_is_near_miss_uncited` (`batch.py`): true only when
+    `validate_doc` failed for exactly one reason -- `NEAR_MISS_MAX_UNCITED`
+    (default 3) or fewer uncited assertive statements, nothing else wrong
+    (no invalid citation, no front-matter problem, no reversed-condition
+    hit). A chunk failing for any other reason, or with more uncited
+    statements than that, is unaffected -- still goes straight to the
+    existing full retry.
+  - Added `build_uncited_patch_prompt` (`batch.py`): a far smaller
+    follow-up prompt for the near-miss case -- the already-written document
+    plus only the flagged sentences and the original fact brief (never the
+    writing rules or template again, since the rest of the document is
+    itself proof the model already followed them), asking for a citation
+    drawn from the brief or an explicit hedge on just those sentences, with
+    everything else asked to come back unchanged.
+    `_generate_module_doc_from_brief` tries this once, immediately after a
+    near-miss failure and before consuming one of `max_attempts`' full
+    regenerations; if the patch attempt itself doesn't resolve validation,
+    generation falls back to the existing full-chunk retry loop unchanged.
+  - A failure that exhausts every attempt now also appends each flagged
+    sentence to `DocResult.problems` verbatim (prefixed `uncited:`), not
+    just the summary count `validate_doc` already reported -- the issue's
+    "at minimum" fallback ask, so a human can hand-patch immediately from
+    the failure output instead of re-deriving which sentences were flagged
+    from the document text.
+  - Dialect-neutral by construction: keyed off `validate_doc`'s own
+    `uncited_assertions`/`problems`, not any dialect-specific text --
+    applies identically to Natural and Mantis/Supra chunks. Not mirrored
+    into `testbatch.py`: `validate_test_doc`'s checks don't include an
+    uncited-assertive-statement check (generated tests are field-inventory
+    prose, not claim-per-sentence narrative), so the near-miss condition
+    this fix keys on never arises there.
+  - New tests in `tests/test_batch.py`: `_is_near_miss_uncited`'s boundary
+    (exactly `NEAR_MISS_MAX_UNCITED` uncited statements alone vs. one more,
+    vs. one alongside an unrelated problem), a near-miss response getting
+    the targeted patch prompt (not the full writing-rules/template retry)
+    and succeeding without consuming a full-retry attempt, a patch attempt
+    that itself fails falling back to the existing full retry, and a
+    genuinely broken response (more uncited statements than the threshold
+    allows) still going straight to a full retry as before.
+  - Full suite green (780 passed, 2 skipped); bundled fixture pipeline
+    clean (71/71 docs, 0 invalid citations of 739, `mfdoc validate` exit 0)
+    -- the bundled fixtures' pre-generated docs already validate clean, so
+    the near-miss path isn't exercised by the fixture run itself, only by
+    the new unit tests' synthetic near-miss/broken responses.
 
 **Progress (2026-09-07c):**
 - Closed out the two items 2026-09-07b left for a future pass:

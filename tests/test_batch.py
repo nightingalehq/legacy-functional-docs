@@ -318,6 +318,168 @@ def test_generate_module_doc_from_brief_tracks_duration_and_retries_across_attem
     assert result.duration_s == pytest.approx(0.2)  # 0.1s/call (fake clock) * 2 calls
 
 
+def test_is_near_miss_uncited_boundary():
+    """`_is_near_miss_uncited` (issue #131) is true only when validation
+    failed for exactly one reason -- a small number (<= NEAR_MISS_MAX_UNCITED)
+    of uncited-and-unhedged assertive statements -- and false the moment
+    either bound is crossed: too many uncited sentences, or any other
+    problem alongside them (here, an invalid citation)."""
+    within_bound = {
+        "ok": False,
+        "problems": ["3 assertive statement(s) carry no citation and no hedge"],
+        "uncited_assertions": ["a", "b", "c"],
+    }
+    assert batch_mod._is_near_miss_uncited(within_bound)
+
+    too_many = {
+        "ok": False,
+        "problems": ["4 assertive statement(s) carry no citation and no hedge"],
+        "uncited_assertions": ["a", "b", "c", "d"],
+    }
+    assert not batch_mod._is_near_miss_uncited(too_many)
+
+    mixed_with_other_problem = {
+        "ok": False,
+        "problems": [
+            "invalid citation [[X:1]]: member 'X' is not in the index",
+            "1 assertive statement(s) carry no citation and no hedge",
+        ],
+        "uncited_assertions": ["a"],
+    }
+    assert not batch_mod._is_near_miss_uncited(mixed_with_other_problem)
+
+
+def test_near_miss_uncited_assertion_gets_a_targeted_patch_not_a_full_retry(indexed_db, tmp_path):
+    """Issue #131: a chunk whose only validation problem is a single
+    near-miss uncited assertive statement gets a cheap targeted-patch
+    follow-up call (build_uncited_patch_prompt) instead of a full chunk
+    regeneration -- the second call must carry the flagged-sentence prompt,
+    not the writing rules/template/"Previous attempt failed" full-retry
+    prompt, and must not consume one of the full-regeneration attempts."""
+    calls = {"n": 0}
+    prompts: list[str] = []
+
+    def caller(prompt: str) -> batch_mod.ModelResponse:
+        calls["n"] += 1
+        prompts.append(prompt)
+        if calls["n"] == 1:
+            return batch_mod.ModelResponse(
+                text=(
+                    GOOD_FRONTMATTER.format(member="MMP0100")
+                    + "\n# MMP0100\n\nDoes something [[MMP0100:1]]. "
+                    "The system also validates the account balance before posting.\n"
+                ),
+                input_tokens=10, output_tokens=20,
+            )
+        # The targeted patch attempt: fix the flagged sentence with a citation.
+        return batch_mod.ModelResponse(
+            text=(
+                GOOD_FRONTMATTER.format(member="MMP0100")
+                + "\n# MMP0100\n\nDoes something [[MMP0100:1]]. "
+                "The system also validates the account balance before posting [[MMP0100:1]].\n"
+            ),
+            input_tokens=5, output_tokens=8,
+        )
+
+    out_path = tmp_path / "MMP0100.md"
+    brief = "# Fact brief: MMP0100\n\nSome brief text [[MMP0100:1]].\n"
+    result = batch_mod._generate_module_doc_from_brief(
+        indexed_db, "MMP0100", brief, out_path, caller, "cite everything", "module template",
+    )
+    assert result.ok, result.problems
+    assert calls["n"] == 2
+    assert result.attempts == 1  # the patch call doesn't count as a full-retry attempt
+    patch_prompt = prompts[1]
+    assert "Flagged sentences (fix only these)" in patch_prompt
+    assert "Previous attempt failed validation" not in patch_prompt
+    assert "cite everything" not in patch_prompt  # writing rules not resent
+    assert "module template" not in patch_prompt  # template not resent
+
+
+def test_near_miss_patch_failure_falls_back_to_full_chunk_retry(indexed_db, tmp_path):
+    """When the targeted patch attempt itself doesn't resolve validation,
+    generation must still fall back to the existing full-retry path (with
+    its normal max_attempts budget) rather than giving up."""
+    calls = {"n": 0}
+    prompts: list[str] = []
+    near_miss_text = (
+        GOOD_FRONTMATTER.format(member="MMP0100")
+        + "\n# MMP0100\n\nDoes something [[MMP0100:1]]. "
+        "The system also validates the account balance before posting.\n"
+    )
+
+    def caller(prompt: str) -> batch_mod.ModelResponse:
+        calls["n"] += 1
+        prompts.append(prompt)
+        if calls["n"] == 1:
+            return batch_mod.ModelResponse(text=near_miss_text, input_tokens=10, output_tokens=20)
+        if calls["n"] == 2:
+            # Patch attempt: model fails to actually fix it.
+            return batch_mod.ModelResponse(text=near_miss_text, input_tokens=5, output_tokens=8)
+        # Full retry: succeeds.
+        return batch_mod.ModelResponse(
+            text=(
+                GOOD_FRONTMATTER.format(member="MMP0100")
+                + "\n# MMP0100\n\nDoes something [[MMP0100:1]]. "
+                "The system also validates the account balance before posting [[MMP0100:1]].\n"
+            ),
+            input_tokens=1, output_tokens=1,
+        )
+
+    out_path = tmp_path / "MMP0100.md"
+    brief = "# Fact brief: MMP0100\n\nSome brief text [[MMP0100:1]].\n"
+    result = batch_mod._generate_module_doc_from_brief(
+        indexed_db, "MMP0100", brief, out_path, caller, "cite everything", "module template",
+        max_attempts=2,
+    )
+    assert result.ok, result.problems
+    assert calls["n"] == 3
+    assert result.attempts == 2
+    assert "Previous attempt failed validation" in prompts[2]
+
+
+def test_multiple_uncited_assertions_still_trigger_a_full_retry(indexed_db, tmp_path):
+    """A genuinely broken response -- more uncited assertions than
+    NEAR_MISS_MAX_UNCITED allows -- must skip the targeted-patch path
+    entirely and go straight to the existing full-chunk retry, unchanged
+    from before issue #131's fix."""
+    assert batch_mod.NEAR_MISS_MAX_UNCITED == 3
+    broken_text = (
+        GOOD_FRONTMATTER.format(member="MMP0100")
+        + "\n# MMP0100\n\n"
+        "The system validates the account balance. "
+        "The user must confirm the transaction. "
+        "The process posts the entry to the ledger. "
+        "The module updates the audit trail.\n"
+    )
+    calls = {"n": 0}
+    prompts: list[str] = []
+
+    def caller(prompt: str) -> batch_mod.ModelResponse:
+        calls["n"] += 1
+        prompts.append(prompt)
+        if calls["n"] == 1:
+            return batch_mod.ModelResponse(text=broken_text, input_tokens=10, output_tokens=20)
+        return batch_mod.ModelResponse(
+            text=(
+                GOOD_FRONTMATTER.format(member="MMP0100")
+                + "\n# MMP0100\n\nDoes something [[MMP0100:1]].\n"
+            ),
+            input_tokens=1, output_tokens=1,
+        )
+
+    out_path = tmp_path / "MMP0100.md"
+    brief = "# Fact brief: MMP0100\n\nSome brief text [[MMP0100:1]].\n"
+    result = batch_mod._generate_module_doc_from_brief(
+        indexed_db, "MMP0100", brief, out_path, caller, "cite everything", "module template",
+    )
+    assert result.ok, result.problems
+    assert calls["n"] == 2
+    assert result.attempts == 2
+    assert "Previous attempt failed validation" in prompts[1]
+    assert "Flagged sentences (fix only these)" not in prompts[1]
+
+
 def test_run_batch_tracks_duration_and_retries_for_a_mixed_run(monkeypatch, indexed_db, tmp_path):
     """End-to-end through run_batch(): one member succeeds first try (with
     transient retries along the way), one raises on its only call, and one

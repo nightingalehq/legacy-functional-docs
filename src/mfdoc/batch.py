@@ -255,6 +255,72 @@ def _retry_note(problems: list[str]) -> str:
     return bullets + "\n\n" + "\n".join(hints)
 
 
+# Issue #131: across two real regenerations, the large majority of `mfdoc
+# batch`'s token cost came from full-chunk regenerations chasing down a
+# handful of sentences flagged as "uncited assertive statement" in chunks
+# that were otherwise already valid -- fixing 2 sentences out of a 40-rule
+# chunk cost the same (a whole fresh model call, re-narrating everything)
+# as regenerating from scratch. `NEAR_MISS_MAX_UNCITED` bounds how small
+# "a handful" has to be (matching the issue's own "1-5 per attempt" report)
+# before `_is_near_miss_uncited` calls a validation failure a near-miss
+# worth a cheap targeted patch (see `build_uncited_patch_prompt`) instead of
+# going straight to a full chunk retry -- a chunk failing for any other
+# reason (a real citation-format error, a structurally broken response, or
+# simply too many uncited sentences to call "almost right") still falls
+# through to the existing full-retry path unchanged.
+NEAR_MISS_MAX_UNCITED = 3
+
+
+def _is_near_miss_uncited(result: dict) -> bool:
+    """True when `result` (a `validate_doc` return value) failed validation
+    for exactly one reason -- a small number of uncited-and-unhedged
+    assertive statements -- and nothing else. `validate_doc` appends exactly
+    one summary problem for every uncited assertion found together (`"{n}
+    assertive statement(s) carry no citation and no hedge"`), so `problems`
+    having exactly that one entry is enough to know no other check (front
+    matter, citation resolution, reversed-condition, ...) also failed --
+    this deliberately does not pattern-match that string, since
+    `uncited_assertions` (the actual flagged sentences) is the authoritative
+    signal `validate_doc` already computed it from."""
+    uncited = result.get("uncited_assertions") or []
+    return (
+        not result["ok"]
+        and len(result["problems"]) == 1
+        and 0 < len(uncited) <= NEAR_MISS_MAX_UNCITED
+    )
+
+
+def build_uncited_patch_prompt(brief: str, current_text: str, uncited: list[str]) -> str:
+    """A far smaller, targeted follow-up prompt for the near-miss case
+    `_is_near_miss_uncited` detects -- issue #131. Unlike `build_prompt`'s
+    full-retry prompt, this never resends the writing rules or template:
+    the model already demonstrated it can follow them (the rest of
+    `current_text` is proof), so the only thing worth asking for again is a
+    fix to the specific flagged sentences, using a citation already present
+    in `brief` (the same fact brief the original response was written from)
+    or, failing that, an explicit hedge. Everything else in the document is
+    asked to come back unchanged -- far cheaper, and far less likely to
+    perturb an otherwise-valid chunk, than a full from-scratch chunk
+    regeneration paying to fix one or two sentences out of dozens."""
+    bullets = "\n".join(f"- {s}" for s in uncited)
+    return (
+        "The document below is almost entirely valid first-draft functional "
+        "documentation. A small number of sentences assert behaviour without "
+        "a `[[MEMBER:LINE]]` citation or an explicit hedge (`inferred`, "
+        "`unresolved`, etc.) -- everything else in it already validated "
+        "clean.\n\n"
+        "# Flagged sentences (fix only these)\n\n" + bullets + "\n\n"
+        "For each flagged sentence, either add a `[[MEMBER:LINE]]` citation "
+        "to a fact already present in the brief below that supports it, or "
+        "-- only if no such fact exists -- rewrite it as an explicit hedge "
+        "instead of an assertion. Do not change anything else: no other "
+        "sentence, heading, citation, or front-matter field. Output the "
+        "complete corrected document, nothing else.\n\n"
+        "# Fact brief\n\n" + brief + "\n\n"
+        "# Current document\n\n" + current_text
+    )
+
+
 @dataclass
 class DocResult:
     member: str
@@ -303,12 +369,22 @@ def _generate_module_doc_from_brief(conn, member_name: str, brief: str, out_path
     the part of generate_module_doc that doesn't care whether `brief` covers
     a member's whole rule set or just one chunk of it, shared by the plain
     single-call path and _generate_module_doc_chunked's per-chunk calls
-    below (mirrors testbatch.py's _generate_test_doc_from_brief)."""
+    below (mirrors testbatch.py's _generate_test_doc_from_brief).
+
+    A validation failure that `_is_near_miss_uncited` calls a near-miss
+    (issue #131: only a handful of uncited-and-unhedged assertive
+    statements, nothing else wrong) gets one cheap targeted-patch attempt
+    (`build_uncited_patch_prompt`) before counting against `max_attempts` --
+    it doesn't consume one of the full-regeneration attempts, since it asks
+    for something far smaller than one. A chunk failing for any other
+    reason, or where the patch attempt itself doesn't resolve everything,
+    falls straight through to the existing full-chunk retry loop unchanged."""
     retry_note = None
     input_tokens = output_tokens = 0
     duration_s = 0.0
     retries = 0
     problems: list[str] = []
+    uncited_assertions: list[str] = []
     attempt = 0
     for attempt in range(1, max_attempts + 1):
         prompt = build_prompt(brief, writing_rules, template, retry_note)
@@ -318,19 +394,56 @@ def _generate_module_doc_from_brief(conn, member_name: str, brief: str, out_path
         duration_s += elapsed
         retries += response.retries
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(_fix_generated_by_version(response.text), encoding="utf-8")
+        text = _fix_generated_by_version(response.text)
+        out_path.write_text(text, encoding="utf-8")
         result = validate_doc(conn, out_path)
         if result["ok"]:
             return DocResult(
                 member_name, str(out_path), True, attempt, input_tokens, output_tokens, [],
                 duration_s=duration_s, retries=retries,
             )
+
+        if _is_near_miss_uncited(result):
+            logger.warning(
+                "%s: validation failed on attempt %d/%d with %d near-miss uncited "
+                "assertive statement(s) only -- trying a targeted patch before a "
+                "full chunk retry",
+                member_name, attempt, max_attempts, len(result["uncited_assertions"]),
+            )
+            patch_prompt = build_uncited_patch_prompt(brief, text, result["uncited_assertions"])
+            patch_response, patch_elapsed = _timed_call(caller, patch_prompt)
+            input_tokens += patch_response.input_tokens
+            output_tokens += patch_response.output_tokens
+            duration_s += patch_elapsed
+            retries += patch_response.retries
+            text = _fix_generated_by_version(patch_response.text)
+            out_path.write_text(text, encoding="utf-8")
+            result = validate_doc(conn, out_path)
+            if result["ok"]:
+                return DocResult(
+                    member_name, str(out_path), True, attempt, input_tokens, output_tokens, [],
+                    duration_s=duration_s, retries=retries,
+                )
+            logger.warning(
+                "%s: targeted patch attempt did not resolve validation (%d problem(s)); "
+                "falling back to a full chunk retry",
+                member_name, len(result["problems"]),
+            )
+
         logger.warning(
             "%s: validation failed on attempt %d/%d (%d problem(s))",
             member_name, attempt, max_attempts, len(result["problems"]),
         )
         problems = result["problems"]
+        uncited_assertions = result.get("uncited_assertions") or []
         retry_note = _retry_note(problems)
+    if uncited_assertions:
+        # Issue #131's fallback ask: surface the flagged sentences
+        # themselves directly and prominently, not just the "N assertive
+        # statement(s)" count already in `problems` -- so a human can
+        # hand-patch immediately from this result instead of re-deriving
+        # which sentences they were from the document text.
+        problems = problems + [f"uncited: {s}" for s in uncited_assertions]
     return DocResult(
         member_name, str(out_path), False, attempt, input_tokens, output_tokens, problems,
         duration_s=duration_s, retries=retries,
