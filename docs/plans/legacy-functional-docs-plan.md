@@ -96,6 +96,37 @@ GitHub org.
     this PR.
   - Full suite green (719 passed, 2 skipped); bundled fixture pipeline
     clean (71/71 docs, 0 invalid citations of 739).
+- Fixed issue #134: `mantis.py`'s
+  `RE_CLEAR = re.compile(r"^\s*CLEAR\s+(?P<rest>.+)$", re.I)` matched
+  greedily to end of line, and its handler did nothing with the captured
+  `rest` beyond setting `matched = True` -- Mantis's colon-chained-clause
+  convention lets one physical `CLEAR` line carry independent trailing
+  statements (e.g. `CLEAR SCREEN:ATTRIBUTE(SCREEN)="RESET":FLAG=""`), so
+  a plain field assignment chained after
+  the screen-clear target had no path to ever being recognised: `RE_CLEAR`
+  consumed the whole line and set `matched = True` before `RE_ASSIGN`
+  further down the same if/elif chain ever got a look at it. Unlike every
+  other "recognised but intentionally not a rule" statement type (`PAD`/
+  `UNPAD`, `RELEASE`), the discarded content left no trace anywhere in the
+  fact store -- not a `rule_candidate`, not a `gap`, nothing.
+  - `RE_CLEAR`'s handler now splits `rest` on `:` at paren-depth 0 in the
+    masked text (the same rule `_assignment_pairs` already uses for
+    colon-chained `ASSIGN` lines, so a literal or subscript expression
+    containing `:` can't wrongly split a clause), then checks each clause
+    after the first (the actual clear-target list, never itself an
+    assignment) against `RE_ASSIGN`. A clause shaped like `ATTRIBUTE(...)=
+    ...` -- setting a screen attribute, not a plain field -- stays
+    untracked exactly as before; a clause that resolves to a plain field
+    assignment now gets its own `ASSIGN` `rule_candidate` row (and updates
+    `last_assign`) like any other `ASSIGN` statement.
+  - New tests in `tests/test_mantis_rules.py`:
+    `test_clear_with_chained_plain_assignment_still_records_the_assignment`
+    (verified to fail against the pre-fix code) and
+    `test_clear_with_only_screen_formatting_clauses_records_no_rule`
+    (no spurious rule or gap when every trailing clause is screen
+    formatting).
+  - Full suite green (731 passed, 2 skipped); bundled fixture pipeline
+    clean (71/71 docs, 0 invalid citations of 739).
 
 **Progress (2026-09-07c):**
 - Closed out the two items 2026-09-07b left for a future pass:
