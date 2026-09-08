@@ -690,8 +690,8 @@ def extract(conn, member_id: int, lines, member_name: str = "?") -> dict:
                 for pat, name, grp in (
                     (RE_IF, "IF", "cond"), (RE_WHILE, "WHILE", "cond"),
                     (RE_FOR, "FOR", "cond"), (RE_CASE, "CASE", "subj"),
-                    (RE_UNTIL, "UNTIL", "cond"), (RE_WHEN, "WHEN", "cond"),
-                    (RE_ONERR, "ON ERROR", "rest"),
+                    (RE_UNTIL, "UNTIL", "cond"), (RE_ONERR, "ON ERROR", "rest"),
+                    (RE_WHEN, "WHEN", "cond"),
                 ):
                     if (m := pat.match(masked)):
                         rule_id = rule(name, orig(stmt, m, grp), line_no, stmt)
@@ -700,17 +700,19 @@ def extract(conn, member_id: int, lines, member_name: str = "?") -> dict:
                             open_blocks.append((name, line_no))
                             when_stack.append(None)
                             depth += 1
-                        elif name == "WHEN" and when_stack:
+                        elif name == "WHEN" and when_stack and open_blocks and open_blocks[-1][0] == "CASE":
                             # A new WHEN closes whichever WHEN was
                             # previously open under the same enclosing
-                            # block (normally a CASE) -- that prior
-                            # branch's extent ends exactly where this one
-                            # starts.
+                            # CASE block -- that prior branch's extent
+                            # ends the line immediately before this one
+                            # starts (end_line is an inclusive upper
+                            # bound elsewhere, e.g. brief.
+                            # _branch_data_access's `line_no <= end_line`).
                             prev_when_id = when_stack[-1]
                             if prev_when_id is not None:
                                 conn.execute(
                                     "UPDATE rule_candidate SET end_line=? WHERE id=?",
-                                    (line_no, prev_when_id),
+                                    (line_no - 1, prev_when_id),
                                 )
                             when_stack[-1] = rule_id
                         matched = True

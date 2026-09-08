@@ -129,10 +129,12 @@ def test_case_when_branch_extent_is_recorded():
     and it could be (and, on a real engagement codebase, was) narrated as
     running unconditionally across every branch.
 
-    Each WHEN's end_line must stop at the next sibling WHEN (or, for the
-    last one, at the enclosing CASE's own END) -- so the GET at line 7,
-    which sits strictly between the WHEN at line 6 and the WHEN at line
-    11, resolves to exactly the branch that contains it and no other."""
+    Each WHEN's end_line is inclusive (like every other construct's --
+    see brief._branch_data_access's `line_no <= end_line`), so it must
+    stop at the line immediately before the next sibling WHEN starts (or,
+    for the last one, at the enclosing CASE's own END) -- so the GET at
+    line 7, which falls inside the WHEN at line 6's [line_no, end_line]
+    extent and no other, resolves to exactly the branch that contains it."""
     conn = _extract(
         'PROGRAM "TESTMOD"\n'
         "ENTRY MAIN\n"
@@ -167,8 +169,8 @@ def test_case_when_branch_extent_is_recorded():
 
     assert [r["line_no"] for r in when_rows] == [4, 6, 11]
     branch1, branch2, branch3 = when_rows
-    assert branch1["end_line"] == 6, "first WHEN's extent must stop at the next WHEN"
-    assert branch2["end_line"] == 11, "the GET's WHEN must stop at the next sibling WHEN"
+    assert branch1["end_line"] == 5, "first WHEN's extent must stop the line before the next WHEN"
+    assert branch2["end_line"] == 10, "the GET's WHEN must stop the line before the next sibling WHEN"
     assert branch3["end_line"] == 13, "the last WHEN's extent must reach the enclosing CASE's END"
 
     # The guarded GET's own nested IF gets its own extent too, unaffected
@@ -176,12 +178,12 @@ def test_case_when_branch_extent_is_recorded():
     assert if_row["line_no"] == 8
     assert if_row["end_line"] == 10
 
-    # The load-bearing check: the GET at line 7 falls strictly inside the
-    # second WHEN's [line_no, end_line) extent and no other branch's.
+    # The load-bearing check: the GET at line 7 falls inside the second
+    # WHEN's inclusive [line_no, end_line] extent and no other branch's.
     get_line = get_row["line_no"]
-    assert branch2["line_no"] < get_line < branch2["end_line"]
-    assert not (branch1["line_no"] < get_line < branch1["end_line"])
-    assert not (branch3["line_no"] < get_line < branch3["end_line"])
+    assert branch2["line_no"] < get_line <= branch2["end_line"]
+    assert not (branch1["line_no"] < get_line <= branch1["end_line"])
+    assert not (branch3["line_no"] < get_line <= branch3["end_line"])
 
 
 def test_while_loop_extent_is_recorded():
