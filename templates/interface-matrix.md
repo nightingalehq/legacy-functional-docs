@@ -24,10 +24,22 @@ dispatches to, and the outcome. Every factual claim must trace to a
 not provide, and do not invent a PF-key's label or outcome the brief's cited
 facts don't evidence; mark it `unresolved` instead.
 
+The brief's "PF-key / mode-panel dispatch branches" table can carry rows
+from two independent mechanisms, each tagged in its own `mechanism` column:
+`PF-key dispatch` (a branch that PERFORMs/CALLs a distinct subroutine per
+PF-key value, or sets a field inline, inside a module that displays the
+screen itself) and, only when the project configures
+`options.overview.mode_field_pattern`, `mode/panel dispatch` (a branch keyed
+on a separate mode/panel/transaction-code-like field, often a central block
+that acts inline with no subroutine call of its own). Treat these as two
+independent fact sources, not duplicates or alternates of each other — a
+screen can have rows from both, and they are not guaranteed to agree on the
+same set of actions.
+
 ## Interface matrix
 
-| Mode / module | Panel / map | PF-key | Label | Routine | Outcome | Citation |
-|---|---|---|---|---|---|---|
+| Mode / module | Panel / map | PF-key | Mechanism | Label | Routine | Outcome | Citation |
+|---|---|---|---|---|---|---|---|
 
 - **Mode / module**: from the brief's "Reachable from" list for this
   screen — every module whose own source displays it. More than one module
@@ -37,7 +49,13 @@ facts don't evidence; mark it `unresolved` instead.
   (ADD/CHANGE/INQUIRE/...) the source doesn't name.
 - **Panel / map**: the screen/map name from the brief's `## Screen/map`
   heading.
-- **PF-key**: the trigger value from the brief's "PF-key branches" table.
+- **PF-key**: the trigger value from the brief's dispatch branches table —
+  a PF-key literal for a `PF-key dispatch` row, or the mode/panel field's
+  own literal value for a `mode/panel dispatch` row.
+- **Mechanism**: copy the brief's `mechanism` column verbatim
+  (`PF-key dispatch` or `mode/panel dispatch`) — never merge or relabel the
+  two into one generic "dispatch" without saying which fact source it came
+  from.
 - **Label**: match a "Candidate PF-key labels" entry to this PF-key only
   when the label text itself names the key (e.g. a `PF3=Exit` caption
   matched to the `PF3` trigger row) — cite both the label and the branch.

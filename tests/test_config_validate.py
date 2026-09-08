@@ -231,6 +231,14 @@ def test_dispatch_field_pattern_must_be_a_valid_regex():
                for p in problems)
 
 
+def test_mode_field_pattern_must_be_a_valid_regex():
+    cfg = _base_cfg()
+    cfg["options"] = {"overview": {"mode_field_pattern": "(unclosed"}}
+    problems = validate_config(cfg)
+    assert any("options.overview.mode_field_pattern" in p and "not a valid regex" in p
+               for p in problems)
+
+
 def test_splitters_entry_must_be_a_list():
     cfg = _base_cfg()
     cfg["options"] = {"splitters": {"natural": "not-a-list"}}

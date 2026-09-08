@@ -233,6 +233,8 @@ OPTION_SPECS: list[OptionSpec] = [
                check=_valid_regex),
     OptionSpec("options.overview.dispatch_field_pattern", (str,), "a string",
                check=_valid_regex),
+    OptionSpec("options.overview.mode_field_pattern", (str,), "a string",
+               check=_valid_regex),
 
     # Dialect-keyed and theme-keyed regex lists (cli.py's cmd_ingest folds
     # options.splitters into normalise.split_members's splitters dict;

@@ -254,6 +254,56 @@ GitHub org.
     members are large enough to trigger chunking), so this check reports
     nothing against them; its behaviour is exercised entirely by the new
     unit tests' synthetic chunk-file fixtures.
+- Fixed issue #129: `interface_matrix_brief`'s dispatch-branch scan only
+  ever looked for the configured PF-key dispatch field
+  (`dispatch_field`/`dispatch_field_pattern`), so a dialect or coding style
+  that instead (or additionally) dispatches a screen's PF-key meanings
+  through a central mode/panel/transaction-code-keyed block -- one that
+  acts inline (sets a field, branches directly) rather than PERFORMing a
+  distinct subroutine per value -- had no fact source at all: that whole
+  class of PF-key-driven navigation was silently missing from the matrix.
+  - Added `mode_field_from_options` (`conditions.py`), deliberately
+    mirroring `dispatch_field_from_options` except for having *no* built-in
+    default: unlike Natural's fixed `*PF-KEY` system variable, a mode/panel
+    field's name is entirely application-chosen, so there's no equivalent
+    convention to guess at -- a project opts in with its own
+    `options.overview.mode_field_pattern` (new `OptionSpec` in
+    `config_validate.py`, same shape as `dispatch_field_pattern`), and the
+    mode/panel-dispatch half of the matrix is simply omitted (a documented
+    gap, not a guessed pattern) until it does.
+  - `interface_matrix_brief` (`brief.py`) now takes an optional `mode_field`
+    param and, when supplied, reuses `structural.dispatch_edges_for_member`
+    a second time per displaying module -- unchanged, since it was already
+    generic over any field pattern -- keyed on `mode_field` instead of
+    `dispatch_field`. Every row is tagged with a new `mechanism` column
+    (`PF-key dispatch` vs. `mode/panel dispatch`) so a reader isn't left
+    assuming both fact sources agree on the same set of actions per screen
+    when they might not. `cmd_brief` (`cli.py`) wires
+    `mode_field_from_options(cfg["options"])` through.
+  - `templates/interface-matrix.md` and `SKILL.md`'s document-set section
+    now describe the `mechanism` column and instruct carrying it into the
+    written document as its own column rather than merging the two
+    mechanisms into one undifferentiated "dispatch" fact.
+    `docs/guides/architecture.md`'s brief-generation section and
+    `README.md`'s command listing/sample config now mention the new
+    `mode_field_pattern` option alongside `dispatch_field_pattern`.
+  - New tests: `tests/test_conditions.py` (`mode_field_from_options` has no
+    built-in default, honours a configured pattern),
+    `tests/test_config_validate.py` (`mode_field_pattern` regex validation),
+    `tests/test_interface_matrix_brief.py` (an inline mode/panel branch
+    with no subroutine call of its own is surfaced and tagged
+    `mode/panel dispatch` alongside an existing `PF-key dispatch` row when
+    `mode_field` is supplied; omitted entirely, with no guessed field, when
+    it isn't) -- all with invented field/member names, no real client data.
+  - Full suite green (762 passed, 2 skipped); bundled fixture pipeline
+    clean (71/71 docs, 0 invalid citations of 739, `mfdoc validate` exit 0)
+    -- the bundled fixtures configure neither dispatch field pattern, so
+    this change reports nothing new against them; its behaviour is
+    exercised entirely by the new unit tests' synthetic fixtures. No real
+    Mantis/Supra fixture exercises the mode/panel mechanism in this change
+    (documented gap, per CLAUDE.md's dialect-variant guidance) -- the
+    derivation itself is dialect-neutral (any `rule_candidate`-populating
+    dialect benefits), only a worked fixture is missing.
 
 **Progress (2026-09-07c):**
 - Closed out the two items 2026-09-07b left for a future pass:

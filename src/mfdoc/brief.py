@@ -1338,7 +1338,9 @@ def _screen_label_candidates(conn, screen_name: str) -> list[dict]:
     return []
 
 
-def interface_matrix_brief(conn, redact: Redactor = NULL_REDACTOR, dispatch_field=None) -> str:
+def interface_matrix_brief(
+    conn, redact: Redactor = NULL_REDACTOR, dispatch_field=None, mode_field=None,
+) -> str:
     """Fact brief for the screen-and-key interface matrix document type
     (mode x panel x map x PF-label x routine x outcome, issue #91): per
     screen/map, which module(s) display it, the PF-key (or configured
@@ -1367,6 +1369,21 @@ def interface_matrix_brief(conn, redact: Redactor = NULL_REDACTOR, dispatch_fiel
       trigger value, routine(s) called, fields set -- scoped to the
       module(s) that display this particular screen, not every
       dispatching module system-wide.
+    - **Mode/panel dispatch branches** (issue #129) reuse the exact same
+      `dispatch_edges_for_member` derivation a second time, keyed on
+      `mode_field` instead of `dispatch_field`, when a project supplies
+      `options.overview.mode_field_pattern` (no built-in default -- see
+      `conditions.mode_field_from_options`). Some dialects/coding styles
+      dispatch a screen's PF-key meanings through a central mode/panel/
+      transaction-code-keyed block rather than (or in addition to) a
+      distinct subroutine call per PF-key branch; without also indexing
+      that field, an inline mode/panel branch that sets a field or acts
+      directly -- no `PERFORM`/`CALL` of its own -- is invisible to this
+      brief even though it's exactly the kind of PF-key-driven navigation
+      the matrix exists to surface. Each row is tagged with a `mechanism`
+      column (`PF-key dispatch` vs. `mode/panel dispatch`) so a reader
+      isn't left assuming both came from the same uniform mechanism when
+      the two fact sources actually disagree.
     - **"outcome"** (exit / navigate / error / ...) is deliberately not
       classified here: the routine name and call kind are handed over
       cited, and the narrative pass is trusted to characterise the outcome
@@ -1410,7 +1427,12 @@ def interface_matrix_brief(conn, redact: Redactor = NULL_REDACTOR, dispatch_fiel
         "writing the document, citing both; do not invent a match the "
         "source doesn't evidence. \"Outcome\" (exit/navigate/error/...) is "
         "not classified here either -- characterise it from the cited "
-        "routine/call kind when writing, or mark it `unresolved`."
+        "routine/call kind when writing, or mark it `unresolved`. Each "
+        "branch row's \"mechanism\" column says whether it came from the "
+        "PF-key dispatch field itself or, when `options.overview."
+        "mode_field_pattern` is configured, a separate mode/panel dispatch "
+        "field -- the two are not guaranteed to agree on the same set of "
+        "actions per screen and must not be read as duplicates of each other."
     )
     out.append("")
 
@@ -1432,15 +1454,17 @@ def interface_matrix_brief(conn, redact: Redactor = NULL_REDACTOR, dispatch_fiel
     # Cached across every screen a member displays -- dispatch_edges_for_member
     # scans that member's whole rule_candidate set, so a member appearing as
     # a display point for more than one screen would otherwise repeat that
-    # scan once per screen for no new information.
-    edges_cache: dict[int, list] = {}
+    # scan once per screen for no new information. Keyed by (member_id,
+    # mechanism) since mode_field, when configured, is a second independent
+    # scan of the same member against a different field pattern.
+    edges_cache: dict[tuple[int, str], list] = {}
 
-    def _dispatch_edges(member_id: int) -> list:
-        if member_id not in edges_cache:
-            edges_cache[member_id] = structural.dispatch_edges_for_member(
-                conn, member_id, dispatch_field=dispatch_field
-            )
-        return edges_cache[member_id]
+    def _dispatch_edges(member_id: int, field, mechanism: str) -> list:
+        key = (member_id, mechanism)
+        if key not in edges_cache:
+            edges = structural.dispatch_edges_for_member(conn, member_id, dispatch_field=field)
+            edges_cache[key] = [dict(e, mechanism=mechanism) for e in edges]
+        return edges_cache[key]
 
     any_rows = False
     for s in screens:
@@ -1462,7 +1486,9 @@ def interface_matrix_brief(conn, redact: Redactor = NULL_REDACTOR, dispatch_fiel
         # could otherwise share a dict key and silently lose one's edges.
         edges_by_module: dict[int, tuple[str, list]] = {}
         for m in displaying:
-            edges = _dispatch_edges(m["id"])
+            edges = list(_dispatch_edges(m["id"], dispatch_field, "PF-key dispatch"))
+            if mode_field is not None:
+                edges += _dispatch_edges(m["id"], mode_field, "mode/panel dispatch")
             if edges:
                 edges_by_module[m["id"]] = (m["name"], edges)
         if not edges_by_module:
@@ -1491,10 +1517,10 @@ def interface_matrix_brief(conn, redact: Redactor = NULL_REDACTOR, dispatch_fiel
                 out.append(f"- {lab['cite']} `{redact(lab['text'])}`")
             out.append("")
 
-        out.append("### PF-key branches, by module")
+        out.append("### PF-key / mode-panel dispatch branches, by module")
         out.append("")
-        out.append("| module | trigger value | branch | calls | fields set |")
-        out.append("|---|---|---|---|---|")
+        out.append("| module | trigger value | mechanism | branch | calls | fields set |")
+        out.append("|---|---|---|---|---|---|")
         for _mid, (module_name, edges) in edges_by_module.items():
             for e in edges:
                 calls = ", ".join(
@@ -1507,7 +1533,8 @@ def interface_matrix_brief(conn, redact: Redactor = NULL_REDACTOR, dispatch_fiel
                 ) or "—"
                 span = _cite(module_name, e["line_no"], e["end_line"])
                 out.append(
-                    f"| `{_cell(module_name)}` | `{_cell(e['trigger_value'])}` | {span} | {calls} | {assigns} |"
+                    f"| `{_cell(module_name)}` | `{_cell(e['trigger_value'])}` | {e['mechanism']} | "
+                    f"{span} | {calls} | {assigns} |"
                 )
         out.append("")
 

@@ -5,7 +5,14 @@ from __future__ import annotations
 
 import re
 
-from mfdoc.conditions import OUTCOME_FIELD, comparisons_in, invert, outcome_field_from_options, prose_polarity
+from mfdoc.conditions import (
+    OUTCOME_FIELD,
+    comparisons_in,
+    invert,
+    mode_field_from_options,
+    outcome_field_from_options,
+    prose_polarity,
+)
 
 
 def test_comparisons_in_finds_outcome_field_equality():
@@ -99,6 +106,21 @@ def test_outcome_field_from_options_uses_configured_pattern():
     pattern = outcome_field_from_options({"validate": {"outcome_field_pattern": r"\bRESULT\b"}})
     assert pattern.search("#RESULT")
     assert not pattern.search("#RETURN-CODE")
+
+
+def test_mode_field_from_options_has_no_built_in_default():
+    """Unlike DISPATCH_FIELD (Natural's fixed `*PF-KEY`), there's no single
+    well-known mode/panel field name to default to across dialects -- an
+    unconfigured project gets None, not a guess (issue #129)."""
+    assert mode_field_from_options(None) is None
+    assert mode_field_from_options({}) is None
+    assert mode_field_from_options({"overview": {}}) is None
+
+
+def test_mode_field_from_options_uses_configured_pattern():
+    pattern = mode_field_from_options({"overview": {"mode_field_pattern": r"#MODE\b"}})
+    assert pattern.search("#MODE")
+    assert not pattern.search("#PF-KEY")
 
 
 def test_invert_round_trips_equality():
