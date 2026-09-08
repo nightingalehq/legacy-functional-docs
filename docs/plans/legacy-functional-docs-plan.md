@@ -305,6 +305,49 @@ GitHub org.
     derivation itself is dialect-neutral (any `rule_candidate`-populating
     dialect benefits), only a worked fixture is missing.
 
+- Fixed issue #130: `mfdoc validate`/`mfdoc test-validate --docs <path>`
+  walked *every* markdown file under `<path>`, with nothing in the
+  directory structure itself saying which of several projects sharing a
+  parent output/test directory a given file belonged to -- pointing
+  `--docs` at that shared parent (rather than one project's own namespaced
+  subtree, per `cli._project_namespace`) silently cross-checked a different
+  project's generated docs against the currently loaded `--config`'s fact
+  store, reported as ordinary "member is not in the index"/"not a known
+  test_case scenario" failures indistinguishable from a real regression.
+  - Added `_out_of_scope_sources`/`_partition_pipeline_docs` (`validate.py`):
+    a member-scoped document's `sources` front matter (required on every
+    narrative/generated-test document) is cross-checked against the
+    currently loaded fact store's own `member` table before validation
+    runs -- a document naming at least one source, but none of them present
+    in this store, is skipped rather than validated against the wrong
+    project's fact store. A document with no `sources` key, an empty list
+    (`doc_type: register` documents, `interface-matrix.md`'s legitimately
+    empty list), a malformed non-list value, or `doc_type: language-guide`
+    (whose `sources` is descriptive placeholder text, not a member name --
+    the one doc type where this front matter isn't member provenance)
+    carries no signal either way and validates exactly as before.
+  - Wired into both `validate_tree` and `validate_tests_tree` as a new
+    `out_of_scope_documents` result key -- advisory only, never subtracted
+    from `documents`/`documents_ok` and never affecting either command's
+    exit code -- and printed by `cmd_validate`/`cmd_test_validate` (`cli.py`)
+    the same way other advisory problem lists already are.
+  - Dialect-neutral by construction: keyed off `sources`/`member`, tables
+    every dialect's extractor populates the same way, so no dialect-specific
+    variant is needed.
+  - New tests: `tests/test_validate.py` (a cross-project module doc is
+    skipped and reported separately rather than reporting invalid
+    citations; a register doc with no `sources` and a doc with an empty
+    `sources` list both still validate exactly as before) and
+    `tests/test_test_validate.py` (a cross-project generated-test doc's
+    scenario ref is skipped rather than reported as an invalid
+    `test_case` scenario) -- all with invented project/member names, no
+    real client data.
+  - Full suite green (767 passed, 2 skipped); bundled fixture pipeline
+    clean (71/71 docs, 0 invalid citations of 739, `mfdoc validate` exit 0)
+    -- the bundled fixtures are a single project, so nothing is newly
+    flagged out of scope against them; the fix's behaviour is exercised by
+    the new unit tests' synthetic two-project fixtures.
+
 **Progress (2026-09-07c):**
 - Closed out the two items 2026-09-07b left for a future pass:
   - `DEFINE WINDOW` and its `SIZE`/`BASE`/`FRAMED`/`FORMAT` attribute lines
