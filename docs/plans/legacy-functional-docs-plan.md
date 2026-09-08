@@ -462,6 +462,32 @@ GitHub org.
     appears under "Data areas included".
   - Full suite green (783 passed, 2 skipped); bundled fixture pipeline
     clean (71/71 docs, 0 invalid citations of 739, `mfdoc validate` exit 0).
+- Fixed issue #142: `mfdoc test-gen`/`mfdoc test-batch` defaulted
+  `options.testgen.out_dir` to the bare literal `"tests_generated"`
+  regardless of where a `project.yml`'s top-level `docs_root` put that
+  project's narrative docs, so a multi-project workspace ended up with two
+  disconnected top-level trees -- each project's docs under its own
+  `docs_root`, but every project's generated tests comingled under one
+  shared top-level `tests_generated/`.
+  - Added `_testgen_default_out_dir` (`cli.py`): when `docs_root` is set,
+    defaults `out_dir` to `<docs_root>/tests`; when it's unset, keeps
+    today's bare `"tests_generated"` literal unchanged, so a config without
+    `docs_root` sees no behavior change. Wired into both `cmd_test_gen` and
+    `cmd_test_batch` in place of the hardcoded `"tests_generated"` fallback
+    they each had; an explicit `options.testgen.out_dir` (or `--out`) still
+    overrides this exactly as before -- `_project_namespace` keeps applying
+    on top, unchanged.
+  - New tests in `tests/test_test_batch.py` cover all three cases: `docs_root`
+    set + no explicit `out_dir`/`--out` (new nested default), `docs_root`
+    unset + no explicit `out_dir`/`--out` (old top-level literal preserved),
+    and an explicit `options.testgen.out_dir` (always wins regardless of
+    `docs_root`, matching the pre-existing `--out`-always-wins coverage).
+  - Full suite green (789 passed, 2 skipped); bundled fixture pipeline clean
+    (71/71 docs, 0 invalid citations of 739, `mfdoc validate` exit 0); also
+    manually confirmed `mfdoc test-gen` against the bundled fixtures with
+    `docs_root` set and `out_dir` unset writes to
+    `docs/functional/tests/<namespace>/...` rather than a top-level
+    `tests_generated/`.
 
 **Progress (2026-09-07c):**
 - Closed out the two items 2026-09-07b left for a future pass:

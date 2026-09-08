@@ -372,7 +372,10 @@ Optional: draft tests from the same fact store (see
 [`docs/guides/testing-strategies-for-mainframes-and-4gl.md`](docs/guides/testing-strategies-for-mainframes-and-4gl.md)).
 Set `options.testgen` in `project.yml` (`default_language`, `default_framework`,
 `overlay_path`, `out_dir`, `max_scenarios_per_call`) once and the flags below
-become optional overrides. A member with more than `max_scenarios_per_call`
+become optional overrides. Leaving `out_dir` unset defaults to `<docs_root>/tests`
+when this config's own top-level `docs_root` is set (so generated tests land
+inside this project's own output tree, next to its narrative docs), or the
+bare `tests_generated` if `docs_root` isn't set. A member with more than `max_scenarios_per_call`
 test_case rows (default 150) renders as several independent chunk documents
 plus a deterministic index doc at the normal path, instead of one call --
 asking a single non-streaming completion for hundreds of scenarios risks a

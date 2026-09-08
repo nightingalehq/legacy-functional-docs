@@ -26,6 +26,33 @@ def test_minimal_valid_config_has_no_problems():
     assert validate_config(_base_cfg()) == []
 
 
+def test_docs_root_must_be_a_string():
+    """_testgen_default_out_dir (#142) joins docs_root into a path with no
+    type check of its own -- a malformed value (here, a list) must be
+    caught here as a clean config error, not surface as a raw TypeError
+    deep inside `mfdoc test-gen`/`mfdoc test-batch`."""
+    cfg = _base_cfg()
+    cfg["docs_root"] = ["not", "a", "string"]
+    problems = validate_config(cfg)
+    assert any("docs_root" in p and "a string" in p for p in problems)
+
+
+def test_docs_root_null_has_no_problems():
+    """An explicit `docs_root: null` means "unset" the same way an absent
+    key does -- `_testgen_default_out_dir`'s own `if docs_root` fallback
+    already treats both identically, so config validation must accept
+    both, not just the absent-key case."""
+    cfg = _base_cfg()
+    cfg["docs_root"] = None
+    assert validate_config(cfg) == []
+
+
+def test_docs_root_as_a_string_has_no_problems():
+    cfg = _base_cfg()
+    cfg["docs_root"] = "docs/functional"
+    assert validate_config(cfg) == []
+
+
 def test_fully_populated_valid_config_has_no_problems():
     cfg = _base_cfg()
     cfg["options"] = {
