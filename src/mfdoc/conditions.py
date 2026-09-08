@@ -82,7 +82,7 @@ def dispatch_field_from_options(options: dict | None) -> re.Pattern:
 # A second, independent dispatch field some dialects/coding styles key on:
 # a mode/panel/transaction-code field whose *own* value selects which set of
 # PF-key meanings/actions applies for the screen currently on display (issue
-# #129) -- e.g. a central `DECIDE ON FIRST VALUE OF #MODE`-style block, one
+# 129) -- e.g. a central `DECIDE ON FIRST VALUE OF #MODE`-style block, one
 # layer above the PF-key branches `DISPATCH_FIELD` already recognises, and
 # frequently found inline (setting a field or branching directly) rather
 # than as a PERFORM to a distinct subroutine per value the way most PF-key

@@ -24,7 +24,7 @@ dispatches to, and the outcome. Every factual claim must trace to a
 not provide, and do not invent a PF-key's label or outcome the brief's cited
 facts don't evidence; mark it `unresolved` instead.
 
-The brief's "PF-key / mode-panel dispatch branches" table can carry rows
+The brief's "PF-key / mode/panel dispatch branches" table can carry rows
 from two independent mechanisms, each tagged in its own `mechanism` column:
 `PF-key dispatch` (a branch that PERFORMs/CALLs a distinct subroutine per
 PF-key value, or sets a field inline, inside a module that displays the
