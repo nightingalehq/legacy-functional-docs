@@ -312,10 +312,11 @@ def cmd_brief(args) -> int:
     elif args.executive:
         out = brief_mod.executive_brief(conn, args.executive, redact=redact, sme_notes=notes)
     elif args.interface_matrix:
-        from .conditions import dispatch_field_from_options
+        from .conditions import dispatch_field_from_options, mode_field_from_options
 
         out = brief_mod.interface_matrix_brief(
-            conn, redact=redact, dispatch_field=dispatch_field_from_options(cfg["options"])
+            conn, redact=redact, dispatch_field=dispatch_field_from_options(cfg["options"]),
+            mode_field=mode_field_from_options(cfg["options"]),
         )
     else:
         print("specify --module, --entity, --system, --executive or --interface-matrix", file=sys.stderr)

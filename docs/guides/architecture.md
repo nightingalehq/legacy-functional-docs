@@ -188,7 +188,14 @@ Produces the plain-text input to the narrative stage: `module_brief`
 system), `executive_brief` (`mfdoc brief --executive`, feeds
 `templates/executive-summary.md`), `interface_matrix_brief` (`mfdoc brief
 --interface-matrix`, whole-system screen-and-key interface matrix, feeds
-`templates/interface-matrix.md`), plus `json_index` for downstream tooling
+`templates/interface-matrix.md`; every branch row is tagged with which
+dispatch mechanism produced it — the PF-key dispatch field (`dispatch_field`,
+same default/override as `dispatch_map` below) or, when a project also
+configures `options.overview.mode_field_pattern`, a second, independent scan
+keyed on a mode/panel-like field, since some dialects/coding styles dispatch
+a screen's PF-key meanings through a central mode/panel-keyed block that
+acts inline rather than a distinct subroutine call per PF-key branch — see
+issue #129), plus `json_index` for downstream tooling
 (`mfdoc export`). `rules_register` is its own subcommand
 (`mfdoc rules-register`) rather than a `brief` flag, but lives in the same
 module and follows the same fact-summary shape. A brief contains only

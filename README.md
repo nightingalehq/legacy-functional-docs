@@ -216,7 +216,11 @@ mfdoc brief --config project.yml --executive MMP0100
 mfdoc brief --config project.yml --interface-matrix
 # whole-system: per screen/map, which module(s) display it, the PF-key (or
 # configured dispatch field) branches those modules dispatch on, and any
-# literal label text recorded on the screen -- see templates/interface-matrix.md
+# literal label text recorded on the screen -- see templates/interface-matrix.md.
+# Each branch row is tagged with its mechanism: PF-key dispatch (the default),
+# or, when options.overview.mode_field_pattern is also set, a second scan for
+# a central mode/panel-field-keyed dispatch block some dialects/coding styles
+# use instead of (or alongside) a distinct subroutine call per PF-key branch.
 
 # ... write documents from the briefs, per reference/writing-rules.md ...
 # module docs are high-volume and formulaic; batch them instead of writing
@@ -340,6 +344,16 @@ options:
     # that wraps *PF-KEY in its own field supplies its own complete
     # pattern here
     dispatch_field_pattern: null
+    # a second, independent dispatch field the screen-and-key interface
+    # matrix (`mfdoc brief --interface-matrix`) also scans for, alongside
+    # dispatch_field_pattern above (issue #129): a mode/panel/transaction-
+    # code-like field some dialects/coding styles use for a central
+    # dispatch block that acts inline (sets a field, branches directly)
+    # rather than PERFORMing a distinct subroutine per PF-key value. No
+    # built-in default -- unlike *PF-KEY there's no one well-known system
+    # variable to guess at, so this mechanism is simply omitted from the
+    # matrix until a project opts in with its own pattern here
+    mode_field_pattern: null
   validate:
     # the field(s) `mfdoc validate` treats as an "outcome" field (return/
     # response/status codes, flags) when cross-checking that a narrative

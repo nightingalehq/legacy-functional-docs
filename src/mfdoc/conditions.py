@@ -79,6 +79,32 @@ def dispatch_field_from_options(options: dict | None) -> re.Pattern:
     return re.compile(pattern, re.IGNORECASE)
 
 
+# A second, independent dispatch field some dialects/coding styles key on:
+# a mode/panel/transaction-code field whose *own* value selects which set of
+# PF-key meanings/actions applies for the screen currently on display (issue
+# 129) -- e.g. a central `DECIDE ON FIRST VALUE OF #MODE`-style block, one
+# layer above the PF-key branches `DISPATCH_FIELD` already recognises, and
+# frequently found inline (setting a field or branching directly) rather
+# than as a PERFORM to a distinct subroutine per value the way most PF-key
+# branches are. Unlike `DISPATCH_FIELD`, there is no built-in pattern here:
+# Natural's `*PF-KEY` is one fixed, well-known system variable to default
+# to, but a mode/panel field's name is entirely application-chosen with no
+# equivalent convention to guess at (see the module docstring's stance on
+# not inventing dialect assumptions) -- a project opts in with its own
+# `options.overview.mode_field_pattern`, and the mode/panel-dispatch half of
+# the interface matrix is simply omitted (a documented gap, not a guessed
+# pattern) until it does.
+def mode_field_from_options(options: dict | None) -> re.Pattern | None:
+    """The mode/panel dispatch-field pattern from
+    `options.overview.mode_field_pattern` in project.yml, or `None` if
+    unset -- see the comment above on why this has no built-in default the
+    way `DISPATCH_FIELD`/`dispatch_field_from_options` does."""
+    pattern = ((options or {}).get("overview") or {}).get("mode_field_pattern")
+    if not pattern:
+        return None
+    return re.compile(pattern, re.IGNORECASE)
+
+
 _IDENT = r"[#@$&A-Za-z][\w\-.]*"
 _LITERAL = r"'[^']*'|\"[^\"]*\""
 

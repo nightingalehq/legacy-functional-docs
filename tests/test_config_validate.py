@@ -231,6 +231,29 @@ def test_dispatch_field_pattern_must_be_a_valid_regex():
                for p in problems)
 
 
+def test_mode_field_pattern_must_be_a_valid_regex():
+    cfg = _base_cfg()
+    cfg["options"] = {"overview": {"mode_field_pattern": "(unclosed"}}
+    problems = validate_config(cfg)
+    assert any("options.overview.mode_field_pattern" in p and "not a valid regex" in p
+               for p in problems)
+
+
+def test_explicit_null_is_accepted_for_the_single_pattern_options():
+    """README.md documents outcome_field_pattern/dispatch_field_pattern/
+    mode_field_pattern as settable to `null` to explicitly mean "unset,
+    use the default/omit" -- the same thing a missing key already means,
+    per each *_from_options helper's own `if not pattern:` fallback. A
+    project that writes that out explicitly (rather than just omitting the
+    key) must not fail config validation for it."""
+    cfg = _base_cfg()
+    cfg["options"] = {
+        "validate": {"outcome_field_pattern": None},
+        "overview": {"dispatch_field_pattern": None, "mode_field_pattern": None},
+    }
+    assert validate_config(cfg) == []
+
+
 def test_splitters_entry_must_be_a_list():
     cfg = _base_cfg()
     cfg["options"] = {"splitters": {"natural": "not-a-list"}}

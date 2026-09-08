@@ -175,7 +175,11 @@ Suggested document set, in this order (each builds vocabulary the next needs):
    as candidate PF-key labels — matching a label to a specific key, and
    characterising the outcome (exit/navigate/error/...), is the judgement
    call to make when writing this document; never invent a match or an
-   outcome the cited facts don't evidence.
+   outcome the cited facts don't evidence. Each branch row is tagged with
+   a `mechanism` (PF-key dispatch vs. mode/panel dispatch, when a project
+   also configures `options.overview.mode_field_pattern`) — carry that tag
+   into the document as its own column rather than merging the two into
+   one undifferentiated "dispatch" fact (issue #129).
 6. `gap-register.md` — every unresolved item, as SME questions
 7. `coverage-report.md` — the numbers, unspun
 8. `reference/language-guide.md` — what this dialect's source actually

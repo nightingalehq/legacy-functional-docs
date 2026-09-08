@@ -223,10 +223,11 @@ def test_a_pipe_in_a_dispatch_literal_does_not_corrupt_the_markdown_table():
     assert "\\|" in out, "the literal's own pipe must be escaped, not left to break the table"
     table_lines = [l for l in out.splitlines() if l.startswith("| `MMP0100`")]
     assert table_lines, "expected a rendered matrix row"
-    # 5 columns -> 6 real column-delimiter pipes; an escaped `\|` inside a
-    # cell's own text must not be counted as one of them.
+    # 6 columns (module/trigger value/mechanism/branch/calls/fields set) ->
+    # 7 real column-delimiter pipes; an escaped `\|` inside a cell's own
+    # text must not be counted as one of them.
     unescaped = re.findall(r"(?<!\\)\|", table_lines[0])
-    assert len(unescaped) == 6, f"unescaped pipe corrupted the row: {table_lines[0]!r}"
+    assert len(unescaped) == 7, f"unescaped pipe corrupted the row: {table_lines[0]!r}"
 
 
 def test_dispatch_edges_are_computed_once_per_member_across_multiple_screens(monkeypatch):
@@ -255,3 +256,52 @@ def test_dispatch_edges_are_computed_once_per_member_across_multiple_screens(mon
     out = interface_matrix_brief(conn, redact=NULL_REDACTOR)
     assert "MMM0100" in out and "MMM0200" in out
     assert calls == [1], f"expected exactly one scan of member 1, got {calls}"
+
+
+def test_mode_field_branch_with_no_subroutine_call_is_surfaced_and_tagged():
+    """Issue #129: a central mode/panel-keyed dispatch branch that acts
+    inline (sets a field directly, no PERFORM/CALL of its own) is an
+    entirely different mechanism from a PF-key branch that PERFORMs a
+    named subroutine -- both must appear in the matrix, each tagged with
+    which mechanism it came from, when `mode_field` is supplied."""
+    conn = _conn()
+    _member(conn, 1, "MMP0100")
+    insert(conn, "interaction", member_id=1, line_no=5, kind="INPUT", target="MMM0100")
+
+    # Subroutine-invoked PF-key branch (existing mechanism).
+    _rc(conn, 1, 10, "IF", condition="*PF-KEY = 'PF3'", depth=0, end_line=11)
+    insert(conn, "call_edge", caller_id=1, callee_name="MMP9999", call_kind="FETCH",
+           dynamic=0, line_no=11)
+
+    # Inline mode/panel dispatch branch: no call at all, just sets a field.
+    _rc(conn, 1, 20, "IF", condition="#MODE = 'INQUIRE'", depth=0, end_line=21)
+    _rc(conn, 1, 21, "ASSIGN", fields_used="#PANEL-STATE", literals="'LOCKED'", depth=1)
+
+    out = interface_matrix_brief(
+        conn, redact=NULL_REDACTOR, mode_field=re.compile(r"#MODE\b"),
+    )
+
+    assert "| PF-key dispatch |" in out
+    assert "| mode/panel dispatch |" in out
+    assert "INQUIRE" in out
+    assert "#PANEL-STATE" in out and "LOCKED" in out
+    assert "[[MMP0100:20" in out, "the inline mode/panel branch itself must be cited"
+
+
+def test_mode_field_omitted_when_not_configured():
+    """Without `mode_field`, a mode/panel-keyed branch on a field other than
+    the PF-key dispatch field must not appear -- no built-in guess at what a
+    project's mode/panel field is named (see conditions.mode_field_from_options)."""
+    conn = _conn()
+    _member(conn, 1, "MMP0100")
+    insert(conn, "interaction", member_id=1, line_no=5, kind="INPUT", target="MMM0100")
+    _rc(conn, 1, 10, "IF", condition="*PF-KEY = 'PF3'", depth=0, end_line=11)
+    insert(conn, "call_edge", caller_id=1, callee_name="MMP9999", call_kind="FETCH",
+           dynamic=0, line_no=11)
+    _rc(conn, 1, 20, "IF", condition="#MODE = 'INQUIRE'", depth=0, end_line=21)
+    _rc(conn, 1, 21, "ASSIGN", fields_used="#PANEL-STATE", literals="'LOCKED'", depth=1)
+
+    out = interface_matrix_brief(conn, redact=NULL_REDACTOR)
+    assert "| PF-key dispatch |" in out
+    assert "| mode/panel dispatch |" not in out
+    assert "INQUIRE" not in out
