@@ -281,8 +281,26 @@ judgement-heavy documents are deliberately routed differently:
   `program`/`subprogram`/`subroutine`/`copycode`): generate brief → call a
   `ModelCaller` with `reference/writing-rules.md` and `templates/module.md`
   → write the doc → validate → retry once with the failure appended to the
-  prompt. Resumable via a state file keyed on brief content, so an
-  interrupted run over thousands of members picks up where it left off.
+  prompt. A validation failure that's a *near-miss* — `_is_near_miss_uncited`
+  (#131): no problem other than a handful (`NEAR_MISS_MAX_UNCITED`, default
+  3) of uncited-and-unhedged assertive statements — gets one cheap targeted
+  patch attempt first (`build_uncited_patch_prompt`: the already-written
+  document plus only the flagged sentences and the original brief, asking
+  for a citation or a hedge on just those, never the writing rules/template
+  again) before falling back to the full retry above; a chunk failing for
+  any other reason, or where the patch itself doesn't resolve everything,
+  still gets the full from-scratch retry unchanged. Across two real
+  regenerations this near-miss pattern accounted for the large majority of
+  `mfdoc batch`'s token cost, since a full chunk retry (re-narrating dozens
+  of rules) previously cost the same as fixing the one or two sentences
+  actually wrong. A retry (of either kind) that still fails has each
+  flagged sentence's snippet (`validate_doc` truncates `uncited_assertions`
+  to 140 characters, so this isn't the full sentence) appended to
+  `DocResult.problems` (prefixed `uncited (snippet):`), not just the
+  summary count, so a human can hand-patch directly from the failure
+  output. Resumable via a state file keyed on
+  brief content, so an interrupted run over thousands of members picks up
+  where it left off.
   `ModelCaller` is a plain callable protocol; `AnthropicCaller`
   (`anthropic_caller.py`), `VertexCaller` (`vertex_caller.py`) and
   `ClaudeCLICaller` (`claude_cli_caller.py`, shells out to a local `claude`
