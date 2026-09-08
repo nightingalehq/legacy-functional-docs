@@ -24,16 +24,14 @@ Two obligations:
    what it cannot parse produces an index that looks complete and is not, and
    nothing downstream can detect the difference.
 
-   This is not honoured everywhere in the shipped codebase, and a reader
-   calibrating against the source should know that going in: `environment.py`'s
-   `extract_sql_ddl`, `extract_copybook`, and `extract_cics_csd` never call
-   `add_gap` — an unrecognised `CREATE TABLE` clause, copybook line, or CSD
-   `DEFINE` is simply dropped with no trace in the gap register. `extract_jcl` is
-   partially compliant: it does not gap individual unrecognised statements either,
-   but it does raise one member-level `unparsed_line` gap when a JCL member
-   produces zero `EXEC` steps. Do not treat these four as the model to copy; they
-   are the exception, not the convention. See `reference/environment.md` for the
-   detail on each.
+   `environment.py`'s `extract_sql_ddl`, `extract_copybook`, and
+   `extract_cics_csd` follow this per-line/per-statement, the same as
+   `natural.py`/`mantis.py`: an unrecognised `CREATE TABLE` column or top-level
+   statement, copybook line, or CSD line with no `DEFINE` match each raise their
+   own `unparsed_line` gap. `extract_jcl` remains only partially compliant: it
+   does not gap individual unrecognised statements, but it does raise one
+   member-level `unparsed_line` gap when a JCL member produces zero `EXEC`
+   steps. See `reference/environment.md` for the detail on each.
 
 ## Registering it
 

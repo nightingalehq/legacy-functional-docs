@@ -11,6 +11,7 @@ nobody can trace to a business process.
 
 from __future__ import annotations
 
+import bisect
 import re
 
 from ..db import add_gap, insert, set_metric, upsert_entity
@@ -29,21 +30,41 @@ DDL_NOISE = re.compile(r"^\s*(PRIMARY|FOREIGN|UNIQUE|CONSTRAINT|CHECK|KEY)\b", r
 
 def extract_sql_ddl(conn, member_id, lines, member_name="?") -> dict:
     text = "\n".join(t for _, _, t in lines)
-    offsets = {}
+    # Parallel, offset-ascending lists rather than the dict-in-insertion-order
+    # scan this used to be -- line_of() below is called once per column and
+    # once per statement-level gap, which can add up to a lot of calls on a
+    # large DDL member, so it needs O(log n) lookup via bisect rather than an
+    # O(n) linear scan repeated for every call.
+    offset_starts: list[int] = []
+    offset_lines: list[int] = []
     pos = 0
     for line_no, _, t in lines:
-        offsets[pos] = line_no
+        offset_starts.append(pos)
+        offset_lines.append(line_no)
         pos += len(t) + 1
         insert(conn, "source_line", member_id=member_id, line_no=line_no, seq=None, text=t, is_comment=0)
 
     def line_of(char_pos: int) -> int:
-        best = 1
-        for p, ln in offsets.items():
-            if p <= char_pos:
-                best = ln
-            else:
-                break
-        return best
+        idx = bisect.bisect_right(offset_starts, char_pos) - 1
+        return offset_lines[idx] if idx >= 0 else 1
+
+    def first_nonspace_offset(s: str) -> int:
+        return re.match(r"\s*", s).end()
+
+    def first_statement_offset(s: str) -> int | None:
+        """Offset in ``s`` where the first line of actual statement content
+        begins, skipping leading blank lines and leading ``--`` comment
+        lines, or ``None`` if ``s`` is entirely blank/comment lines -- so a
+        gap anchors to the statement itself, not to blank lines or comments
+        preceding it."""
+        pos = 0
+        for line in s.splitlines(keepends=True):
+            stripped = line.strip()
+            if not stripped or stripped.startswith("--"):
+                pos += len(line)
+                continue
+            return pos + first_nonspace_offset(line)
+        return None
 
     tables = cols = 0
     for m in RE_CREATE_TABLE.finditer(text):
@@ -55,7 +76,8 @@ def extract_sql_ddl(conn, member_id, lines, member_name="?") -> dict:
         pk_cols = set()
         if (pk := RE_PK.search(m.group("body"))):
             pk_cols = {c.strip().strip('"').upper() for c in pk.group("cols").split(",")}
-        for raw_col in _split_top_level(m.group("body")):
+        for raw_col_start, raw_col in _split_top_level(m.group("body")):
+            col_ln = line_of(m.start("body") + raw_col_start + first_nonspace_offset(raw_col))
             if DDL_NOISE.match(raw_col):
                 if (fk := RE_FK.search(raw_col)):
                     ref = upsert_entity(conn, fk.group("ref").strip('"').upper(), "sql_table")
@@ -71,8 +93,14 @@ def extract_sql_ddl(conn, member_id, lines, member_name="?") -> dict:
                        is_descriptor=1 if cname in pk_cols else 0,
                        descriptor_kind="primary_key" if cname in pk_cols else None,
                        options="NOT NULL" if re.search(r"NOT\s+NULL", rest, re.I) else None,
-                       defined_line=ln, remark=rest.strip()[:120] or None)
+                       defined_line=col_ln, remark=rest.strip()[:120] or None)
                 cols += 1
+            elif raw_col.strip():
+                add_gap(conn, "unparsed_line",
+                        f"Column definition not recognised by the SQL DDL scanner in "
+                        f"{member_name}, table {name}.",
+                        member_id=member_id, line_no=col_ln, severity="low",
+                        raw=raw_col.strip()[:400])
 
     for m in RE_CREATE_INDEX.finditer(text):
         tbl = upsert_entity(conn, m.group("tbl").strip('"').upper(), "sql_table")
@@ -80,25 +108,51 @@ def extract_sql_ddl(conn, member_id, lines, member_name="?") -> dict:
                is_descriptor=1, descriptor_kind="UQ" if m.group("uq") else "index",
                parent_fields=m.group("cols").strip(), defined_line=line_of(m.start()))
 
+    # Statements that are neither a recognised CREATE TABLE nor a CREATE INDEX
+    # (a CREATE VIEW, ALTER TABLE, GRANT, or a CREATE TABLE malformed enough to
+    # miss RE_CREATE_TABLE) leave no trace anywhere above -- flag each such
+    # semicolon-delimited statement so the drop is visible in the gap register.
+    chunk_start = 0
+    for chunk in text.split(";"):
+        this_start = chunk_start
+        chunk_start += len(chunk) + 1
+        stmt_offset = first_statement_offset(chunk)
+        if stmt_offset is None:
+            continue
+        body = chunk[stmt_offset:].strip()
+        # RE_CREATE_TABLE's pattern requires the trailing ';' that text.split
+        # just consumed as the delimiter -- put one back before checking.
+        if RE_CREATE_TABLE.search(chunk + ";") or RE_CREATE_INDEX.search(chunk):
+            continue
+        stmt_start = this_start + stmt_offset
+        add_gap(conn, "unparsed_line",
+                f"Statement not recognised by the SQL DDL scanner in {member_name}.",
+                member_id=member_id, line_no=line_of(stmt_start), severity="low",
+                raw=body[:400])
+
     set_metric(conn, member_name, "sqlddl.tables", tables)
     set_metric(conn, member_name, "sqlddl.columns", cols)
     return {"tables": tables, "columns": cols}
 
 
-def _split_top_level(body: str) -> list[str]:
-    out, depth, cur = [], 0, []
-    for ch in body:
+def _split_top_level(body: str) -> list[tuple[int, str]]:
+    """Split on top-level commas, pairing each piece with its starting offset
+    within ``body`` so callers can map a piece back to its own source line
+    rather than the enclosing statement's."""
+    out, depth, cur, start = [], 0, [], 0
+    for i, ch in enumerate(body):
         if ch == "(":
             depth += 1
         elif ch == ")":
             depth -= 1
         if ch == "," and depth == 0:
-            out.append("".join(cur))
+            out.append((start, "".join(cur)))
             cur = []
+            start = i + 1
         else:
             cur.append(ch)
     if cur:
-        out.append("".join(cur))
+        out.append((start, "".join(cur)))
     return out
 
 
@@ -159,6 +213,12 @@ def extract_copybook(conn, member_id, lines, member_name="?") -> dict:
                    parent_fields=f"REDEFINES {red.group('t').upper()}" if red else None,
                    defined_line=line_no, remark=rest.strip()[:120] or None)
             n += 1
+        else:
+            add_gap(conn, "unparsed_line",
+                    f"Line not recognised by the COBOL copybook scanner in {member_name} "
+                    f"(not a level-number field entry).",
+                    member_id=member_id, line_no=line_no, severity="low",
+                    raw=code.strip()[:400])
     set_metric(conn, member_name, "copybook.fields", n)
     return {"fields": n}
 
@@ -365,6 +425,12 @@ def extract_cics_csd(conn, member_id, lines, member_name="?") -> dict:
                 upsert_entity(conn, attrs.get("DSNAME", rname).upper(), "vsam",
                               physical_ref=attrs.get("DSNAME"), defined_in=member_id,
                               defined_line=line_no, notes=f"CICS FILE {rname}")
+        elif stmt.strip() and not raw.lstrip().startswith("*"):
+            add_gap(conn, "unparsed_line",
+                    f"Line not recognised by the CICS CSD scanner in {member_name} "
+                    f"(no DEFINE matched).",
+                    member_id=member_id, line_no=line_no, severity="low",
+                    raw=stmt.strip()[:400])
         i = j + 1
     set_metric(conn, member_name, "cics.resources", n)
     return {"resources": n}
