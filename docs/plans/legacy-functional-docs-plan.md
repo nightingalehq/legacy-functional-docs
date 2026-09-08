@@ -96,12 +96,13 @@ GitHub org.
     this PR.
   - Full suite green (719 passed, 2 skipped); bundled fixture pipeline
     clean (71/71 docs, 0 invalid citations of 739).
-- Fixed issue #134: `mantis.py`'s `RE_CLEAR = re.compile(r"^\s*CLEAR\s+
-  (?P<rest>.+)$", re.I)` matched greedily to end of line, and its handler
-  did nothing with the captured `rest` beyond setting `matched = True` --
-  Mantis's colon-chained-clause convention lets one physical `CLEAR` line
-  carry independent trailing statements (e.g. `CLEAR SCREEN:ATTRIBUTE
-  (SCREEN)="RESET":FLAG=""`), so a plain field assignment chained after
+- Fixed issue #134: `mantis.py`'s
+  `RE_CLEAR = re.compile(r"^\s*CLEAR\s+(?P<rest>.+)$", re.I)` matched
+  greedily to end of line, and its handler did nothing with the captured
+  `rest` beyond setting `matched = True` -- Mantis's colon-chained-clause
+  convention lets one physical `CLEAR` line carry independent trailing
+  statements (e.g. `CLEAR SCREEN:ATTRIBUTE(SCREEN)="RESET":FLAG=""`), so
+  a plain field assignment chained after
   the screen-clear target had no path to ever being recognised: `RE_CLEAR`
   consumed the whole line and set `matched = True` before `RE_ASSIGN`
   further down the same if/elif chain ever got a look at it. Unlike every

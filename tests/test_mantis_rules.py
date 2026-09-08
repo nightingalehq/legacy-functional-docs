@@ -441,3 +441,23 @@ def test_clear_with_only_screen_formatting_clauses_records_no_rule():
         "SELECT 1 FROM gap WHERE member_id=1 AND line_no=3"
     ).fetchone()
     assert gap is None
+
+
+def test_clear_with_assignment_to_attribute_prefixed_variable_is_recorded():
+    """The screen-formatting skip must match the `ATTRIBUTE(` function form
+    specifically, not any clause whose text happens to start with the
+    letters "ATTRIBUTE" -- a plain assignment to a variable that merely
+    starts with that prefix (e.g. `ATTRIBUTE_FLAG=""`) is a real business
+    assignment and must still be recorded, not swallowed alongside genuine
+    `ATTRIBUTE(...)=...` screen-formatting clauses."""
+    conn = _extract(
+        'PROGRAM "TESTMOD"\n'
+        "ENTRY MAIN\n"
+        '  CLEAR MYSCREEN:ATTRIBUTE_FLAG=""\n'
+        "EXIT\n"
+    )
+    row = conn.execute(
+        "SELECT construct, condition FROM rule_candidate WHERE construct='ASSIGN' AND line_no=3"
+    ).fetchone()
+    assert row is not None
+    assert row["condition"] == 'ATTRIBUTE_FLAG=""'

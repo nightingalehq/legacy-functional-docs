@@ -769,7 +769,7 @@ def extract(conn, member_id: int, lines, member_name: str = "?") -> dict:
             for start, end in clause_bounds[1:]:
                 clause_masked = rest_masked[start:end].strip()
                 clause_stmt = rest_stmt[start:end].strip()
-                if not clause_masked or clause_masked.upper().startswith("ATTRIBUTE"):
+                if not clause_masked or re.match(r"ATTRIBUTE\s*\(", clause_masked, re.I):
                     continue
                 if RE_ASSIGN.match(clause_masked):
                     rule("ASSIGN", clause_stmt, line_no, clause_stmt)
