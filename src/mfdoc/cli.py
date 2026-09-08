@@ -1190,8 +1190,8 @@ def cmd_validate(args) -> int:
     )
     _print_problem_list(
         res["forward_reference_problems"],
-        "{} forward reference(s) to another chunk that the named chunk doesn't "
-        "actually fulfil (advisory, does not fail validation):",
+        "{} forward reference(s) to another chunk that either doesn't exist or "
+        "doesn't actually fulfil the reference (advisory, does not fail validation):",
     )
     _print_problem_list(
         res["stale_documents"],
