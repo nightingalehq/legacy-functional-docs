@@ -11,6 +11,7 @@ nobody can trace to a business process.
 
 from __future__ import annotations
 
+import bisect
 import re
 
 from ..db import add_gap, insert, set_metric, upsert_entity
@@ -29,24 +30,43 @@ DDL_NOISE = re.compile(r"^\s*(PRIMARY|FOREIGN|UNIQUE|CONSTRAINT|CHECK|KEY)\b", r
 
 def extract_sql_ddl(conn, member_id, lines, member_name="?") -> dict:
     text = "\n".join(t for _, _, t in lines)
-    offsets = {}
+    # Parallel, offset-ascending lists rather than the dict-in-insertion-order
+    # scan this used to be -- line_of() below is called once per column and
+    # once per statement-level gap, which can add up to a lot of calls on a
+    # large DDL member, so it needs O(log n) lookup via bisect rather than an
+    # O(n) linear scan repeated for every call.
+    offset_starts: list[int] = []
+    offset_lines: list[int] = []
     pos = 0
     for line_no, _, t in lines:
-        offsets[pos] = line_no
+        offset_starts.append(pos)
+        offset_lines.append(line_no)
         pos += len(t) + 1
         insert(conn, "source_line", member_id=member_id, line_no=line_no, seq=None, text=t, is_comment=0)
 
     def line_of(char_pos: int) -> int:
-        best = 1
-        for p, ln in offsets.items():
-            if p <= char_pos:
-                best = ln
-            else:
-                break
-        return best
+        idx = bisect.bisect_right(offset_starts, char_pos) - 1
+        return offset_lines[idx] if idx >= 0 else 1
 
     def first_nonspace_offset(s: str) -> int:
         return re.match(r"\s*", s).end()
+
+    def content_start(chunk: str) -> int:
+        """Offset in ``chunk`` where the first line of actual statement
+        content begins, skipping leading blank lines and leading ``--``
+        comment lines (same comment convention as the comment-only-chunk
+        check below) so a gap anchors to the statement, not to blank lines
+        or comments preceding it."""
+        pos = 0
+        while pos < len(chunk):
+            if (m := re.match(r"[ \t]*\n", chunk[pos:])):
+                pos += m.end()
+                continue
+            if (m := re.match(r"[ \t]*--[^\n]*\n", chunk[pos:])):
+                pos += m.end()
+                continue
+            break
+        return pos + first_nonspace_offset(chunk[pos:])
 
     tables = cols = 0
     for m in RE_CREATE_TABLE.finditer(text):
@@ -105,11 +125,12 @@ def extract_sql_ddl(conn, member_id, lines, member_name="?") -> dict:
         # just consumed as the delimiter -- put one back before checking.
         if RE_CREATE_TABLE.search(chunk + ";") or RE_CREATE_INDEX.search(chunk):
             continue
-        stmt_start = this_start + first_nonspace_offset(chunk)
+        skip = content_start(chunk)
+        stmt_start = this_start + skip
         add_gap(conn, "unparsed_line",
                 f"Statement not recognised by the SQL DDL scanner in {member_name}.",
                 member_id=member_id, line_no=line_of(stmt_start), severity="low",
-                raw=body[:400])
+                raw=chunk[skip:].strip()[:400])
 
     set_metric(conn, member_name, "sqlddl.tables", tables)
     set_metric(conn, member_name, "sqlddl.columns", cols)

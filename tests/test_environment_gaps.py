@@ -107,6 +107,56 @@ def test_sql_ddl_unrecognised_statement_after_blank_lines_gap_points_at_statemen
     assert matches[0]["line_no"] == 6
 
 
+# Unrecognised statement preceded by leading `--` comment lines (and, in the
+# second case, a blank line mixed in too) -- the gap's line_no must point at
+# the statement's own first line, and `raw` must not include the leading
+# comment text.
+DDL_STATEMENT_AFTER_COMMENT_LINES = """\
+CREATE TABLE GADGET (
+    GADGET_ID INTEGER NOT NULL
+);
+-- next object is a reporting view, not a base table
+-- kept here only for reference
+CREATE VIEW GADGET_VIEW AS SELECT * FROM GADGET;
+"""
+
+DDL_STATEMENT_AFTER_COMMENT_AND_BLANK_LINES = """\
+CREATE TABLE GADGET (
+    GADGET_ID INTEGER NOT NULL
+);
+
+-- next object is a reporting view, not a base table
+
+CREATE VIEW GADGET_VIEW AS SELECT * FROM GADGET;
+"""
+
+
+def test_sql_ddl_unrecognised_statement_after_comment_lines_gap_points_at_statement_line():
+    conn = _conn()
+    environment.extract_sql_ddl(conn, 1, _lines(DDL_STATEMENT_AFTER_COMMENT_LINES), "FAKEMEM")
+    gaps = conn.execute(
+        "SELECT line_no, raw FROM gap WHERE member_id=1 AND gap_kind='unparsed_line'"
+    ).fetchall()
+    matches = [g for g in gaps if "CREATE VIEW" in (g["raw"] or "")]
+    assert len(matches) == 1
+    assert matches[0]["line_no"] == 6
+    assert "reporting view" not in matches[0]["raw"]
+
+
+def test_sql_ddl_unrecognised_statement_after_comment_and_blank_lines_gap_points_at_statement_line():
+    conn = _conn()
+    environment.extract_sql_ddl(
+        conn, 1, _lines(DDL_STATEMENT_AFTER_COMMENT_AND_BLANK_LINES), "FAKEMEM"
+    )
+    gaps = conn.execute(
+        "SELECT line_no, raw FROM gap WHERE member_id=1 AND gap_kind='unparsed_line'"
+    ).fetchall()
+    matches = [g for g in gaps if "CREATE VIEW" in (g["raw"] or "")]
+    assert len(matches) == 1
+    assert matches[0]["line_no"] == 7
+    assert "reporting view" not in matches[0]["raw"]
+
+
 def test_sql_ddl_recognised_input_records_no_gap():
     conn = _conn()
     clean = "CREATE TABLE WIDGET (\n    WIDGET_ID INTEGER NOT NULL\n);\n"
