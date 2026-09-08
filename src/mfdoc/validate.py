@@ -29,7 +29,7 @@ from .conditions import (
     invert,
     prose_polarity,
 )
-from .db import insert
+from .db import insert, resolve_member_by_name
 from .testlang import sidecar_path_for
 
 CITATION = re.compile(r"\[\[(?P<member>[A-Z0-9#@$&\-_.]+)(?::(?P<from>\d+)(?:-(?P<to>\d+))?)?\]\]", re.I)
@@ -865,6 +865,29 @@ def module_completeness_problems(conn, results: list[dict]) -> list[str]:
     return problems
 
 
+def _coalesce_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Sort and merge overlapping/adjacent `[lo, hi]` ranges into a minimal
+    equivalent set, so the per-statement coverage check (`any(lo <= ln <= hi
+    for lo, hi in ranges)`) that follows has as few ranges as possible to
+    scan -- a member's citations across a whole module document set can
+    otherwise number in the hundreds, with lots of overlap between adjacent
+    or re-cited ranges, checked once per `call_edge`/`interaction` row.
+    Preserves membership exactly: a line covered by any input range is
+    covered by exactly one output range, and vice versa."""
+    if not ranges:
+        return []
+    ordered = sorted(ranges)
+    merged = [ordered[0]]
+    for lo, hi in ordered[1:]:
+        last_lo, last_hi = merged[-1]
+        if lo <= last_hi + 1:
+            if hi > last_hi:
+                merged[-1] = (last_lo, hi)
+        else:
+            merged.append((lo, hi))
+    return merged
+
+
 def statement_citation_coverage_problems(conn, results: list[dict]) -> list[str]:
     """A member's non-dynamic `call_edge` row, or `interaction` row, whose
     source line is never covered by *any* `[[MEMBER:LINE]]` citation across
@@ -887,9 +910,10 @@ def statement_citation_coverage_problems(conn, results: list[dict]) -> list[str]
     naming its target, has no citation range there for it to inspect at all.
     This checks coverage first, at the citation-range level, before any
     question of whether the citing prose names the target -- and unlike
-    #59 (advisory only), a gap here is folded into `completeness_problems`,
-    the same hard-failure list `module_completeness_problems` populates, so
-    `mfdoc validate`'s exit code actually reflects it.
+    #59 (advisory only), a gap here is aggregated separately, under its own
+    `statement_coverage_problems` hard-failure list (which `cmd_validate`
+    checks alongside `completeness_problems`), so `mfdoc validate`'s exit
+    code actually reflects it.
 
     Scoped to `doc_type: module` documents only, deliberately mirroring
     `module_completeness_problems`'s own scoping (see
@@ -920,13 +944,14 @@ def statement_citation_coverage_problems(conn, results: list[dict]) -> list[str]
 
     problems = []
     for member in sorted(members):
-        row = conn.execute("SELECT id FROM member WHERE UPPER(name)=?", (member.upper(),)).fetchone()
-        if row is None:
+        rows, ambiguous_libs = resolve_member_by_name(conn, member)
+        if ambiguous_libs or not rows:
             continue
-        member_ranges = cited_ranges.get(member.upper(), [])
+        member_id = rows[0]["id"]
+        member_ranges = _coalesce_ranges(cited_ranges.get(member.upper(), []))
         missing = []
         for target_col, kind_col, sql in _STATEMENT_SOURCES[:2]:  # call_edge, interaction -- not data_access
-            for stmt in conn.execute(sql, (row["id"],)).fetchall():
+            for stmt in conn.execute(sql, (member_id,)).fetchall():
                 ln = stmt["line_no"]
                 if not any(lo <= ln <= hi for lo, hi in member_ranges):
                     missing.append((ln, stmt[kind_col], stmt[target_col]))
