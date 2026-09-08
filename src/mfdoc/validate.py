@@ -751,8 +751,14 @@ def _reversed_condition_problems(
     return problems
 
 
-def validate_doc(conn, path: Path, outcome_field=OUTCOME_FIELD) -> dict:
-    text = path.read_text(encoding="utf-8")
+def validate_doc(conn, path: Path, outcome_field=OUTCOME_FIELD, _text: str | None = None) -> dict:
+    """`_text`, when given, is used instead of reading `path` again -- a
+    tree walk (`validate_tree`) that already read every file once to decide
+    scope (`_partition_pipeline_docs`, issue #130) passes its cached
+    content through here rather than re-reading the same file from disk a
+    second time. Callers validating a single known path (the common case
+    outside a tree walk) simply omit it."""
+    text = _text if _text is not None else path.read_text(encoding="utf-8")
     problems: list[str] = []
     omitted_targets: list[str] = []
     deferred_references: list[str] = []
@@ -773,6 +779,18 @@ def validate_doc(conn, path: Path, outcome_field=OUTCOME_FIELD) -> dict:
         for key in REQUIRED_FRONTMATTER:
             if key not in fm:
                 problems.append(f"front matter missing required key: {key}")
+        # `_out_of_scope_sources` (issue #130) deliberately does *not* treat
+        # a malformed `sources` value as a cross-project skip signal -- it
+        # relies on this check to actually report the contract violation
+        # instead, rather than the value silently passing through as
+        # "valid" (or distorting a tree-level aggregate check that iterates
+        # `sources` expecting a list of member-name strings).
+        if "sources" in fm:
+            sources = fm["sources"]
+            if not isinstance(sources, list):
+                problems.append(f"sources must be a list, got {sources!r}")
+            elif not all(isinstance(s, str) for s in sources):
+                problems.append(f"sources must be a list of strings, got {sources!r}")
         rs = fm.get("review_status")
         if rs and rs not in VALID_REVIEW:
             problems.append(f"review_status '{rs}' not one of {sorted(VALID_REVIEW)}")
@@ -909,7 +927,7 @@ def validate_doc(conn, path: Path, outcome_field=OUTCOME_FIELD) -> dict:
     }
 
 
-def validate_test_doc(conn, path: Path) -> dict:
+def validate_test_doc(conn, path: Path, _text: str | None = None) -> dict:
     """`validate_doc` plus the checks specific to a generated test file:
     `language`/`framework` front matter, and that every bare `MEMBER:BR-nnn`
     reference names a scenario that actually exists in test_case -- the
@@ -929,7 +947,7 @@ def validate_test_doc(conn, path: Path) -> dict:
     an unrecognised language) falls back to scanning `body` directly,
     exactly as before this feature existed.
     """
-    result = validate_doc(conn, path)
+    result = validate_doc(conn, path, _text=_text)
     fm, body = result.pop("_fm"), result.pop("_body")
     problems = list(result["problems"])
 
@@ -1019,17 +1037,19 @@ def _out_of_scope_sources(fm: dict | None, known_members: set[str]) -> list[str]
     list despite belonging to this project, and must validate exactly as
     before rather than being silently skipped for lack of a signal.
 
-    Also returns `None` (don't skip) when `sources` isn't a list at all --
-    a bare string, a mapping, or any other YAML shape someone wrote by
-    mistake instead of a list. That's a genuine front-matter contract
-    violation (`sources` is a `REQUIRED_FRONTMATTER` key), not a cross-
-    project signal, and this out-of-scope partition has no business
-    swallowing it: iterating a malformed value character-by-character (a
-    string) or key-by-key (a mapping) can easily produce zero matches
-    against `known_members` and get misclassified as belonging to a
-    different project, silently skipping the document instead of letting
-    whatever front-matter validation already runs elsewhere flag the real
-    problem.
+    Also returns `None` (don't skip) when `sources` isn't a list at all, or
+    is a list containing a non-string item -- a bare string, a mapping, or
+    any other YAML shape someone wrote by mistake instead of a list of
+    member-name strings. That's a genuine front-matter contract violation
+    (`sources` is a `REQUIRED_FRONTMATTER` key), not a cross-project signal,
+    and this out-of-scope partition has no business swallowing it:
+    iterating a malformed value character-by-character (a string) or
+    key-by-key (a mapping) can easily produce zero matches against
+    `known_members` and get misclassified as belonging to a different
+    project, silently skipping the document instead of letting it fall
+    through to `validate_doc`'s own `sources` shape check (added alongside
+    this exclusion specifically so that check is real, not just assumed --
+    see the `REQUIRED_FRONTMATTER` loop there) flag the real problem.
 
     And returns `None` (don't skip) for `doc_type: language-guide`
     specifically: `templates/language-guide.md` populates `sources` with a
@@ -1114,7 +1134,7 @@ def _out_of_scope_sources(fm: dict | None, known_members: set[str]) -> list[str]
     return normalized
 
 
-def _partition_pipeline_docs(conn, root: Path) -> tuple[list[Path], list[str]]:
+def _partition_pipeline_docs(conn, root: Path) -> tuple[list[Path], list[str], dict[Path, str]]:
     """Every pipeline-output markdown file under `root`, split into paths to
     actually validate and human-readable notes for ones skipped as
     belonging to a different project (see `_out_of_scope_sources`). Shared
@@ -1135,19 +1155,29 @@ def _partition_pipeline_docs(conn, root: Path) -> tuple[list[Path], list[str]]:
     against), which would skip the *entire* tree and let `mfdoc validate`
     exit 0 over a broken/misconfigured setup instead of surfacing the real
     "member is not in the index" failures normal validation exists to
-    catch -- exactly the case this whole partition must never hide."""
+    catch -- exactly the case this whole partition must never hide.
+
+    Also returns a `{path: text}` cache of every file's content already read
+    here to make the out-of-scope decision -- `validate_tree`/
+    `validate_tests_tree` hand it to `validate_doc`/`validate_test_doc` so
+    an in-scope document's content is read from disk exactly once per run,
+    not once here (for its front matter) and again there (for the rest of
+    validation)."""
     known_members = {
         (row[0] or "").upper() for row in conn.execute("SELECT name FROM member").fetchall()
     }
     in_scope: list[Path] = []
     skipped: list[str] = []
+    text_cache: dict[Path, str] = {}
     for path in sorted(root.rglob("*.md")):
         if not _is_pipeline_doc(path):
             continue
+        text = path.read_text(encoding="utf-8")
+        text_cache[path] = text
         if not known_members:
             in_scope.append(path)
             continue
-        fm, _, fm_err = _split_frontmatter(path.read_text(encoding="utf-8"))
+        fm, _, fm_err = _split_frontmatter(text)
         bad_sources = None if fm_err else _out_of_scope_sources(fm, known_members)
         if bad_sources is None:
             in_scope.append(path)
@@ -1157,12 +1187,12 @@ def _partition_pipeline_docs(conn, root: Path) -> tuple[list[Path], list[str]]:
                 f"looks like it belongs to a different project; skipped rather than "
                 f"validated against the wrong one"
             )
-    return in_scope, skipped
+    return in_scope, skipped, text_cache
 
 
 def validate_tests_tree(conn, root: Path) -> dict:
-    paths, out_of_scope = _partition_pipeline_docs(conn, root)
-    results = [validate_test_doc(conn, p) for p in paths]
+    paths, out_of_scope, text_cache = _partition_pipeline_docs(conn, root)
+    results = [validate_test_doc(conn, p, _text=text_cache.get(p)) for p in paths]
     return {
         "documents": len(results),
         "documents_ok": sum(1 for r in results if r["ok"]),
@@ -1463,8 +1493,8 @@ def _artifact_consistency_problems(conn, results: list[dict]) -> list[str]:
 
 
 def validate_tree(conn, root: Path, outcome_field=OUTCOME_FIELD) -> dict:
-    paths, out_of_scope = _partition_pipeline_docs(conn, root)
-    results = [validate_doc(conn, p, outcome_field=outcome_field) for p in paths]
+    paths, out_of_scope, text_cache = _partition_pipeline_docs(conn, root)
+    results = [validate_doc(conn, p, outcome_field=outcome_field, _text=text_cache.get(p)) for p in paths]
     return {
         "documents": len(results),
         "documents_ok": sum(1 for r in results if r["ok"]),

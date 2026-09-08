@@ -309,6 +309,45 @@ def test_validate_tree_does_not_skip_a_doc_with_malformed_sources(indexed_db, tm
     assert res["out_of_scope_documents"] == []
     assert res["documents_ok"] == 0
     assert res["invalid_citations"] == 1
+    assert any("sources must be a list" in p for p in res["results"][0]["problems"])
+
+
+def test_validate_doc_flags_a_sources_list_containing_a_non_string_item(indexed_db, tmp_path):
+    """A `sources` list with a non-string item (a number, a nested list/dict
+    someone wrote by mistake) is exactly as malformed as `sources` not being
+    a list at all -- `_out_of_scope_sources` deliberately doesn't treat
+    either shape as a cross-project signal (see its docstring), relying on
+    this real check to report it instead of the value silently passing as
+    "valid" front matter."""
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        GOOD_FRONTMATTER.replace("sources:\n  - MMP0100\n", "sources:\n  - MMP0100\n  - 42\n")
+    )
+    result = validate_doc(indexed_db, doc)
+    assert any("sources must be a list of strings" in p for p in result["problems"])
+
+
+def test_validate_tree_reads_each_in_scope_file_only_once(indexed_db, tmp_path, monkeypatch):
+    """`_partition_pipeline_docs` (issue #130) already reads every file's
+    content to decide scope -- `validate_tree` must reuse that same read
+    (via `validate_doc`'s `_text` parameter) rather than reading the file
+    from disk a second time to actually validate it."""
+    doc = tmp_path / "doc.md"
+    doc.write_text(GOOD_FRONTMATTER)
+
+    read_counts: dict[Path, int] = {}
+    original_read_text = Path.read_text
+
+    def counting_read_text(self, *args, **kwargs):
+        read_counts[self] = read_counts.get(self, 0) + 1
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", counting_read_text)
+
+    res = validate_tree(indexed_db, tmp_path)
+
+    assert res["documents"] == 1
+    assert read_counts.get(doc) == 1
 
 
 def test_validate_tree_ignores_whitespace_when_matching_sources_to_known_members(indexed_db, tmp_path):
