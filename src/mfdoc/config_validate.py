@@ -131,6 +131,33 @@ def _dict_of_regex_lists(value: dict) -> str | None:
     return None
 
 
+# The fixed set of label keys `supra.LABELS` (and therefore
+# `supra.labels_from_options`) recognises -- unlike `_dict_of_regex_lists`'s
+# project-chosen keys, an override here with an unknown key is almost
+# always a typo (e.g. "dataset-type" for "dataset_type") that would
+# otherwise silently do nothing, since `labels_from_options` only reads the
+# eight keys below.
+_SUPRA_LABEL_KEYS = {
+    "schema", "dataset", "dataset_type", "control_key", "element",
+    "linkpath", "link_from", "link_to",
+}
+
+
+def _dict_of_supra_labels(value: dict) -> str | None:
+    """For `options.dialects.supra.labels`: a mapping of label name (one of
+    `_SUPRA_LABEL_KEYS`) to a single regex string overriding that entry in
+    `supra.LABELS` -- see `supra.labels_from_options` for the merge."""
+    for key, pattern in value.items():
+        if key not in _SUPRA_LABEL_KEYS:
+            return f"[{key!r}] is not a recognised Supra label -- must be one of {sorted(_SUPRA_LABEL_KEYS)}"
+        if not isinstance(pattern, str):
+            return f"[{key!r}] must be a string, got {pattern!r}"
+        err = _valid_regex(pattern)
+        if err:
+            return f"[{key!r}] {err}"
+    return None
+
+
 @dataclass(frozen=True)
 class OptionSpec:
     path: str
@@ -205,6 +232,14 @@ OPTION_SPECS: list[OptionSpec] = [
     OptionSpec("options.overview.themes.taxonomy", (dict,),
                "a mapping of theme name to a list of regex strings",
                check=_dict_of_regex_lists),
+
+    # Supra's label-driven directory parser (supra.py's LABELS,
+    # supra.labels_from_options) -- a fixed set of named single patterns,
+    # each overridable independently and merged over the built-in defaults
+    # rather than the whole mapping being replaced.
+    OptionSpec("options.dialects.supra.labels", (dict,),
+               f"a mapping of label name ({sorted(_SUPRA_LABEL_KEYS)}) to a regex string",
+               check=_dict_of_supra_labels),
 
     OptionSpec("options.overview.themes.llm_fallback", (bool,), "a boolean"),
     OptionSpec("options.overview.complexity.metric", (str,), "a string",

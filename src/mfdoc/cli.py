@@ -56,17 +56,22 @@ from .redact import Redactor
 # accurate.
 from . import __version__ as VERSION
 
+#: Each entry takes `(conn, mid, lines, name, options)` -- `options` is the
+#: resolved `cfg["options"]` dict from the project config being ingested.
+#: Almost every dialect ignores it today (its extractor has no config-driven
+#: overrides yet); `supra_dir` is the one that reads
+#: `options.dialects.supra.labels` (see `supra.labels_from_options`).
 DIALECT_ROUTER = {
-    "natural": lambda conn, mid, lines, name: natural.extract(conn, mid, lines, name),
-    "mantis": lambda conn, mid, lines, name: mantis.extract(conn, mid, lines, name),
-    "adabas_fdt": lambda conn, mid, lines, name: adabas.extract_fdt(conn, mid, lines, name),
-    "ddm": lambda conn, mid, lines, name: adabas.extract_ddm(conn, mid, lines, name),
-    "supra_dir": lambda conn, mid, lines, name: supra.extract(conn, mid, lines, name),
-    "sql_ddl": lambda conn, mid, lines, name: environment.extract_sql_ddl(conn, mid, lines, name),
-    "cobol_copybook": lambda conn, mid, lines, name: environment.extract_copybook(conn, mid, lines, name),
-    "jcl": lambda conn, mid, lines, name: environment.extract_jcl(conn, mid, lines, name),
-    "cics_csd": lambda conn, mid, lines, name: environment.extract_cics_csd(conn, mid, lines, name),
-    "mantis_screen": lambda conn, mid, lines, name: screen.extract(conn, mid, lines, name),
+    "natural": lambda conn, mid, lines, name, options: natural.extract(conn, mid, lines, name),
+    "mantis": lambda conn, mid, lines, name, options: mantis.extract(conn, mid, lines, name),
+    "adabas_fdt": lambda conn, mid, lines, name, options: adabas.extract_fdt(conn, mid, lines, name),
+    "ddm": lambda conn, mid, lines, name, options: adabas.extract_ddm(conn, mid, lines, name),
+    "supra_dir": lambda conn, mid, lines, name, options: supra.extract(conn, mid, lines, name, options=options),
+    "sql_ddl": lambda conn, mid, lines, name, options: environment.extract_sql_ddl(conn, mid, lines, name),
+    "cobol_copybook": lambda conn, mid, lines, name, options: environment.extract_copybook(conn, mid, lines, name),
+    "jcl": lambda conn, mid, lines, name, options: environment.extract_jcl(conn, mid, lines, name),
+    "cics_csd": lambda conn, mid, lines, name, options: environment.extract_cics_csd(conn, mid, lines, name),
+    "mantis_screen": lambda conn, mid, lines, name, options: screen.extract(conn, mid, lines, name),
 }
 
 DIALECT_DEFAULT_TYPE = {
@@ -247,7 +252,7 @@ def cmd_ingest(args) -> int:
                     library=ch.library, system=system, source_file_id=sf_id,
                     first_line=ch.first_line, last_line=ch.first_line + len(ch.lines) - 1)
                 purge_member_facts(conn, mid)
-                DIALECT_ROUTER[dialect](conn, mid, ch.lines, ch.name)
+                DIALECT_ROUTER[dialect](conn, mid, ch.lines, ch.name, opts)
                 touched_member_ids.add(mid)
                 total_members += 1
             # A member this file owned before a content change that the new
@@ -980,8 +985,9 @@ DIALECT_CALIBRATION_HINTS = {
     "mantis": ("src/mfdoc/dialects/mantis.py",
                "DECL_TYPES, COMMENT_PREFIXES, or the call/screen verb patterns"),
     "supra_dir": ("src/mfdoc/dialects/supra.py",
-                  "LABELS or SUPRA_DML -- edit LABELS in supra.py directly; extract() takes no "
-                  "config, so there is no project-config override for it"),
+                  "LABELS or SUPRA_DML -- either edit LABELS in supra.py directly, or override "
+                  "individual keys per project via `options.dialects.supra.labels` in "
+                  "project.yml (merged over the LABELS defaults, see supra.labels_from_options)"),
     "adabas_fdt": ("src/mfdoc/dialects/adabas.py", "RE_FDT_PIPE / RE_FDT_WS field-row patterns"),
     "ddm": ("src/mfdoc/dialects/adabas.py", "RE_DDM_FIELD / RE_DDM_SUPER field-row patterns"),
     "jcl": ("src/mfdoc/dialects/environment.py", "RE_EXEC / RE_DD / INFRASTRUCTURE_DDS"),

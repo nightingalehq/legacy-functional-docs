@@ -55,14 +55,34 @@ the rate moved. Two or three iterations is normal. Record what was changed and w
 in the project repo, because the next person to run this will need to know that the
 scanner was tuned for this codebase.
 
-For Supra, edit `LABELS` in `src/mfdoc/dialects/supra.py` directly to match the
-site's directory report wording. There is no project-config override for this
-today — `supra.extract()` takes no `config`/`options` parameter and always reads
-the module-level `LABELS` dict, so a `dialects.supra.labels` entry in
-`project.yml` (mentioned in older guidance, and in the CLI's own calibration
-hint) has no effect; the only way to calibrate Supra's labels is to change the
-table in the module and re-ingest. If `datasets` comes back as zero, the report
-layout differs from the shipped patterns entirely.
+For Supra, the label patterns live in `LABELS` in `src/mfdoc/dialects/supra.py`.
+Two ways to calibrate them:
+
+- Per project, override just the labels that disagree with this site's report
+  wording via `options.dialects.supra.labels` in `project.yml` -- a mapping of
+  label name (`schema`, `dataset`, `dataset_type`, `control_key`, `element`,
+  `linkpath`, `link_from`, `link_to`) to a regex string. Supplied keys replace
+  the built-in pattern for that key only; unset keys keep the shipped default
+  (`supra.labels_from_options` does the merge). This is the right place for a
+  one-off site quirk (e.g. the report prints `FILE-ID:` instead of
+  `DATA-SET:`) without forking the module:
+
+  ```yaml
+  options:
+    dialects:
+      supra:
+        labels:
+          dataset: '(?:FILE-ID|DATA\s*-?\s*SET)\s*[:=]\s*(?P<v>[A-Z0-9\-_#$]{1,32})'
+  ```
+
+- If the shipped defaults are wrong for every codebase this project will ever
+  touch (not just this one site), edit `LABELS` in the module directly and
+  re-ingest.
+
+If `datasets` comes back as zero, the report layout differs from the shipped
+patterns (and any project override) entirely -- check the gap register
+(`unparsed_line`) for a sample of the unmatched lines before assuming which
+label is at fault.
 
 ## Getting Mantis source out
 
