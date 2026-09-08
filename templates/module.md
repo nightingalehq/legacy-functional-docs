@@ -39,13 +39,17 @@ than leaving the section empty.
 
 Parameters, and any data read to establish context before the main work begins.
 The brief's "Program variables and screen/MAP fields" section tags each
-field's kind explicitly (`screen field`, `program variable`, `DB view
-field`) -- carry that into the Source column (e.g. "screen field on the
-{MAP} map", "program variable (working storage)", "DB view field on
-{VIEW}") rather than listing every field the same way. A reader must be
-able to tell "the operator sees/enters this on a screen" apart from "this
-is a value the program computes and holds only in memory" apart from
-"this comes off a database view" without opening the source.
+field's kind explicitly (`screen field`, `screen field (bound via MAP)`,
+`program variable`, `program variable (global)`) -- carry that into the
+Source column (e.g. "screen field on the {MAP} map", "program variable
+(working storage)", "program variable (global)") rather than listing every
+field the same way. A reader must be able to tell "the operator sees/enters
+this on a screen" apart from "this is a value the program computes and
+holds only in memory" without opening the source. A field that instead
+comes off a database view is listed separately in the brief's "Data views
+declared" section (`DB view field on {VIEW}` in the Source column here);
+don't confuse that with a plain program variable just because both end up
+in this same table.
 
 ## Data used
 

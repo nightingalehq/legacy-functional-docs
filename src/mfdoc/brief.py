@@ -392,10 +392,11 @@ _GLOBAL_SCOPES = {"global", "independent", "mantis_shared"}
 
 def _variable_kind(row, screen_field_names: set[str]) -> str:
     """Human-readable label for a `variable` row's scope, distinguishing a
-    screen/MAP field from a plain program variable from a DB view field
-    (issue #141). Callers already exclude scope in ('parameter','entry',
-    'view') before calling this -- those are labelled by their own section
-    heading instead."""
+    screen/MAP field from a plain program variable (issue #141). Callers
+    already exclude scope in ('parameter','entry','view') before calling
+    this -- those are labelled by their own section heading instead, as are
+    Natural's synthetic `USING <name>` data-area-include rows (see
+    module_brief's "Data areas included" section)."""
     scope = row["scope"] or ""
     if scope in _SCREEN_SCOPES:
         return "screen field"
@@ -562,14 +563,24 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
     # explicit kind so a reader (and the narrating LLM filling in the
     # template's Inputs/Data-used tables) can tell a screen field the operator
     # sees apart from a value that only ever lives in program memory.
+    #
+    # Natural's DEFINE DATA <scope> USING <LDA/PDA/GDA> also records a
+    # synthetic `variable` row named `USING <NAME>` (natural.py, alongside
+    # the matching call_edge/INCLUDE row) so the include is visible even
+    # when the data area itself isn't in the fact store. That's a data-area
+    # include, not a program variable -- keep it out of the kind-labelled
+    # list below (issue #141 follow-up) and surface it in its own small
+    # subsection instead of silently dropping it.
     screen_field_names = (
         _natural_screen_field_names(conn, mid) if m["dialect"] == "natural" else set()
     )
-    other_vars = conn.execute(
+    all_other_vars = conn.execute(
         "SELECT * FROM variable WHERE member_id=? AND scope NOT IN "
         "('parameter','entry','view') ORDER BY line_no",
         (mid,),
     ).fetchall()
+    data_area_includes = [r for r in all_other_vars if r["name"].startswith("USING ")]
+    other_vars = [r for r in all_other_vars if not r["name"].startswith("USING ")]
     if other_vars:
         add("## Program variables and screen/MAP fields")
         add(
@@ -584,6 +595,17 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
             spec = f" ({r['format'] or ''}{r['length'] or ''})" if (r["format"] or r["length"]) else ""
             bound = f" bound to `{r['view_of']}`" if r["view_of"] else ""
             add(f"- {_cite(name, r['line_no'])} {kind} `{r['name']}`{spec}{bound}")
+        add("")
+    if data_area_includes:
+        add("## Data areas included")
+        add(
+            "A `DEFINE DATA ... USING` data area (LDA/PDA/GDA) this member "
+            "includes -- its own fields live in that data area's own member, "
+            "not here; this is only the include itself, not a program "
+            "variable."
+        )
+        for r in data_area_includes:
+            add(f"- {_cite(name, r['line_no'])} data area include `{r['name'][len('USING '):]}`")
         add("")
 
     # --- internal routines (Natural DEFINE SUBROUTINE / Mantis ENTRY) --

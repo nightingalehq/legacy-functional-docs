@@ -425,3 +425,46 @@ def test_natural_brief_resolves_a_local_variable_as_a_screen_field_via_using_map
     plain_line = [l for l in section.splitlines() if "#NEXT-ID" in l][0]
     assert "screen field" in screen_line
     assert "program variable" in plain_line and "screen field" not in plain_line
+
+
+def test_natural_brief_keeps_using_data_area_includes_out_of_program_variables():
+    """`DEFINE DATA LOCAL USING <LDA/PDA/GDA>` records a synthetic `variable`
+    row named `USING <NAME>` alongside the call_edge INCLUDE row (natural.py)
+    -- that's a data-area include, not a program variable, and must not be
+    mislabeled as one in the "Program variables and screen/MAP fields"
+    section (issue #141 follow-up)."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA
+    from mfdoc.dialects import natural
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'MMP0100', 'natural')")
+    src = (
+        "DEFINE DATA\n"
+        "LOCAL USING LDAWGT01\n"
+        "LOCAL\n"
+        "1 #TALLY (N4)\n"
+        "END-DEFINE\n"
+        "#TALLY := #TALLY + 1\n"
+    )
+    lines = [(i + 1, None, t) for i, t in enumerate(src.splitlines())]
+    natural.extract(conn, 1, lines, "MMP0100")
+
+    brief = module_brief(conn, "MMP0100", redact=NULL_REDACTOR)
+
+    var_section = brief.split("## Program variables and screen/MAP fields", 1)[1]
+    var_section = var_section.split("## ", 1)[0]
+    assert "LDAWGT01" not in var_section
+    assert "USING" not in var_section
+
+    tally_line = [l for l in var_section.splitlines() if "#TALLY" in l][0]
+    assert "program variable" in tally_line
+
+    assert "## Data areas included" in brief
+    includes_section = brief.split("## Data areas included", 1)[1]
+    include_line = [l for l in includes_section.splitlines() if "LDAWGT01" in l][0]
+    assert "data area include" in include_line
+    assert "program variable" not in include_line

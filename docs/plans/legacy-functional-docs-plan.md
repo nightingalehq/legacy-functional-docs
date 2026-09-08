@@ -443,6 +443,28 @@ GitHub org.
   - Full suite green (782 passed, 2 skipped); bundled fixture pipeline
     clean (71/71 docs, 0 invalid citations of 739, `mfdoc validate` exit 0).
 
+**Progress (2026-09-08b):**
+- Follow-up to issue #141 (PR #146), from automated review comments on the
+  new "Program variables and screen/MAP fields" section: Natural's
+  `DEFINE DATA <scope> USING <LDA/PDA/GDA>` records a synthetic `variable`
+  row named `USING <NAME>` (alongside its own `call_edge`/`INCLUDE` row) so
+  the include is visible in the fact store -- that's a data-area include,
+  not a program variable, and the new section was rendering it mislabeled
+  as one. `module_brief` now splits those rows out into their own "Data
+  areas included" subsection instead. Also corrected `_variable_kind`'s
+  docstring (it never actually sees a `scope='view'` row -- those are
+  filtered out and handled by the pre-existing "Data views declared"
+  section before `_variable_kind` is called) and reworded
+  `templates/module.md`'s Inputs section paragraph, which had claimed the
+  new section itself tags a `DB view field` kind -- it doesn't; that label
+  only ever appears via the separate "Data views declared" section.
+  - New `tests/test_brief.py` case covering a Natural member with a
+    `DEFINE DATA ... USING` data-area include, asserting it's absent from
+    the "Program variables and screen/MAP fields" section and instead
+    appears under "Data areas included".
+  - Full suite green (783 passed, 2 skipped); bundled fixture pipeline
+    clean (71/71 docs, 0 invalid citations of 739, `mfdoc validate` exit 0).
+
 **Progress (2026-09-07c):**
 - Closed out the two items 2026-09-07b left for a future pass:
   - `DEFINE WINDOW` and its `SIZE`/`BASE`/`FRAMED`/`FORMAT` attribute lines
