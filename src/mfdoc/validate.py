@@ -1042,7 +1042,11 @@ def _out_of_scope_sources(fm: dict | None, known_members: set[str]) -> list[str]
     member names, per `docs/guides/architecture.md`) does use real member
     names there, so this exclusion is deliberately narrow to the one type
     that doesn't, rather than an allowlist that would wrongly re-enable
-    cross-project contamination for those.
+    cross-project contamination for those. Compared stripped and
+    case-folded, the same as the general `doc_type` presence check just
+    above, so incidental whitespace/casing in front matter can't
+    accidentally fall through to the member-matching path below and get
+    misclassified as cross-project.
 
     Also returns `None` (don't skip) whenever `doc_type` itself is missing
     or isn't a non-empty string. `doc_type` is a `REQUIRED_FRONTMATTER` key
@@ -1080,7 +1084,7 @@ def _out_of_scope_sources(fm: dict | None, known_members: set[str]) -> list[str]
     doc_type = fm.get("doc_type")
     if not isinstance(doc_type, str) or not doc_type.strip():
         return None
-    if doc_type == "language-guide":
+    if doc_type.strip().casefold() == "language-guide":
         return None
     sources = fm.get("sources")
     if not sources:

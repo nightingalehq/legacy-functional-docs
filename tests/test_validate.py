@@ -347,6 +347,22 @@ def test_validate_tree_still_validates_a_language_guide_doc_with_placeholder_sou
     assert res["documents_ok"] == 1
 
 
+def test_validate_tree_still_validates_a_language_guide_doc_with_whitespace_and_casing_variance(indexed_db, tmp_path):
+    """The `doc_type: language-guide` exclusion must match on the same
+    stripped/case-folded basis as the general `doc_type` presence check --
+    a value like `" Language-Guide "` is still unambiguously the same doc
+    type and must not fall through to member-matching (where it would then
+    look, wrongly, like a cross-project document over pure formatting)."""
+    doc = tmp_path / "natural-language-guide.md"
+    doc.write_text(
+        GOOD_FRONTMATTER.replace("doc_type: module\n", 'doc_type: " Language-Guide "\n')
+        .replace("sources:\n  - MMP0100\n", 'sources: ["natural source files"]\n')
+    )
+    res = validate_tree(indexed_db, tmp_path)
+    assert res["documents"] == 1
+    assert res["out_of_scope_documents"] == []
+
+
 def test_validate_tree_does_not_skip_anything_against_an_empty_fact_store(tmp_path):
     """An empty fact store (no `mfdoc ingest` ever run against the loaded
     config, or `--config` pointing at the wrong/an empty project) is the
