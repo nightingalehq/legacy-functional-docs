@@ -726,6 +726,27 @@ def test_statement_coverage_ignores_non_module_docs():
     assert statement_citation_coverage_problems(conn, results) == []
 
 
+def test_statement_coverage_ignores_citations_from_an_unrelated_members_doc():
+    """A citation to `[[TESTSTMT:...]]` appearing in a module doc for a
+    *different* member (e.g. a caller naming the target line of a
+    subroutine it invokes) must not count toward TESTSTMT's own coverage --
+    only a document whose own front-matter `sources` includes TESTSTMT can
+    satisfy its statement coverage."""
+    from mfdoc.validate import statement_citation_coverage_problems
+
+    conn = _member_with_statements(call_edge={})
+    results = [
+        _module_result(
+            "OTHERMOD", "This calls the target routine [[TESTSTMT:691-693]]."
+        ),
+        _module_result("TESTSTMT", "No citation of its own call edge here."),
+    ]
+    problems = statement_citation_coverage_problems(conn, results)
+    assert len(problems) == 1
+    assert "TESTSTMT" in problems[0]
+    assert "PGMX02" in problems[0]
+
+
 def test_statement_coverage_skips_a_member_name_ambiguous_across_libraries():
     """A bare member name that matches more than one library's member row
     must be skipped, not resolved via an arbitrary `fetchone()` pick --
