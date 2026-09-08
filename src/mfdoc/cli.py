@@ -502,7 +502,14 @@ def _testgen_default_out_dir(cfg: dict) -> str:
     `options.testgen.out_dir` (or `--out`) always overrides this, exactly
     as before this function existed."""
     docs_root = cfg.get("docs_root")
-    return str(Path(docs_root) / "tests") if docs_root else "tests_generated"
+    if docs_root is None or docs_root == "":
+        return "tests_generated"
+    if not isinstance(docs_root, str):
+        raise ConfigError(
+            "invalid project config -- 1 problem(s):\n"
+            f"  - docs_root must be a string, got {docs_root!r}"
+        )
+    return str(Path(docs_root) / "tests")
 
 
 def _project_namespace(cfg: dict) -> str:

@@ -2154,6 +2154,19 @@ def test_testgen_default_out_dir_falls_back_to_tests_generated_without_docs_root
 
     assert _testgen_default_out_dir({}) == "tests_generated"
     assert _testgen_default_out_dir({"docs_root": None}) == "tests_generated"
+    assert _testgen_default_out_dir({"docs_root": ""}) == "tests_generated"
+
+
+def test_testgen_default_out_dir_rejects_malformed_docs_root():
+    from mfdoc.cli import _testgen_default_out_dir
+    from mfdoc.config_validate import ConfigError
+
+    try:
+        _testgen_default_out_dir({"docs_root": {"not": "a path"}})
+    except ConfigError as exc:
+        assert "docs_root must be a string" in str(exc)
+    else:
+        raise AssertionError("expected malformed docs_root to raise ConfigError")
 
 
 def _write_config_for_default_out_dir_case(
