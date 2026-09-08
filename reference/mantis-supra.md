@@ -172,6 +172,15 @@ as unparsed-line gaps (the same role `RESET`/`IGNORE` play for Natural — see
 or a called program's memory — source alone doesn't disambiguate which, so this
 stays a bare recognised statement rather than a guessed CRUD access).
 
+`CLEAR`'s screen-field target can itself be followed by further `:`-chained
+clauses, same convention as `ASSIGN` (see `_assignment_pairs` below) — e.g.
+`CLEAR SCREEN:ATTRIBUTE(SCREEN)="RESET":FLAG=""`. A trailing clause shaped
+like a screen-attribute assignment (`ATTRIBUTE(...)=...`) stays untracked
+along with the bare `CLEAR` target, but a clause that's a plain field
+assignment is split out and recorded as its own `ASSIGN` `rule_candidate`
+— it's real business content (a state reset), not screen formatting, so it
+doesn't get silently discarded under `CLEAR`'s greedy match.
+
 Blocks close with a bare `END`, which means a missing or extra `END` shifts the
 apparent nesting of everything after it. The scanner reports unclosed blocks as
 gaps; take them seriously rather than assuming a scanner fault, because they are

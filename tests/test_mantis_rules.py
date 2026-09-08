@@ -397,3 +397,47 @@ def test_converse_with_a_bare_unquoted_screen_name_is_not_dynamic():
         "SELECT dynamic FROM call_edge WHERE callee_name='ORDSCR1' AND call_kind='INCLUDE'"
     ).fetchone()
     assert edge["dynamic"] == 0
+
+
+def test_clear_with_chained_plain_assignment_still_records_the_assignment():
+    """`CLEAR` chains onto its screen-clear target with `:`, the same
+    colon-separated-clause convention `_assignment_pairs` already handles
+    for plain ASSIGN lines. A trailing clause that's a genuine field
+    assignment (not screen formatting) must still surface as its own
+    ASSIGN rule_candidate -- RE_CLEAR's greedy `.+` used to swallow it with
+    zero trace anywhere in the fact store."""
+    conn = _extract(
+        'PROGRAM "TESTMOD"\n'
+        "ENTRY MAIN\n"
+        '  CLEAR MYSCREEN:MYFLAG=""\n'
+        "EXIT\n"
+    )
+    row = conn.execute(
+        "SELECT construct, condition FROM rule_candidate WHERE construct='ASSIGN' AND line_no=3"
+    ).fetchone()
+    assert row is not None
+    assert row["condition"] == 'MYFLAG=""'
+    gap = conn.execute(
+        "SELECT 1 FROM gap WHERE member_id=1 AND line_no=3"
+    ).fetchone()
+    assert gap is None
+
+
+def test_clear_with_only_screen_formatting_clauses_records_no_rule():
+    """A `CLEAR` chained only to screen-attribute-formatting clauses (no
+    plain field assignment) must keep behaving as before: recognised as a
+    non-business-rule statement, no ASSIGN rule_candidate, no gap."""
+    conn = _extract(
+        'PROGRAM "TESTMOD"\n'
+        "ENTRY MAIN\n"
+        '  CLEAR MYSCREEN:ATTRIBUTE(MYSCREEN)="RESET"\n'
+        "EXIT\n"
+    )
+    rows = conn.execute(
+        "SELECT construct FROM rule_candidate WHERE line_no=3"
+    ).fetchall()
+    assert rows == []
+    gap = conn.execute(
+        "SELECT 1 FROM gap WHERE member_id=1 AND line_no=3"
+    ).fetchone()
+    assert gap is None

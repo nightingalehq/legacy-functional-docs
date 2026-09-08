@@ -733,9 +733,48 @@ def extract(conn, member_id: int, lines, member_name: str = "?") -> dict:
             # coverage figure honest, but not treated as a business rule.
             matched = True
 
-        if not matched and RE_CLEAR.match(masked):
+        if not matched and (m := RE_CLEAR.match(masked)):
             # CLEAR resets one or more screen fields -- a formatting
             # statement, like PAD/UNPAD, not conditional business logic.
+            # But the colon-chained-clause convention (see
+            # `_assignment_pairs`) means `rest` can carry independent
+            # trailing clauses after the screen field(s) being cleared,
+            # e.g. `CLEAR SCREEN:ATTRIBUTE(SCREEN)="RESET":FLAG=""` -- a
+            # plain field assignment chained on like that is real business
+            # content (a state reset), not screen formatting, and must
+            # still get its own ASSIGN rule_candidate rather than being
+            # silently swallowed by RE_CLEAR's greedy `.+`. Split `rest` on
+            # `:` at paren-depth 0 in the masked text (same rule
+            # `_assignment_pairs` uses, so a literal or subscript
+            # expression containing `:` can't wrongly split the clause),
+            # then check each clause *after* the first (the actual
+            # clear-target list) against RE_ASSIGN. A clause shaped like
+            # `ATTRIBUTE(...)=...` -- setting a screen attribute, not a
+            # plain field -- stays untracked exactly as before.
+            rest_start = m.start("rest")
+            rest_masked = masked[rest_start:]
+            rest_stmt = stmt[rest_start:]
+            depth2 = 0
+            seg_start = 0
+            clause_bounds: list[tuple[int, int]] = []
+            for i, ch in enumerate(rest_masked):
+                if ch == "(":
+                    depth2 += 1
+                elif ch == ")":
+                    depth2 = max(depth2 - 1, 0)
+                elif ch == ":" and depth2 == 0:
+                    clause_bounds.append((seg_start, i))
+                    seg_start = i + 1
+            clause_bounds.append((seg_start, len(rest_masked)))
+            for start, end in clause_bounds[1:]:
+                clause_masked = rest_masked[start:end].strip()
+                clause_stmt = rest_stmt[start:end].strip()
+                if not clause_masked or clause_masked.upper().startswith("ATTRIBUTE"):
+                    continue
+                if RE_ASSIGN.match(clause_masked):
+                    rule("ASSIGN", clause_stmt, line_no, clause_stmt)
+                    for var, rhs in _assignment_pairs(clause_stmt, clause_masked):
+                        last_assign[var] = (line_no, rhs)
             matched = True
 
         if not matched and (m := RE_RELEASE.match(masked)):
