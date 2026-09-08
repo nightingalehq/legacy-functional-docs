@@ -1343,9 +1343,11 @@ def interface_matrix_brief(
 ) -> str:
     """Fact brief for the screen-and-key interface matrix document type
     (mode x panel x map x PF-label x routine x outcome, issue #91): per
-    screen/map, which module(s) display it, the PF-key (or configured
-    dispatch field) branches those modules dispatch on, and any literal
-    label text recorded on the screen itself.
+    screen/map, which module(s) display it, the dispatch-trigger-value
+    branches those modules dispatch on -- PF-key (or configured dispatch
+    field) branches, and, when `options.overview.mode_field_pattern` is
+    configured, mode/panel-keyed dispatch branches too (issue #129) -- and
+    any literal label text recorded on the screen itself.
 
     Whole-system scope, no member argument -- like `system_brief` and
     `structural.dispatch_map`, not `module_brief`: this brief gathers each
@@ -1517,7 +1519,7 @@ def interface_matrix_brief(
                 out.append(f"- {lab['cite']} `{redact(lab['text'])}`")
             out.append("")
 
-        out.append("### PF-key / mode-panel dispatch branches, by module")
+        out.append("### PF-key / mode/panel dispatch branches, by module")
         out.append("")
         out.append("| module | trigger value | mechanism | branch | calls | fields set |")
         out.append("|---|---|---|---|---|---|")
