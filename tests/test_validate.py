@@ -1484,3 +1484,113 @@ def test_validate_tree_aggregates_stale_documents_with_their_own_path(tmp_path):
     assert "0.0.1" in res["stale_documents"][0]
     # Advisory only -- must never affect pass/fail.
     assert res["documents_ok"] == res["documents"] == 1
+
+
+# --- Forward-reference fulfilment (issue #128): a chunk that says "documented
+# in chunk N" for a routine must actually be fulfilled by that chunk. ---
+
+def _member_with_routine():
+    """A minimal chunked-member fact store: one member, one routine
+    (PF5-BRANCH), spanning lines a chunked doc set could plausibly split
+    across two chunks."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'TESTSTMT', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 50, 'irrelevant')")
+    conn.execute(
+        "INSERT INTO routine (member_id, name, kind, start_line, end_line) "
+        "VALUES (1, 'PF5-BRANCH', 'natural_subroutine', 40, 50)"
+    )
+    conn.commit()
+    return conn
+
+
+def test_forward_reference_accepted_when_named_chunk_documents_the_routine(tmp_path):
+    conn = _member_with_routine()
+    (tmp_path / "doc.chunk01.md").write_text(
+        DEFERRED_FRONTMATTER
+        + "\nPF5-BRANCH is a separate branch; its effects are documented in "
+          "chunk 2 [[TESTSTMT:1]].\n"
+    )
+    (tmp_path / "doc.chunk02.md").write_text(
+        DEFERRED_FRONTMATTER
+        + "\nThis chunk covers PF5-BRANCH in full [[TESTSTMT:50]].\n"
+    )
+    res = validate_tree(conn, tmp_path)
+    assert res["forward_reference_problems"] == []
+    # Advisory only -- must never affect pass/fail.
+    assert res["documents_ok"] == res["documents"] == 2
+
+
+def test_forward_reference_flagged_when_named_chunk_never_mentions_the_routine(tmp_path):
+    conn = _member_with_routine()
+    (tmp_path / "doc.chunk01.md").write_text(
+        DEFERRED_FRONTMATTER
+        + "\nPF5-BRANCH is a separate branch; its effects are documented in "
+          "chunk 2 [[TESTSTMT:1]].\n"
+    )
+    (tmp_path / "doc.chunk02.md").write_text(
+        DEFERRED_FRONTMATTER
+        + "\nThis chunk only discusses unrelated processing [[TESTSTMT:50]].\n"
+    )
+    res = validate_tree(conn, tmp_path)
+    assert len(res["forward_reference_problems"]) == 1
+    msg = res["forward_reference_problems"][0]
+    assert "PF5-BRANCH" in msg
+    assert "chunk 2" in msg
+    assert "never mentioned" in msg
+    # Advisory only -- must never affect pass/fail.
+    assert res["documents_ok"] == res["documents"] == 2
+
+
+def test_forward_reference_flagged_when_named_chunk_does_not_exist(tmp_path):
+    conn = _member_with_routine()
+    (tmp_path / "doc.chunk01.md").write_text(
+        DEFERRED_FRONTMATTER
+        + "\nPF5-BRANCH is a separate branch; its effects are documented in "
+          "chunk 9 [[TESTSTMT:1]].\n"
+    )
+    (tmp_path / "doc.chunk02.md").write_text(
+        DEFERRED_FRONTMATTER
+        + "\nThis chunk covers PF5-BRANCH in full [[TESTSTMT:50]].\n"
+    )
+    res = validate_tree(conn, tmp_path)
+    assert len(res["forward_reference_problems"]) == 1
+    msg = res["forward_reference_problems"][0]
+    assert "chunk 9" in msg
+    assert "no such chunk" in msg
+    assert res["documents_ok"] == res["documents"] == 2
+
+
+def test_forward_reference_ignored_for_a_single_unchunked_module_doc(tmp_path):
+    """A plain, unchunked module doc's filename never matches the
+    '.chunkNN' convention -- nothing here to cross-check against, and this
+    must not raise on the single-document case."""
+    conn = _member_with_routine()
+    (tmp_path / "doc.md").write_text(
+        DEFERRED_FRONTMATTER
+        + "\nPF5-BRANCH is documented in chunk 2 [[TESTSTMT:1]].\n"
+    )
+    res = validate_tree(conn, tmp_path)
+    assert res["forward_reference_problems"] == []
+
+
+def test_forward_reference_ignored_when_no_known_routine_name_is_nearby(tmp_path):
+    """A concrete chunk number with nothing this member's fact store
+    recognises as a routine name nearby is left alone -- there's nothing
+    concrete enough to check the claim against, and
+    `_deferred_reference_problems` already accepts it as a resolved
+    deferral."""
+    conn = _member_with_routine()
+    (tmp_path / "doc.chunk01.md").write_text(
+        DEFERRED_FRONTMATTER
+        + "\nSome unrelated processing is documented in chunk 2 [[TESTSTMT:1]].\n"
+    )
+    (tmp_path / "doc.chunk02.md").write_text(
+        DEFERRED_FRONTMATTER
+        + "\nThis chunk covers other things [[TESTSTMT:50]].\n"
+    )
+    res = validate_tree(conn, tmp_path)
+    assert res["forward_reference_problems"] == []

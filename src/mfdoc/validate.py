@@ -19,7 +19,7 @@ from pathlib import Path
 
 import yaml
 
-from .brief import fetch_rule_candidate_rows
+from .brief import fetch_routines, fetch_rule_candidate_rows
 from .citations import _rule_id
 from .conditions import (
     FAILURE_WORDS,
@@ -55,8 +55,8 @@ CITATION = re.compile(r"\[\[(?P<member>[A-Z0-9#@$&\-_.]+)(?::(?P<from>\d+)(?:-(?
 BR_REF = re.compile(r"(?<![A-Z0-9#@$&.\-_])(?P<member>[A-Z0-9#@$&\-_.]+):BR-(?P<n>\d+)\b", re.I)
 
 
-def _name_mentioned(text: str, name: str) -> bool:
-    """Whether `name` appears in `text` as a whole token, case-insensitive.
+def _name_pattern(name: str) -> re.Pattern:
+    """Compiled whole-token, case-insensitive match pattern for `name`.
 
     Reuses the same non-word-boundary trick `BR_REF` already uses instead of
     `\\b`: a Natural/Mantis member, program, map, or file name can contain
@@ -76,14 +76,22 @@ def _name_mentioned(text: str, name: str) -> bool:
     no realistic motivating example in prose -- a sentence never opens
     mid-name the way it closes one -- so it's kept consistent with the
     trailing side on principle rather than because a real case forced it.
-    """
-    pattern = re.compile(
+
+    Factored out of `_name_mentioned` so `forward_reference_problems` can
+    reuse the exact same match rule to find *where* a routine name occurs
+    (not just whether it occurs at all)."""
+    return re.compile(
         rf"(?<![A-Z0-9#@$&\-_])(?<![A-Z0-9#@$&\-_]\.)"
         rf"{re.escape(name)}"
         rf"(?![A-Z0-9#@$&\-_]|\.[A-Z0-9#@$&\-_])",
         re.I,
     )
-    return bool(pattern.search(text))
+
+
+def _name_mentioned(text: str, name: str) -> bool:
+    """Whether `name` appears in `text` as a whole token, case-insensitive.
+    See `_name_pattern` for why this isn't just `re.search(r'\\bname\\b', ...)`."""
+    return bool(_name_pattern(name).search(text))
 
 
 REQUIRED_TEST_FRONTMATTER = ["language", "framework"]
@@ -460,6 +468,153 @@ def _deferred_reference_problems(body: str) -> list[str]:
         problems.append(
             f"deferred reference with no concrete chunk named near: …{snippet}…"
         )
+    return problems
+
+
+# The *concrete* counterpart to DEFERRED_REFERENCE above: the phrasing
+# module_brief's `chunk_map` guidance actually instructs the model to use --
+# "documented in chunk N" naming a specific chunk index -- rather than the
+# vague "documented in a later chunk" DEFERRED_REFERENCE exists to catch.
+# The two patterns are deliberately disjoint (DEFERRED_REFERENCE requires
+# "a"/"another"/"a later"/"a separate"/"the next" between by/in and "chunk";
+# this requires a literal number there instead), so a well-formed concrete
+# forward reference never also matches DEFERRED_REFERENCE and vice versa --
+# a chunk's prose lands in exactly one of the two checks below, never both,
+# never neither (once it uses chunk-crossing language at all).
+_CONCRETE_FORWARD_REFERENCE = re.compile(
+    r"\b(?:cover(?:ed|s)|document(?:ed|s)|explain(?:ed|s)|address(?:ed|es))\s+"
+    r"(?:by|in)\s+chunk\s*[-.]?\s*(?P<n>\d+)\b",
+    re.I,
+)
+
+# A chunk document's filename stem, per batch.py's `_generate_module_doc_
+# chunked` naming convention (see its `expected_chunk_names`/
+# `_prune_stale_chunk_files`): "<member-stem>.chunkNN" with NN zero-padded to
+# that run's own chunk-count width. The width isn't recoverable from one
+# filename alone (it depends on the member's total chunk count), so this
+# only recovers the chunk index as an int -- comparisons below are always
+# int-to-int, never against the padded string.
+_CHUNK_FILENAME = re.compile(r"\.chunk0*(?P<n>\d+)$", re.I)
+
+
+def forward_reference_problems(conn, results: list[dict]) -> list[str]:
+    """A chunk document's "documented in chunk N" forward reference
+    (`module_brief`'s `chunk_map` parameter -- see its docstring, and
+    `brief.py`'s "Internal routines" section for the exact phrasing this
+    instructs the model to use) whose named chunk either doesn't exist in
+    this member's own generated chunk-file set, or exists but never
+    mentions the routine the deferral names.
+
+    Complements `_deferred_reference_problems` (per-document; only checks
+    that *some* concrete chunk number is named at all, not that it's the
+    right one) with the cross-document check issue #128 describes: each
+    chunk is generated, validated, and retried independently of every other
+    chunk in its set (`_generate_module_doc_chunked`'s per-chunk loop), so
+    nothing before this ever went back and confirmed a chunk's own forward
+    reference was actually fulfilled by the chunk it named -- a wrong,
+    stale, or hallucinated chunk number happily validates as long as the
+    chunk making the claim is itself well-formed. This only makes sense
+    once every chunk in a member's set is available to cross-check against,
+    so -- like `module_completeness_problems` and
+    `statement_citation_coverage_problems` -- it runs at the tree level,
+    not inside `validate_doc`.
+
+    Advisory only (mirrors `_deferred_reference_problems`): identifying
+    *which* routine a deferral is about is a prose-proximity heuristic (the
+    nearest of this member's known routine names -- from the fact store's
+    `routine` table, the same ground truth `chunk_map` itself is built from
+    -- mentioned before the "documented in chunk N" phrase, in the same
+    paragraph) rather than a citation with a fixed, parseable shape. A
+    chunk's own phrasing naming the routine in some way this doesn't
+    recognise produces a false negative (a real mismatch this misses), not
+    a false positive, so on its own that would argue for hard-failure. But
+    the "chunk N doesn't exist" half of this check *is* unambiguous, and
+    both halves share one scan over the same matches -- keeping the whole
+    check advisory (like #59's `_statement_completeness_problems` already
+    reasons for a narrower heuristic than this) accepts a slightly softer
+    guarantee on the "exists but doesn't mention it" half in exchange for
+    not needing a second pass to split the two apart.
+    """
+    # member (upper) -> {chunk index -> body}, built only from doc_type:
+    # module documents whose filename matches the chunk-file convention.
+    # A chunked member's own module_index overview (doc_type: module_index)
+    # and an unchunked member's plain module doc (no ".chunkN" suffix in its
+    # filename) both fall outside this map, as intended: neither is a member
+    # of the chunk set a forward reference needs to resolve against.
+    chunk_bodies: dict[str, dict[int, str]] = defaultdict(dict)
+    chunk_docs: list[tuple[str, int, str]] = []  # (member, chunk index, body)
+    for r in results:
+        fm = r.get("_fm")
+        if not fm or fm.get("doc_type") != "module":
+            continue
+        sources = fm.get("sources") or []
+        if len(sources) != 1:
+            continue
+        m = _CHUNK_FILENAME.search(Path(r["path"]).stem)
+        if not m:
+            continue
+        member = sources[0].upper()
+        idx = int(m.group("n"))
+        body = r.get("_body") or ""
+        chunk_bodies[member][idx] = body
+        chunk_docs.append((sources[0], idx, body))
+
+    routines_cache: dict[str, list[str]] = {}
+    problems: list[str] = []
+    for member_name, this_chunk, body in chunk_docs:
+        member = member_name.upper()
+        siblings = chunk_bodies.get(member) or {}
+        if len(siblings) < 2:
+            continue  # not actually a chunked member's set (or only one chunk on disk)
+
+        if member not in routines_cache:
+            rows, ambiguous_libs = resolve_member_by_name(conn, member_name)
+            routines_cache[member] = (
+                [] if ambiguous_libs or not rows
+                else [rt["name"] for rt in fetch_routines(conn, rows[0]["id"])]
+            )
+        routine_names = routines_cache[member]
+        if not routine_names:
+            continue
+
+        for dm in _CONCRETE_FORWARD_REFERENCE.finditer(body):
+            para, rel_start = _containing_paragraph(body, dm.start(), dm.end())
+            target_chunk = int(dm.group("n"))
+            if target_chunk == this_chunk:
+                continue  # a chunk naming its own number isn't deferring anywhere
+
+            # Nearest of this member's known routine names mentioned before
+            # the deferral phrase, in the same paragraph -- the routine the
+            # deferral is presumably about. Skip entirely when none is
+            # found: with nothing concrete to check the claim against,
+            # flagging anything here would just be re-deriving
+            # _deferred_reference_problems's own "vague deferral" finding.
+            named_routine = None
+            best_pos = -1
+            preceding = para[:rel_start]
+            for name in routine_names:
+                occurrences = list(_name_pattern(name).finditer(preceding))
+                if occurrences and occurrences[-1].start() > best_pos:
+                    best_pos = occurrences[-1].start()
+                    named_routine = name
+            if named_routine is None:
+                continue
+
+            if target_chunk not in siblings:
+                problems.append(
+                    f"{member_name} chunk {this_chunk}: forward reference near routine "
+                    f"'{named_routine}' names chunk {target_chunk}, but this member's "
+                    f"generated chunk set has no such chunk (chunks present: "
+                    f"{', '.join(str(n) for n in sorted(siblings))})"
+                )
+                continue
+            if not _name_mentioned(siblings[target_chunk], named_routine):
+                problems.append(
+                    f"{member_name} chunk {this_chunk}: forward reference says routine "
+                    f"'{named_routine}' is documented in chunk {target_chunk}, but "
+                    f"'{named_routine}' is never mentioned anywhere in chunk "
+                    f"{target_chunk}'s generated document"
+                )
     return problems
 
 
@@ -1135,6 +1290,10 @@ def validate_tree(conn, root: Path, outcome_field=OUTCOME_FIELD) -> dict:
         "deferred_references": list(dict.fromkeys(
             p for r in results for p in r.get("deferred_references", [])
         )),
+        # Advisory only, same reasoning as deferred_references above (see
+        # forward_reference_problems's own docstring for why) -- never
+        # subtracted from documents_ok and never affects a caller's exit code.
+        "forward_reference_problems": forward_reference_problems(conn, results),
         # Advisory only, same reasoning as the two lists above -- a version
         # mismatch alone doesn't mean a document's content is wrong.
         "stale_documents": [

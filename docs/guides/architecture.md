@@ -379,7 +379,7 @@ Parses YAML front matter and body of each generated document and checks:
 Both of the above are hard failures, folded into `mfdoc validate`'s exit
 code the same way invalid citations are — unlike the three checks below.
 
-Three more checks are advisory (surfaced, never counted against a
+Four more checks are advisory (surfaced, never counted against a
 document's own `ok`/pass-fail — a false positive here should cost nothing,
 by design):
 
@@ -391,6 +391,25 @@ by design):
   once before any chunk is narrated) so a chunk can write "documented in
   chunk 15" concretely; this check exists to catch a *regression* back to
   the vague, unresolved phrasing, not to fix it after the fact.
+- `forward_reference_problems` (#128) — a chunk's *concrete* "documented in
+  chunk N" claim (the phrasing the check above accepts as resolved) was
+  never itself checked against the chunk it actually names. Runs at the
+  tree level, once every `doc_type: module` chunk file for a member is
+  available (grouped by the `.chunkNN.md` filename convention
+  `_generate_module_doc_chunked` writes): for each concrete forward
+  reference, it finds the nearest of that member's known `routine` names
+  mentioned before the claim in the same paragraph, then confirms chunk N
+  both exists in the member's own chunk-file set and actually mentions that
+  routine somewhere in its body. Chunk generation validates each chunk
+  independently (`_generate_module_doc_from_brief`'s per-chunk retry loop),
+  so nothing upstream ever cross-checks a forward reference against the
+  chunk it points at — a wrong, stale, or hallucinated chunk number
+  previously validated cleanly as long as the chunk making the claim was
+  itself well-formed. Kept advisory rather than a hard failure for the same
+  reason `_statement_completeness_problems` (#59) is: identifying which
+  routine a deferral is about is a prose-proximity heuristic, not a fixed,
+  parseable citation shape, so a false negative (a real mismatch this
+  misses) is more likely than a false positive.
 - `_staleness_problem` — a document's `generated_by` version differs from
   the `mfdoc` version installed right now. Direction-aware where the two
   versions actually parse as ordinary dotted-numeric strings (older ->
@@ -399,7 +418,7 @@ by design):
   than assuming "older" for a version string it can't order. Only catches
   a version bump (same caveat `batch.py`'s `_corpus_signature` already
   documents for its own, narrower purpose).
-- `_statement_completeness_problems` (existing) and the two above are all
+- `_statement_completeness_problems` (existing) and the three above are all
   scoped to `doc_type: module` documents only, for the same reason: a
   register or test doc echoes source syntax/field-inventory phrasing
   verbatim rather than narrating sentence-per-claim, which would make

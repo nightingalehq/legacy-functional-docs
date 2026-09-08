@@ -207,6 +207,53 @@ GitHub org.
     clean (71/71 docs, 0 invalid citations of 739) -- the bundled Supra
     fixture already matches the shipped `LABELS` defaults, so no fixture
     change was needed to exercise the non-override path.
+- Fixed issue #128: a chunk's "documented in chunk N" forward reference
+  (`module_brief`'s `chunk_map` parameter, the fix that gave a chunk
+  something concrete to say instead of a vague "covered elsewhere") was
+  never itself checked against the chunk it actually names -- each chunk
+  validates and retries independently (`_generate_module_doc_chunked`'s
+  per-chunk loop), so a wrong, stale, or hallucinated chunk number
+  previously passed cleanly as long as the chunk making the claim was
+  itself well-formed.
+  - Added `forward_reference_problems` (`validate.py`), a new tree-level
+    check alongside `module_completeness_problems`/
+    `statement_citation_coverage_problems`: groups a member's `doc_type:
+    module` chunk documents by the `.chunkNN.md` filename convention
+    `_generate_module_doc_chunked` writes, then for each concrete "documented
+    in/covered by chunk N" claim (`_CONCRETE_FORWARD_REFERENCE`, the
+    literal-number counterpart to the existing vague-deferral pattern
+    `_deferred_reference_problems`/`DEFERRED_REFERENCE` already matches --
+    the two patterns are deliberately disjoint) finds the nearest of that
+    member's known `routine` names mentioned before the claim in the same
+    paragraph, then confirms chunk N both exists in the member's own
+    chunk-file set and actually mentions that routine somewhere in its
+    body. Flags either "chunk N doesn't exist" or "chunk N exists but never
+    mentions the named routine."
+  - Advisory only (wired into `validate_tree`'s `forward_reference_problems`
+    key, printed by `cmd_validate` but never subtracted from
+    `documents_ok`/the exit code) -- same reasoning `_statement_completeness_
+    problems` (#59) already documents for a narrower heuristic: identifying
+    which routine a deferral is about is a prose-proximity heuristic, not a
+    fixed citation shape, so a false negative is more likely than a false
+    positive here.
+  - Refactored `_name_mentioned`'s inline regex into a reusable
+    `_name_pattern` helper so this check can search for *where* a routine
+    name occurs (not just whether it occurs), without duplicating the
+    match rule.
+  - New tests in `tests/test_validate.py`: accepts a forward reference the
+    named chunk actually fulfils, flags one where the named chunk never
+    mentions the routine, flags one naming a chunk that doesn't exist,
+    ignores a single unchunked module doc (no chunk-file siblings to
+    cross-check against), and ignores a concrete chunk number with no
+    known routine name nearby to check the claim against.
+  - `docs/guides/architecture.md`'s stage-4 section now documents this as
+    a fourth advisory check, alongside `_deferred_reference_problems`.
+  - Full suite green (756 passed, 2 skipped); bundled fixture pipeline
+    clean (71/71 docs, 0 invalid citations of 739, `mfdoc validate` exit 0)
+    -- the bundled fixtures have no chunked module-doc set (none of their
+    members are large enough to trigger chunking), so this check reports
+    nothing against them; its behaviour is exercised entirely by the new
+    unit tests' synthetic chunk-file fixtures.
 
 **Progress (2026-09-07c):**
 - Closed out the two items 2026-09-07b left for a future pass:
