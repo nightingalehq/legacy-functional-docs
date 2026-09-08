@@ -681,6 +681,19 @@ def test_statement_coverage_ignores_dynamic_call_edges():
     assert statement_citation_coverage_problems(conn, results) == []
 
 
+def test_statement_coverage_ignores_dynamic_interactions():
+    """Mirrors test_statement_coverage_ignores_dynamic_call_edges for the
+    `interaction` table: a dynamic interaction's target is a variable, not a
+    literal screen/map name -- it is excluded from `_STATEMENT_SOURCES`'s own
+    SQL (dynamic=0) the same way a dynamic call_edge is, so it must never be
+    flagged as uncovered regardless of citations present."""
+    from mfdoc.validate import statement_citation_coverage_problems
+
+    conn = _member_with_statements(interaction={"dynamic": 1, "target": "*SCREEN-NAME"})
+    results = [_module_result("TESTSTMT", "No citation at all here for this chunk.")]
+    assert statement_citation_coverage_problems(conn, results) == []
+
+
 def test_statement_coverage_ignores_module_index_docs():
     """A `doc_type: module_index` overview's citations must not count toward
     coverage -- same scoping module_completeness_problems already applies,

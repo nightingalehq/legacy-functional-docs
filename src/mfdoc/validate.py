@@ -247,13 +247,13 @@ def _containing_sentence(body: str, start: int, end: int) -> str:
 
 
 _STATEMENT_SOURCES = [
-    ("callee_name", "call_kind",
+    ("call_edge", "callee_name", "call_kind",
      "SELECT line_no, call_kind, callee_name FROM call_edge "
      "WHERE caller_id=? AND dynamic=0 AND callee_name IS NOT NULL AND callee_name != ''"),
-    ("target", "kind",
+    ("interaction", "target", "kind",
      "SELECT line_no, kind, target FROM interaction "
      "WHERE member_id=? AND dynamic=0 AND target IS NOT NULL AND target != ''"),
-    ("entity_name", "verb",
+    ("data_access", "entity_name", "verb",
      "SELECT line_no, verb, entity_name FROM data_access "
      "WHERE member_id=? AND entity_name IS NOT NULL AND entity_name != ''"),
 ]
@@ -273,7 +273,7 @@ def _fetch_statement_rows(conn, member_id: int) -> list[tuple[str, str, object]]
     `_statement_completeness_problems` instead of in SQL.
     """
     rows = []
-    for target_col, kind_col, sql in _STATEMENT_SOURCES:
+    for _table, target_col, kind_col, sql in _STATEMENT_SOURCES:
         for row in conn.execute(sql, (member_id,)).fetchall():
             rows.append((target_col, kind_col, row))
     return rows
@@ -950,7 +950,9 @@ def statement_citation_coverage_problems(conn, results: list[dict]) -> list[str]
         member_id = rows[0]["id"]
         member_ranges = _coalesce_ranges(cited_ranges.get(member.upper(), []))
         missing = []
-        for target_col, kind_col, sql in _STATEMENT_SOURCES[:2]:  # call_edge, interaction -- not data_access
+        for table, target_col, kind_col, sql in _STATEMENT_SOURCES:
+            if table == "data_access":
+                continue
             for stmt in conn.execute(sql, (member_id,)).fetchall():
                 ln = stmt["line_no"]
                 if not any(lo <= ln <= hi for lo, hi in member_ranges):
