@@ -393,15 +393,16 @@ _GLOBAL_SCOPES = {"global", "independent", "mantis_shared"}
 def _variable_kind(row, screen_field_names: set[str]) -> str:
     """Human-readable label for a `variable` row's scope, distinguishing a
     screen/MAP field from a plain program variable (issue #141). Callers
-    already exclude scope in ('parameter','entry','view') before calling
-    this -- those are labelled by their own section heading instead, as are
-    Natural's synthetic `USING <name>` data-area-include rows (see
-    module_brief's "Data areas included" section)."""
+    already exclude scope in ('parameter','entry','view','mantis_interface')
+    before calling this -- those are labelled by their own section heading
+    instead (or, for `mantis_interface`'s call-target-binding rows -- see
+    `graph.resolve_interface_literal_calls` -- not rendered as a field at
+    all, since they aren't one), as are Natural's synthetic `USING <name>`
+    data-area-include rows (see module_brief's "Data areas included"
+    section)."""
     scope = row["scope"] or ""
     if scope in _SCREEN_SCOPES:
         return "screen field"
-    if scope == "mantis_interface":
-        return "call-target binding"
     if row["name"].upper() in screen_field_names:
         return "screen field (bound via MAP)"
     if scope in _GLOBAL_SCOPES:
@@ -577,7 +578,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
     )
     all_other_vars = conn.execute(
         "SELECT * FROM variable WHERE member_id=? AND scope NOT IN "
-        "('parameter','entry','view') ORDER BY line_no",
+        "('parameter','entry','view','mantis_interface') ORDER BY line_no",
         (mid,),
     ).fetchall()
     data_area_includes = conn.execute(

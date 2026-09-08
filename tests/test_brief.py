@@ -382,6 +382,39 @@ def test_mantis_brief_tags_screen_local_and_view_fields_with_distinct_kinds():
     assert "WIDGET-VIEW" not in section
 
 
+def test_mantis_brief_keeps_interface_call_target_bindings_out_of_the_variable_section():
+    """A Mantis `INTERFACE handle("LITERAL",...)` binding (scope=
+    'mantis_interface', see `graph.resolve_interface_literal_calls`) is
+    call-target metadata, not a field a program reads or writes -- it must
+    never appear in the "Program variables and screen/MAP fields" section
+    mislabeled as one."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA
+    from mfdoc.dialects import mantis
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'WGTMOD', 'mantis')")
+    src = (
+        'PROGRAM "WGTMOD"\n'
+        "ENTRY MAIN\n"
+        '  INTERFACE MYHANDLE("REALPROG",PASSWORD)\n'
+        "TEXT WIDGET-NOTE(30)\n"
+        "EXIT\n"
+    )
+    lines = [(i + 1, None, t) for i, t in enumerate(src.splitlines())]
+    mantis.extract(conn, 1, lines, "WGTMOD")
+
+    brief = module_brief(conn, "WGTMOD", redact=NULL_REDACTOR)
+    assert "## Program variables and screen/MAP fields" in brief
+    section = brief.split("## Program variables and screen/MAP fields", 1)[1]
+    section = section.split("## ", 1)[0]
+    assert "MYHANDLE" not in section
+    assert "WIDGET-NOTE" in section
+
+
 def test_natural_brief_resolves_a_local_variable_as_a_screen_field_via_using_map():
     """Natural declares a screen's fields as ordinary DEFINE DATA LOCAL
     variables bound only by naming convention to a `USING MAP` target --
