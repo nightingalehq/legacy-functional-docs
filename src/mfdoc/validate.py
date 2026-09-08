@@ -602,9 +602,11 @@ def forward_reference_problems(conn, results: list[dict]) -> list[str]:
             best_pos = -1
             preceding = para[:rel_start]
             for name in routine_names:
-                occurrences = list(_name_pattern(name).finditer(preceding))
-                if occurrences and occurrences[-1].start() > best_pos:
-                    best_pos = occurrences[-1].start()
+                last_start = -1
+                for m in _name_pattern(name).finditer(preceding):
+                    last_start = m.start()
+                if last_start > best_pos:
+                    best_pos = last_start
                     named_routine = name
             if named_routine is None:
                 continue
