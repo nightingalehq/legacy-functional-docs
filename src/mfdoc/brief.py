@@ -534,7 +534,8 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
 
     # --- interfaces
     params = conn.execute(
-        "SELECT * FROM variable WHERE member_id=? AND scope IN ('parameter','entry') ORDER BY line_no",
+        "SELECT * FROM variable WHERE member_id=? AND scope IN ('parameter','entry') "
+        "AND name NOT LIKE 'USING %' ORDER BY line_no",
         (mid,),
     ).fetchall()
     if params:
@@ -579,7 +580,10 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
         "('parameter','entry','view') ORDER BY line_no",
         (mid,),
     ).fetchall()
-    data_area_includes = [r for r in all_other_vars if r["name"].startswith("USING ")]
+    data_area_includes = conn.execute(
+        "SELECT * FROM variable WHERE member_id=? AND name LIKE 'USING %' ORDER BY line_no",
+        (mid,),
+    ).fetchall()
     other_vars = [r for r in all_other_vars if not r["name"].startswith("USING ")]
     if other_vars:
         add("## Program variables and screen/MAP fields")

@@ -444,6 +444,7 @@ def test_natural_brief_keeps_using_data_area_includes_out_of_program_variables()
     conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'MMP0100', 'natural')")
     src = (
         "DEFINE DATA\n"
+        "PARAMETER USING PDAWGT01\n"
         "LOCAL USING LDAWGT01\n"
         "LOCAL\n"
         "1 #TALLY (N4)\n"
@@ -455,6 +456,7 @@ def test_natural_brief_keeps_using_data_area_includes_out_of_program_variables()
 
     brief = module_brief(conn, "MMP0100", redact=NULL_REDACTOR)
 
+    assert "## Interface (parameters)" not in brief
     var_section = brief.split("## Program variables and screen/MAP fields", 1)[1]
     var_section = var_section.split("## ", 1)[0]
     assert "LDAWGT01" not in var_section
@@ -468,3 +470,7 @@ def test_natural_brief_keeps_using_data_area_includes_out_of_program_variables()
     include_line = [l for l in includes_section.splitlines() if "LDAWGT01" in l][0]
     assert "data area include" in include_line
     assert "program variable" not in include_line
+    parameter_include_line = [
+        l for l in includes_section.splitlines() if "PDAWGT01" in l
+    ][0]
+    assert "data area include" in parameter_include_line
