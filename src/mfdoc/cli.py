@@ -502,7 +502,7 @@ def _testgen_default_out_dir(cfg: dict) -> str:
     `options.testgen.out_dir` (or `--out`) always overrides this, exactly
     as before this function existed."""
     docs_root = cfg.get("docs_root")
-    return f"{docs_root}/tests" if docs_root else "tests_generated"
+    return str(Path(docs_root) / "tests") if docs_root else "tests_generated"
 
 
 def _project_namespace(cfg: dict) -> str:

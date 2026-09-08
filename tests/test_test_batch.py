@@ -2200,7 +2200,7 @@ def test_test_batch_nests_default_out_dir_under_docs_root(tmp_path):
         project_dir, set_docs_root=True, out_dir=None,
     )
 
-    _run_test_batch_default(config_path)
+    assert _run_test_batch_default(config_path) == 0
 
     out = (project_dir / "docs" / "functional" / "tests" / "sysa"
            / "natural" / "python" / "pytest" / "FAKEMOD.md")
@@ -2217,7 +2217,7 @@ def test_test_batch_default_out_dir_stays_top_level_without_docs_root(tmp_path):
         project_dir, set_docs_root=False, out_dir=None,
     )
 
-    _run_test_batch_default(config_path)
+    assert _run_test_batch_default(config_path) == 0
 
     out = (project_dir / "tests_generated" / "sysa"
            / "natural" / "python" / "pytest" / "FAKEMOD.md")
@@ -2233,7 +2233,7 @@ def test_test_batch_explicit_out_dir_wins_over_docs_root_default(tmp_path):
         project_dir, set_docs_root=True, out_dir="explicit-tests",
     )
 
-    _run_test_batch_default(config_path)
+    assert _run_test_batch_default(config_path) == 0
 
     out = (project_dir / "explicit-tests" / "sysa"
            / "natural" / "python" / "pytest" / "FAKEMOD.md")
