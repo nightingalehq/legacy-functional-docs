@@ -60,8 +60,6 @@ GitHub org.
     — no new coverage gap against the bundled fixtures, only the existing
     (pre-existing, unaffected) advisory `_statement_completeness_problems`
     findings for paraphrased-but-uncited-by-name targets.
-
-**Progress (2026-09-08):**
 - Fixed issue #132: `mantis.py`'s `extract()` only back-filled
   `rule_candidate.end_line` (and, for `IF`, its paired `ELSE`'s
   `pair_line_no`) when the popped block was an `IF` — `WHILE`/`FOR`/`CASE`
