@@ -386,6 +386,51 @@ def fetch_rule_candidate_rows(conn, member_name: str):
     return rows, []
 
 
+_SCREEN_SCOPES = {"screen"}
+_GLOBAL_SCOPES = {"global", "independent", "mantis_shared"}
+
+
+def _variable_kind(row, screen_field_names: set[str]) -> str:
+    """Human-readable label for a `variable` row's scope, distinguishing a
+    screen/MAP field from a plain program variable (issue #141). Callers
+    already exclude scope in ('parameter','entry','view','mantis_interface')
+    before calling this -- those are labelled by their own section heading
+    instead (or, for `mantis_interface`'s call-target-binding rows -- see
+    `graph.resolve_interface_literal_calls` -- not rendered as a field at
+    all, since they aren't one), as are Natural's synthetic `USING <name>`
+    data-area-include rows (see module_brief's "Data areas included"
+    section)."""
+    scope = row["scope"] or ""
+    if scope in _SCREEN_SCOPES:
+        return "screen field"
+    if row["name"].upper() in screen_field_names:
+        return "screen field (bound via MAP)"
+    if scope in _GLOBAL_SCOPES:
+        return "program variable (global)"
+    return "program variable"
+
+
+def _natural_screen_field_names(conn, mid) -> set[str]:
+    """Field names declared on a Natural map (.nsm) this member INPUTs/
+    DISPLAYs `USING MAP` -- resolved by joining the call_edge INCLUDE row
+    `natural._match_interaction` already records for `USING MAP` against
+    the target map member's own `MAP_FIELD` interaction rows (recorded by
+    `natural._match_map_body`). Both facts already exist in the fact store;
+    this is a rendering-time cross-reference, not a new extraction pass --
+    a Natural program's screen fields are otherwise declared as ordinary
+    DEFINE DATA LOCAL variables, indistinguishable from a value that only
+    ever lives in program memory (issue #141)."""
+    rows = conn.execute(
+        """
+        SELECT DISTINCT i.target FROM call_edge ce
+        JOIN interaction i ON i.member_id = ce.callee_id
+        WHERE ce.caller_id=? AND ce.call_kind='INCLUDE' AND ce.args='USING MAP'
+          AND ce.callee_id IS NOT NULL AND i.kind='MAP_FIELD' AND i.target IS NOT NULL
+        """,
+        (mid,),
+    ).fetchall()
+    return {r["target"].upper() for r in rows if r["target"]}
+
 
 def module_brief(conn, member_name: str, excerpt_rules: bool = True,
                   redact: Redactor = NULL_REDACTOR, lexicon: dict[str, str] | None = None,
@@ -490,7 +535,8 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
 
     # --- interfaces
     params = conn.execute(
-        "SELECT * FROM variable WHERE member_id=? AND scope IN ('parameter','entry') ORDER BY line_no",
+        "SELECT * FROM variable WHERE member_id=? AND scope IN ('parameter','entry') "
+        "AND name NOT LIKE 'USING %' ORDER BY line_no",
         (mid,),
     ).fetchall()
     if params:
@@ -507,6 +553,64 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
         add("## Data views declared")
         for r in views:
             add(f"- {_cite(name, r['line_no'])} view `{r['name']}` over `{r['view_of']}`")
+        add("")
+
+    # --- program variables and screen/MAP fields (issue #141): every other
+    # variable.scope value -- working storage (local/mantis_local/global/
+    # independent/mantis_shared), a Mantis SCREEN-bound field (scope='screen'),
+    # or a Natural local variable that's actually the target of a `USING MAP`
+    # (resolved below via _natural_screen_field_names, cross-referencing facts
+    # already recorded -- no new extraction pass). Rendered separately from
+    # "Interface (parameters)"/"Data views declared" above and tagged with an
+    # explicit kind so a reader (and the narrating LLM filling in the
+    # template's Inputs/Data-used tables) can tell a screen field the operator
+    # sees apart from a value that only ever lives in program memory.
+    #
+    # Natural's DEFINE DATA <scope> USING <LDA/PDA/GDA> also records a
+    # synthetic `variable` row named `USING <NAME>` (natural.py, alongside
+    # the matching call_edge/INCLUDE row) so the include is visible even
+    # when the data area itself isn't in the fact store. That's a data-area
+    # include, not a program variable -- keep it out of the kind-labelled
+    # list below (issue #141 follow-up) and surface it in its own small
+    # subsection instead of silently dropping it.
+    screen_field_names = (
+        _natural_screen_field_names(conn, mid) if m["dialect"] == "natural" else set()
+    )
+    all_other_vars = conn.execute(
+        "SELECT * FROM variable WHERE member_id=? AND scope NOT IN "
+        "('parameter','entry','view','mantis_interface') ORDER BY line_no",
+        (mid,),
+    ).fetchall()
+    data_area_includes = conn.execute(
+        "SELECT * FROM variable WHERE member_id=? AND name LIKE 'USING %' ORDER BY line_no",
+        (mid,),
+    ).fetchall()
+    other_vars = [r for r in all_other_vars if not r["name"].startswith("USING ")]
+    if other_vars:
+        add("## Program variables and screen/MAP fields")
+        add(
+            "Kind distinguishes a screen/MAP-bound field (a value the operator "
+            "sees or enters on a screen) from a plain program variable "
+            "(working storage -- exists only in memory while the program "
+            "runs). Don't conflate the two just because a field name alone "
+            "doesn't make the distinction obvious."
+        )
+        for r in other_vars:
+            kind = _variable_kind(r, screen_field_names)
+            spec = f" ({r['format'] or ''}{r['length'] or ''})" if (r["format"] or r["length"]) else ""
+            bound = f" bound to `{r['view_of']}`" if r["view_of"] else ""
+            add(f"- {_cite(name, r['line_no'])} {kind} `{r['name']}`{spec}{bound}")
+        add("")
+    if data_area_includes:
+        add("## Data areas included")
+        add(
+            "A `DEFINE DATA ... USING` data area (LDA/PDA/GDA) this member "
+            "includes -- its own fields live in that data area's own member, "
+            "not here; this is only the include itself, not a program "
+            "variable."
+        )
+        for r in data_area_includes:
+            add(f"- {_cite(name, r['line_no'])} data area include `{r['name'][len('USING '):]}`")
         add("")
 
     # --- internal routines (Natural DEFINE SUBROUTINE / Mantis ENTRY) --

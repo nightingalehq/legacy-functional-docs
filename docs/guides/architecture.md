@@ -203,6 +203,16 @@ facts already in the store, each already carrying its citation — the
 narrative stage's job is reduced to "write from what's already true and
 cited," not "find and verify facts while also writing prose."
 
+`module_brief`'s "Program variables and screen/MAP fields" section tags
+every `variable` row not already covered by "Interface (parameters)"/"Data
+views declared" with an explicit kind — `screen field` (Mantis
+`scope='screen'`, or a Natural local variable resolved as a `USING MAP`
+target via `_natural_screen_field_names`, cross-referencing the call_edge/
+interaction facts natural.py already records rather than a new extraction
+pass), `program variable` (working storage), or the parameter/view labels
+the two sections above already give. Without this, a rule's `fields_used`
+list mixes all three kinds with no way to tell them apart (issue #141).
+
 Any SME notes supplied for a member (`sme_notes.py`, parsed free-text
 annotations keyed by member/entity name) are threaded into every one of
 `module_brief`, `entity_brief` and `executive_brief` as their own
