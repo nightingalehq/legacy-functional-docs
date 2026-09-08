@@ -376,10 +376,12 @@ GitHub org.
     regenerations; if the patch attempt itself doesn't resolve validation,
     generation falls back to the existing full-chunk retry loop unchanged.
   - A failure that exhausts every attempt now also appends each flagged
-    sentence to `DocResult.problems` verbatim (prefixed `uncited:`), not
-    just the summary count `validate_doc` already reported -- the issue's
-    "at minimum" fallback ask, so a human can hand-patch immediately from
-    the failure output instead of re-deriving which sentences were flagged
+    sentence's snippet (`validate_doc` truncates `uncited_assertions` to
+    140 characters, so this isn't the full sentence) to
+    `DocResult.problems` (prefixed `uncited (snippet):`), not just the
+    summary count `validate_doc` already reported -- the issue's "at
+    minimum" fallback ask, so a human can hand-patch immediately from the
+    failure output instead of re-deriving which sentences were flagged
     from the document text.
   - Dialect-neutral by construction: keyed off `validate_doc`'s own
     `uncited_assertions`/`problems`, not any dialect-specific text --

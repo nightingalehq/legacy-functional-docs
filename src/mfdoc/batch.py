@@ -442,8 +442,10 @@ def _generate_module_doc_from_brief(conn, member_name: str, brief: str, out_path
         # themselves directly and prominently, not just the "N assertive
         # statement(s)" count already in `problems` -- so a human can
         # hand-patch immediately from this result instead of re-deriving
-        # which sentences they were from the document text.
-        problems = problems + [f"uncited: {s}" for s in uncited_assertions]
+        # which sentences they were from the document text. Each entry is a
+        # snippet, not the full sentence: validate_doc truncates
+        # uncited_assertions to 140 characters.
+        problems = problems + [f"uncited (snippet): {s}" for s in uncited_assertions]
     return DocResult(
         member_name, str(out_path), False, attempt, input_tokens, output_tokens, problems,
         duration_s=duration_s, retries=retries,

@@ -294,9 +294,11 @@ judgement-heavy documents are deliberately routed differently:
   `mfdoc batch`'s token cost, since a full chunk retry (re-narrating dozens
   of rules) previously cost the same as fixing the one or two sentences
   actually wrong. A retry (of either kind) that still fails has each
-  flagged sentence appended to `DocResult.problems` verbatim (prefixed
-  `uncited:`), not just the summary count, so a human can hand-patch
-  directly from the failure output. Resumable via a state file keyed on
+  flagged sentence's snippet (`validate_doc` truncates `uncited_assertions`
+  to 140 characters, so this isn't the full sentence) appended to
+  `DocResult.problems` (prefixed `uncited (snippet):`), not just the
+  summary count, so a human can hand-patch directly from the failure
+  output. Resumable via a state file keyed on
   brief content, so an interrupted run over thousands of members picks up
   where it left off.
   `ModelCaller` is a plain callable protocol; `AnthropicCaller`
