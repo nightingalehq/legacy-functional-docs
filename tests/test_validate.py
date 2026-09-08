@@ -225,6 +225,70 @@ def test_validate_tree_skips_sme_notes_files(indexed_db, tmp_path):
     assert res["documents_ok"] == 1
 
 
+OTHER_PROJECT_FRONTMATTER = """---
+title: Test doc
+doc_type: module
+system: OTHERSYS
+generated_by: legacy-functional-docs 0.1.0
+generated_at: "2026-01-01T00:00:00"
+review_status: draft
+confidence_summary:
+  verified: 1
+sources:
+  - OTHERSYS-MOD1
+---
+# Test doc
+"""
+
+
+def test_validate_tree_skips_a_document_belonging_to_a_different_project(indexed_db, tmp_path):
+    """A shared parent `--docs` directory holding more than one project's
+    generated output (see issue #130) must not have one project's docs
+    cross-checked against another project's fact store: `sources`
+    front matter naming only members this fact store has never heard of is
+    a strong signal the document belongs elsewhere, and it must be skipped
+    -- reported separately as out of scope -- rather than silently
+    misreported as having invalid citations."""
+    (tmp_path / "other-project-doc.md").write_text(
+        OTHER_PROJECT_FRONTMATTER
+        + "\nThe program resets the return code [[OTHERSYS-MOD1:1]].\n"
+    )
+    (tmp_path / "doc.md").write_text(
+        GOOD_FRONTMATTER + "\nThe program resets the return code [[MMP0100:31]].\n"
+    )
+    res = validate_tree(indexed_db, tmp_path)
+    assert res["documents"] == 1
+    assert res["documents_ok"] == 1
+    assert res["invalid_citations"] == 0
+    assert len(res["out_of_scope_documents"]) == 1
+    assert "other-project-doc.md" in res["out_of_scope_documents"][0]
+    assert "OTHERSYS-MOD1" in res["out_of_scope_documents"][0]
+
+
+def test_validate_tree_still_validates_a_register_doc_with_no_sources(indexed_db, tmp_path):
+    """`doc_type: register` documents (gap-summary.md, glossary.md, ...)
+    legitimately carry no `sources` front matter at all -- there must be no
+    real signal either way, so they still validate exactly as before rather
+    than being (wrongly) treated as belonging to another project."""
+    (tmp_path / "gap-summary.md").write_text(
+        "---\ntitle: \"Gap summary\"\ndoc_type: register\n---\n\n# Gap summary\n"
+    )
+    res = validate_tree(indexed_db, tmp_path)
+    assert res["documents"] == 1
+    assert res["documents_ok"] == 1
+    assert res["out_of_scope_documents"] == []
+
+
+def test_validate_tree_still_validates_a_doc_with_an_empty_sources_list(indexed_db, tmp_path):
+    """interface-matrix.md legitimately carries `sources: []` -- an empty
+    list is "no signal", not "signal of a different project"."""
+    doc = tmp_path / "interface-matrix.md"
+    doc.write_text(GOOD_FRONTMATTER.replace("sources:\n  - MMP0100\n", "sources: []\n"))
+    res = validate_tree(indexed_db, tmp_path)
+    assert res["documents"] == 1
+    assert res["out_of_scope_documents"] == []
+
+
 def test_validator_accepts_the_worked_example_unchanged(indexed_db):
     """A false positive here trains people to ignore the validator, which is
     worse than not having one."""

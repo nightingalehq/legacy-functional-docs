@@ -442,6 +442,29 @@ test-validate`) applies the same checks to a generated test file, plus one
 more: every bare `MEMBER:BR-nnn` reference in the body must name a real
 `test_case.scenario_name` row, not a renumbered or invented id.
 
+Before any of the above, `_partition_pipeline_docs` (#130) splits the tree
+walk itself: a multi-project workspace commonly runs several `mfdoc`
+configs against one shared parent output directory (each project's own
+`--out`/`--docs` subtree living side by side under it, per `--config`'s
+namespacing convention — see `cli._project_namespace`). Pointing `--docs`
+at that shared parent instead of one project's own subtree makes `mfdoc
+validate`/`mfdoc test-validate` visit every project's files, with nothing
+in the directory structure itself saying which file belongs to which
+project — a document's `sources` front matter (required on every
+narrative/generated-test document) already names the real member(s) it was
+generated from, so `_out_of_scope_sources` cross-checks it against the
+currently loaded fact store's own `member` table: a document whose
+`sources` names at least one member, but none of them exist here, was
+generated against a *different* project's fact store, and is skipped
+(reported separately, advisory, never counted against `documents`/
+`documents_ok` or the exit code) rather than silently cross-checked
+against the wrong one — which previously surfaced as a wall of "member is
+not in the index" or "not a known test_case scenario" false positives
+indistinguishable from a real regression. A document with no `sources` key
+or an empty `sources` list (a `doc_type: register` document, or
+`interface-matrix.md`'s legitimately empty list) carries no signal either
+way and still validates exactly as before.
+
 ### 5 — Test generation (optional; `testplan.py`, `testadvisor.py`, `testoverlay.py`, `testbatch.py`)
 
 The same fact-vs-narrative split, applied to tests instead of prose. See

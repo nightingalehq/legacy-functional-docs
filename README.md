@@ -399,12 +399,18 @@ mfdoc test-validate --config project.yml --docs tests_generated
 ```
 
 If multiple `project.yml` configs share the same `out_dir` (the common case
-once namespacing is in play), point `mfdoc test-validate --docs` at the
+once namespacing is in play), pointing `mfdoc test-validate --docs` (or
+`mfdoc validate --docs`) at the bare, shared `out_dir` is safe: a document
+whose `sources` front matter names only members that don't exist in the
+config you ran it against is recognised as belonging to a *different*
+project and skipped -- reported separately as out of scope, advisory only
+-- rather than being cross-checked against the wrong project's fact store
+(which previously surfaced as a wall of false "member is not in the index"/
+"not a known test_case scenario" failures). Pointing `--docs` at the
 namespaced subdirectory for the config you're validating (e.g.
-`tests_generated/mom`) rather than the bare `out_dir` -- pointed at the bare
-`out_dir` it walks every project's namespace subdirectory it finds there and
-attempts to validate their generated test docs too, not just the one config
-you ran it for.
+`tests_generated/mom`) still works exactly as before and avoids the
+skip-and-report noise entirely, so prefer it when you know the subdirectory
+up front.
 
 ## Worked examples
 

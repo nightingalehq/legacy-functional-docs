@@ -989,8 +989,79 @@ def _is_pipeline_doc(path: Path) -> bool:
     return path.name.upper() not in _NON_PIPELINE_DOC_NAMES
 
 
+def _out_of_scope_sources(fm: dict | None, known_members: set[str]) -> list[str] | None:
+    """`fm`'s `sources` front matter, if this document looks like it belongs
+    to a *different* project's fact store rather than the one currently
+    loaded (see `_partition_pipeline_docs`) -- otherwise `None`.
+
+    A multi-project workspace commonly runs several `mfdoc` configs against
+    one shared parent output directory (each project's own `--out`/`--docs`
+    subtree living side by side under it, per `--config`'s namespacing
+    convention -- see `cli._project_namespace`). Pointing `--docs` at that
+    shared parent instead of one project's own subtree makes a tree walk
+    visit every project's files, not just the one implied by `--config` --
+    with nothing in the directory structure itself to say which file
+    belongs to which project. `sources` front matter (required on every
+    narrative/generated-test document, see `REQUIRED_FRONTMATTER`) already
+    names the real member(s) that document was generated from, so cross-
+    checking it against the currently loaded fact store's own `member`
+    table is a reliable, already-available signal: a document whose
+    `sources` names at least one member, but none of them exist here, was
+    generated against a *different* project's fact store, and validating
+    it against this one would silently misreport it (module: "member is not
+    in the index" citation failures for module docs; "not a known test_case
+    scenario" for generated tests) instead of flagging it as out of scope.
+
+    Returns `None` (don't skip) whenever there isn't a real signal either
+    way: no front matter, no `sources` key, or an empty `sources` list --
+    `doc_type: register` documents (gap-summary.md, glossary.md, ...) and
+    `interface-matrix.md` legitimately carry no (or an empty) `sources`
+    list despite belonging to this project, and must validate exactly as
+    before rather than being silently skipped for lack of a signal."""
+    if not fm:
+        return None
+    sources = fm.get("sources")
+    if not sources:
+        return None
+    if any(str(s).upper() in known_members for s in sources):
+        return None
+    return [str(s) for s in sources]
+
+
+def _partition_pipeline_docs(conn, root: Path) -> tuple[list[Path], list[str]]:
+    """Every pipeline-output markdown file under `root`, split into paths to
+    actually validate and human-readable notes for ones skipped as
+    belonging to a different project (see `_out_of_scope_sources`). Shared
+    by `validate_tree` and `validate_tests_tree` so both commands stop
+    cross-checking an unrelated project's generated docs against this
+    project's fact store when `--docs` points at a directory shared by more
+    than one project (issue #130) -- a malformed/unparseable front matter
+    is deliberately still handed to the real validator rather than silently
+    dropped here, so that failure is reported exactly as before."""
+    known_members = {
+        (row[0] or "").upper() for row in conn.execute("SELECT name FROM member").fetchall()
+    }
+    in_scope: list[Path] = []
+    skipped: list[str] = []
+    for path in sorted(root.rglob("*.md")):
+        if not _is_pipeline_doc(path):
+            continue
+        fm, _, fm_err = _split_frontmatter(path.read_text(encoding="utf-8"))
+        bad_sources = None if fm_err else _out_of_scope_sources(fm, known_members)
+        if bad_sources is None:
+            in_scope.append(path)
+        else:
+            skipped.append(
+                f"{path}: sources {bad_sources} not found in the loaded fact store -- "
+                f"looks like it belongs to a different project; skipped rather than "
+                f"validated against the wrong one"
+            )
+    return in_scope, skipped
+
+
 def validate_tests_tree(conn, root: Path) -> dict:
-    results = [validate_test_doc(conn, p) for p in sorted(root.rglob("*.md")) if _is_pipeline_doc(p)]
+    paths, out_of_scope = _partition_pipeline_docs(conn, root)
+    results = [validate_test_doc(conn, p) for p in paths]
     return {
         "documents": len(results),
         "documents_ok": sum(1 for r in results if r["ok"]),
@@ -998,6 +1069,9 @@ def validate_tests_tree(conn, root: Path) -> dict:
         "invalid_citations": sum(r["invalid_citations"] for r in results),
         "invalid_scenario_refs": sum(r.get("invalid_scenario_refs", 0) for r in results),
         "results": results,
+        # Advisory only -- never subtracted from documents_ok and never
+        # affects a caller's exit code; see _out_of_scope_sources.
+        "out_of_scope_documents": out_of_scope,
     }
 
 
@@ -1288,10 +1362,8 @@ def _artifact_consistency_problems(conn, results: list[dict]) -> list[str]:
 
 
 def validate_tree(conn, root: Path, outcome_field=OUTCOME_FIELD) -> dict:
-    results = [
-        validate_doc(conn, p, outcome_field=outcome_field)
-        for p in sorted(root.rglob("*.md")) if _is_pipeline_doc(p)
-    ]
+    paths, out_of_scope = _partition_pipeline_docs(conn, root)
+    results = [validate_doc(conn, p, outcome_field=outcome_field) for p in paths]
     return {
         "documents": len(results),
         "documents_ok": sum(1 for r in results if r["ok"]),
@@ -1329,4 +1401,7 @@ def validate_tree(conn, root: Path, outcome_field=OUTCOME_FIELD) -> dict:
         "stale_documents": [
             f"{r['path']}: {p}" for r in results for p in r.get("staleness_problems", [])
         ],
+        # Advisory only -- never subtracted from documents_ok and never
+        # affects a caller's exit code; see _out_of_scope_sources.
+        "out_of_scope_documents": out_of_scope,
     }

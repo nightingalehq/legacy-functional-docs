@@ -71,6 +71,55 @@ def test_missing_language_or_framework_front_matter_is_flagged(indexed_db, tmp_p
     assert any("framework" in p for p in result["problems"])
 
 
+OTHER_PROJECT_DOC = """---
+title: "OTHERSYS-MOD1 -- generated tests (python)"
+doc_type: generated_test
+system: OTHERSYS
+module: OTHERSYS-MOD1
+language: python
+framework: pytest
+generated_by: legacy-functional-docs 0.1.0
+generated_at: "2026-01-01"
+review_status: draft
+reviewers: []
+confidence_summary:
+  verified: 1
+  inferred: 0
+  unresolved: 0
+sources: ["OTHERSYS-MOD1"]
+---
+
+# OTHERSYS-MOD1 -- generated tests
+
+```python
+def test_something():
+    # OTHERSYS-MOD1:BR-001 [[OTHERSYS-MOD1:1]]
+    ...
+```
+"""
+
+
+def test_validate_tests_tree_skips_a_document_belonging_to_a_different_project(indexed_db, tmp_path):
+    """A shared parent `--docs` directory holding more than one project's
+    generated-test output (see issue #130) must not have a scenario id from
+    project B's test tree reported as "not a known test_case scenario"
+    against project A's `test_case` store -- `sources` naming only members
+    this fact store never ingested is a strong signal the document belongs
+    to a different project, and must be skipped rather than cross-checked
+    against the wrong one."""
+    conn = indexed_db
+    testplan.run_all(conn, member_name="MMP0100")
+    (tmp_path / "other-project.md").write_text(OTHER_PROJECT_DOC, encoding="utf-8")
+    (tmp_path / "good.md").write_text(VALID_DOC, encoding="utf-8")
+    res = validate_tests_tree(conn, tmp_path)
+    assert res["documents"] == 1
+    assert res["documents_ok"] == 1
+    assert res["invalid_scenario_refs"] == 0
+    assert len(res["out_of_scope_documents"]) == 1
+    assert "other-project.md" in res["out_of_scope_documents"][0]
+    assert "OTHERSYS-MOD1" in res["out_of_scope_documents"][0]
+
+
 def test_validate_tests_tree_aggregates_across_files(indexed_db, tmp_path):
     conn = indexed_db
     testplan.run_all(conn, member_name="MMP0100")
