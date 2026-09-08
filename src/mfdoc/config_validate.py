@@ -151,11 +151,12 @@ def _dict_of_supra_labels(value: dict) -> str | None:
     Every pattern here, built-in or overridden, is matched via `supra._find`,
     which unconditionally does `m.group("v")` on a match -- a compiled
     override missing the `(?P<v>...)` named group would pass `re.compile`
-    fine but blow up with an `IndexError`/`re.error` the first time the
-    pattern actually matches a line during `mfdoc ingest`, well after this
+    fine but blow up with an `IndexError` the first time the pattern
+    actually matches a line during `mfdoc ingest`, well after this
     validation has already said the config is fine. So this check compiles
-    the pattern (same as `_valid_regex`) and additionally rejects one
-    lacking that named group."""
+    the pattern (same as `_valid_regex`, which already rejects the
+    `re.error` case) and additionally rejects one lacking that named
+    group."""
     for key, pattern in value.items():
         if key not in _SUPRA_LABEL_KEYS:
             return f"[{key!r}] is not a recognised Supra label -- must be one of {sorted(_SUPRA_LABEL_KEYS)}"
