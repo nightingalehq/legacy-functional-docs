@@ -1037,9 +1037,18 @@ def _out_of_scope_sources(fm: dict | None, known_members: set[str]) -> list[str]
         return None
     if not isinstance(sources, list):
         return None
-    if any(str(s).upper() in known_members for s in sources):
+    # Strip whitespace before the membership check -- a front-matter value
+    # like "MMP0100 " (easy to introduce hand-editing YAML) must still match
+    # `known_members` the way the unpadded name would, or a same-project doc
+    # gets misclassified as out of scope over pure formatting. An
+    # all-whitespace/empty entry filters out rather than comparing as "".
+    normalized = [str(s).strip() for s in sources]
+    normalized = [s for s in normalized if s]
+    if not normalized:
         return None
-    return [str(s) for s in sources]
+    if any(s.upper() in known_members for s in normalized):
+        return None
+    return normalized
 
 
 def _partition_pipeline_docs(conn, root: Path) -> tuple[list[Path], list[str]]:

@@ -311,6 +311,24 @@ def test_validate_tree_does_not_skip_a_doc_with_malformed_sources(indexed_db, tm
     assert res["invalid_citations"] == 1
 
 
+def test_validate_tree_ignores_whitespace_when_matching_sources_to_known_members(indexed_db, tmp_path):
+    """A `sources` entry like `"MMP0100 "` (easy to introduce hand-editing
+    YAML) must still match `known_members` the way the unpadded name would
+    -- otherwise a same-project document gets misclassified as belonging to
+    a different project purely over incidental whitespace, and silently
+    skipped instead of validated."""
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        GOOD_FRONTMATTER.replace("sources:\n  - MMP0100\n", "sources:\n  - \" MMP0100 \"\n")
+        + "\nThe program resets the return code [[MMP0100:31]].\n"
+    )
+    res = validate_tree(indexed_db, tmp_path)
+    assert res["documents"] == 1
+    assert res["out_of_scope_documents"] == []
+    assert res["documents_ok"] == 1
+    assert res["invalid_citations"] == 0
+
+
 def test_validator_accepts_the_worked_example_unchanged(indexed_db):
     """A false positive here trains people to ignore the validator, which is
     worse than not having one."""
