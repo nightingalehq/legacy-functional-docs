@@ -146,15 +146,28 @@ _SUPRA_LABEL_KEYS = {
 def _dict_of_supra_labels(value: dict) -> str | None:
     """For `options.dialects.supra.labels`: a mapping of label name (one of
     `_SUPRA_LABEL_KEYS`) to a single regex string overriding that entry in
-    `supra.LABELS` -- see `supra.labels_from_options` for the merge."""
+    `supra.LABELS` -- see `supra.labels_from_options` for the merge.
+
+    Every pattern here, built-in or overridden, is matched via `supra._find`,
+    which unconditionally does `m.group("v")` on a match -- a compiled
+    override missing the `(?P<v>...)` named group would pass `re.compile`
+    fine but blow up with an `IndexError`/`re.error` the first time the
+    pattern actually matches a line during `mfdoc ingest`, well after this
+    validation has already said the config is fine. So this check compiles
+    the pattern (same as `_valid_regex`) and additionally rejects one
+    lacking that named group."""
     for key, pattern in value.items():
         if key not in _SUPRA_LABEL_KEYS:
             return f"[{key!r}] is not a recognised Supra label -- must be one of {sorted(_SUPRA_LABEL_KEYS)}"
         if not isinstance(pattern, str):
             return f"[{key!r}] must be a string, got {pattern!r}"
-        err = _valid_regex(pattern)
-        if err:
-            return f"[{key!r}] {err}"
+        try:
+            compiled = re.compile(pattern)
+        except re.error as exc:
+            return f"[{key!r}] is not a valid regex: {exc}"
+        if "v" not in compiled.groupindex:
+            return (f"[{key!r}] must contain a named capture group (?P<v>...) -- "
+                     f"supra._find reads m.group('v') from every match, got {pattern!r}")
     return None
 
 

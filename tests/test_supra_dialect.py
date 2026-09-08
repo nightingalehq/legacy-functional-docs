@@ -146,3 +146,19 @@ def test_config_validate_rejects_an_invalid_regex():
     }
     problems = validate_config(cfg)
     assert any("dataset" in p and "regex" in p for p in problems)
+
+
+def test_config_validate_rejects_a_valid_regex_missing_the_v_group():
+    """A syntactically valid override that omits the required `(?P<v>...)`
+    named group must be rejected at config-validation time, not left to blow
+    up in `supra._find`'s `m.group("v")` the first time it matches a line
+    during `mfdoc ingest`."""
+    cfg = {
+        "index_db": ".mfdoc/index.db",
+        "sources": [],
+        "options": {
+            "dialects": {"supra": {"labels": {"dataset": r"FILE-ID\s*[:=]\s*(\w+)"}}},
+        },
+    }
+    problems = validate_config(cfg)
+    assert any("dataset" in p and "(?P<v>" in p for p in problems)
