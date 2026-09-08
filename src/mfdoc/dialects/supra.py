@@ -80,8 +80,6 @@ def labels_from_options(options: dict | None) -> dict:
     replacing the whole mapping; an unset key keeps its built-in pattern.
     """
     overrides = (((options or {}).get("dialects") or {}).get("supra") or {}).get("labels") or {}
-    if not overrides:
-        return LABELS
     merged = dict(LABELS)
     merged.update(overrides)
     return merged
