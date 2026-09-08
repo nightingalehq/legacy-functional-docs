@@ -356,6 +356,28 @@ Parses YAML front matter and body of each generated document and checks:
   or an explicit hedge (`inferred`, `unresolved`, etc.) — the mechanical
   enforcement of "never assert behaviour that cannot be traced to a
   specific source line."
+- `module_completeness_problems` (#50) — every `rule_candidate` id assigned
+  to a member's brief (`_rule_id`'s `MEMBER:BR-nnn`) must be carried forward
+  somewhere across the *union* of that member's `doc_type: module` chunk
+  documents, not each one individually — a chunk that trails off just short
+  of its own assigned range still validates as long as what *is* there
+  cites cleanly, so this is the aggregate check that catches the rules a
+  chunked run silently dropped.
+- `statement_citation_coverage_problems` (#133) — every non-dynamic
+  `call_edge` row and every `interaction` row for a member (a `DO`/`PERFORM`
+  subroutine call, a `PROGRAM`+`DO` external call, a `RELEASE`, a `PROMPT`,
+  a `CHAIN`/`TRANSFER` — none of these ever produce a `rule_candidate` row,
+  so `module_completeness_problems`'s `BR-nnn` check has nothing to
+  cross-reference for them) must have its source line covered by *some*
+  `[[MEMBER:LINE]]` citation somewhere across that member's `doc_type:
+  module` document set. This is a citation-*coverage* check, not a mention
+  check: it catches a statement dropped from every citation in a chunk
+  entirely, which is a different (and, per #133, more common) failure mode
+  than `_statement_completeness_problems` below, which only ever looks
+  inside a citation range that already exists.
+
+Both of the above are hard failures, folded into `mfdoc validate`'s exit
+code the same way invalid citations are — unlike the three checks below.
 
 Three more checks are advisory (surfaced, never counted against a
 document's own `ok`/pass-fail — a false positive here should cost nothing,

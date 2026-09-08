@@ -865,6 +865,83 @@ def module_completeness_problems(conn, results: list[dict]) -> list[str]:
     return problems
 
 
+def statement_citation_coverage_problems(conn, results: list[dict]) -> list[str]:
+    """A member's non-dynamic `call_edge` row, or `interaction` row, whose
+    source line is never covered by *any* `[[MEMBER:LINE]]` citation across
+    that member's whole `doc_type: module` document set.
+
+    Extends `module_completeness_problems` (#50) to a class of fact that
+    check has nothing to cross-reference at all: `call_edge`/`interaction`
+    rows (a `DO`/`PERFORM` subroutine call, a `PROGRAM`+`DO` external call, a
+    `RELEASE`, a `PROMPT`, a `CHAIN`/`TRANSFER` -- see `mantis.py`'s
+    `RE_DO_ENTRY`/`RE_CALL`/`RE_RELEASE`/`RE_PROMPT` handlers) never create a
+    `rule_candidate` row, so they never get a `BR-nnn` id a narrator could be
+    asked to carry forward the way `module_completeness_problems` checks for.
+    Citation-range coverage is the closest dialect-neutral equivalent
+    available for them.
+
+    Distinct from, and stricter than, `_statement_completeness_problems`
+    (#59): that check only inspects the *paragraph* of a citation whose own
+    range already happens to cover the row's line -- a line the model drops
+    from every citation in a chunk entirely, rather than citing without
+    naming its target, has no citation range there for it to inspect at all.
+    This checks coverage first, at the citation-range level, before any
+    question of whether the citing prose names the target -- and unlike
+    #59 (advisory only), a gap here is folded into `completeness_problems`,
+    the same hard-failure list `module_completeness_problems` populates, so
+    `mfdoc validate`'s exit code actually reflects it.
+
+    Scoped to `doc_type: module` documents only, deliberately mirroring
+    `module_completeness_problems`'s own scoping (see
+    `test_module_completeness_ignores_module_index_docs`): a chunked
+    member's `module_index` overview carries citations copied forward from
+    its already-checked chunks, so counting it too would let an index page
+    launder a chunk's real gap.
+
+    `data_access` rows are deliberately excluded -- CRUD/field-level access
+    already has other machinery (`unused_entity_fields`) checking it, and
+    this issue is scoped to control-transfer/resource statements only.
+    """
+    cited_ranges: dict[str, list[tuple[int, int]]] = defaultdict(list)
+    members: set[str] = set()
+    for r in results:
+        fm = r.get("_fm")
+        if not fm or fm.get("doc_type") != "module":
+            continue
+        for src in fm.get("sources") or []:
+            members.add(src)
+        for m in CITATION.finditer(r.get("_body") or ""):
+            lf = m.group("from")
+            if lf is None:
+                continue
+            lf = int(lf)
+            lt = int(m.group("to")) if m.group("to") else lf
+            cited_ranges[m.group("member").upper()].append((lf, lt))
+
+    problems = []
+    for member in sorted(members):
+        row = conn.execute("SELECT id FROM member WHERE UPPER(name)=?", (member.upper(),)).fetchone()
+        if row is None:
+            continue
+        member_ranges = cited_ranges.get(member.upper(), [])
+        missing = []
+        for target_col, kind_col, sql in _STATEMENT_SOURCES[:2]:  # call_edge, interaction -- not data_access
+            for stmt in conn.execute(sql, (row["id"],)).fetchall():
+                ln = stmt["line_no"]
+                if not any(lo <= ln <= hi for lo, hi in member_ranges):
+                    missing.append((ln, stmt[kind_col], stmt[target_col]))
+        if not missing:
+            continue
+        missing.sort()
+        examples = "; ".join(f"{kind} '{target}' @{ln}" for ln, kind, target in missing[:5])
+        more = f" (+{len(missing) - 5} more)" if len(missing) > 5 else ""
+        problems.append(
+            f"{member}: {len(missing)} call/interaction statement(s) never covered by any "
+            f"citation across its generated module document(s) ({examples}{more})"
+        )
+    return problems
+
+
 # Row/line-count patterns used by `_artifact_consistency_problems` to
 # re-derive a cheap invariant from a `structural.py`-rendered artifact's own
 # markdown, without re-rendering (and diffing) the whole document.
@@ -1001,6 +1078,7 @@ def validate_tree(conn, root: Path, outcome_field=OUTCOME_FIELD) -> dict:
         "invalid_citations": sum(r["invalid_citations"] for r in results),
         "results": results,
         "completeness_problems": module_completeness_problems(conn, results),
+        "statement_coverage_problems": statement_citation_coverage_problems(conn, results),
         "artifact_problems": _artifact_consistency_problems(conn, results),
         # Advisory only (see _statement_completeness_problems) -- never
         # subtracted from documents_ok and never affects a caller's exit code.

@@ -622,6 +622,111 @@ def test_module_completeness_ignores_non_module_docs():
     assert module_completeness_problems(conn, results) == []
 
 
+def test_statement_coverage_flags_a_call_never_cited_anywhere():
+    """A `PERFORM`/internal-call edge whose line is never inside *any*
+    `[[MEMBER:LINE]]` citation across the member's module doc set -- the
+    class of gap issue #133 identified: the model dropped the statement
+    from every citation entirely, so neither #50's BR-id check (it never
+    got a rule_candidate/BR-id in the first place) nor #59's
+    within-citation-range mention check (there is no citation range
+    covering it to inspect) has anything to catch."""
+    from mfdoc.validate import statement_citation_coverage_problems
+
+    conn = _member_with_statements(call_edge={})
+    results = [_module_result(
+        "TESTSTMT", "The routine validates the request [[TESTSTMT:691]]."
+    )]
+    problems = statement_citation_coverage_problems(conn, results)
+    assert len(problems) == 1
+    assert "TESTSTMT" in problems[0]
+    assert "PGMX02" in problems[0]
+    assert "FETCH" in problems[0]
+
+
+def test_statement_coverage_accepts_a_call_inside_a_cited_range():
+    """The call_edge row sits at line 692, inside the cited 691-693 range --
+    covered, even though the citing prose never names 'PGMX02' by name (that
+    narrower, advisory-only gap is #59's job, not this one's)."""
+    from mfdoc.validate import statement_citation_coverage_problems
+
+    conn = _member_with_statements(call_edge={})
+    results = [_module_result(
+        "TESTSTMT", "The routine handles the branch [[TESTSTMT:691-693]]."
+    )]
+    assert statement_citation_coverage_problems(conn, results) == []
+
+
+def test_statement_coverage_unions_coverage_across_chunk_documents():
+    """Mirrors module_completeness_problems's own chunk-union behaviour: one
+    chunk citing lines up to 691 and another citing 692-693 together cover
+    the call_edge row at line 692."""
+    from mfdoc.validate import statement_citation_coverage_problems
+
+    conn = _member_with_statements(call_edge={})
+    results = [
+        _module_result("TESTSTMT", "Setup happens here [[TESTSTMT:691]]."),
+        _module_result("TESTSTMT", "Then the branch runs [[TESTSTMT:692-693]]."),
+    ]
+    assert statement_citation_coverage_problems(conn, results) == []
+
+
+def test_statement_coverage_ignores_dynamic_call_edges():
+    """A dynamic call_edge's target is a variable, not a literal name -- it
+    is excluded from `_STATEMENT_SOURCES`'s own SQL (dynamic=0), so it must
+    never be flagged as uncovered regardless of citations present."""
+    from mfdoc.validate import statement_citation_coverage_problems
+
+    conn = _member_with_statements(call_edge={"dynamic": 1, "callee_name": "*PGM-NAME"})
+    results = [_module_result("TESTSTMT", "No citation at all here for this chunk.")]
+    assert statement_citation_coverage_problems(conn, results) == []
+
+
+def test_statement_coverage_ignores_module_index_docs():
+    """A `doc_type: module_index` overview's citations must not count toward
+    coverage -- same scoping module_completeness_problems already applies,
+    for the same reason (its citations are copied forward from chunks
+    already checked in their own right). Here the only real `module` chunk
+    never cites the call_edge row's line at all, and the module_index
+    overview's own wider citation must not be allowed to paper over that."""
+    from mfdoc.validate import statement_citation_coverage_problems
+
+    conn = _member_with_statements(call_edge={})
+    results = [
+        _module_result("TESTSTMT", "Setup happens here [[TESTSTMT:691]]."),
+        {
+            "_fm": {"doc_type": "module_index", "sources": ["TESTSTMT"]},
+            "_body": "The whole routine [[TESTSTMT:691-693]].",
+        },
+    ]
+    problems = statement_citation_coverage_problems(conn, results)
+    assert len(problems) == 1
+    assert "PGMX02" in problems[0]
+
+
+def test_statement_coverage_ignores_non_module_docs():
+    conn = _member_with_statements(call_edge={})
+    results = [{
+        "_fm": {"doc_type": "register", "sources": ["TESTSTMT"]},
+        "_body": "The whole routine [[TESTSTMT:691-693]].",
+    }]
+    from mfdoc.validate import statement_citation_coverage_problems
+    assert statement_citation_coverage_problems(conn, results) == []
+
+
+def test_validate_tree_folds_statement_coverage_into_hard_failure(tmp_path):
+    """Unlike #59's advisory-only omitted_statement_targets,
+    statement_coverage_problems is meant to actually fail the build --
+    verified end-to-end through validate_tree, the same aggregation
+    cmd_validate's exit code reads."""
+    conn = _member_with_statements(call_edge={})
+    (tmp_path / "doc.md").write_text(
+        STMT_FRONTMATTER + "\nThe routine validates the request; no citation for the call.\n"
+    )
+    res = validate_tree(conn, tmp_path)
+    assert res["statement_coverage_problems"]
+    assert any("PGMX02" in p for p in res["statement_coverage_problems"])
+
+
 def test_validator_accepts_a_citation_placed_after_the_sentence_ending_period(indexed_db, tmp_path):
     """A citation placed right after the period that ends the claim it
     supports -- rather than before it, inside the same sentence -- must not
