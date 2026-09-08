@@ -45,6 +45,9 @@ def extract_sql_ddl(conn, member_id, lines, member_name="?") -> dict:
                 break
         return best
 
+    def first_nonspace_offset(s: str) -> int:
+        return re.match(r"\s*", s).end()
+
     tables = cols = 0
     for m in RE_CREATE_TABLE.finditer(text):
         name = m.group("name").strip('"').upper()
@@ -55,7 +58,8 @@ def extract_sql_ddl(conn, member_id, lines, member_name="?") -> dict:
         pk_cols = set()
         if (pk := RE_PK.search(m.group("body"))):
             pk_cols = {c.strip().strip('"').upper() for c in pk.group("cols").split(",")}
-        for raw_col in _split_top_level(m.group("body")):
+        for raw_col_start, raw_col in _split_top_level(m.group("body")):
+            col_ln = line_of(m.start("body") + raw_col_start + first_nonspace_offset(raw_col))
             if DDL_NOISE.match(raw_col):
                 if (fk := RE_FK.search(raw_col)):
                     ref = upsert_entity(conn, fk.group("ref").strip('"').upper(), "sql_table")
@@ -71,13 +75,13 @@ def extract_sql_ddl(conn, member_id, lines, member_name="?") -> dict:
                        is_descriptor=1 if cname in pk_cols else 0,
                        descriptor_kind="primary_key" if cname in pk_cols else None,
                        options="NOT NULL" if re.search(r"NOT\s+NULL", rest, re.I) else None,
-                       defined_line=ln, remark=rest.strip()[:120] or None)
+                       defined_line=col_ln, remark=rest.strip()[:120] or None)
                 cols += 1
             elif raw_col.strip():
                 add_gap(conn, "unparsed_line",
                         f"Column definition not recognised by the SQL DDL scanner in "
                         f"{member_name}, table {name}.",
-                        member_id=member_id, line_no=ln, severity="low",
+                        member_id=member_id, line_no=col_ln, severity="low",
                         raw=raw_col.strip()[:400])
 
     for m in RE_CREATE_INDEX.finditer(text):
@@ -101,9 +105,10 @@ def extract_sql_ddl(conn, member_id, lines, member_name="?") -> dict:
         # just consumed as the delimiter -- put one back before checking.
         if RE_CREATE_TABLE.search(chunk + ";") or RE_CREATE_INDEX.search(chunk):
             continue
+        stmt_start = this_start + first_nonspace_offset(chunk)
         add_gap(conn, "unparsed_line",
                 f"Statement not recognised by the SQL DDL scanner in {member_name}.",
-                member_id=member_id, line_no=line_of(this_start), severity="low",
+                member_id=member_id, line_no=line_of(stmt_start), severity="low",
                 raw=body[:400])
 
     set_metric(conn, member_name, "sqlddl.tables", tables)
@@ -111,20 +116,24 @@ def extract_sql_ddl(conn, member_id, lines, member_name="?") -> dict:
     return {"tables": tables, "columns": cols}
 
 
-def _split_top_level(body: str) -> list[str]:
-    out, depth, cur = [], 0, []
-    for ch in body:
+def _split_top_level(body: str) -> list[tuple[int, str]]:
+    """Split on top-level commas, pairing each piece with its starting offset
+    within ``body`` so callers can map a piece back to its own source line
+    rather than the enclosing statement's."""
+    out, depth, cur, start = [], 0, [], 0
+    for i, ch in enumerate(body):
         if ch == "(":
             depth += 1
         elif ch == ")":
             depth -= 1
         if ch == "," and depth == 0:
-            out.append("".join(cur))
+            out.append((start, "".join(cur)))
             cur = []
+            start = i + 1
         else:
             cur.append(ch)
     if cur:
-        out.append("".join(cur))
+        out.append((start, "".join(cur)))
     return out
 
 

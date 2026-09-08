@@ -41,6 +41,31 @@ CREATE TABLE WIDGET (
 CREATE VIEW WIDGET_VIEW AS SELECT * FROM WIDGET;
 """
 
+# Multi-column table where the unrecognised column sits a few lines below the
+# CREATE TABLE header -- the gap's line_no must point at the column itself
+# (line 4), not the table header (line 1).
+DDL_MULTI_COLUMN_UNRECOGNISED = """\
+CREATE TABLE GADGET (
+    GADGET_ID INTEGER NOT NULL,
+    GADGET_NAME VARCHAR(40),
+    &BOGUS-CLAUSE!! garbage that is not a column,
+    PRIMARY KEY (GADGET_ID)
+);
+"""
+
+# Unrecognised statement preceded by blank lines after the prior statement's
+# closing ';' -- the gap's line_no must point at the first line of the
+# unrecognised statement's actual content (line 6), not the blank lines
+# (4-5) or the previous statement's closing line (3).
+DDL_STATEMENT_AFTER_BLANK_LINES = """\
+CREATE TABLE GADGET (
+    GADGET_ID INTEGER NOT NULL
+);
+
+
+CREATE VIEW GADGET_VIEW AS SELECT * FROM GADGET;
+"""
+
 
 def test_sql_ddl_unrecognised_column_records_gap():
     conn = _conn()
@@ -58,6 +83,28 @@ def test_sql_ddl_unrecognised_statement_records_gap():
         "SELECT gap_kind, raw FROM gap WHERE member_id=1 AND gap_kind='unparsed_line'"
     ).fetchall()
     assert any("CREATE VIEW" in (g["raw"] or "") for g in gaps)
+
+
+def test_sql_ddl_unrecognised_column_gap_points_at_column_line():
+    conn = _conn()
+    environment.extract_sql_ddl(conn, 1, _lines(DDL_MULTI_COLUMN_UNRECOGNISED), "FAKEMEM")
+    gaps = conn.execute(
+        "SELECT line_no, raw FROM gap WHERE member_id=1 AND gap_kind='unparsed_line'"
+    ).fetchall()
+    matches = [g for g in gaps if "BOGUS-CLAUSE" in (g["raw"] or "")]
+    assert len(matches) == 1
+    assert matches[0]["line_no"] == 4
+
+
+def test_sql_ddl_unrecognised_statement_after_blank_lines_gap_points_at_statement_line():
+    conn = _conn()
+    environment.extract_sql_ddl(conn, 1, _lines(DDL_STATEMENT_AFTER_BLANK_LINES), "FAKEMEM")
+    gaps = conn.execute(
+        "SELECT line_no, raw FROM gap WHERE member_id=1 AND gap_kind='unparsed_line'"
+    ).fetchall()
+    matches = [g for g in gaps if "CREATE VIEW" in (g["raw"] or "")]
+    assert len(matches) == 1
+    assert matches[0]["line_no"] == 6
 
 
 def test_sql_ddl_recognised_input_records_no_gap():
