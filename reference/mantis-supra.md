@@ -63,9 +63,12 @@ Two ways to calibrate them:
   label name (`schema`, `dataset`, `dataset_type`, `control_key`, `element`,
   `linkpath`, `link_from`, `link_to`) to a regex string. Supplied keys replace
   the built-in pattern for that key only; unset keys keep the shipped default
-  (`supra.labels_from_options` does the merge). This is the right place for a
-  one-off site quirk (e.g. the report prints `FILE-ID:` instead of
-  `DATA-SET:`) without forking the module:
+  (`supra.labels_from_options` does the merge). Every pattern, built-in or
+  overridden, **must** include a named capture group `(?P<v>...)` around the
+  value to extract -- `supra._find` reads `m.group("v")` unconditionally, and
+  `mfdoc`'s config validation rejects an override missing it. This is the
+  right place for a one-off site quirk (e.g. the report prints `FILE-ID:`
+  instead of `DATA-SET:`) without forking the module:
 
   ```yaml
   options:
