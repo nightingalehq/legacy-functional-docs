@@ -64,11 +64,33 @@ def _find(pattern: str, text: str) -> str | None:
     return m.group("v").strip().upper() if m else None
 
 
-def extract(conn, member_id: int, lines, member_name: str = "?") -> dict:
+def labels_from_options(options: dict | None) -> dict:
+    """The label patterns to use, from `options.dialects.supra.labels` in
+    project.yml, merged over the module-level `LABELS` defaults.
+
+    Unlike `conditions.py`'s single-pattern `outcome_field_from_options`/
+    `dispatch_field_from_options` (replace-not-merge, because those are one
+    pattern each), `LABELS` is a small fixed set of named patterns
+    (`schema`, `dataset`, `dataset_type`, `control_key`, `element`,
+    `linkpath`, `link_from`, `link_to`) and a site's directory report
+    typically only disagrees with the shipped wording for a few of them --
+    e.g. a shop that prints "FILE-ID:" instead of "DATA-SET:" only needs to
+    override `dataset`, not restate every other label it already matches.
+    So a project override merges key-by-key over the defaults rather than
+    replacing the whole mapping; an unset key keeps its built-in pattern.
+    """
+    overrides = (((options or {}).get("dialects") or {}).get("supra") or {}).get("labels") or {}
+    merged = dict(LABELS)
+    merged.update(overrides)
+    return merged
+
+
+def extract(conn, member_id: int, lines, member_name: str = "?", options: dict | None = None) -> dict:
     current_ds: tuple[int, str] | None = None
     pending_link: dict = {}
     counts = {"datasets": 0, "elements": 0, "linkpaths": 0, "unmatched": 0}
     schema_name = None
+    labels = labels_from_options(options)
 
     for line_no, seq, raw in lines:
         insert(conn, "source_line", member_id=member_id, line_no=line_no, seq=seq,
@@ -77,17 +99,17 @@ def extract(conn, member_id: int, lines, member_name: str = "?") -> dict:
             continue
         used = False
 
-        if (v := _find(LABELS["schema"], raw)):
+        if (v := _find(labels["schema"], raw)):
             schema_name = v
             used = True
 
-        if (v := _find(LABELS["linkpath"], raw)):
+        if (v := _find(labels["linkpath"], raw)):
             pending_link = {"name": v, "line": line_no}
             counts["linkpaths"] += 1
             used = True
         if pending_link:
-            frm = _find(LABELS["link_from"], raw)
-            to = _find(LABELS["link_to"], raw)
+            frm = _find(labels["link_from"], raw)
+            to = _find(labels["link_to"], raw)
             if frm:
                 pending_link["from"] = frm
             if to:
@@ -101,8 +123,8 @@ def extract(conn, member_id: int, lines, member_name: str = "?") -> dict:
                 pending_link = {}
                 used = True
 
-        if not used and (v := _find(LABELS["dataset"], raw)):
-            kind_tok = _find(LABELS["dataset_type"], raw)
+        if not used and (v := _find(labels["dataset"], raw)):
+            kind_tok = _find(labels["dataset_type"], raw)
             kind = DATASET_KIND.get(kind_tok or "", "supra_master")
             eid = _entity(conn, v, kind, defined_in=member_id, defined_line=line_no,
                           physical_ref=f"schema {schema_name}" if schema_name else None)
@@ -120,7 +142,7 @@ def extract(conn, member_id: int, lines, member_name: str = "?") -> dict:
                         f"since that determines how occurrences are keyed.",
                         member_id=member_id, line_no=line_no, severity="medium")
 
-        if current_ds and (v := _find(LABELS["control_key"], raw)):
+        if current_ds and (v := _find(labels["control_key"], raw)):
             for key in [k.strip() for k in v.split(",") if k.strip()]:
                 upsert_field(conn, current_ds[0], key, is_descriptor=1,
                              descriptor_kind="primary_key", defined_line=line_no,
@@ -138,7 +160,7 @@ def extract(conn, member_id: int, lines, member_name: str = "?") -> dict:
                          remark=(m.group("rest") or "").strip()[:120] or None)
             counts["elements"] += 1
             used = True
-        elif current_ds and (v := _find(LABELS["element"], raw)):
+        elif current_ds and (v := _find(labels["element"], raw)):
             upsert_field(conn, current_ds[0], v, defined_line=line_no)
             counts["elements"] += 1
             used = True
@@ -150,7 +172,7 @@ def extract(conn, member_id: int, lines, member_name: str = "?") -> dict:
         add_gap(conn, "unparsed_line",
                 f"No datasets recognised in Supra directory export {member_name}. The report "
                 f"layout differs from the shipped label patterns — override "
-                f"`dialects.supra.labels` in project config before proceeding.",
+                f"`options.dialects.supra.labels` in project config before proceeding.",
                 member_id=member_id, severity="high")
     if counts["linkpaths"] == 0 and counts["datasets"] > 1:
         add_gap(conn, "sme_question",

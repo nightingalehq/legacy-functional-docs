@@ -160,6 +160,53 @@ GitHub org.
     formatting).
   - Full suite green (731 passed, 2 skipped); bundled fixture pipeline
     clean (71/71 docs, 0 invalid citations of 739).
+- Fixed issue #124: the Supra gap message (`supra.extract`), the CLI's own
+  `DIALECT_CALIBRATION_HINTS["supra_dir"]` hint, and `reference/mantis-
+  supra.md` all told a calibrator to override `dialects.supra.labels` in
+  project config when the shipped label patterns didn't match a site's
+  directory report -- a config path that didn't exist. `supra.extract()`
+  took no config parameter at all and always read the module-level
+  `LABELS` dict directly; `config_validate.py`'s `OPTION_SPECS` had no entry
+  for it either, so a project that added the documented block got no error
+  and no effect.
+  - Implemented the advertised mechanism instead of just correcting the
+    docs: `supra.labels_from_options` reads `options.dialects.supra.labels`
+    (a mapping of label name to a regex string) and merges it key-by-key
+    over the `LABELS` defaults -- deliberately merge, not replace-whole-
+    dict like `conditions.py`'s single-pattern `outcome_field_pattern`/
+    `dispatch_field_pattern`, since a site's report usually only disagrees
+    with the shipped wording for one or two of the eight label keys.
+    `supra.extract` now takes an optional `options` parameter and uses it.
+  - `DIALECT_ROUTER` (`cli.py`) now threads `cfg["options"]` through to
+    every dialect's extractor (`(conn, mid, lines, name, options)`), not
+    just Supra's -- almost every other extractor ignores the new parameter
+    today, but the router no longer has a fixed signature that structurally
+    can't pass config through.
+  - Added `OptionSpec("options.dialects.supra.labels", ...)` to
+    `config_validate.py`, with a new `_dict_of_supra_labels` check
+    validating both that each key is one of the eight recognised label
+    names (an unknown key is almost always a typo that would otherwise
+    silently do nothing) and that each value is a valid regex.
+  - Corrected the gap message and CLI calibration hint to reference
+    `options.dialects.supra.labels` (matching the `options.*` convention
+    every other `OPTION_SPECS` entry uses), and rewrote `reference/mantis-
+    supra.md`'s Supra calibration section to describe both real paths:
+    the new per-project config override for a one-off site quirk, and
+    editing `LABELS` directly for a change that should apply to every
+    project.
+  - New `tests/test_supra_dialect.py`: a synthetic directory-report
+    snippet using a nonstandard dataset label ("FILE-ID:") the shipped
+    defaults don't recognise -- confirms zero datasets and a high-severity
+    `unparsed_line` gap naming the config key with no override (regression
+    guard for unset/default behaviour), confirms the override recognises
+    the dataset and drops the gap, confirms overriding one key leaves the
+    other `LABELS` keys' recognition intact (merge, not replace), and
+    exercises `config_validate`'s acceptance/rejection of a well-formed
+    override, an unknown label key, and an invalid regex.
+  - Full suite green (750 passed, 2 skipped); bundled fixture pipeline
+    clean (71/71 docs, 0 invalid citations of 739) -- the bundled Supra
+    fixture already matches the shipped `LABELS` defaults, so no fixture
+    change was needed to exercise the non-override path.
 
 **Progress (2026-09-07c):**
 - Closed out the two items 2026-09-07b left for a future pass:
