@@ -193,6 +193,16 @@ ELSE bullet, every one of those accesses belongs in the generated document,
 attributed to the branch that performs it -- not merged into the surrounding
 narrative as if unconditional, and not dropped.
 
+**Blurring screen fields, program variables, and DB view fields together.**
+The brief's "Program variables and screen/MAP fields" section (and "Data views
+declared") tag every field's kind explicitly. Carry that into the Inputs and
+Data used tables' Source column rather than listing every field the same way
+-- "a screen field the operator enters" reads very differently from "a value
+the program computes and holds only in memory", which is different again
+from "a value read off a DB view". A field built by slicing another field
+(e.g. a program variable assembled from a screen array field) needs both
+halves named with their own kind, not just the result.
+
 ## The reversed-condition check
 
 The validator does not just resolve citations to real lines — for a narrow

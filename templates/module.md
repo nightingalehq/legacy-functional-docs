@@ -38,6 +38,14 @@ than leaving the section empty.
 |---|---|---|---|---|
 
 Parameters, and any data read to establish context before the main work begins.
+The brief's "Program variables and screen/MAP fields" section tags each
+field's kind explicitly (`screen field`, `program variable`, `DB view
+field`) -- carry that into the Source column (e.g. "screen field on the
+{MAP} map", "program variable (working storage)", "DB view field on
+{VIEW}") rather than listing every field the same way. A reader must be
+able to tell "the operator sees/enters this on a screen" apart from "this
+is a value the program computes and holds only in memory" apart from
+"this comes off a database view" without opening the source.
 
 ## Data used
 
@@ -45,6 +53,9 @@ Parameters, and any data read to establish context before the main work begins.
 |---|---|---|---|---|
 
 One row per store. Say what each access is *for*, not merely that it happens.
+Fields named here (in key/where expressions, or elsewhere in this document)
+carry the same kind distinction as the Inputs table above -- don't drop it
+just because a field also shows up in a data-access row.
 
 When the brief lists "Unreferenced fields on entities this module touches", name
 them here too -- a field present on the screen/table but never read or written by

@@ -341,3 +341,87 @@ def test_module_brief_surfaces_else_branch_data_access_next_to_the_rule():
     assert "pairs with the IF at [[TESTMOD:3]]" in else_line
     assert "GET" in else_line and "WIDGETFILE01" in else_line and "[[TESTMOD:6]]" in else_line
     assert "DELETE" in else_line and "WIDGETFILE02" in else_line and "[[TESTMOD:7]]" in else_line
+
+
+# --- issue #141: screen field / program variable / DB view field kinds -----
+
+def test_mantis_brief_tags_screen_local_and_view_fields_with_distinct_kinds():
+    """A Mantis module mixing a SCREEN-bound field, a plain working-storage
+    declaration, and a VIEW field must render each with a distinguishable
+    kind label -- before this fix the "Inputs"/"Data used" narrative had no
+    signal telling these three namespaces apart at all."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA
+    from mfdoc.dialects import mantis
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'WGTMOD', 'mantis')")
+    src = (
+        'PROGRAM "WGTMOD"\n'
+        "ENTRY MAIN\n"
+        "VIEW WIDGET-VIEW OF WIDGET-MASTER\n"
+        "TEXT WIDGET-NOTE(30)\n"
+        'SCREEN SHIFT-CODE("SHIFT-CODE-FLD")\n'
+        "EXIT\n"
+    )
+    lines = [(i + 1, None, t) for i, t in enumerate(src.splitlines())]
+    mantis.extract(conn, 1, lines, "WGTMOD")
+
+    brief = module_brief(conn, "WGTMOD", redact=NULL_REDACTOR)
+    assert "## Program variables and screen/MAP fields" in brief
+    section = brief.split("## Program variables and screen/MAP fields", 1)[1]
+    local_line = [l for l in section.splitlines() if "WIDGET-NOTE" in l][0]
+    screen_line = [l for l in section.splitlines() if "SHIFT-CODE" in l][0]
+    assert "program variable" in local_line and "screen field" not in local_line
+    assert "screen field" in screen_line and "program variable" not in screen_line
+    # the view field stays under its own pre-existing section, not duplicated here
+    assert "## Data views declared" in brief
+    assert "WIDGET-VIEW" not in section
+
+
+def test_natural_brief_resolves_a_local_variable_as_a_screen_field_via_using_map():
+    """Natural declares a screen's fields as ordinary DEFINE DATA LOCAL
+    variables bound only by naming convention to a `USING MAP` target --
+    the brief must cross-reference the map member's own MAP_FIELD facts
+    (already recorded by natural._match_map_body) against this program's
+    call_edge INCLUDE (`USING MAP`) row to resolve that #NEXT-FLD, though
+    declared LOCAL, is actually screen-scoped (issue #141)."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA, insert
+    from mfdoc.dialects import natural
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+
+    map_id = insert(conn, "member", name="WGTMAP", dialect="natural", object_type="map")
+    map_src = (
+        "1 T 'Next item:' 01/01\n"
+        "1 F #NEXT-FLD (A8) 01/16\n"
+    )
+    map_lines = [(i + 1, None, t) for i, t in enumerate(map_src.splitlines())]
+    natural.extract(conn, map_id, map_lines, "WGTMAP")
+
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (99, 'WGTPGM', 'natural')")
+    pgm_src = (
+        "DEFINE DATA LOCAL\n"
+        "1 #NEXT-FLD (A8)\n"
+        "1 #NEXT-ID (A4)\n"
+        "END-DEFINE\n"
+        "INPUT USING MAP 'WGTMAP'\n"
+        "#NEXT-ID := SUBSTR(#NEXT-FLD,1,4)\n"
+    )
+    pgm_lines = [(i + 1, None, t) for i, t in enumerate(pgm_src.splitlines())]
+    natural.extract(conn, 99, pgm_lines, "WGTPGM")
+    conn.execute("UPDATE call_edge SET callee_id=? WHERE callee_name='WGTMAP'", (map_id,))
+
+    brief = module_brief(conn, "WGTPGM", redact=NULL_REDACTOR)
+    section = brief.split("## Program variables and screen/MAP fields", 1)[1]
+    screen_line = [l for l in section.splitlines() if "#NEXT-FLD" in l][0]
+    plain_line = [l for l in section.splitlines() if "#NEXT-ID" in l][0]
+    assert "screen field" in screen_line
+    assert "program variable" in plain_line and "screen field" not in plain_line

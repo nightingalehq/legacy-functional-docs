@@ -403,6 +403,45 @@ GitHub org.
     -- the bundled fixtures' pre-generated docs already validate clean, so
     the near-miss path isn't exercised by the fixture run itself, only by
     the new unit tests' synthetic near-miss/broken responses.
+- Fixed issue #141: generated modules' "Inputs"/"Data used" tables listed
+  every field uniformly, with no signal telling a screen/MAP-bound field, a
+  plain program (working-storage) variable, and a DB/VIEW field apart --
+  an SME review flagged a case where a program variable was built by
+  slicing a value with no indication that value was actually a screen
+  array field, which made the construction unreadable on first pass.
+  - `variable.scope` already distinguished these for Mantis (`screen`,
+    `mantis_local`/`local`/`global`/`independent`, `view`) -- the gap was
+    entirely in `brief.py`, which only ever rendered `parameter`/`entry`
+    (as "Interface (parameters)") and `view` (as "Data views declared"),
+    never surfacing any other scope at all. Added a new "Program variables
+    and screen/MAP fields" section (`module_brief`) covering every other
+    scope, each row tagged with an explicit kind (`screen field`, `program
+    variable`, `program variable (global)`) via a new `_variable_kind`
+    helper.
+  - Natural has no equivalent `scope='screen'` value -- a Natural program's
+    screen fields are declared as ordinary `DEFINE DATA LOCAL` variables,
+    bound to a map only by naming convention against a `USING MAP` target.
+    Rather than a new extraction pass, added `_natural_screen_field_names`
+    (`brief.py`): a rendering-time join of facts already recorded --
+    `natural._match_interaction`'s `call_edge` (`INCLUDE`/`USING MAP`) row
+    against the target map member's own `MAP_FIELD` `interaction` rows
+    (`natural._match_map_body`) -- to resolve which of a program's local
+    variables are actually screen-bound, so those render as `screen field
+    (bound via MAP)` instead of an indistinguishable `program variable`.
+  - `templates/module.md`'s Inputs/Data used sections and
+    `reference/writing-rules.md`'s prose-failures list now spell out the
+    contract explicitly: carry the brief's kind label into the Source
+    column rather than treating every field the same.
+  - No real Mantis/Supra or Natural fixture under `examples/inputs/`
+    exercises this (the bundled fixtures don't cross-reference a `USING
+    MAP` target against a real map member) -- covered instead by two new
+    `tests/test_brief.py` cases building minimal in-memory fact stores.
+    Documented gap: `mantis_shared` is a schema-documented scope value
+    with no current emitter in `mantis.py`, defensively mapped to
+    `program variable (global)` here but never exercised by a test, since
+    nothing produces it yet.
+  - Full suite green (782 passed, 2 skipped); bundled fixture pipeline
+    clean (71/71 docs, 0 invalid citations of 739, `mfdoc validate` exit 0).
 
 **Progress (2026-09-07c):**
 - Closed out the two items 2026-09-07b left for a future pass:
