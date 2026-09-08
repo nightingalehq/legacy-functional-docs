@@ -418,11 +418,15 @@ by design):
   than assuming "older" for a version string it can't order. Only catches
   a version bump (same caveat `batch.py`'s `_corpus_signature` already
   documents for its own, narrower purpose).
-- `_statement_completeness_problems` (existing) and the three above are all
-  scoped to `doc_type: module` documents only, for the same reason: a
-  register or test doc echoes source syntax/field-inventory phrasing
-  verbatim rather than narrating sentence-per-claim, which would make
-  these checks noise rather than signal outside the doc type they were
+- `_statement_completeness_problems` (existing), the deferred-reference
+  check, and the forward-reference check above are all scoped to
+  `doc_type: module` documents only (`_staleness_problem` just above is the
+  exception -- it applies more broadly, to any document carrying
+  `generated_by`, not only module docs). The three that are scoped this way
+  share the same reason: a register or test doc echoes source syntax/
+  field-inventory phrasing verbatim rather than narrating sentence-per-claim,
+  which would make these checks noise rather than signal outside the doc type
+  they were
   built for.
 
 This is the only stage that reads generated documents back in; everything
