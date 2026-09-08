@@ -364,7 +364,7 @@ Parses YAML front matter and body of each generated document and checks:
   cites cleanly, so this is the aggregate check that catches the rules a
   chunked run silently dropped.
 - `statement_citation_coverage_problems` (#133) — every non-dynamic
-  `call_edge` row and every `interaction` row for a member (a `DO`/`PERFORM`
+  `call_edge` row and every non-dynamic `interaction` row for a member (a `DO`/`PERFORM`
   subroutine call, a `PROGRAM`+`DO` external call, a `RELEASE`, a `PROMPT`,
   a `CHAIN`/`TRANSFER` — none of these ever produce a `rule_candidate` row,
   so `module_completeness_problems`'s `BR-nnn` check has nothing to
