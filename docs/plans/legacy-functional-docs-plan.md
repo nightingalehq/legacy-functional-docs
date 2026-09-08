@@ -13,6 +13,53 @@ GitHub org.
   flows and the gap register, where judgement matters most.
 
 **Progress (2026-09-08):**
+- Fixed issue #133: neither completeness mechanism caught a whole
+  `call_edge`/`interaction` statement (a `DO`/`PERFORM` subroutine call, a
+  `PROGRAM`+`DO` external call, a `RELEASE`, a `PROMPT`, a `CHAIN`/
+  `TRANSFER`) dropped from every citation in a generated document entirely.
+  The #50 coverage-completeness gate (`module_completeness_problems`) only
+  cross-references `rule_candidate` ids, which none of those constructs
+  ever create; the #59 per-statement check (`_statement_completeness_problems`)
+  only inspects the paragraph of a citation whose range *already* covers
+  the statement's line, so a line missing from every citation has no range
+  there for it to look inside.
+  - Added `statement_citation_coverage_problems` (`validate.py`): for every
+    non-dynamic `call_edge`/`interaction` row belonging to a member, checks
+    that its line is covered by *some* `[[MEMBER:LINE]]` citation anywhere
+    across that member's `doc_type: module` document set (unioned across
+    chunks, the same way `module_completeness_problems` already unions
+    `BR-nnn` coverage) — a citation-coverage check, not a mention check.
+    `data_access` rows are out of scope (CRUD/field-level access already
+    has `unused_entity_fields`); scoped to `doc_type: module` only, same
+    reasoning `module_completeness_problems` and `_statement_completeness_
+    problems` already document. Wired into `validate_tree` as
+    `statement_coverage_problems` and folded into `mfdoc validate`'s exit
+    code (`cmd_validate`, `cli.py`) the same way `completeness_problems`
+    already is — a hard failure, unlike #59's advisory-only check.
+  - Confirmed #59's `_statement_completeness_problems` check *is* wired into
+    the standard `mfdoc validate` pass (`validate_doc`'s per-citation loop
+    in `validate.py`, gated the same way the reversed-condition check is,
+    on `module_doc_checks` and a resolved line range) — not dead code, so
+    the "a DO call inside a cited range still went unmentioned" half of the
+    issue's report is a real false-negative in that check's own heuristic
+    (or the model regenerating differently), not a wiring gap. Left as-is:
+    no reproduction of that narrower miss was found against the bundled
+    fixtures, and the new coverage check above is the higher-leverage fix
+    the issue asked to prioritise.
+  - New tests in `tests/test_validate.py` (`_member_with_statements`
+    fixture, already built for #59): flags a call never covered by any
+    citation, accepts one inside a cited range regardless of prose mention,
+    unions coverage across chunk documents, ignores dynamic call edges,
+    ignores `module_index`/non-`module` doc types, and verifies the gap
+    is folded into `validate_tree`'s hard-failure result end to end.
+  - `docs/guides/architecture.md`'s stage-4 section now documents both
+    hard-failure completeness checks (#50 and this one) alongside the
+    three existing advisory ones.
+  - Full suite green (726 passed, 2 skipped); bundled fixture pipeline
+    clean (71/71 docs, 0 invalid citations of 739, `mfdoc validate` exit 0)
+    — no new coverage gap against the bundled fixtures, only the existing
+    (pre-existing, unaffected) advisory `_statement_completeness_problems`
+    findings for paraphrased-but-uncited-by-name targets.
 - Fixed issue #132: `mantis.py`'s `extract()` only back-filled
   `rule_candidate.end_line` (and, for `IF`, its paired `ELSE`'s
   `pair_line_no`) when the popped block was an `IF` — `WHILE`/`FOR`/`CASE`

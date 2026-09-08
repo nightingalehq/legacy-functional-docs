@@ -1165,6 +1165,10 @@ def cmd_validate(args) -> int:
           f"{res['invalid_citations']} invalid citations of {res['total_citations']}")
     _print_problem_list(res["completeness_problems"], "{} member(s) with incomplete rule coverage:")
     _print_problem_list(
+        res["statement_coverage_problems"],
+        "{} member(s) with a call/interaction statement never covered by any citation:",
+    )
+    _print_problem_list(
         res["artifact_problems"],
         "{} structural artifact(s) inconsistent with the fact store:",
     )
@@ -1187,6 +1191,7 @@ def cmd_validate(args) -> int:
         res["invalid_citations"] == 0
         and res["documents_ok"] == res["documents"]
         and not res["completeness_problems"]
+        and not res["statement_coverage_problems"]
         and not res["artifact_problems"]
     ) else 1
 

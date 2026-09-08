@@ -53,6 +53,8 @@ def test_cmd_validate_reports_omitted_statement_targets_without_failing(indexed_
         res["invalid_citations"] == 0
         and res["documents_ok"] == res["documents"]
         and not res["completeness_problems"]
+        and not res["statement_coverage_problems"]
+        and not res["artifact_problems"]
     ) else 1)
     if res["omitted_statement_targets"]:
         assert "advisory, does not fail validation" in captured.out
