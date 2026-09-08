@@ -713,6 +713,24 @@ def test_statement_coverage_ignores_non_module_docs():
     assert statement_citation_coverage_problems(conn, results) == []
 
 
+def test_statement_coverage_skips_a_member_name_ambiguous_across_libraries():
+    """A bare member name that matches more than one library's member row
+    must be skipped, not resolved via an arbitrary `fetchone()` pick --
+    the same refusal `fetch_rule_candidate_rows`/`validate_doc` already
+    apply for the identical ambiguity, so this hard-failure gate can't
+    silently check (or wrongly clear) the wrong library's statements."""
+    from mfdoc.validate import statement_citation_coverage_problems
+
+    conn = _member_with_statements(call_edge={})
+    insert(conn, "member", name="TESTSTMT", dialect="natural", object_type="subprogram",
+           library="OTHERLIB")
+    conn.commit()
+    results = [_module_result(
+        "TESTSTMT", "The routine validates the request [[TESTSTMT:691]]."
+    )]
+    assert statement_citation_coverage_problems(conn, results) == []
+
+
 def test_validate_tree_folds_statement_coverage_into_hard_failure(tmp_path):
     """Unlike #59's advisory-only omitted_statement_targets,
     statement_coverage_problems is meant to actually fail the build --
