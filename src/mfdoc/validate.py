@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
+from functools import lru_cache
 from pathlib import Path
 
 import yaml
@@ -79,7 +80,15 @@ def _name_pattern(name: str) -> re.Pattern:
 
     Factored out of `_name_mentioned` so `forward_reference_problems` can
     reuse the exact same match rule to find *where* a routine name occurs
-    (not just whether it occurs at all)."""
+    (not just whether it occurs at all). `lru_cache`d -- both callers use
+    this inside loops over many citations/routines, often re-checking the
+    same handful of names repeatedly, so recompiling on every call would
+    add needless overhead to `mfdoc validate` runs."""
+    return _compile_name_pattern(name)
+
+
+@lru_cache(maxsize=None)
+def _compile_name_pattern(name: str) -> re.Pattern:
     return re.compile(
         rf"(?<![A-Z0-9#@$&\-_])(?<![A-Z0-9#@$&\-_]\.)"
         rf"{re.escape(name)}"
