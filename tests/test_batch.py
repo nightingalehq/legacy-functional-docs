@@ -324,17 +324,19 @@ def test_is_near_miss_uncited_boundary():
     of uncited-and-unhedged assertive statements -- and false the moment
     either bound is crossed: too many uncited sentences, or any other
     problem alongside them (here, an invalid citation)."""
+    at_limit = ["x"] * batch_mod.NEAR_MISS_MAX_UNCITED
     within_bound = {
         "ok": False,
-        "problems": ["3 assertive statement(s) carry no citation and no hedge"],
-        "uncited_assertions": ["a", "b", "c"],
+        "problems": [f"{len(at_limit)} assertive statement(s) carry no citation and no hedge"],
+        "uncited_assertions": at_limit,
     }
     assert batch_mod._is_near_miss_uncited(within_bound)
 
+    over_limit = ["x"] * (batch_mod.NEAR_MISS_MAX_UNCITED + 1)
     too_many = {
         "ok": False,
-        "problems": ["4 assertive statement(s) carry no citation and no hedge"],
-        "uncited_assertions": ["a", "b", "c", "d"],
+        "problems": [f"{len(over_limit)} assertive statement(s) carry no citation and no hedge"],
+        "uncited_assertions": over_limit,
     }
     assert not batch_mod._is_near_miss_uncited(too_many)
 
@@ -443,14 +445,12 @@ def test_multiple_uncited_assertions_still_trigger_a_full_retry(indexed_db, tmp_
     NEAR_MISS_MAX_UNCITED allows -- must skip the targeted-patch path
     entirely and go straight to the existing full-chunk retry, unchanged
     from before issue #131's fix."""
-    assert batch_mod.NEAR_MISS_MAX_UNCITED == 3
+    uncited_sentences = "".join(
+        f"The system performs step {i}. " for i in range(batch_mod.NEAR_MISS_MAX_UNCITED + 1)
+    )
     broken_text = (
         GOOD_FRONTMATTER.format(member="MMP0100")
-        + "\n# MMP0100\n\n"
-        "The system validates the account balance. "
-        "The user must confirm the transaction. "
-        "The process posts the entry to the ledger. "
-        "The module updates the audit trail.\n"
+        + "\n# MMP0100\n\n" + uncited_sentences.strip() + "\n"
     )
     calls = {"n": 0}
     prompts: list[str] = []
