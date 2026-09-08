@@ -60,6 +60,39 @@ GitHub org.
     — no new coverage gap against the bundled fixtures, only the existing
     (pre-existing, unaffected) advisory `_statement_completeness_problems`
     findings for paraphrased-but-uncited-by-name targets.
+- Fixed issue #123: three of the four `environment.py` extractors
+  (`extract_sql_ddl`, `extract_copybook`, `extract_cics_csd`) never called
+  `add_gap` — an unrecognised `CREATE TABLE` column or top-level statement,
+  copybook line, or CSD `DEFINE` line was silently dropped with no trace in
+  the gap register, unlike `natural.py`/`mantis.py`, which raise an
+  `unparsed_line` gap for every statement they can't recognise.
+  `extract_jcl` already raised one member-level `unparsed_line` gap when a
+  JCL member produces zero `EXEC` steps and was not touched.
+  - `extract_sql_ddl` now raises an `unparsed_line` gap for a column
+    definition inside a `CREATE TABLE` body that matches neither
+    `DDL_NOISE` (a constraint clause) nor `RE_COL`, and for any top-level,
+    semicolon-delimited statement matching neither `RE_CREATE_TABLE` nor
+    `RE_CREATE_INDEX`.
+  - `extract_copybook` now raises an `unparsed_line` gap for a non-comment,
+    non-blank line that doesn't match `RE_COB` (an 01-49-level field entry).
+  - `extract_cics_csd` now raises an `unparsed_line` gap for a non-comment
+    line with no `DEFINE` matching `RE_CSD_DEFINE`.
+  - All three follow the exact same `add_gap(conn, "unparsed_line", ...,
+    severity="low", raw=...)` convention already used by
+    `natural.py`/`mantis.py`/`adabas.py`/`supra.py` — no new gap kind.
+  - New `tests/test_environment_gaps.py`: invented (not client-derived) DDL,
+    copybook, and CSD fixtures, each with one deliberately unrecognisable
+    line, verifying the new gap is recorded, plus a "clean input records no
+    gap" counterpart for each extractor.
+  - `reference/environment.md` and `reference/adding-a-dialect.md` updated
+    to describe the new per-line/per-statement gap behaviour instead of the
+    prior "these three never gap" caveat.
+  - Full suite green (739 passed, 2 skipped); bundled fixture pipeline
+    clean (71/71 docs, 0 invalid citations of 739, `mfdoc validate` exit 0)
+    — the bundled `ddl`/`csd` fixtures were already fully recognised, so no
+    new gaps appeared against them; the 4 pre-existing `unparsed_line` gaps
+    in `unparsed_lines` coverage are unrelated Natural-scanner gaps, not new
+    ones from this change.
 - Fixed issue #132: `mantis.py`'s `extract()` only back-filled
   `rule_candidate.end_line` (and, for `IF`, its paired `ELSE`'s
   `pair_line_no`) when the popped block was an `IF` — `WHILE`/`FOR`/`CASE`

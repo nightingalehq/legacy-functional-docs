@@ -73,12 +73,38 @@ def extract_sql_ddl(conn, member_id, lines, member_name="?") -> dict:
                        options="NOT NULL" if re.search(r"NOT\s+NULL", rest, re.I) else None,
                        defined_line=ln, remark=rest.strip()[:120] or None)
                 cols += 1
+            elif raw_col.strip():
+                add_gap(conn, "unparsed_line",
+                        f"Column definition not recognised by the SQL DDL scanner in "
+                        f"{member_name}, table {name}.",
+                        member_id=member_id, line_no=ln, severity="low",
+                        raw=raw_col.strip()[:400])
 
     for m in RE_CREATE_INDEX.finditer(text):
         tbl = upsert_entity(conn, m.group("tbl").strip('"').upper(), "sql_table")
         insert(conn, "entity_field", entity_id=tbl, name=m.group("idx").strip('"').upper(),
                is_descriptor=1, descriptor_kind="UQ" if m.group("uq") else "index",
                parent_fields=m.group("cols").strip(), defined_line=line_of(m.start()))
+
+    # Statements that are neither a recognised CREATE TABLE nor a CREATE INDEX
+    # (a CREATE VIEW, ALTER TABLE, GRANT, or a CREATE TABLE malformed enough to
+    # miss RE_CREATE_TABLE) leave no trace anywhere above -- flag each such
+    # semicolon-delimited statement so the drop is visible in the gap register.
+    chunk_start = 0
+    for chunk in text.split(";"):
+        this_start = chunk_start
+        chunk_start += len(chunk) + 1
+        body = chunk.strip()
+        if not body or re.fullmatch(r"(--[^\n]*\n?\s*)+", body):
+            continue
+        # RE_CREATE_TABLE's pattern requires the trailing ';' that text.split
+        # just consumed as the delimiter -- put one back before checking.
+        if RE_CREATE_TABLE.search(chunk + ";") or RE_CREATE_INDEX.search(chunk):
+            continue
+        add_gap(conn, "unparsed_line",
+                f"Statement not recognised by the SQL DDL scanner in {member_name}.",
+                member_id=member_id, line_no=line_of(this_start), severity="low",
+                raw=body[:400])
 
     set_metric(conn, member_name, "sqlddl.tables", tables)
     set_metric(conn, member_name, "sqlddl.columns", cols)
@@ -159,6 +185,12 @@ def extract_copybook(conn, member_id, lines, member_name="?") -> dict:
                    parent_fields=f"REDEFINES {red.group('t').upper()}" if red else None,
                    defined_line=line_no, remark=rest.strip()[:120] or None)
             n += 1
+        else:
+            add_gap(conn, "unparsed_line",
+                    f"Line not recognised by the COBOL copybook scanner in {member_name} "
+                    f"(not a level-number field entry).",
+                    member_id=member_id, line_no=line_no, severity="low",
+                    raw=code.strip()[:400])
     set_metric(conn, member_name, "copybook.fields", n)
     return {"fields": n}
 
@@ -365,6 +397,12 @@ def extract_cics_csd(conn, member_id, lines, member_name="?") -> dict:
                 upsert_entity(conn, attrs.get("DSNAME", rname).upper(), "vsam",
                               physical_ref=attrs.get("DSNAME"), defined_in=member_id,
                               defined_line=line_no, notes=f"CICS FILE {rname}")
+        elif stmt.strip() and not raw.lstrip().startswith("*"):
+            add_gap(conn, "unparsed_line",
+                    f"Line not recognised by the CICS CSD scanner in {member_name} "
+                    f"(no DEFINE matched).",
+                    member_id=member_id, line_no=line_no, severity="low",
+                    raw=stmt.strip()[:400])
         i = j + 1
     set_metric(conn, member_name, "cics.resources", n)
     return {"resources": n}
