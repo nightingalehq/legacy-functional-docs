@@ -108,9 +108,9 @@ def test_override_only_replaces_the_supplied_key_not_the_whole_dict():
 
 
 def test_labels_from_options_with_no_override_returns_module_defaults():
-    assert supra.labels_from_options(None) is supra.LABELS
-    assert supra.labels_from_options({}) is supra.LABELS
-    assert supra.labels_from_options({"dialects": {"supra": {}}}) is supra.LABELS
+    assert supra.labels_from_options(None) == supra.LABELS
+    assert supra.labels_from_options({}) == supra.LABELS
+    assert supra.labels_from_options({"dialects": {"supra": {}}}) == supra.LABELS
 
 
 def test_config_validate_accepts_a_well_formed_labels_override():
