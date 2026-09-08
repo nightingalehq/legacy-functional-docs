@@ -232,13 +232,17 @@ CREATE TABLE IF NOT EXISTS rule_candidate (
     line_no       INTEGER NOT NULL,
     -- For a construct that opens a block (IF, WHILE, FOR, CASE, ...), the
     -- line of its matching END/END-*, once found -- the block's extent.
-    -- Populated for IF specifically (natural.py's _match_rules, mantis.py's
-    -- extract()) so a later fact (a GET, a DELETE, another rule) inside
-    -- either the IF's or its ELSE's own extent can be told apart from
-    -- unrelated code that merely follows it -- without this, narration has
-    -- no structural cue that the two share a branch, and consistently
-    -- describes only the branch that reads as interesting (typically the
-    -- error/validation one) while silently dropping the other's effects.
+    -- Populated for IF in both natural.py's _match_rules and mantis.py's
+    -- extract() (so a later fact inside either the IF's or its ELSE's own
+    -- extent can be told apart from unrelated code that merely follows
+    -- it), and, in mantis.py's extract() only, also for WHILE/FOR/CASE
+    -- and each WHEN branch of a CASE dispatch (see issue #132) -- without
+    -- this, narration has no structural cue that a later GET/DELETE/etc.
+    -- belongs inside a particular branch or loop body, and consistently
+    -- describes only the branch/loop that reads as interesting while
+    -- silently misattributing the rest as unconditional. natural.py's own
+    -- DECIDE/VALUE OF (and FOR/REPEAT/AT-EVENT/ON ERROR) have the same
+    -- gap, not yet closed -- see issue #132's PR discussion.
     end_line      INTEGER,
     -- For an ELSE (or an equivalent alternate-branch construct), the
     -- line_no of the IF/etc. it pairs with -- lets a reader join "if this

@@ -353,16 +353,29 @@ def extract(conn, member_id: int, lines, member_name: str = "?") -> dict:
     # built it (`LOOKUP_KEY="H"+BUILD_PART(1,1,5)+...`), so the generated doc
     # doesn't have to describe an opaque token as if it were the real key.
     last_assign: dict[str, tuple[int, str]] = {}
-    # IF/ELSE branch-extent tracking, mirroring natural.py's _match_rules:
-    # the rule_candidate id of the IF that opened each currently-open
-    # block, and of its ELSE (if one has fired), keyed by the IF's own
-    # line_no -- so, once the matching END is found, both rows' end_line
-    # can be set to where their branch actually ends. Without this, a
-    # generated document has no structural cue that a later GET/DELETE/
-    # etc. belongs to a particular IF's ELSE branch rather than being
-    # unrelated main-line code.
-    if_rule_ids: dict[int, int] = {}
+    # Block-extent tracking, mirroring natural.py's _match_rules: the
+    # rule_candidate id of the IF/WHILE/FOR/CASE that opened each
+    # currently-open block, keyed by its own line_no -- so, once the
+    # matching END is found, that row's end_line can be set to where its
+    # extent actually ends. Without this, a generated document has no
+    # structural cue that a later GET/DELETE/etc. belongs inside a
+    # particular branch or loop body rather than being unrelated
+    # main-line code. Generalised from IF-only (this dict used to be
+    # `if_rule_ids`) to also cover WHILE/FOR/CASE -- see issue #132.
+    block_rule_ids: dict[int, int] = {}
+    # ELSE's own extent, keyed by the IF's line_no it pairs with -- IF
+    # specific, since WHILE/FOR/CASE have no alternate-branch construct.
     else_rule_ids: dict[int, int] = {}
+    # CASE/WHEN branch-extent tracking: the rule_candidate id of the most
+    # recently opened WHEN under each currently-open block, one slot per
+    # open_blocks entry (pushed/popped in lockstep with it) so nesting a
+    # CASE inside a WHEN (or an IF inside a CASE) can't misattribute a
+    # WHEN to the wrong enclosing block. A WHEN doesn't open its own
+    # open_blocks entry (it's a sibling marker inside its enclosing CASE,
+    # not a nested block), so its extent instead ends at whichever comes
+    # first: the next WHEN at the same level, or the enclosing CASE's own
+    # END -- both handled below.
+    when_stack: list[int | None] = []
 
     def rule(construct, cond, line_no, raw, pair_line_no=None):
         f, l = _facts(cond or "")
@@ -652,33 +665,56 @@ def extract(conn, member_id: int, lines, member_name: str = "?") -> dict:
             if RE_END.match(masked):
                 if open_blocks:
                     popped_construct, opened_line = open_blocks.pop()
+                    block_id = block_rule_ids.pop(opened_line, None)
+                    if block_id is not None:
+                        conn.execute(
+                            "UPDATE rule_candidate SET end_line=? WHERE id=?", (line_no, block_id)
+                        )
                     if popped_construct == "IF":
-                        if_id = if_rule_ids.pop(opened_line, None)
                         else_id = else_rule_ids.pop(opened_line, None)
-                        if if_id is not None:
-                            conn.execute(
-                                "UPDATE rule_candidate SET end_line=? WHERE id=?", (line_no, if_id)
-                            )
                         if else_id is not None:
                             conn.execute(
                                 "UPDATE rule_candidate SET end_line=? WHERE id=?", (line_no, else_id)
                             )
+                    # This block's own extent is known now -- if it was a
+                    # CASE (or anything else) with an open WHEN branch,
+                    # that branch's extent ends here too.
+                    last_when_id = when_stack.pop() if when_stack else None
+                    if last_when_id is not None:
+                        conn.execute(
+                            "UPDATE rule_candidate SET end_line=? WHERE id=?", (line_no, last_when_id)
+                        )
                 depth = max(depth - 1, 0)
                 matched = True
             else:
                 for pat, name, grp in (
                     (RE_IF, "IF", "cond"), (RE_WHILE, "WHILE", "cond"),
                     (RE_FOR, "FOR", "cond"), (RE_CASE, "CASE", "subj"),
-                    (RE_UNTIL, "UNTIL", "cond"), (RE_WHEN, "WHEN", "cond"),
-                    (RE_ONERR, "ON ERROR", "rest"),
+                    (RE_UNTIL, "UNTIL", "cond"), (RE_ONERR, "ON ERROR", "rest"),
+                    (RE_WHEN, "WHEN", "cond"),
                 ):
                     if (m := pat.match(masked)):
                         rule_id = rule(name, orig(stmt, m, grp), line_no, stmt)
                         if name in {"IF", "WHILE", "FOR", "CASE"}:
-                            if name == "IF":
-                                if_rule_ids[line_no] = rule_id
+                            block_rule_ids[line_no] = rule_id
                             open_blocks.append((name, line_no))
+                            when_stack.append(None)
                             depth += 1
+                        elif name == "WHEN" and when_stack and open_blocks and open_blocks[-1][0] == "CASE":
+                            # A new WHEN closes whichever WHEN was
+                            # previously open under the same enclosing
+                            # CASE block -- that prior branch's extent
+                            # ends the line immediately before this one
+                            # starts (end_line is an inclusive upper
+                            # bound elsewhere, e.g. brief.
+                            # _branch_data_access's `line_no <= end_line`).
+                            prev_when_id = when_stack[-1]
+                            if prev_when_id is not None:
+                                conn.execute(
+                                    "UPDATE rule_candidate SET end_line=? WHERE id=?",
+                                    (line_no - 1, prev_when_id),
+                                )
+                            when_stack[-1] = rule_id
                         matched = True
                         break
                 else:
