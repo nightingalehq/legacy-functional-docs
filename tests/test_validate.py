@@ -1564,6 +1564,33 @@ def test_forward_reference_flagged_when_named_chunk_does_not_exist(tmp_path):
     assert res["documents_ok"] == res["documents"] == 2
 
 
+def test_forward_reference_flagged_for_a_single_chunk_member_with_missing_target(tmp_path):
+    """Only one chunk file exists on disk for this member (e.g. a `mfdoc
+    batch` run that hasn't produced chunk 2 yet), but its filename still
+    matches the '.chunkNN' convention, so this is a real chunk document, not
+    an unchunked one (see the sibling '_ignored_for_a_single_unchunked_'
+    test just below, whose doc.md has no '.chunkNN' suffix at all). Before
+    the len(siblings) < 2 gate was removed, this whole member was skipped
+    silently; the "named chunk doesn't exist" half of the check needs no
+    sibling chunk to fire against, so a single-chunk member must still be
+    flagged when its own forward reference names a chunk that was never
+    generated."""
+    conn = _member_with_routine()
+    (tmp_path / "doc.chunk01.md").write_text(
+        DEFERRED_FRONTMATTER
+        + "\nPF5-BRANCH is a separate branch; its effects are documented in "
+          "chunk 2 [[TESTSTMT:1]].\n"
+    )
+    res = validate_tree(conn, tmp_path)
+    assert len(res["forward_reference_problems"]) == 1
+    msg = res["forward_reference_problems"][0]
+    assert "PF5-BRANCH" in msg
+    assert "chunk 2" in msg
+    assert "no such chunk" in msg
+    # Advisory only -- must never affect pass/fail.
+    assert res["documents_ok"] == res["documents"] == 1
+
+
 def test_forward_reference_ignored_for_a_single_unchunked_module_doc(tmp_path):
     """A plain, unchunked module doc's filename never matches the
     '.chunkNN' convention -- nothing here to cross-check against, and this

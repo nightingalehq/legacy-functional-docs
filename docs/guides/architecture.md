@@ -377,7 +377,7 @@ Parses YAML front matter and body of each generated document and checks:
   inside a citation range that already exists.
 
 Both of the above are hard failures, folded into `mfdoc validate`'s exit
-code the same way invalid citations are — unlike the three checks below.
+code the same way invalid citations are — unlike the four checks below.
 
 Four more checks are advisory (surfaced, never counted against a
 document's own `ok`/pass-fail — a false positive here should cost nothing,

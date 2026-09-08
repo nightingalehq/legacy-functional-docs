@@ -87,7 +87,10 @@ def _name_pattern(name: str) -> re.Pattern:
     return _compile_name_pattern(name)
 
 
-@lru_cache(maxsize=None)
+_NAME_PATTERN_CACHE_SIZE = 2048
+
+
+@lru_cache(maxsize=_NAME_PATTERN_CACHE_SIZE)
 def _compile_name_pattern(name: str) -> re.Pattern:
     return re.compile(
         rf"(?<![A-Z0-9#@$&\-_])(?<![A-Z0-9#@$&\-_]\.)"
@@ -486,10 +489,13 @@ def _deferred_reference_problems(body: str) -> list[str]:
 # vague "documented in a later chunk" DEFERRED_REFERENCE exists to catch.
 # The two patterns are deliberately disjoint (DEFERRED_REFERENCE requires
 # "a"/"another"/"a later"/"a separate"/"the next" between by/in and "chunk";
-# this requires a literal number there instead), so a well-formed concrete
-# forward reference never also matches DEFERRED_REFERENCE and vice versa --
-# a chunk's prose lands in exactly one of the two checks below, never both,
-# never neither (once it uses chunk-crossing language at all).
+# this requires a literal number there instead), so a well-formed match for
+# one never also matches the other -- a chunk's prose using one of these two
+# verb/phrase shapes lands in exactly one of the two checks below, never
+# both. That's narrower than covering every way a model might phrase a
+# chunk-crossing reference, though: a phrasing neither pattern recognises
+# (e.g. "continues in chunk 2") matches neither check and is silently
+# missed by both, not caught as a false positive by either.
 _CONCRETE_FORWARD_REFERENCE = re.compile(
     r"\b(?:cover(?:ed|s)|document(?:ed|s)|explain(?:ed|s)|address(?:ed|es))\s+"
     r"(?:by|in)\s+chunk\s*[-.]?\s*(?P<n>\d+)\b",
@@ -522,11 +528,14 @@ def forward_reference_problems(conn, results: list[dict]) -> list[str]:
     nothing before this ever went back and confirmed a chunk's own forward
     reference was actually fulfilled by the chunk it named -- a wrong,
     stale, or hallucinated chunk number happily validates as long as the
-    chunk making the claim is itself well-formed. This only makes sense
-    once every chunk in a member's set is available to cross-check against,
-    so -- like `module_completeness_problems` and
-    `statement_citation_coverage_problems` -- it runs at the tree level,
-    not inside `validate_doc`.
+    chunk making the claim is itself well-formed. Cross-checking a forward
+    reference at all needs to see every chunk file generated for a member so
+    far, not just the one being narrated -- so, like `module_completeness_problems`
+    and `statement_citation_coverage_problems`, it runs at the tree level,
+    not inside `validate_doc`. That still works when only one chunk exists
+    on disk (a partial or single-chunk member): the "named chunk doesn't
+    exist" half of the check needs no sibling to fire against, so it still
+    catches an unambiguous reference to a chunk that was never generated.
 
     Advisory only (mirrors `_deferred_reference_problems`): identifying
     *which* routine a deferral is about is a prose-proximity heuristic (the
@@ -572,9 +581,19 @@ def forward_reference_problems(conn, results: list[dict]) -> list[str]:
     problems: list[str] = []
     for member_name, this_chunk, body in chunk_docs:
         member = member_name.upper()
+        # No `len(siblings) < 2` gate here: `siblings` always contains at
+        # least `this_chunk` itself (this same loop populated `chunk_bodies`
+        # from `chunk_docs`, which is exactly the set this iterates), so a
+        # single-chunk member (only "<member>.chunk01.md" on disk, e.g. a
+        # `mfdoc batch` run not yet resumed to completion) still reaches the
+        # checks below with `siblings == {this_chunk: body}`. That's enough
+        # to catch an unambiguous forward reference to a chunk that doesn't
+        # exist yet -- `target_chunk not in siblings` -- which is exactly
+        # what a partial chunk set should still be checked for; only the
+        # second half ("chunk N exists but never mentions the routine")
+        # needs a real sibling to inspect, and it naturally can't fire until
+        # `target_chunk in siblings` holds, which requires 2+ chunks anyway.
         siblings = chunk_bodies.get(member) or {}
-        if len(siblings) < 2:
-            continue  # not actually a chunked member's set (or only one chunk on disk)
 
         if member not in routines_cache:
             rows, ambiguous_libs = resolve_member_by_name(conn, member_name)
