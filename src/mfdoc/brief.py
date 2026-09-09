@@ -220,7 +220,15 @@ def _caller_guard_chain(conn, caller_id: int, caller_name: str, call_line_no: in
                 "(guard condition not captured)"
             )
         else:
-            lines.append(f"- unconditionally calls `{callee}` (`{call['call_kind']}`) {cite}")
+            # No enclosing rule_candidate block found at all. That's
+            # evidence this call sits in the caller's main line of
+            # execution, not proof of it -- a dialect scanner gap or a
+            # control-flow shape `_opens_a_block` doesn't recognise could
+            # still be scoping it. Report the call itself and let the
+            # absence of a guard line speak for it, rather than asserting
+            # "unconditionally", which claims more than this brief can back
+            # (Copilot review on PR #151).
+            lines.append(f"- calls `{callee}` (`{call['call_kind']}`) {cite}")
     return lines
 
 

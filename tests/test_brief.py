@@ -655,6 +655,39 @@ def test_module_brief_redacts_guard_chain_condition_text():
     assert "[REDACTED]" in inbound_section
 
 
+def test_module_brief_guard_chain_never_claims_unconditional():
+    """Copilot review on PR #151: finding no enclosing `rule_candidate`
+    block for a preceding call is evidence it sits in the caller's main
+    line of execution, not proof -- a scanner gap or an unrecognised
+    control-flow shape could still be scoping it. The fallback bullet must
+    report the call itself without asserting "unconditionally", which
+    claims more than this brief can back."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA
+    from mfdoc.dialects import natural
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'ORDER-CTRL', 'natural')")
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (2, 'SCHEDULE-RESET', 'natural')")
+
+    caller_src = "CALLNAT 'VALIDATE-CUSTOMER'\nCALLNAT 'SCHEDULE-RESET'\n"
+    caller_lines = [(i + 1, None, t) for i, t in enumerate(caller_src.splitlines())]
+    natural.extract(conn, 1, caller_lines, "ORDER-CTRL")
+
+    callee_src = "FIND (1) SCHED-VIEW WITH SCHED-KEY = 'RESET'\n  MOVE ' ' TO SCHED-VIEW.SCHED-STATUS\nEND-FIND\n"
+    callee_lines = [(i + 1, None, t) for i, t in enumerate(callee_src.splitlines())]
+    natural.extract(conn, 2, callee_lines, "SCHEDULE-RESET")
+
+    brief = module_brief(conn, "SCHEDULE-RESET", redact=NULL_REDACTOR)
+    inbound_section = brief.split("## Inbound callers", 1)[1].split("## ", 1)[0]
+
+    assert "unconditionally" not in inbound_section
+    assert "- calls `VALIDATE-CUSTOMER` (`CALLNAT`) [[ORDER-CTRL:1]]" in inbound_section
+
+
 def test_module_brief_omits_guard_chain_when_more_than_one_caller():
     """With more than one known call site there is no single guard chain to
     point to -- each caller may gate the call differently, or not at all --
