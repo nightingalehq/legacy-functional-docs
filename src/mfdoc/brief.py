@@ -207,6 +207,18 @@ def _caller_guard_chain(conn, caller_id: int, caller_name: str, call_line_no: in
                 f"- when `{redact(cond['condition'])}` holds {_cite(caller_name, cond['line_no'])}, "
                 f"calls `{callee}` (`{call['call_kind']}`) {cite}"
             )
+        elif cond:
+            # `_enclosing_condition` found a real enclosing block (a DECIDE
+            # FOR CONDITION, an ELSE, ...) but that construct's own
+            # `condition` text wasn't captured -- the call is still
+            # control-flow scoped, just not by a condition this brief can
+            # quote. Saying "unconditionally" here would be wrong, not
+            # merely uninformative (Copilot review on PR #151).
+            lines.append(
+                f"- calls `{callee}` (`{call['call_kind']}`) {cite}, scoped inside "
+                f"`{cond['construct']}` {_cite(caller_name, cond['line_no'])} "
+                "(guard condition not captured)"
+            )
         else:
             lines.append(f"- unconditionally calls `{callee}` (`{call['call_kind']}`) {cite}")
     return lines
