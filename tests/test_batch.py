@@ -198,6 +198,122 @@ def test_fix_generated_by_version_is_a_no_op_when_the_line_is_missing_or_differe
     assert batch_mod._fix_generated_by_version(other_tool) == other_tool
 
 
+def test_strip_response_preamble_removes_wrapping_code_fence():
+    """A ClaudeCLICaller response (issue #150) can come back as the whole
+    document wrapped in a single ```markdown fence -- the fence itself,
+    not just lead-in text, must be gone before _split_frontmatter sees it,
+    or the fence's own opening ``` line is what fails the leading-`---`
+    check instead of the real front matter."""
+    text = "---\ntitle: X\n---\nbody\n"
+    fenced = f"```markdown\n{text}```\n"
+    assert batch_mod._strip_response_preamble(fenced) == text
+
+
+def test_strip_response_preamble_removes_leading_bare_fence_with_no_language():
+    text = "---\ntitle: X\n---\nbody\n"
+    fenced = f"```\n{text}```"
+    assert batch_mod._strip_response_preamble(fenced) == text
+
+
+def test_strip_response_preamble_removes_preamble_text_before_frontmatter():
+    """Claude Code running headless (--provider claude-code) sometimes adds
+    a line or two of its own commentary ahead of the document proper, even
+    though `--tools ""` stops it editing files -- the prompt's own "start
+    with the front matter, no preamble" instruction isn't always followed
+    to the letter under that framing."""
+    text = "---\ntitle: X\n---\nbody\n"
+    preambled = f"Here is the requested document:\n\n{text}"
+    assert batch_mod._strip_response_preamble(preambled) == text
+
+
+def test_strip_response_preamble_is_a_no_op_when_already_clean():
+    """The two bare-completion callers (AnthropicCaller/VertexCaller) already
+    produce a response starting with `---` -- this must never touch that
+    case, or a change here could introduce a regression for callers that
+    never had the problem issue #150 describes."""
+    text = "---\ntitle: X\n---\nbody\n"
+    assert batch_mod._strip_response_preamble(text) == text
+
+
+def test_strip_response_preamble_leaves_text_with_no_frontmatter_at_all_unchanged():
+    """No `---` anywhere in the response at all (e.g. the model refused, or
+    produced something completely unrelated) -- nothing to rescue, so the
+    original text passes through untouched and _split_frontmatter's own
+    "missing YAML front matter" error still reports the real raw output,
+    not something this function invented or truncated."""
+    text = "I can't help with that.\n"
+    assert batch_mod._strip_response_preamble(text) == text
+
+
+def test_strip_response_preamble_does_not_treat_a_prompt_section_separator_as_frontmatter():
+    """Reviewer-flagged false positive (PR #152): build_prompt joins its own
+    sections with a bare "\\n\\n---\\n\\n" separator -- a fake-echo caller's
+    response is literally its whole prompt echoed back, so that separator
+    (followed by ordinary prose, not a YAML mapping) sits right near the
+    start of the "response" text too. This must be left alone rather than
+    mistaken for a real front-matter start and used to truncate everything
+    before it."""
+    text = (
+        "# Fact brief: MMP0100\n\n"
+        "some fact content here [[MMP0100:1]].\n\n"
+        "---\n\n"
+        "A test brief (`mfdoc test-plan`) already exists for this member.\n\n"
+        "---\n\n"
+        "Write the complete document, starting with the front matter.\n"
+    )
+    assert batch_mod._strip_response_preamble(text) == text
+
+
+def test_strip_response_preamble_ignores_a_frontmatter_example_beyond_the_search_window():
+    """A worked front-matter *example* quoted verbatim inside a prompt's own
+    writing-rules/template text does parse as a real YAML mapping (unlike
+    build_prompt's bare separators) -- but it's not the actual response,
+    so it must not be mistaken for one just because it happens to appear
+    somewhere in a long fake-echo "response". Bounding the search to near
+    the start (where a genuine preamble always is) keeps this safe without
+    needing to tell the two cases apart any other way."""
+    filler = "x" * 500
+    text = (
+        f"# Instructions\n\n{filler}\n\n"
+        '---\ntitle: "example"\ndoc_type: module\n---\nexample body\n'
+    )
+    assert batch_mod._strip_response_preamble(text) == text
+
+
+def test_written_doc_survives_a_wrapped_and_prefaced_claude_cli_response(indexed_db, tmp_path):
+    """End-to-end: a caller (standing in for ClaudeCLICaller) that wraps its
+    otherwise-valid response in a code fence with lead-in commentary must
+    still produce a document that validates -- the normalization has to be
+    wired into generate_module_doc's actual write site, not just exist as
+    an unused helper."""
+
+    class WrappingCaller(FakeCaller):
+        def __call__(self, prompt: str) -> batch_mod.ModelResponse:
+            response = super().__call__(prompt)
+            wrapped = f"Sure, here's the document:\n\n```markdown\n{response.text}```\n"
+            response.text = wrapped
+            return response
+
+    out_path = tmp_path / "MMP0100.md"
+    result = batch_mod.generate_module_doc(
+        indexed_db, "MMP0100", out_path, WrappingCaller(), "cite everything", "module template",
+    )
+    assert result.ok, result.problems
+    text = out_path.read_text(encoding="utf-8")
+    assert text.startswith("---")
+
+
+def test_fix_generated_by_version_still_strips_preamble_when_generated_by_line_is_missing():
+    """_fix_generated_by_version is not a full no-op just because there's no
+    generated_by: line to correct -- it always runs _strip_response_preamble
+    first (that's how every response.text write site gets the issue #150
+    fix for free), so a preamble/fence ahead of a document with no
+    generated_by: line at all still gets cleaned up."""
+    text = "---\ntitle: X\n---\nbody\n"
+    preambled = f"Here is the requested document:\n\n{text}"
+    assert batch_mod._fix_generated_by_version(preambled) == text
+
+
 def test_estimate_cost_computes_dollar_amount_when_pricing_configured():
     """estimate_cost is the single shared formula behind run_batch's own
     cost_usd (see test_batch_reports_cost_only_when_pricing_configured

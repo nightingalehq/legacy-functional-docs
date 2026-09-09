@@ -62,12 +62,125 @@ _GENERATED_BY_LINE = re.compile(r"(?m)^generated_by:\s*legacy-functional-docs\s+
 
 
 def _fix_generated_by_version(text: str) -> str:
-    """`text` with its `generated_by:` line's version corrected to the
-    actually-installed `__version__`, regardless of what the model wrote.
-    A no-op if the line isn't present in the expected `legacy-functional-docs
-    <version>` shape (e.g. missing front matter entirely) -- validate_doc's
-    own front-matter check reports that case, not this function's job to."""
-    return _GENERATED_BY_LINE.sub(f"generated_by: legacy-functional-docs {__version__}", text, count=1)
+    """`text` with `_strip_response_preamble` applied, then its
+    `generated_by:` line's version corrected to the actually-installed
+    `__version__`, regardless of what the model wrote.
+
+    The version-correction half is a no-op if the line isn't present in
+    the expected `legacy-functional-docs <version>` shape (e.g. missing
+    front matter entirely) -- validate_doc's own front-matter check
+    reports that case, not this function's job to. The function as a
+    whole is *not* a no-op in that case, though: `_strip_response_preamble`
+    still runs regardless, so a response with a stray fence/preamble but
+    no `generated_by:` line at all still comes back changed.
+
+    Also runs `_strip_response_preamble` first -- this is already the one
+    function every response.text write site (batch.py and testbatch.py)
+    calls right before write_text, so it's the natural single place for
+    both pieces of caller-agnostic response post-processing to live,
+    rather than threading a second call through every one of those sites."""
+    return _GENERATED_BY_LINE.sub(
+        f"generated_by: legacy-functional-docs {__version__}",
+        _strip_response_preamble(text),
+        count=1,
+    )
+
+
+# AnthropicCaller/VertexCaller are bare completions -- nothing but the
+# prompt's own "start with the YAML front matter, no preamble" instruction
+# shapes their output, and in practice they follow it. ClaudeCLICaller
+# (--provider claude-code) instead runs Claude Code itself in headless mode
+# (`claude -p`): still following that same prompt, but under Claude Code's
+# own system prompt/agent framing, which can add a wrapping code fence or a
+# line or two of lead-in commentary ("Here's the requested document:")
+# before the actual document (issue #150). _split_frontmatter's own check is
+# strict -- text must literally start with "---" -- so this has to be fixed
+# before the response reaches it, not by loosening that check.
+#
+# Deliberately caller-agnostic (applied at every response.text write site
+# regardless of which ModelCaller produced it, not gated on
+# --provider claude-code) rather than special-cased to one caller: it's a
+# no-op for a response that already starts with "---", and protects the
+# bare-completion callers too if they ever exhibit the same shape.
+# Deliberately doesn't consume the newline before the closing "```" --
+# that newline is indistinguishable from the document body's own trailing
+# newline (both are the same character), so only the delimiter itself is
+# removed, leaving whatever whitespace the body already had intact.
+_TRAILING_FENCE = re.compile(r"```[ \t]*$")
+_FRONTMATTER_START = re.compile(r"(?m)^---[ \t]*$")
+
+
+def _looks_like_real_frontmatter(candidate: str) -> bool:
+    """True if `candidate` (which starts with a `---` line) actually opens
+    a non-empty YAML mapping, per `_split_frontmatter` itself -- not just
+    a bare `---` line that happens to appear in the text for an unrelated
+    reason. build_prompt's own section separator is literally the string
+    `"\\n\\n---\\n\\n"`; naively treating any `---` line as a frontmatter
+    start would misidentify that separator (e.g. in a fake-echo caller's
+    response, which is just its whole prompt echoed back) as real front
+    matter and truncate/misreport an unrelated failure. The YAML block
+    between this `---` and the next one has to actually parse as a
+    mapping with at least one key -- a prompt section's prose (a markdown
+    heading, a paragraph) never does."""
+    fm, _, err = _split_frontmatter(candidate)
+    return err is None and isinstance(fm, dict) and bool(fm)
+
+
+def _strip_trailing_fence(candidate: str) -> str:
+    """`candidate` (already sliced to start at a verified-real `---` front
+    matter line) with a trailing wrapping code-fence delimiter removed, if
+    present. Slicing to the frontmatter start already discards any leading
+    fence-open marker or preamble text before it, whatever form either
+    took -- this is the other half, for a fence that wraps the *whole*
+    response and so still has its closing ``` after the document. Doesn't
+    consume the newline immediately before the closing "```" -- see
+    `_TRAILING_FENCE`'s own comment."""
+    stripped = candidate.rstrip("\n")
+    if _TRAILING_FENCE.search(stripped):
+        return _TRAILING_FENCE.sub("", stripped, count=1)
+    return candidate
+
+
+# Only look for a rescuable "---" within this many leading characters.
+# A genuine preamble ("Here's the requested document:") is a line or two;
+# bounding the search keeps this from reaching into the rest of a long
+# response and mistaking something else for the real front matter start.
+# Two different things live out there and both need excluding: build_
+# prompt's own "\n\n---\n\n" section separators (excluded by
+# `_looks_like_real_frontmatter`'s YAML-mapping check, regardless of
+# position) and a worked front-matter *example* quoted verbatim inside
+# the prompt's own writing-rules/template text (which -- being a fully
+# formed example -- *does* parse as a real YAML mapping, so only the
+# window keeps that one from being mistaken for the actual response). A
+# fake-echo caller's response is its whole prompt echoed back, so both
+# can appear in the same text this function has to handle correctly.
+_PREAMBLE_SEARCH_WINDOW = 300
+
+
+def _strip_response_preamble(text: str) -> str:
+    """Strip a wrapping code fence and any pre-`---` preamble text from a
+    raw model response, so `_split_frontmatter`'s leading-`---` check finds
+    the real front matter even when the caller added lead-in text or
+    fenced the whole output. A no-op when `text` already starts with `---`,
+    and a no-op (original `text` returned untouched) when no `---` line
+    that actually opens a real YAML mapping is found near the start --
+    nothing to rescue, so `_split_frontmatter`'s own "missing YAML front
+    matter" error still reports the real raw output.
+
+    Every "---" line within `_PREAMBLE_SEARCH_WINDOW` characters of the
+    start is a candidate, checked in order via `_looks_like_real_
+    frontmatter` -- the first one that actually opens a real YAML mapping
+    wins, so an early build_prompt section separator (never a real
+    mapping) is skipped in favour of a later one within the window,
+    rather than accepted just for appearing first."""
+    if text.startswith("---"):
+        return text
+    for match in _FRONTMATTER_START.finditer(text[:_PREAMBLE_SEARCH_WINDOW]):
+        candidate = text[match.start():]
+        if _looks_like_real_frontmatter(candidate):
+            return _strip_trailing_fence(candidate)
+    return text
+
 
 # Object types that get the batch treatment: one module, one program's worth
 # of judgement-light narrative. Data stores, system overview, process flows

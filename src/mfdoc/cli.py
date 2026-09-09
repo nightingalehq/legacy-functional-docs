@@ -649,9 +649,13 @@ def _build_model_caller(args):
                             timeout=getattr(args, "api_timeout", None))
     if provider == "claude-code":
         from .claude_cli_caller import ClaudeCLICaller
-        # getattr, not args.claude_code_timeout: same bare-namespace
-        # backward-compat concern as `provider` above.
-        return ClaudeCLICaller(model=args.model, timeout=getattr(args, "claude_code_timeout", None))
+        # getattr, not args.claude_code_timeout/args.claude_code_max_budget_usd:
+        # same bare-namespace backward-compat concern as `provider` above.
+        return ClaudeCLICaller(
+            model=args.model,
+            timeout=getattr(args, "claude_code_timeout", None),
+            max_budget_usd=getattr(args, "claude_code_max_budget_usd", None),
+        )
     from .anthropic_caller import AnthropicCaller
     return AnthropicCaller(model=args.model or "claude-sonnet-4-5",
                             timeout=getattr(args, "api_timeout", None))
@@ -1490,6 +1494,11 @@ def main(argv=None) -> int:
     p.add_argument("--gcp-project")
     p.add_argument("--gcp-region")
     p.add_argument("--claude-code-timeout", type=int, default=None)
+    p.add_argument("--claude-code-max-budget-usd", type=float, default=None,
+                    help="--provider claude-code only; caps `claude -p`'s dollar spend for a "
+                         "single call (its own --max-budget-usd) -- claude -p has no output "
+                         "token cap, so this is the closest available lever against a runaway "
+                         "generation; unset by default (no cap)")
     p.add_argument("--api-timeout", type=int, default=None,
                     help="request timeout in seconds for --provider anthropic/vertex "
                     "(default: 600, matching --claude-code-timeout's default)")
@@ -1526,6 +1535,11 @@ def main(argv=None) -> int:
                     help="--provider claude-code only; seconds before a `claude -p` call is "
                          "killed as hung, default 600 (claude_cli_caller.DEFAULT_TIMEOUT_S) -- "
                          "raise this for a member with an unusually large fact brief/test-case count")
+    p.add_argument("--claude-code-max-budget-usd", type=float, default=None,
+                    help="--provider claude-code only; caps `claude -p`'s dollar spend for a "
+                         "single call (its own --max-budget-usd) -- claude -p has no output "
+                         "token cap, so this is the closest available lever against a runaway "
+                         "generation; unset by default (no cap)")
     p.add_argument("--api-timeout", type=int, default=None,
                     help="request timeout in seconds for --provider anthropic/vertex "
                     "(default: 600, matching --claude-code-timeout's default)")
@@ -1561,6 +1575,11 @@ def main(argv=None) -> int:
                         help="--provider claude-code only; seconds before a `claude -p` call is "
                              "killed as hung, default 600 (claude_cli_caller.DEFAULT_TIMEOUT_S) -- "
                              "raise this for a member with an unusually large fact brief/test-case count")
+        p.add_argument("--claude-code-max-budget-usd", type=float, default=None,
+                        help="--provider claude-code only; caps `claude -p`'s dollar spend for a "
+                             "single call (its own --max-budget-usd) -- claude -p has no output "
+                             "token cap, so this is the closest available lever against a runaway "
+                             "generation; unset by default (no cap)")
         p.add_argument("--api-timeout", type=int, default=None,
                         help="request timeout in seconds for --provider anthropic/vertex "
                         "(default: 600, matching --claude-code-timeout's default)")
@@ -1622,6 +1641,11 @@ def main(argv=None) -> int:
                     help="--provider claude-code only; seconds before a `claude -p` call is "
                          "killed as hung, default 600 (claude_cli_caller.DEFAULT_TIMEOUT_S) -- "
                          "raise this for a module with an unusually large fact brief")
+    p.add_argument("--claude-code-max-budget-usd", type=float, default=None,
+                    help="--provider claude-code only; caps `claude -p`'s dollar spend for a "
+                         "single call (its own --max-budget-usd) -- claude -p has no output "
+                         "token cap, so this is the closest available lever against a runaway "
+                         "generation; unset by default (no cap)")
     p.add_argument("--api-timeout", type=int, default=None,
                     help="request timeout in seconds for --provider anthropic/vertex "
                     "(default: 600, matching --claude-code-timeout's default)")
@@ -1663,6 +1687,11 @@ def main(argv=None) -> int:
     p.add_argument("--claude-code-timeout", type=int, default=None,
                     help="--provider claude-code only; seconds before a `claude -p` call is "
                          "killed as hung, default 600 (claude_cli_caller.DEFAULT_TIMEOUT_S)")
+    p.add_argument("--claude-code-max-budget-usd", type=float, default=None,
+                    help="--provider claude-code only; caps `claude -p`'s dollar spend for a "
+                         "single call (its own --max-budget-usd) -- claude -p has no output "
+                         "token cap, so this is the closest available lever against a runaway "
+                         "generation; unset by default (no cap)")
     p.add_argument("--api-timeout", type=int, default=None,
                     help="request timeout in seconds for --provider anthropic/vertex "
                     "(default: 600, matching --claude-code-timeout's default)")

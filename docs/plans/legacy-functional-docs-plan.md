@@ -13,6 +13,38 @@ GitHub org.
   flows and the gap register, where judgement matters most.
 
 **Progress (2026-09-09):**
+- Fixed issue #150: `--provider claude-code` (`ClaudeCLICaller`) runs Claude
+  Code itself in headless mode, not a bare completion like `AnthropicCaller`/
+  `VertexCaller` -- on real `mfdoc batch`/`test-batch` volume this produced
+  responses that don't literally start with `---` (a wrapping code fence or
+  a line of lead-in commentary before the document), failing
+  `_split_frontmatter`'s strict leading-`---` check, plus 600s subprocess
+  timeouts with nothing analogous to `AnthropicCaller.DEFAULT_MAX_TOKENS`
+  bounding a single call's output.
+  - Added `_strip_response_preamble` (`batch.py`), folded into the existing
+    `_fix_generated_by_version` post-processing hook every response.text
+    write site (both `batch.py` and `testbatch.py`) already calls right
+    before `write_text` -- caller-agnostic on purpose, a no-op for a
+    response that already starts with `---`. Strips a wrapping code fence
+    (only the delimiter, never the document's own trailing newline) and,
+    failing that, a pre-`---` preamble within a 300-char search window. A
+    candidate `---` also has to actually open a real YAML mapping
+    (`_looks_like_real_frontmatter`) to be accepted -- added after
+    Copilot's PR review flagged that a naive "any `---` line" match would
+    misidentify `build_prompt`'s own bare `"\n\n---\n\n"` section
+    separators. The window stays too: on its own the YAML check isn't
+    enough, since a worked front-matter *example* quoted verbatim inside a
+    prompt's writing-rules/template text does parse as a real mapping --
+    the fake-echo test caller (which echoes its whole prompt back as the
+    "response") exercises both false-positive shapes.
+  - `ClaudeCLICaller` gained an opt-in `max_budget_usd` (`--claude-code-
+    max-budget-usd` on every subcommand that already exposes
+    `--claude-code-timeout`), passed through as `claude -p`'s own
+    `--max-budget-usd` -- the closest available lever to `claude -p --help`
+    exposing no output-token cap at all; unset by default, since this repo
+    doesn't guess at a business-tuned dollar figure nobody asked for.
+    Rejects a non-positive value immediately (`ValueError`), rather than
+    letting a nonsensical cap reach `claude -p` for a confusing failure.
 - Fixed issue #149: `natural.py`'s `_match_arithmetic` deliberately skips a
   COMPUTE/ADD/SUBTRACT/MULTIPLY/DIVIDE/MOVE/EXAMINE/bare-`:=` assignment
   whose RHS has no literal (a pure variable/array-element move, e.g. `#REF
