@@ -303,6 +303,17 @@ def test_written_doc_survives_a_wrapped_and_prefaced_claude_cli_response(indexed
     assert text.startswith("---")
 
 
+def test_fix_generated_by_version_still_strips_preamble_when_generated_by_line_is_missing():
+    """_fix_generated_by_version is not a full no-op just because there's no
+    generated_by: line to correct -- it always runs _strip_response_preamble
+    first (that's how every response.text write site gets the issue #150
+    fix for free), so a preamble/fence ahead of a document with no
+    generated_by: line at all still gets cleaned up."""
+    text = "---\ntitle: X\n---\nbody\n"
+    preambled = f"Here is the requested document:\n\n{text}"
+    assert batch_mod._fix_generated_by_version(preambled) == text
+
+
 def test_estimate_cost_computes_dollar_amount_when_pricing_configured():
     """estimate_cost is the single shared formula behind run_batch's own
     cost_usd (see test_batch_reports_cost_only_when_pricing_configured

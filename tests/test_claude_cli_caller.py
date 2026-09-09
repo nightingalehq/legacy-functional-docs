@@ -127,6 +127,19 @@ def test_max_budget_usd_flag_omitted_when_not_set(monkeypatch):
     assert "--max-budget-usd" not in captured["cmd"]
 
 
+def test_max_budget_usd_rejects_zero():
+    """0 is nonsensical for a dollar cap -- fail fast, at construction,
+    rather than passing it through to `claude -p` for a confusing failure
+    (or, worse, some CLI-specific "no limit" behaviour) later."""
+    with pytest.raises(ValueError, match="positive dollar amount"):
+        ClaudeCLICaller(max_budget_usd=0)
+
+
+def test_max_budget_usd_rejects_negative():
+    with pytest.raises(ValueError, match="positive dollar amount"):
+        ClaudeCLICaller(max_budget_usd=-1.5)
+
+
 def test_cmd_batch_routes_to_claude_cli_caller_when_provider_is_claude_code(cli_args, tmp_path, monkeypatch):
     project_dir = Path(cli_args.config).parent
     if not (project_dir / "reference").exists():

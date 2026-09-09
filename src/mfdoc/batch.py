@@ -62,11 +62,17 @@ _GENERATED_BY_LINE = re.compile(r"(?m)^generated_by:\s*legacy-functional-docs\s+
 
 
 def _fix_generated_by_version(text: str) -> str:
-    """`text` with its `generated_by:` line's version corrected to the
-    actually-installed `__version__`, regardless of what the model wrote.
-    A no-op if the line isn't present in the expected `legacy-functional-docs
-    <version>` shape (e.g. missing front matter entirely) -- validate_doc's
-    own front-matter check reports that case, not this function's job to.
+    """`text` with `_strip_response_preamble` applied, then its
+    `generated_by:` line's version corrected to the actually-installed
+    `__version__`, regardless of what the model wrote.
+
+    The version-correction half is a no-op if the line isn't present in
+    the expected `legacy-functional-docs <version>` shape (e.g. missing
+    front matter entirely) -- validate_doc's own front-matter check
+    reports that case, not this function's job to. The function as a
+    whole is *not* a no-op in that case, though: `_strip_response_preamble`
+    still runs regardless, so a response with a stray fence/preamble but
+    no `generated_by:` line at all still comes back changed.
 
     Also runs `_strip_response_preamble` first -- this is already the one
     function every response.text write site (batch.py and testbatch.py)

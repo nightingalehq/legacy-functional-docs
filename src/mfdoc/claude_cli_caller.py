@@ -43,6 +43,11 @@ class ClaudeCLICaller:
                  max_budget_usd: float | None = None):
         self.model = model
         self.timeout = timeout if timeout is not None else DEFAULT_TIMEOUT_S
+        if max_budget_usd is not None and max_budget_usd <= 0:
+            raise ValueError(
+                f"max_budget_usd must be a positive dollar amount, got {max_budget_usd!r} -- "
+                "omit it (or pass None) for no cap"
+            )
         self.max_budget_usd = max_budget_usd
 
     def __call__(self, prompt: str) -> ModelResponse:
