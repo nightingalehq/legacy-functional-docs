@@ -659,6 +659,68 @@ def test_module_brief_guard_chain_stops_at_a_closed_unresolved_extent_block():
     assert "guard condition not captured" not in inbound_section
 
 
+def test_module_brief_guard_chain_nested_block_close_does_not_close_the_outer_block():
+    """Copilot review on PR #151: a nested block's own close (an inner IF's
+    `END-IF`) must not be mistaken for closing an outer, unresolved-extent
+    block (a `DECIDE FOR FIRST CONDITION` with no `end_line` of its own).
+    Fixture nests an IF inside a DECIDE:
+
+    - a call still inside the DECIDE, after the inner IF's own END-IF,
+      must still be attributed to the DECIDE (not treated as unscoped);
+    - a call after the DECIDE's own END-DECIDE must be unscoped, not
+      attributed to the DECIDE just because an END-* line preceded it."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA
+    from mfdoc.dialects import natural
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'ORDER-CTRL', 'natural')")
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (2, 'SCHEDULE-RESET', 'natural')")
+
+    caller_src = (
+        "DECIDE FOR FIRST CONDITION\n"  # line 1 -- opens DECIDE, condition=None
+        "  IF #X\n"                     # line 2 -- opens nested IF, condition="#X"
+        "    CALLNAT 'INNER-CALL'\n"    # line 3 -- inside the nested IF
+        "  END-IF\n"                    # line 4 -- closes the nested IF only
+        "  CALLNAT 'STILL-IN-DECIDE'\n"  # line 5 -- back inside the DECIDE
+        "END-DECIDE\n"                  # line 6 -- closes the DECIDE
+        "CALLNAT 'AFTER-DECIDE'\n"      # line 7 -- outside the DECIDE
+        "CALLNAT 'SCHEDULE-RESET'\n"    # line 8 -- the single call site
+    )
+    caller_lines = [(i + 1, None, t) for i, t in enumerate(caller_src.splitlines())]
+    natural.extract(conn, 1, caller_lines, "ORDER-CTRL")
+
+    callee_src = "FIND (1) SCHED-VIEW WITH SCHED-KEY = 'RESET'\n  MOVE ' ' TO SCHED-VIEW.SCHED-STATUS\nEND-FIND\n"
+    callee_lines = [(i + 1, None, t) for i, t in enumerate(callee_src.splitlines())]
+    natural.extract(conn, 2, callee_lines, "SCHEDULE-RESET")
+
+    brief = module_brief(conn, "SCHEDULE-RESET", redact=NULL_REDACTOR)
+    inbound_section = brief.split("## Inbound callers", 1)[1].split("## ", 1)[0]
+    bullet_lines = [line for line in inbound_section.splitlines() if line.startswith("- ")]
+
+    def bullet_for(callee: str) -> str:
+        matches = [line for line in bullet_lines if f"`{callee}`" in line]
+        assert len(matches) == 1, f"expected exactly one bullet for {callee}, got {matches}"
+        return matches[0]
+
+    inner_call = bullet_for("INNER-CALL")
+    assert "when `#X` holds" in inner_call
+
+    still_in_decide = bullet_for("STILL-IN-DECIDE")
+    assert "DECIDE FOR FIRST CONDITION" in still_in_decide
+    assert "guard condition not captured" in still_in_decide
+    assert "[[ORDER-CTRL:1]]" in still_in_decide
+
+    after_decide = bullet_for("AFTER-DECIDE")
+    # Exact equality: no "scoped inside ..." / "when ... holds" wrapper --
+    # a bare call bullet is the only correct rendering once the DECIDE has
+    # actually closed.
+    assert after_decide == "- calls `AFTER-DECIDE` (`CALLNAT`) [[ORDER-CTRL:7]]"
+
+
 def test_module_brief_redacts_guard_chain_condition_text():
     """The guard-chain condition text synthesized by `_caller_guard_chain` is
     raw source (`rule_candidate.condition`), same as every other condition

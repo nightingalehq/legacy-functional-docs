@@ -157,12 +157,53 @@ def _opens_a_block(construct: str | None) -> bool:
 _BLOCK_CLOSE_LINE_RE = re.compile(r"^\s*END(-[A-Z]+)?\s*$", re.IGNORECASE)
 
 
-def _has_intervening_close(conn, member_id: int, opened_line: int, line_no: int) -> bool:
-    rows = conn.execute(
-        "SELECT text FROM source_line WHERE member_id=? AND line_no>? AND line_no<=?",
+def _has_intervening_close(conn, member_id: int, rule_rows: list, opened_line: int,
+                            line_no: int) -> bool:
+    """Whether the block opened at `opened_line` has already closed by
+    `line_no` -- *not* whether any `END*`-shaped line appears in between.
+    A bare "any END-* line in range" check (an earlier version of this
+    function) misattributes a *nested* block's own close (an inner IF's
+    `END-IF` inside an outer, unresolved-extent DECIDE) as closing the
+    outer block too, dropping real guard-scope context for everything after
+    that inner close but still inside the outer one (Copilot review on PR
+    #151).
+
+    Mirrors the extractor's own `open_blocks` stack instead: walk every
+    block-opening `rule_candidate` row strictly between `opened_line` and
+    `line_no` as a nested "push", and every generic close-shaped source
+    line (`_BLOCK_CLOSE_LINE_RE`) as a "pop" -- interleaved by line number,
+    the same order the extractor itself sees them in. A pop while `depth>0`
+    closes some nested block, not this one; a pop at `depth==0` is the
+    first close that isn't accounted for by a nested opener already in
+    range, so it closes *this* block."""
+    nested_opens = [
+        rc["line_no"] for rc in rule_rows
+        if opened_line < rc["line_no"] <= line_no and _opens_a_block(rc["construct"])
+    ]
+    # Narrow to plausible close lines in SQL rather than fetching every
+    # line in range and filtering all of it in Python -- an avoidable N*M
+    # scan otherwise, since this runs once per unresolved-extent candidate
+    # per preceding call. Tabs are normalised to spaces before the LIKE
+    # check so a tab-indented "END..." line still matches the same way
+    # `_BLOCK_CLOSE_LINE_RE`'s `\s*` does; the regex below still does the
+    # exact match, this is only a pre-filter.
+    close_rows = conn.execute(
+        "SELECT line_no, text FROM source_line WHERE member_id=? AND line_no>? AND line_no<=?"
+        " AND UPPER(TRIM(REPLACE(text, CHAR(9), ' '))) LIKE 'END%'"
+        " ORDER BY line_no",
         (member_id, opened_line, line_no),
     ).fetchall()
-    return any(_BLOCK_CLOSE_LINE_RE.match(r["text"] or "") for r in rows)
+    closes = [r["line_no"] for r in close_rows if _BLOCK_CLOSE_LINE_RE.match(r["text"] or "")]
+    events = sorted([(ln, 0) for ln in nested_opens] + [(ln, 1) for ln in closes])
+    depth = 0
+    for _, is_close in events:
+        if not is_close:
+            depth += 1
+        elif depth > 0:
+            depth -= 1
+        else:
+            return True
+    return False
 
 
 def _enclosing_condition(conn, member_id: int, rule_rows: list, line_no: int) -> dict | None:
@@ -180,7 +221,9 @@ def _enclosing_condition(conn, member_id: int, rule_rows: list, line_no: int) ->
     line-ordered here, the same assumption `routine_for_line` and
     `_branch_data_access` already make), so a call inside a nested IF
     reports that IF's own condition, not an outer one. Returns None when no
-    row encloses `line_no` -- an unconditional call has no guard to report."""
+    row encloses `line_no` -- not proof the call is unconditional, only that
+    this brief found no enclosing block for it (see `_caller_guard_chain`'s
+    own wording for that distinction)."""
     match = None
     for rc in rule_rows:
         if rc["line_no"] > line_no:
@@ -191,7 +234,7 @@ def _enclosing_condition(conn, member_id: int, rule_rows: list, line_no: int) ->
         else:
             if not _opens_a_block(rc["construct"]):
                 continue
-            if _has_intervening_close(conn, member_id, rc["line_no"], line_no):
+            if _has_intervening_close(conn, member_id, rule_rows, rc["line_no"], line_no):
                 continue
         if match is None or rc["line_no"] > match["line_no"]:
             match = rc
