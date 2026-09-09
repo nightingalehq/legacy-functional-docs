@@ -15,6 +15,17 @@ completion, not an agentic session that could wander off and edit files),
 `--no-session-persistence` avoids leaving a throwaway conversation behind
 per call, `--output-format json` gives a single structured result with
 token usage instead of having to scrape human-readable text output.
+
+Issue #150: `claude -p` has no `max_tokens` equivalent -- nothing bounds how
+much a single call can generate the way `AnthropicCaller.DEFAULT_MAX_TOKENS`
+does, which was implicated in real 600s subprocess timeouts. `claude -p
+--help` exposes no output-token cap either, but `--max-budget-usd` ("only
+works with --print", i.e. exactly this caller's usage) is the closest
+available lever -- capping dollar spend also caps how long a runaway
+generation can keep going. Opt-in only (`max_budget_usd=None` by default):
+this repo doesn't guess at a business-tuned dollar figure nobody asked for,
+so callers that want the safety net set one explicitly (via
+--claude-code-max-budget-usd).
 """
 
 from __future__ import annotations
@@ -28,14 +39,18 @@ DEFAULT_TIMEOUT_S = 600
 
 
 class ClaudeCLICaller:
-    def __init__(self, model: str | None = None, timeout: int | None = None):
+    def __init__(self, model: str | None = None, timeout: int | None = None,
+                 max_budget_usd: float | None = None):
         self.model = model
         self.timeout = timeout if timeout is not None else DEFAULT_TIMEOUT_S
+        self.max_budget_usd = max_budget_usd
 
     def __call__(self, prompt: str) -> ModelResponse:
         cmd = ["claude", "-p", "--output-format", "json", "--tools", "", "--no-session-persistence"]
         if self.model:
             cmd += ["--model", self.model]
+        if self.max_budget_usd is not None:
+            cmd += ["--max-budget-usd", str(self.max_budget_usd)]
         try:
             proc = subprocess.run(
                 cmd, input=prompt, capture_output=True, text=True, timeout=self.timeout,

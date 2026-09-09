@@ -66,8 +66,83 @@ def _fix_generated_by_version(text: str) -> str:
     actually-installed `__version__`, regardless of what the model wrote.
     A no-op if the line isn't present in the expected `legacy-functional-docs
     <version>` shape (e.g. missing front matter entirely) -- validate_doc's
-    own front-matter check reports that case, not this function's job to."""
-    return _GENERATED_BY_LINE.sub(f"generated_by: legacy-functional-docs {__version__}", text, count=1)
+    own front-matter check reports that case, not this function's job to.
+
+    Also runs `_strip_response_preamble` first -- this is already the one
+    function every response.text write site (batch.py and testbatch.py)
+    calls right before write_text, so it's the natural single place for
+    both pieces of caller-agnostic response post-processing to live,
+    rather than threading a second call through every one of those sites."""
+    return _GENERATED_BY_LINE.sub(
+        f"generated_by: legacy-functional-docs {__version__}",
+        _strip_response_preamble(text),
+        count=1,
+    )
+
+
+# AnthropicCaller/VertexCaller are bare completions -- nothing but the
+# prompt's own "start with the YAML front matter, no preamble" instruction
+# shapes their output, and in practice they follow it. ClaudeCLICaller
+# (--provider claude-code) instead runs Claude Code itself in headless mode
+# (`claude -p`): still following that same prompt, but under Claude Code's
+# own system prompt/agent framing, which can add a wrapping code fence or a
+# line or two of lead-in commentary ("Here's the requested document:")
+# before the actual document (issue #150). _split_frontmatter's own check is
+# strict -- text must literally start with "---" -- so this has to be fixed
+# before the response reaches it, not by loosening that check.
+#
+# Deliberately caller-agnostic (applied at every response.text write site
+# regardless of which ModelCaller produced it, not gated on
+# --provider claude-code) rather than special-cased to one caller: it's a
+# no-op for a response that already starts with "---", and protects the
+# bare-completion callers too if they ever exhibit the same shape.
+_LEADING_FENCE = re.compile(r"^```[A-Za-z0-9_-]*[ \t]*\n")
+# Deliberately doesn't consume the newline before the closing "```" --
+# that newline is indistinguishable from the document body's own trailing
+# newline (both are the same character), so only the delimiter itself is
+# removed, leaving whatever whitespace the body already had intact.
+_TRAILING_FENCE = re.compile(r"```[ \t]*$")
+_FRONTMATTER_START = re.compile(r"(?m)^---[ \t]*$")
+
+# Only look for a rescuable "---" within this many leading characters of an
+# unfenced response. A genuine preamble ("Here's the requested document:")
+# is a line or two; a long document that legitimately contains a "---"
+# line deep inside it (e.g. a fake-echo test caller that echoes an entire
+# prompt -- itself containing an embedded front-matter *example* -- back as
+# its "response") must NOT be mistaken for preamble, or everything before
+# that unrelated "---" gets silently discarded instead of the real issue
+# (this response was never going to validate) being reported as-is.
+_PREAMBLE_SEARCH_WINDOW = 400
+
+
+def _strip_response_preamble(text: str) -> str:
+    """Strip a wrapping code fence and any pre-`---` preamble text from a
+    raw model response, so `_split_frontmatter`'s leading-`---` check finds
+    the real front matter even when the caller added lead-in text or
+    fenced the whole output. A no-op when `text` already starts with `---`,
+    and a no-op (original `text` returned untouched) when no rescuable
+    `---` line is found near the start -- nothing to rescue, so
+    `_split_frontmatter`'s own "missing YAML front matter" error still
+    reports the real raw output."""
+    if text.startswith("---"):
+        return text
+    # Fence check operates on an edge-trimmed copy (only the outermost
+    # blank lines around the fence itself, not internal whitespace) so a
+    # response with trailing/leading blank lines around the fence still
+    # matches; the frontmatter search below instead slices the *original*
+    # `text`, so any trailing content is preserved exactly as the model
+    # wrote it.
+    edge_trimmed = text.strip("\n")
+    if _LEADING_FENCE.match(edge_trimmed) and _TRAILING_FENCE.search(edge_trimmed):
+        candidate = _LEADING_FENCE.sub("", edge_trimmed, count=1)
+        candidate = _TRAILING_FENCE.sub("", candidate, count=1)
+        if candidate.startswith("---"):
+            return candidate
+    match = _FRONTMATTER_START.search(text[:_PREAMBLE_SEARCH_WINDOW])
+    if match:
+        return text[match.start():]
+    return text
+
 
 # Object types that get the batch treatment: one module, one program's worth
 # of judgement-light narrative. Data stores, system overview, process flows
