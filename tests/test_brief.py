@@ -517,7 +517,12 @@ def test_module_brief_summarizes_single_callers_guard_chain():
     guard/validation call sequence (already recorded, in order, as
     `call_edge` rows) rather than citing only the call line itself. Fixture:
     `ORDER-CTRL` validates a customer and confirms a balance, each gated by
-    its own IF, before ever reaching the single call to `SCHEDULE-RESET`."""
+    its own IF, before ever reaching the single call to `SCHEDULE-RESET`.
+
+    The first IF also has a literal-bearing `MOVE` statement ahead of its
+    `CALLNAT`, deliberately -- a statement-shaped `rule_candidate` has no
+    block of its own and must never be mistaken for the enclosing guard
+    (regression coverage for `_enclosing_condition`/`_opens_a_block`)."""
     import sqlite3
 
     from mfdoc.db import SCHEMA
@@ -530,13 +535,14 @@ def test_module_brief_summarizes_single_callers_guard_chain():
     conn.execute("INSERT INTO member (id, name, dialect) VALUES (2, 'SCHEDULE-RESET', 'natural')")
 
     caller_src = (
-        "IF #CUST-VALID\n"
-        "  CALLNAT 'VALIDATE-CUSTOMER'\n"
-        "END-IF\n"
-        "IF #BAL-CONFIRMED\n"
-        "  CALLNAT 'CONFIRM-BALANCE'\n"
-        "END-IF\n"
-        "CALLNAT 'SCHEDULE-RESET'\n"
+        "IF #CUST-VALID\n"                    # line 1
+        "  MOVE 'Y' TO #CUST-FLAG\n"           # line 2 -- statement, not a guard
+        "  CALLNAT 'VALIDATE-CUSTOMER'\n"      # line 3
+        "END-IF\n"                             # line 4
+        "IF #BAL-CONFIRMED\n"                  # line 5
+        "  CALLNAT 'CONFIRM-BALANCE'\n"        # line 6
+        "END-IF\n"                             # line 7
+        "CALLNAT 'SCHEDULE-RESET'\n"           # line 8
     )
     caller_lines = [(i + 1, None, t) for i, t in enumerate(caller_src.splitlines())]
     natural.extract(conn, 1, caller_lines, "ORDER-CTRL")
@@ -557,10 +563,17 @@ def test_module_brief_summarizes_single_callers_guard_chain():
     assert "CONFIRM-BALANCE" in inbound_section
     assert "#CUST-VALID" in inbound_section
     assert "#BAL-CONFIRMED" in inbound_section
-    assert "[[ORDER-CTRL:1]]" in inbound_section
-    assert "[[ORDER-CTRL:2]]" in inbound_section
-    assert "[[ORDER-CTRL:4]]" in inbound_section
-    assert "[[ORDER-CTRL:5]]" in inbound_section
+    assert "[[ORDER-CTRL:1]]" in inbound_section     # IF #CUST-VALID
+    assert "[[ORDER-CTRL:3]]" in inbound_section      # CALLNAT VALIDATE-CUSTOMER
+    assert "[[ORDER-CTRL:5]]" in inbound_section      # IF #BAL-CONFIRMED
+    assert "[[ORDER-CTRL:6]]" in inbound_section      # CALLNAT CONFIRM-BALANCE
+
+    # The MOVE on line 2 must never be reported as VALIDATE-CUSTOMER's guard
+    # -- the guard is the enclosing IF's own condition, not the last
+    # statement-shaped rule_candidate that happens to precede the call.
+    assert "#CUST-FLAG" not in inbound_section
+    assert "when `MOVE" not in inbound_section
+    assert "[[ORDER-CTRL:2]]" not in inbound_section
 
 
 def test_module_brief_redacts_guard_chain_condition_text():

@@ -120,14 +120,38 @@ def fetch_routines(conn, member_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+# construct names (first token) that open a block with a body -- an IF/
+# ELSE/DECIDE/FOR/REPEAT/WHILE/ON ERROR/AT-event's own rule_candidate row
+# can legitimately have `end_line IS NULL` and still enclose later lines
+# (see natural.py's `_match_rules`: only IF/ELSE ever get `end_line` filled
+# in via their own END-IF -- DECIDE/FOR/REPEAT/ON ERROR/AT-EVENT open a
+# real block too but never get their own end_line resolved at all today).
+# A statement-shaped rule_candidate (MOVE, COMPUTE, ADD, ASSIGN, VALUE,
+# WHEN, ESCAPE, REJECT IF, NONE/ANY/ALL, ...) is a single line with no body
+# of its own and *always* has `end_line IS NULL` -- treating that as
+# "extends indefinitely" the same way an unresolved block extent does
+# misattributes any later call to the last statement seen, instead of its
+# real enclosing IF/WHILE/etc. (issue #151 follow-up).
+_BLOCK_CONSTRUCT_FIRST_WORDS = {"IF", "ELSE", "DECIDE", "FOR", "REPEAT", "WHILE", "ON", "AT", "CASE"}
+
+
+def _opens_a_block(construct: str | None) -> bool:
+    if not construct:
+        return False
+    return construct.split()[0].upper() in _BLOCK_CONSTRUCT_FIRST_WORDS
+
+
 def _enclosing_condition(rule_rows: list, line_no: int) -> dict | None:
     """The innermost `rule_candidate` row (already fetched, any order) whose
     block encloses `line_no` -- `rc.line_no <= line_no` and either
-    `rc.end_line` is unresolved (kept as a candidate the same way
-    `routine_for_line` treats an unresolved routine end: still evidence the
-    block continues at least that far) or `rc.end_line >= line_no`. Among
-    matches, the one with the greatest `line_no` is innermost (nesting is
-    strictly line-ordered here, the same assumption `routine_for_line` and
+    `rc.end_line >= line_no`, or `rc.end_line` is unresolved *and* `rc`
+    actually opens a block (`_opens_a_block`) -- kept as a candidate the
+    same way `routine_for_line` treats an unresolved routine end: still
+    evidence the block continues at least that far. A statement-shaped row
+    (`_opens_a_block` false) never encloses anything, regardless of its own
+    `end_line` -- it has no body to enclose with. Among matches, the one
+    with the greatest `line_no` is innermost (nesting is strictly
+    line-ordered here, the same assumption `routine_for_line` and
     `_branch_data_access` already make), so a call inside a nested IF
     reports that IF's own condition, not an outer one. Returns None when no
     row encloses `line_no` -- an unconditional call has no guard to report."""
@@ -135,7 +159,10 @@ def _enclosing_condition(rule_rows: list, line_no: int) -> dict | None:
     for rc in rule_rows:
         if rc["line_no"] > line_no:
             continue
-        if rc["end_line"] is not None and rc["end_line"] < line_no:
+        if rc["end_line"] is not None:
+            if rc["end_line"] < line_no:
+                continue
+        elif not _opens_a_block(rc["construct"]):
             continue
         if match is None or rc["line_no"] > match["line_no"]:
             match = rc
