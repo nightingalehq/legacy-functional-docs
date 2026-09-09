@@ -10,6 +10,7 @@ enforces and the prose failures it cannot catch.
 - [Confidence taxonomy](#confidence-taxonomy)
 - [Front matter](#front-matter)
 - [How to turn a rule candidate into a documented rule](#how-to-turn-a-rule-candidate-into-a-documented-rule)
+- [Business-first sentence framing](#business-first-sentence-framing)
 - [Prose failures to avoid](#prose-failures-to-avoid)
 - [The reversed-condition check](#the-reversed-condition-check)
 - [Audience calibration](#audience-calibration)
@@ -155,6 +156,44 @@ would survive review because it is unfalsifiable, which is precisely the problem
 Correct and cited, but it is a transliteration. The reader could have read the
 code. Functional documentation earns its keep by saying what the branch means for
 the business.
+
+## Business-first sentence framing
+
+Citation discipline (above) says every claim needs a `[[MEMBER:LINE]]` citation.
+It says nothing about what leads the sentence, and that matters just as much: a
+rule sentence's main clause should state the business trigger and the resulting
+action, with field names, literals, and the citation as supporting detail — not
+as the sentence's subject. This does not relax the citation requirement at all;
+every claim still needs its citation, exactly where it always went. It changes
+only what the reader meets first.
+
+The test is simple: read only the sentence's main clause (drop the field names,
+literals, and citation) and ask whether a business analyst with no mainframe
+background — this repo's own stated default audience — would understand what
+happened and why, without reconstructing it from code shape. A sentence that
+leads with a statement description ("the routine performs a FIND on...") fails
+that test even when it is fully cited; the reader has to do the interpretation
+work the documentation exists to do for them.
+
+**Before** (statement-first — describes the code, leaves intent implicit):
+> The routine performs a `FIND` on `SCHED-VIEW` with `SCHED-KEY` held equal to
+> `'RESET'` [[MMS0100:40]], then moves blanks to `SCHED-VIEW.SCHED-STATUS` and
+> `SCHED-VIEW.LAST-RUN-DATE` [[MMS0100:41-42]].
+
+**After** (business-first — trigger and action lead, the same facts follow as
+support):
+> When a reset record exists for the schedule [[MMS0100:40]], the routine clears
+> the schedule's tracking fields back to their initial state — status and last-run
+> date are both blanked [[MMS0100:41-42]].
+
+Both sentences cite the same lines and assert nothing the first doesn't. The
+difference is only which fact leads: the first makes the reader infer that a
+`FIND` returning a sentinel record means "this is a reset," and that blanking two
+fields means "tracking resets to initial state"; the second states both outright
+and lets the field names and citation confirm it, which is exactly the order a
+functional-spec reader needs. This applies to "How it is invoked" narration too —
+summarize what a caller checks/confirms and under what condition before it
+reaches this member, not just that a call statement exists.
 
 ## Prose failures to avoid
 

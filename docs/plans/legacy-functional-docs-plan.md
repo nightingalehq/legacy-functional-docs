@@ -12,6 +12,31 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-09b):**
+- Fixed issue #151: real SME review feedback asked, across several
+  independent examples, for two framing changes to the module-doc
+  narrative rather than a new document type.
+  - `reference/writing-rules.md` gained a new "Business-first sentence
+    framing" section: a rule sentence's main clause should state the
+    business trigger and resulting action, with field names/literals/
+    citation as supporting detail, not the sentence's subject -- citation
+    discipline is unchanged, only what leads the sentence. Includes a
+    before/after example pair in the same style as the existing "How to
+    turn a rule candidate into a documented rule" section. `batch.py`'s
+    narrative prompts embed `writing_rules` verbatim and needed no separate
+    change; `SKILL.md` only references `writing-rules.md` and duplicates
+    none of its guidance.
+  - `brief.py`'s `module_brief` "Inbound callers" section previously cited
+    only the call line itself for every callee, even one reachable from
+    exactly one call site. Added `_caller_guard_chain`/`_enclosing_condition`:
+    for a single-caller callee, the caller's own preceding `call_edge` rows
+    (already ordered by `line_no`) are summarized with their innermost
+    enclosing `rule_candidate` condition, when one exists -- read-only
+    synthesis over facts already in the store, no new extraction. Scoped
+    to exactly one known call site; with more than one caller there is no
+    single guard chain to point to. `templates/module.md`'s "How it is
+    invoked" section now instructs the narrator to use this when present.
+
 **Progress (2026-09-09):**
 - Fixed issue #148: `natural.py`'s `FIND`/`READ`/`HISTOGRAM` deliberately
   never push onto `open_blocks` (nesting integrity -- see

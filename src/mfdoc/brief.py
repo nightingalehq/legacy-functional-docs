@@ -120,6 +120,64 @@ def fetch_routines(conn, member_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def _enclosing_condition(rule_rows: list, line_no: int) -> dict | None:
+    """The innermost `rule_candidate` row (already fetched, any order) whose
+    block encloses `line_no` -- `rc.line_no <= line_no` and either
+    `rc.end_line` is unresolved (kept as a candidate the same way
+    `routine_for_line` treats an unresolved routine end: still evidence the
+    block continues at least that far) or `rc.end_line >= line_no`. Among
+    matches, the one with the greatest `line_no` is innermost (nesting is
+    strictly line-ordered here, the same assumption `routine_for_line` and
+    `_branch_data_access` already make), so a call inside a nested IF
+    reports that IF's own condition, not an outer one. Returns None when no
+    row encloses `line_no` -- an unconditional call has no guard to report."""
+    match = None
+    for rc in rule_rows:
+        if rc["line_no"] > line_no:
+            continue
+        if rc["end_line"] is not None and rc["end_line"] < line_no:
+            continue
+        if match is None or rc["line_no"] > match["line_no"]:
+            match = rc
+    return match
+
+
+def _caller_guard_chain(conn, caller_id: int, caller_name: str, call_line_no: int) -> list[str]:
+    """For a callee reachable from exactly one call site, the caller's own
+    `call_edge` rows strictly before that call (already ordered by
+    `line_no`, per `call_edge`'s own citation ordering elsewhere in this
+    module) -- the validation/confirmation/mode-gate calls the caller
+    performs before ever reaching this one, which module_brief's own
+    "Inbound callers" section previously dropped entirely by citing only the
+    call line itself (issue #151). Each preceding call is paired with its
+    innermost enclosing `rule_candidate` condition, when one exists, via
+    `_enclosing_condition` -- read-only synthesis over facts already in the
+    store, no new extraction. Returns rendered bullet lines, or an empty
+    list when there is nothing preceding this call in its own caller."""
+    preceding = conn.execute(
+        "SELECT * FROM call_edge WHERE caller_id=? AND line_no<? ORDER BY line_no",
+        (caller_id, call_line_no),
+    ).fetchall()
+    if not preceding:
+        return []
+    rule_rows = conn.execute(
+        "SELECT * FROM rule_candidate WHERE member_id=? ORDER BY line_no", (caller_id,)
+    ).fetchall()
+    lines = []
+    for call in preceding:
+        cond = _enclosing_condition(rule_rows, call["line_no"])
+        callee = call["callee_name"] or "UNKNOWN"
+        cite = _cite(caller_name, call["line_no"])
+        if cond and cond["condition"]:
+            lines.append(
+                f"- when `{cond['condition']}` holds {_cite(caller_name, cond['line_no'])}, "
+                f"calls `{callee}` (`{call['call_kind']}`) {cite}"
+            )
+        else:
+            lines.append(f"- unconditionally calls `{callee}` (`{call['call_kind']}`) {cite}")
+    return lines
+
+
 def routine_for_line(routines: list[dict], line_no: int) -> dict | None:
     """Which of `routines` (as returned by fetch_routines, ordered by
     start_line) contains `line_no`, or None when the line belongs to the
@@ -749,7 +807,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
 
     inbound = conn.execute(
         """
-        SELECT c.name AS caller, ce.call_kind, ce.line_no
+        SELECT c.id AS caller_id, c.name AS caller, ce.call_kind, ce.line_no
           FROM call_edge ce JOIN member c ON c.id = ce.caller_id
          WHERE UPPER(ce.callee_name)=UPPER(?) ORDER BY c.name, ce.line_no
         """,
@@ -759,6 +817,23 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
         add("## Inbound callers")
         for r in inbound:
             add(f"- {_cite(r['caller'], r['line_no'])} `{r['call_kind']}` from `{r['caller']}`")
+        # Reachable from exactly one call site (issue #151): the "How it is
+        # invoked" section only had the call line itself to cite, never the
+        # caller's own preceding guard/validation sequence that decides
+        # whether and when that call happens. With more than one call site,
+        # there is no single guard chain to point to -- each caller may gate
+        # the call under a different condition, or none -- so this is
+        # deliberately scoped to the single-caller case only.
+        if len(inbound) == 1:
+            only = inbound[0]
+            guard_lines = _caller_guard_chain(conn, only["caller_id"], only["caller"], only["line_no"])
+            if guard_lines:
+                add("")
+                add(
+                    f"This is the only known call site for `{name}`. Before reaching it, "
+                    f"`{only['caller']}` performs, in order:"
+                )
+                out.extend(guard_lines)
         add("")
 
     # --- interactions

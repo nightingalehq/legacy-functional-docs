@@ -511,6 +511,93 @@ def test_natural_brief_keeps_using_data_area_includes_out_of_program_variables()
 
 # --- issue #148: FIND/READ/HISTOGRAM found-body extent must reach the brief
 
+def test_module_brief_summarizes_single_callers_guard_chain():
+    """Issue #151: a subroutine reachable from exactly one call site should
+    have its "Inbound callers" section summarize the caller's own preceding
+    guard/validation call sequence (already recorded, in order, as
+    `call_edge` rows) rather than citing only the call line itself. Fixture:
+    `ORDER-CTRL` validates a customer and confirms a balance, each gated by
+    its own IF, before ever reaching the single call to `SCHEDULE-RESET`."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA
+    from mfdoc.dialects import natural
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'ORDER-CTRL', 'natural')")
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (2, 'SCHEDULE-RESET', 'natural')")
+
+    caller_src = (
+        "IF #CUST-VALID\n"
+        "  CALLNAT 'VALIDATE-CUSTOMER'\n"
+        "END-IF\n"
+        "IF #BAL-CONFIRMED\n"
+        "  CALLNAT 'CONFIRM-BALANCE'\n"
+        "END-IF\n"
+        "CALLNAT 'SCHEDULE-RESET'\n"
+    )
+    caller_lines = [(i + 1, None, t) for i, t in enumerate(caller_src.splitlines())]
+    natural.extract(conn, 1, caller_lines, "ORDER-CTRL")
+
+    callee_src = (
+        "FIND (1) SCHED-VIEW WITH SCHED-KEY = 'RESET'\n"
+        "  MOVE ' ' TO SCHED-VIEW.SCHED-STATUS\n"
+        "END-FIND\n"
+    )
+    callee_lines = [(i + 1, None, t) for i, t in enumerate(callee_src.splitlines())]
+    natural.extract(conn, 2, callee_lines, "SCHEDULE-RESET")
+
+    brief = module_brief(conn, "SCHEDULE-RESET", redact=NULL_REDACTOR)
+    inbound_section = brief.split("## Inbound callers", 1)[1].split("## ", 1)[0]
+
+    assert "the only known call site" in inbound_section
+    assert "VALIDATE-CUSTOMER" in inbound_section
+    assert "CONFIRM-BALANCE" in inbound_section
+    assert "#CUST-VALID" in inbound_section
+    assert "#BAL-CONFIRMED" in inbound_section
+    assert "[[ORDER-CTRL:1]]" in inbound_section
+    assert "[[ORDER-CTRL:2]]" in inbound_section
+    assert "[[ORDER-CTRL:4]]" in inbound_section
+    assert "[[ORDER-CTRL:5]]" in inbound_section
+
+
+def test_module_brief_omits_guard_chain_when_more_than_one_caller():
+    """With more than one known call site there is no single guard chain to
+    point to -- each caller may gate the call differently, or not at all --
+    so the summary is deliberately scoped to the single-caller case, per
+    issue #151's suggested fix."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA
+    from mfdoc.dialects import natural
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'ORDER-CTRL', 'natural')")
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (2, 'BATCH-CTRL', 'natural')")
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (3, 'SCHEDULE-RESET', 'natural')")
+
+    for mid, mname, src in (
+        (1, "ORDER-CTRL", "IF #CUST-VALID\n  CALLNAT 'VALIDATE-CUSTOMER'\nEND-IF\nCALLNAT 'SCHEDULE-RESET'\n"),
+        (2, "BATCH-CTRL", "CALLNAT 'SCHEDULE-RESET'\n"),
+    ):
+        lines = [(i + 1, None, t) for i, t in enumerate(src.splitlines())]
+        natural.extract(conn, mid, lines, mname)
+
+    callee_src = "FIND (1) SCHED-VIEW WITH SCHED-KEY = 'RESET'\n  MOVE ' ' TO SCHED-VIEW.SCHED-STATUS\nEND-FIND\n"
+    callee_lines = [(i + 1, None, t) for i, t in enumerate(callee_src.splitlines())]
+    natural.extract(conn, 3, callee_lines, "SCHEDULE-RESET")
+
+    brief = module_brief(conn, "SCHEDULE-RESET", redact=NULL_REDACTOR)
+    inbound_section = brief.split("## Inbound callers", 1)[1].split("## ", 1)[0]
+
+    assert "the only known call site" not in inbound_section
+    assert "VALIDATE-CUSTOMER" not in inbound_section
+
+
 def test_module_brief_surfaces_find_found_body_extent_next_to_the_access():
     """The exact defect reported: a single-record `FIND (1) ... WITH
     <sentinel>` existence check with no IF/ELSE in sight, immediately
