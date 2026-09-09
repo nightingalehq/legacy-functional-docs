@@ -96,7 +96,6 @@ def _fix_generated_by_version(text: str) -> str:
 # --provider claude-code) rather than special-cased to one caller: it's a
 # no-op for a response that already starts with "---", and protects the
 # bare-completion callers too if they ever exhibit the same shape.
-_LEADING_FENCE = re.compile(r"^```[A-Za-z0-9_-]*[ \t]*\n")
 # Deliberately doesn't consume the newline before the closing "```" --
 # that newline is indistinguishable from the document body's own trailing
 # newline (both are the same character), so only the delimiter itself is
@@ -104,15 +103,52 @@ _LEADING_FENCE = re.compile(r"^```[A-Za-z0-9_-]*[ \t]*\n")
 _TRAILING_FENCE = re.compile(r"```[ \t]*$")
 _FRONTMATTER_START = re.compile(r"(?m)^---[ \t]*$")
 
-# Only look for a rescuable "---" within this many leading characters of an
-# unfenced response. A genuine preamble ("Here's the requested document:")
-# is a line or two; a long document that legitimately contains a "---"
-# line deep inside it (e.g. a fake-echo test caller that echoes an entire
-# prompt -- itself containing an embedded front-matter *example* -- back as
-# its "response") must NOT be mistaken for preamble, or everything before
-# that unrelated "---" gets silently discarded instead of the real issue
-# (this response was never going to validate) being reported as-is.
-_PREAMBLE_SEARCH_WINDOW = 400
+
+def _looks_like_real_frontmatter(candidate: str) -> bool:
+    """True if `candidate` (which starts with a `---` line) actually opens
+    a non-empty YAML mapping, per `_split_frontmatter` itself -- not just
+    a bare `---` line that happens to appear in the text for an unrelated
+    reason. build_prompt's own section separator is literally the string
+    `"\\n\\n---\\n\\n"`; naively treating any `---` line as a frontmatter
+    start would misidentify that separator (e.g. in a fake-echo caller's
+    response, which is just its whole prompt echoed back) as real front
+    matter and truncate/misreport an unrelated failure. The YAML block
+    between this `---` and the next one has to actually parse as a
+    mapping with at least one key -- a prompt section's prose (a markdown
+    heading, a paragraph) never does."""
+    fm, _, err = _split_frontmatter(candidate)
+    return err is None and isinstance(fm, dict) and bool(fm)
+
+
+def _strip_trailing_fence(candidate: str) -> str:
+    """`candidate` (already sliced to start at a verified-real `---` front
+    matter line) with a trailing wrapping code-fence delimiter removed, if
+    present. Slicing to the frontmatter start already discards any leading
+    fence-open marker or preamble text before it, whatever form either
+    took -- this is the other half, for a fence that wraps the *whole*
+    response and so still has its closing ``` after the document. Doesn't
+    consume the newline immediately before the closing "```" -- see
+    `_TRAILING_FENCE`'s own comment."""
+    stripped = candidate.rstrip("\n")
+    if _TRAILING_FENCE.search(stripped):
+        return _TRAILING_FENCE.sub("", stripped, count=1)
+    return candidate
+
+
+# Only look for a rescuable "---" within this many leading characters.
+# A genuine preamble ("Here's the requested document:") is a line or two;
+# bounding the search keeps this from reaching into the rest of a long
+# response and mistaking something else for the real front matter start.
+# Two different things live out there and both need excluding: build_
+# prompt's own "\n\n---\n\n" section separators (excluded by
+# `_looks_like_real_frontmatter`'s YAML-mapping check, regardless of
+# position) and a worked front-matter *example* quoted verbatim inside
+# the prompt's own writing-rules/template text (which -- being a fully
+# formed example -- *does* parse as a real YAML mapping, so only the
+# window keeps that one from being mistaken for the actual response). A
+# fake-echo caller's response is its whole prompt echoed back, so both
+# can appear in the same text this function has to handle correctly.
+_PREAMBLE_SEARCH_WINDOW = 300
 
 
 def _strip_response_preamble(text: str) -> str:
@@ -120,27 +156,23 @@ def _strip_response_preamble(text: str) -> str:
     raw model response, so `_split_frontmatter`'s leading-`---` check finds
     the real front matter even when the caller added lead-in text or
     fenced the whole output. A no-op when `text` already starts with `---`,
-    and a no-op (original `text` returned untouched) when no rescuable
-    `---` line is found near the start -- nothing to rescue, so
-    `_split_frontmatter`'s own "missing YAML front matter" error still
-    reports the real raw output."""
+    and a no-op (original `text` returned untouched) when no `---` line
+    that actually opens a real YAML mapping is found near the start --
+    nothing to rescue, so `_split_frontmatter`'s own "missing YAML front
+    matter" error still reports the real raw output.
+
+    Every "---" line within `_PREAMBLE_SEARCH_WINDOW` characters of the
+    start is a candidate, checked in order via `_looks_like_real_
+    frontmatter` -- the first one that actually opens a real YAML mapping
+    wins, so an early build_prompt section separator (never a real
+    mapping) is skipped in favour of a later one within the window,
+    rather than accepted just for appearing first."""
     if text.startswith("---"):
         return text
-    # Fence check operates on an edge-trimmed copy (only the outermost
-    # blank lines around the fence itself, not internal whitespace) so a
-    # response with trailing/leading blank lines around the fence still
-    # matches; the frontmatter search below instead slices the *original*
-    # `text`, so any trailing content is preserved exactly as the model
-    # wrote it.
-    edge_trimmed = text.strip("\n")
-    if _LEADING_FENCE.match(edge_trimmed) and _TRAILING_FENCE.search(edge_trimmed):
-        candidate = _LEADING_FENCE.sub("", edge_trimmed, count=1)
-        candidate = _TRAILING_FENCE.sub("", candidate, count=1)
-        if candidate.startswith("---"):
-            return candidate
-    match = _FRONTMATTER_START.search(text[:_PREAMBLE_SEARCH_WINDOW])
-    if match:
-        return text[match.start():]
+    for match in _FRONTMATTER_START.finditer(text[:_PREAMBLE_SEARCH_WINDOW]):
+        candidate = text[match.start():]
+        if _looks_like_real_frontmatter(candidate):
+            return _strip_trailing_fence(candidate)
     return text
 
 

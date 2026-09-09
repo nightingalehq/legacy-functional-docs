@@ -245,6 +245,41 @@ def test_strip_response_preamble_leaves_text_with_no_frontmatter_at_all_unchange
     assert batch_mod._strip_response_preamble(text) == text
 
 
+def test_strip_response_preamble_does_not_treat_a_prompt_section_separator_as_frontmatter():
+    """Reviewer-flagged false positive (PR #152): build_prompt joins its own
+    sections with a bare "\\n\\n---\\n\\n" separator -- a fake-echo caller's
+    response is literally its whole prompt echoed back, so that separator
+    (followed by ordinary prose, not a YAML mapping) sits right near the
+    start of the "response" text too. This must be left alone rather than
+    mistaken for a real front-matter start and used to truncate everything
+    before it."""
+    text = (
+        "# Fact brief: MMP0100\n\n"
+        "some fact content here [[MMP0100:1]].\n\n"
+        "---\n\n"
+        "A test brief (`mfdoc test-plan`) already exists for this member.\n\n"
+        "---\n\n"
+        "Write the complete document, starting with the front matter.\n"
+    )
+    assert batch_mod._strip_response_preamble(text) == text
+
+
+def test_strip_response_preamble_ignores_a_frontmatter_example_beyond_the_search_window():
+    """A worked front-matter *example* quoted verbatim inside a prompt's own
+    writing-rules/template text does parse as a real YAML mapping (unlike
+    build_prompt's bare separators) -- but it's not the actual response,
+    so it must not be mistaken for one just because it happens to appear
+    somewhere in a long fake-echo "response". Bounding the search to near
+    the start (where a genuine preamble always is) keeps this safe without
+    needing to tell the two cases apart any other way."""
+    filler = "x" * 500
+    text = (
+        f"# Instructions\n\n{filler}\n\n"
+        '---\ntitle: "example"\ndoc_type: module\n---\nexample body\n'
+    )
+    assert batch_mod._strip_response_preamble(text) == text
+
+
 def test_written_doc_survives_a_wrapped_and_prefaced_claude_cli_response(indexed_db, tmp_path):
     """End-to-end: a caller (standing in for ClaudeCLICaller) that wraps its
     otherwise-valid response in a code fence with lead-in commentary must
