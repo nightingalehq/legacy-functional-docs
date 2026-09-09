@@ -143,18 +143,27 @@ def _opens_a_block(construct: str | None) -> bool:
 
 # A generic, dialect-agnostic "this line closes a block" shape, covering
 # both text-based dialects this repo currently supports: Natural's
-# `END-<CONSTRUCT>` (END-DECIDE, END-FOR, END-REPEAT, END-ERROR, ...) and
-# Mantis's bare `END`. Used only as a heuristic bound on how far an
-# unresolved block extent (`_opens_a_block` true, `end_line` still NULL)
-# can be trusted to reach -- DECIDE/FOR/REPEAT/ON ERROR/AT-EVENT never get
-# their own `end_line` backfilled today (only IF/ELSE do, via
+# `END-<CONSTRUCT>` and Mantis's bare `END`. Used only as a heuristic bound
+# on how far an unresolved block extent (`_opens_a_block` true, `end_line`
+# still NULL) can be trusted to reach -- DECIDE/FOR/REPEAT/ON ERROR/AT-EVENT
+# never get their own `end_line` backfilled today (only IF/ELSE do, via
 # `natural.py`'s `if_rule_ids`/`else_rule_ids`), so without this check a
 # call *after* such a block's real end would still read as enclosed by it
-# (Copilot review on PR #151). A plain text match, not a reparse: good
-# enough for this best-effort narrative synthesis, where an occasional
-# miss costs a slightly less precise guard-chain summary, never a wrong
-# citation (this never touches what a document is allowed to cite).
-_BLOCK_CLOSE_LINE_RE = re.compile(r"^\s*END(-[A-Z]+)?\s*$", re.IGNORECASE)
+# (Copilot review on PR #151).
+#
+# Deliberately narrower than "any END-<WORD> line": natural.py's own
+# `_END_TO_OPENERS` is the authority on which END-forms actually pop an
+# open_blocks entry -- END-FIND/END-READ/END-HISTOGRAM/END-WORK/END-ALL/
+# END-SUBROUTINE/END-BEFORE/END-PROCESS never do (FIND/READ/HISTOGRAM don't
+# even push onto open_blocks at all -- see that dict's own comment), so
+# matching them here would let a data-access loop's own closing line get
+# mistaken for closing an unrelated, still-open DECIDE/FOR/etc. around it.
+# This list is exactly `_END_TO_OPENERS`'s keys, spelled out as the actual
+# END-<CONSTRUCT> keyword each one closes.
+_BLOCK_CLOSE_LINE_RE = re.compile(
+    r"^\s*(END-(IF|DECIDE|FOR|REPEAT|ERROR|BREAK|ENDDATA|START|TOPPAGE|NOREC)|END)\s*$",
+    re.IGNORECASE,
+)
 
 
 def _has_intervening_close(conn, member_id: int, rule_rows: list, opened_line: int,

@@ -721,6 +721,52 @@ def test_module_brief_guard_chain_nested_block_close_does_not_close_the_outer_bl
     assert after_decide == "- calls `AFTER-DECIDE` (`CALLNAT`) [[ORDER-CTRL:7]]"
 
 
+def test_module_brief_guard_chain_ignores_a_data_access_loops_own_end_line():
+    """Copilot review on PR #151: `_BLOCK_CLOSE_LINE_RE` must not match
+    `END-FIND`/`END-READ`/`END-HISTOGRAM` (or `END-WORK`/`END-ALL`/
+    `END-SUBROUTINE`/`END-BEFORE`/`END-PROCESS`) -- none of those pop
+    `open_blocks` in natural.py (`_END_TO_OPENERS`'s own keys), and
+    FIND/READ/HISTOGRAM never push onto it at all. A FIND...END-FIND data
+    access loop entirely inside a still-open DECIDE must not be mistaken
+    for closing that DECIDE."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA
+    from mfdoc.dialects import natural
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'ORDER-CTRL', 'natural')")
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (2, 'SCHEDULE-RESET', 'natural')")
+
+    caller_src = (
+        "DECIDE FOR FIRST CONDITION\n"                       # line 1
+        "  FIND (1) WIDGET-VIEW WITH WIDGET-KEY = 'X'\n"      # line 2
+        "    MOVE 'Y' TO #FLAG\n"                             # line 3
+        "  END-FIND\n"                                        # line 4 -- not a block close
+        "  CALLNAT 'STILL-IN-DECIDE'\n"                        # line 5
+        "END-DECIDE\n"                                         # line 6
+        "CALLNAT 'SCHEDULE-RESET'\n"                           # line 7
+    )
+    caller_lines = [(i + 1, None, t) for i, t in enumerate(caller_src.splitlines())]
+    natural.extract(conn, 1, caller_lines, "ORDER-CTRL")
+
+    callee_src = "FIND (1) SCHED-VIEW WITH SCHED-KEY = 'RESET'\n  MOVE ' ' TO SCHED-VIEW.SCHED-STATUS\nEND-FIND\n"
+    callee_lines = [(i + 1, None, t) for i, t in enumerate(callee_src.splitlines())]
+    natural.extract(conn, 2, callee_lines, "SCHEDULE-RESET")
+
+    brief = module_brief(conn, "SCHEDULE-RESET", redact=NULL_REDACTOR)
+    inbound_section = brief.split("## Inbound callers", 1)[1].split("## ", 1)[0]
+
+    still_in_decide = [
+        line for line in inbound_section.splitlines() if "`STILL-IN-DECIDE`" in line
+    ]
+    assert len(still_in_decide) == 1
+    assert "DECIDE FOR FIRST CONDITION" in still_in_decide[0]
+    assert "guard condition not captured" in still_in_decide[0]
+
+
 def test_module_brief_redacts_guard_chain_condition_text():
     """The guard-chain condition text synthesized by `_caller_guard_chain` is
     raw source (`rule_candidate.condition`), same as every other condition
