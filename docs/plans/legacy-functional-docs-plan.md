@@ -13,6 +13,34 @@ GitHub org.
   flows and the gap register, where judgement matters most.
 
 **Progress (2026-09-09):**
+- Fixed issue #148: `natural.py`'s `FIND`/`READ`/`HISTOGRAM` deliberately
+  never push onto `open_blocks` (nesting integrity -- see
+  `_END_TO_OPENERS`'s comment), which left statements between the verb line
+  and its own `END-FIND`/`END-READ`/`END-HISTOGRAM` with no scope signal
+  tying them to "this runs once per record actually found/matched." For a
+  single-record `FIND (n) ... WITH <key>` existence check with no
+  `IF`/`ELSE` in sight, the narrative stage had nothing but line adjacency
+  to infer the found-branch shape from, and could (and did, on a real
+  engagement) invert it -- narrating a found-branch assignment block as "the
+  assumed default when not found."
+  - Added `data_access.end_line` (new column, migrated via
+    `_COLUMN_MIGRATIONS`): the found-body extent for a FIND/READ/HISTOGRAM
+    row, resolved from its own matching END- keyword via a new,
+    deliberately separate `access_opens` per-verb stack in `natural.py`'s
+    `extract()`/`_match_data_access()`/`_match_rules()` -- never touching
+    `open_blocks`, so the nesting-integrity fix stays intact.
+  - `brief.py`'s "Data access" section now renders a `found-body extent
+    [[MEMBER:LINE-LINE]]` fact on any FIND/READ/HISTOGRAM row whose extent
+    resolved, with an explicit "no implicit not-found branch" sentence.
+    `reference/writing-rules.md` gained a matching "Inventing a not-found
+    branch for FIND/READ/HISTOGRAM" rule.
+  - Checked `mantis.py` for the equivalent idiom (issue's own suggestion):
+    Mantis's `GET`/`OBTAIN` are single-line statements with no `END-GET`/
+    body block of their own (unlike Natural's `FIND`/`READ`/`HISTOGRAM`), so
+    there's no analogous verb-owned line range to record. A Mantis loop
+    shape (`WHILE`/`FOR` wrapping repeated `GET`s) already gets `end_line`
+    under mantis.py's existing block-extent tracking (issue #132) --
+    out of scope here, left as-is.
 - Fixed issue #150: `--provider claude-code` (`ClaudeCLICaller`) runs Claude
   Code itself in headless mode, not a bare completion like `AnthropicCaller`/
   `VertexCaller` -- on real `mfdoc batch`/`test-batch` volume this produced
