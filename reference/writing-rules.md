@@ -177,14 +177,14 @@ work the documentation exists to do for them.
 
 **Before** (statement-first — describes the code, leaves intent implicit):
 > The routine performs a `FIND` on `SCHED-VIEW` with `SCHED-KEY` held equal to
-> `'RESET'` [[MMS0100:40]], then moves blanks to `SCHED-VIEW.SCHED-STATUS` and
-> `SCHED-VIEW.LAST-RUN-DATE` [[MMS0100:41-42]].
+> `'RESET'` [[MMP0100:40]], then moves blanks to `SCHED-VIEW.SCHED-STATUS` and
+> `SCHED-VIEW.LAST-RUN-DATE` [[MMP0100:41-42]].
 
 **After** (business-first — trigger and action lead, the same facts follow as
 support):
-> When a reset record exists for the schedule [[MMS0100:40]], the routine clears
+> When a reset record exists for the schedule [[MMP0100:40]], the routine clears
 > the schedule's tracking fields back to their initial state — status and last-run
-> date are both blanked [[MMS0100:41-42]].
+> date are both blanked [[MMP0100:41-42]].
 
 Both sentences cite the same lines and assert nothing the first doesn't. The
 difference is only which fact leads: the first makes the reader infer that a
