@@ -1821,7 +1821,8 @@
       "key_source_line": null,
       "key_source_expr": null,
       "raw": "FIND ORDER-VIEW WITH ORDER-NO = #ORDER-NO",
-      "confidence": "verified"
+      "confidence": "verified",
+      "end_line": 65
     },
     {
       "id": 2,
@@ -1837,7 +1838,8 @@
       "key_source_line": null,
       "key_source_expr": null,
       "raw": "READ STOCK-VIEW BY GRADE-CODE STARTING FROM ORDER-VIEW.GRADE-CODE",
-      "confidence": "verified"
+      "confidence": "verified",
+      "end_line": 50
     },
     {
       "id": 3,
@@ -1853,7 +1855,8 @@
       "key_source_line": null,
       "key_source_expr": null,
       "raw": "UPDATE ORDER-VIEW",
-      "confidence": "verified"
+      "confidence": "verified",
+      "end_line": null
     },
     {
       "id": 4,
@@ -1869,7 +1872,8 @@
       "key_source_line": null,
       "key_source_expr": null,
       "raw": "STORE AUDIT-VIEW",
-      "confidence": "verified"
+      "confidence": "verified",
+      "end_line": null
     },
     {
       "id": 5,
@@ -1885,7 +1889,8 @@
       "key_source_line": null,
       "key_source_expr": null,
       "raw": "FIND (1) CERT-VIEW WITH CERT-NO = #CERT-NO",
-      "confidence": "verified"
+      "confidence": "verified",
+      "end_line": 20
     },
     {
       "id": 6,
@@ -1901,7 +1906,8 @@
       "key_source_line": null,
       "key_source_expr": null,
       "raw": "F1. FIND ORDER-VIEW WITH ORDER-NO = #ORDER-NO",
-      "confidence": "verified"
+      "confidence": "verified",
+      "end_line": 40
     },
     {
       "id": 7,
@@ -1917,7 +1923,8 @@
       "key_source_line": null,
       "key_source_expr": null,
       "raw": "UPDATE(F1.)",
-      "confidence": "verified"
+      "confidence": "verified",
+      "end_line": null
     },
     {
       "id": 8,
@@ -1933,7 +1940,8 @@
       "key_source_line": null,
       "key_source_expr": null,
       "raw": "STORE HOLD-VIEW",
-      "confidence": "verified"
+      "confidence": "verified",
+      "end_line": null
     },
     {
       "id": 9,
@@ -1949,7 +1957,8 @@
       "key_source_line": null,
       "key_source_expr": null,
       "raw": "F1. FIND ORDER-VIEW WITH ORDER-STATUS = 'HELD'",
-      "confidence": "verified"
+      "confidence": "verified",
+      "end_line": 14
     },
     {
       "id": 10,
@@ -1965,7 +1974,8 @@
       "key_source_line": null,
       "key_source_expr": null,
       "raw": "UPDATE (F1.)",
-      "confidence": "verified"
+      "confidence": "verified",
+      "end_line": null
     },
     {
       "id": 11,
@@ -1981,7 +1991,8 @@
       "key_source_line": null,
       "key_source_expr": null,
       "raw": "DELETE (X9.)",
-      "confidence": "unresolved"
+      "confidence": "unresolved",
+      "end_line": null
     },
     {
       "id": 12,
@@ -1997,7 +2008,8 @@
       "key_source_line": null,
       "key_source_expr": null,
       "raw": "FIND (10) MILL-ORDER WITH GRADE-CODE = 'X9'",
-      "confidence": "verified"
+      "confidence": "verified",
+      "end_line": null
     },
     {
       "id": 13,
@@ -2013,7 +2025,8 @@
       "key_source_line": null,
       "key_source_expr": null,
       "raw": "FIND (10) MILL-ORDER WITH GRADE-CODE = 'X9'",
-      "confidence": "verified"
+      "confidence": "verified",
+      "end_line": null
     },
     {
       "id": 14,
@@ -2029,7 +2042,8 @@
       "key_source_line": null,
       "key_source_expr": null,
       "raw": "READM(ORDERMST, ORDER_NO)",
-      "confidence": "verified"
+      "confidence": "verified",
+      "end_line": null
     },
     {
       "id": 15,
@@ -2045,7 +2059,8 @@
       "key_source_line": null,
       "key_source_expr": null,
       "raw": "OBTAIN ORDVIEW WHERE ORDER_NO = ORDER_NO",
-      "confidence": "verified"
+      "confidence": "verified",
+      "end_line": null
     },
     {
       "id": 16,
@@ -2061,7 +2076,8 @@
       "key_source_line": null,
       "key_source_expr": null,
       "raw": "RDNXT(ORDLINE, ORDER_NO)",
-      "confidence": "verified"
+      "confidence": "verified",
+      "end_line": null
     },
     {
       "id": 17,
@@ -2077,7 +2093,8 @@
       "key_source_line": null,
       "key_source_expr": null,
       "raw": "WRITM(ORDERMST, ORDER_NO)",
-      "confidence": "verified"
+      "confidence": "verified",
+      "end_line": null
     },
     {
       "id": 18,
@@ -2093,7 +2110,8 @@
       "key_source_line": null,
       "key_source_expr": null,
       "raw": "ADD-M(SCHEDVIEW)",
-      "confidence": "verified"
+      "confidence": "verified",
+      "end_line": null
     }
   ],
   "call_edge": [
