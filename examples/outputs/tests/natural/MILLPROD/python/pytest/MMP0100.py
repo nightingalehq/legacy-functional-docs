@@ -67,21 +67,21 @@ def test_plant_code_matches_param_unresolved(stock_view):
 
 
 def test_avail_total_meets_full_weight_sets_status_rlsd(order_view):
-    # MMP0100:BR-011 [[MMP0100:53]]
+    # MMP0100:BR-012 [[MMP0100:53]]
     # Branch: WHEN #AVAIL-TOTAL >= ORDER-VIEW.ORDER-WEIGHT
     # Consequence [[MMP0100:54]]: MOVE 'RLSD' TO ORDER-VIEW.ORDER-STATUS
     ...
 
 
 def test_avail_total_meets_tolerance_threshold_sets_status_part(order_view):
-    # MMP0100:BR-013 [[MMP0100:55]]
+    # MMP0100:BR-014 [[MMP0100:55]]
     # Branch: WHEN #AVAIL-TOTAL >= ORDER-VIEW.ORDER-WEIGHT * (1 - #TOLERANCE-PCT / 100)
     # Consequence [[MMP0100:56]]: MOVE 'PART' TO ORDER-VIEW.ORDER-STATUS
     ...
 
 
 def test_when_none_sets_return_code_30_and_escapes():
-    # MMP0100:BR-015 [[MMP0100:58]]
+    # MMP0100:BR-016 [[MMP0100:58]]
     # Branch: WHEN NONE
     # Consequence [[MMP0100:59-60]]: MOVE 30 TO #RETURN-CODE / ESCAPE ROUTINE
     ...

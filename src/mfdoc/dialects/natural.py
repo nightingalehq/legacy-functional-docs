@@ -732,9 +732,12 @@ def extract(conn, member_id: int, lines: list[tuple[int, str | None, str]], memb
             matched = _match_arithmetic(conn, member_id, line_no, stmt, masked, depth)
 
         if not matched:
+            matched = _match_arithmetic_low_confidence(conn, member_id, line_no, stmt, masked, depth)
+
+        if not matched:
             matched = RE_COMPUTE.match(masked) or RE_END_ANY.match(masked) \
                 or RE_RESET.match(masked) or RE_IGNORE.match(masked) \
-                or RE_SET_CONTROL.match(masked) or RE_BARE_ASSIGN.match(masked) \
+                or RE_SET_CONTROL.match(masked) \
                 or RE_BARE_LABEL.match(masked) or RE_DEFINE_WINDOW.match(masked)
 
         # ---------------------------------------------- labelled statements
@@ -766,9 +769,11 @@ def extract(conn, member_id: int, lines: list[tuple[int, str | None, str]], memb
             if not matched:
                 matched = _match_arithmetic(conn, member_id, line_no, stmt2, masked2, depth)
             if not matched:
+                matched = _match_arithmetic_low_confidence(conn, member_id, line_no, stmt2, masked2, depth)
+            if not matched:
                 matched = RE_COMPUTE.match(masked2) or RE_END_ANY.match(masked2) \
                     or RE_RESET.match(masked2) or RE_IGNORE.match(masked2) \
-                    or RE_SET_CONTROL.match(masked2) or RE_BARE_ASSIGN.match(masked2)
+                    or RE_SET_CONTROL.match(masked2)
 
         if not matched and line_no in folded_lines:
             # Already folded into the statement it continues -- see
@@ -1093,6 +1098,38 @@ def _match_arithmetic(conn, member_id, line_no, stmt, masked, depth) -> bool:
            construct=verb, condition=stmt.strip()[:500] or None,
            depth=depth, fields_used=fields[:500] or None, literals=lits[:500] or None,
            raw=stmt.strip()[:500])
+    return True
+
+
+def _match_arithmetic_low_confidence(conn, member_id, line_no, stmt, masked, depth) -> bool:
+    """Fallback for a COMPUTE/ADD/SUBTRACT/MULTIPLY/DIVIDE/MOVE/EXAMINE/bare
+    `:=` assignment that _match_arithmetic declined to capture only because
+    its RHS has no literal -- a pure variable-to-variable or variable-to-
+    array-element move (e.g. `#REF := #ARRAY(#INDEX)`). Previously such a
+    statement reached extract()'s own last-resort matcher, which set
+    matched=True purely because the regex matched syntactically, without
+    ever calling insert() -- leaving the statement with *no* trace
+    anywhere: no rule_candidate (nothing to capture the decision), and
+    (since "matched" suppresses the unparsed_line path too) no gap either.
+    A pure variable/array-element reassignment can still be the load-
+    bearing statement in a routine (re-anchoring a loop's own control
+    variable, say) -- worth surfacing, just not with the same confidence
+    as a literal-bearing decision (issue #149).
+
+    The classic loop-counter idiom (ADD 1 TO x / SUBTRACT 1 FROM x) stays
+    excluded here too, same as _match_arithmetic -- still not a business
+    decision even at this lower confidence tier.
+    """
+    is_keyword_form = RE_COMPUTE.match(masked)
+    is_bare_assign = not is_keyword_form and RE_BARE_ASSIGN.match(masked)
+    if not (is_keyword_form or is_bare_assign) or RE_LOOP_COUNTER.match(masked):
+        return False
+    verb = masked.split()[0].upper() if is_keyword_form else "ASSIGN"
+    fields, lits = _condition_facts(stmt)
+    insert(conn, "rule_candidate", member_id=member_id, line_no=line_no,
+           construct=verb, condition=stmt.strip()[:500] or None,
+           depth=depth, fields_used=fields[:500] or None, literals=lits[:500] or None,
+           raw=stmt.strip()[:500], confidence="low")
     return True
 
 

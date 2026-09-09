@@ -2844,6 +2844,20 @@
     {
       "id": 12,
       "member_id": 4,
+      "line_no": 48,
+      "end_line": null,
+      "pair_line_no": null,
+      "construct": "ADD",
+      "condition": "ADD STOCK-VIEW.AVAIL-WEIGHT TO #AVAIL-TOTAL",
+      "depth": 1,
+      "fields_used": "ADD,STOCK-VIEW.AVAIL-WEIGHT,AVAIL-TOTAL",
+      "literals": null,
+      "raw": "ADD STOCK-VIEW.AVAIL-WEIGHT TO #AVAIL-TOTAL",
+      "confidence": "low"
+    },
+    {
+      "id": 13,
+      "member_id": 4,
       "line_no": 52,
       "end_line": null,
       "pair_line_no": null,
@@ -2856,7 +2870,7 @@
       "confidence": "verified"
     },
     {
-      "id": 13,
+      "id": 14,
       "member_id": 4,
       "line_no": 53,
       "end_line": null,
@@ -2870,7 +2884,7 @@
       "confidence": "verified"
     },
     {
-      "id": 14,
+      "id": 15,
       "member_id": 4,
       "line_no": 54,
       "end_line": null,
@@ -2884,7 +2898,7 @@
       "confidence": "verified"
     },
     {
-      "id": 15,
+      "id": 16,
       "member_id": 4,
       "line_no": 55,
       "end_line": null,
@@ -2898,7 +2912,7 @@
       "confidence": "verified"
     },
     {
-      "id": 16,
+      "id": 17,
       "member_id": 4,
       "line_no": 56,
       "end_line": null,
@@ -2912,7 +2926,7 @@
       "confidence": "verified"
     },
     {
-      "id": 17,
+      "id": 18,
       "member_id": 4,
       "line_no": 58,
       "end_line": null,
@@ -2926,7 +2940,7 @@
       "confidence": "verified"
     },
     {
-      "id": 18,
+      "id": 19,
       "member_id": 4,
       "line_no": 59,
       "end_line": null,
@@ -2940,7 +2954,7 @@
       "confidence": "verified"
     },
     {
-      "id": 19,
+      "id": 20,
       "member_id": 4,
       "line_no": 60,
       "end_line": null,
@@ -2954,7 +2968,7 @@
       "confidence": "verified"
     },
     {
-      "id": 20,
+      "id": 21,
       "member_id": 5,
       "line_no": 12,
       "end_line": 14,
@@ -2968,7 +2982,7 @@
       "confidence": "verified"
     },
     {
-      "id": 21,
+      "id": 22,
       "member_id": 5,
       "line_no": 16,
       "end_line": null,
@@ -2982,7 +2996,7 @@
       "confidence": "verified"
     },
     {
-      "id": 22,
+      "id": 23,
       "member_id": 5,
       "line_no": 21,
       "end_line": null,
@@ -2996,7 +3010,7 @@
       "confidence": "verified"
     },
     {
-      "id": 23,
+      "id": 24,
       "member_id": 5,
       "line_no": 24,
       "end_line": null,
@@ -3010,7 +3024,7 @@
       "confidence": "verified"
     },
     {
-      "id": 24,
+      "id": 25,
       "member_id": 6,
       "line_no": 33,
       "end_line": null,
@@ -3024,7 +3038,7 @@
       "confidence": "verified"
     },
     {
-      "id": 25,
+      "id": 26,
       "member_id": 6,
       "line_no": 34,
       "end_line": null,
@@ -3038,7 +3052,7 @@
       "confidence": "verified"
     },
     {
-      "id": 26,
+      "id": 27,
       "member_id": 6,
       "line_no": 35,
       "end_line": null,
@@ -3052,7 +3066,7 @@
       "confidence": "verified"
     },
     {
-      "id": 27,
+      "id": 28,
       "member_id": 6,
       "line_no": 37,
       "end_line": null,
@@ -3066,7 +3080,7 @@
       "confidence": "verified"
     },
     {
-      "id": 28,
+      "id": 29,
       "member_id": 6,
       "line_no": 38,
       "end_line": null,
@@ -3080,7 +3094,63 @@
       "confidence": "verified"
     },
     {
-      "id": 29,
+      "id": 30,
+      "member_id": 6,
+      "line_no": 42,
+      "end_line": null,
+      "pair_line_no": null,
+      "construct": "MOVE",
+      "condition": "MOVE #ORDER-NO TO HOLD-VIEW.ORDER-NO",
+      "depth": 0,
+      "fields_used": "MOVE,ORDER-NO,HOLD-VIEW.ORDER-NO",
+      "literals": null,
+      "raw": "MOVE #ORDER-NO TO HOLD-VIEW.ORDER-NO",
+      "confidence": "low"
+    },
+    {
+      "id": 31,
+      "member_id": 6,
+      "line_no": 43,
+      "end_line": null,
+      "pair_line_no": null,
+      "construct": "MOVE",
+      "condition": "MOVE #HOLD-REASON TO HOLD-VIEW.HOLD-REASON",
+      "depth": 0,
+      "fields_used": "MOVE,HOLD-REASON,HOLD-VIEW.HOLD-REASON",
+      "literals": null,
+      "raw": "MOVE #HOLD-REASON TO HOLD-VIEW.HOLD-REASON",
+      "confidence": "low"
+    },
+    {
+      "id": 32,
+      "member_id": 6,
+      "line_no": 44,
+      "end_line": null,
+      "pair_line_no": null,
+      "construct": "MOVE",
+      "condition": "MOVE #TODAY TO HOLD-VIEW.HOLD-DATE",
+      "depth": 0,
+      "fields_used": "MOVE,TODAY,HOLD-VIEW.HOLD-DATE",
+      "literals": null,
+      "raw": "MOVE #TODAY TO HOLD-VIEW.HOLD-DATE",
+      "confidence": "low"
+    },
+    {
+      "id": 33,
+      "member_id": 6,
+      "line_no": 45,
+      "end_line": null,
+      "pair_line_no": null,
+      "construct": "MOVE",
+      "condition": "MOVE #INSPECTOR-ID TO HOLD-VIEW.INSPECTOR-ID",
+      "depth": 0,
+      "fields_used": "MOVE,INSPECTOR-ID,HOLD-VIEW.INSPECTOR-ID",
+      "literals": null,
+      "raw": "MOVE #INSPECTOR-ID TO HOLD-VIEW.INSPECTOR-ID",
+      "confidence": "low"
+    },
+    {
+      "id": 34,
       "member_id": 6,
       "line_no": 46,
       "end_line": null,
@@ -3094,7 +3164,7 @@
       "confidence": "verified"
     },
     {
-      "id": 30,
+      "id": 35,
       "member_id": 7,
       "line_no": 14,
       "end_line": 17,
@@ -3108,7 +3178,7 @@
       "confidence": "verified"
     },
     {
-      "id": 31,
+      "id": 36,
       "member_id": 7,
       "line_no": 16,
       "end_line": null,
@@ -3122,7 +3192,7 @@
       "confidence": "verified"
     },
     {
-      "id": 32,
+      "id": 37,
       "member_id": 10,
       "line_no": 12,
       "end_line": 14,
@@ -3136,7 +3206,7 @@
       "confidence": "verified"
     },
     {
-      "id": 33,
+      "id": 38,
       "member_id": 11,
       "line_no": 9,
       "end_line": null,
@@ -3150,7 +3220,7 @@
       "confidence": "verified"
     },
     {
-      "id": 34,
+      "id": 39,
       "member_id": 11,
       "line_no": 11,
       "end_line": 12,
@@ -3164,7 +3234,7 @@
       "confidence": "verified"
     },
     {
-      "id": 35,
+      "id": 40,
       "member_id": 14,
       "line_no": 12,
       "end_line": null,
@@ -3178,7 +3248,7 @@
       "confidence": "verified"
     },
     {
-      "id": 36,
+      "id": 41,
       "member_id": 15,
       "line_no": 9,
       "end_line": null,
@@ -3192,7 +3262,7 @@
       "confidence": "inferred"
     },
     {
-      "id": 37,
+      "id": 42,
       "member_id": 17,
       "line_no": 13,
       "end_line": null,
@@ -3206,7 +3276,7 @@
       "confidence": "verified"
     },
     {
-      "id": 38,
+      "id": 43,
       "member_id": 17,
       "line_no": 18,
       "end_line": null,
@@ -3220,7 +3290,7 @@
       "confidence": "verified"
     },
     {
-      "id": 39,
+      "id": 44,
       "member_id": 24,
       "line_no": 13,
       "end_line": 16,
@@ -3234,7 +3304,7 @@
       "confidence": "verified"
     },
     {
-      "id": 40,
+      "id": 45,
       "member_id": 24,
       "line_no": 14,
       "end_line": null,
@@ -3248,7 +3318,7 @@
       "confidence": "verified"
     },
     {
-      "id": 41,
+      "id": 46,
       "member_id": 24,
       "line_no": 18,
       "end_line": 21,
@@ -3262,7 +3332,7 @@
       "confidence": "verified"
     },
     {
-      "id": 42,
+      "id": 47,
       "member_id": 24,
       "line_no": 19,
       "end_line": null,
@@ -3276,7 +3346,7 @@
       "confidence": "verified"
     },
     {
-      "id": 43,
+      "id": 48,
       "member_id": 24,
       "line_no": 23,
       "end_line": 26,
@@ -3290,7 +3360,7 @@
       "confidence": "verified"
     },
     {
-      "id": 44,
+      "id": 49,
       "member_id": 24,
       "line_no": 24,
       "end_line": null,
@@ -3304,7 +3374,7 @@
       "confidence": "verified"
     },
     {
-      "id": 45,
+      "id": 50,
       "member_id": 24,
       "line_no": 27,
       "end_line": 32,
@@ -3318,7 +3388,7 @@
       "confidence": "verified"
     },
     {
-      "id": 46,
+      "id": 51,
       "member_id": 24,
       "line_no": 28,
       "end_line": 29,
@@ -3332,7 +3402,7 @@
       "confidence": "verified"
     },
     {
-      "id": 47,
+      "id": 52,
       "member_id": 24,
       "line_no": 30,
       "end_line": 32,
@@ -3346,7 +3416,7 @@
       "confidence": "verified"
     },
     {
-      "id": 48,
+      "id": 53,
       "member_id": 24,
       "line_no": 31,
       "end_line": null,
@@ -3360,7 +3430,7 @@
       "confidence": "verified"
     },
     {
-      "id": 49,
+      "id": 54,
       "member_id": 24,
       "line_no": 39,
       "end_line": 43,
@@ -3374,7 +3444,7 @@
       "confidence": "verified"
     },
     {
-      "id": 50,
+      "id": 55,
       "member_id": 24,
       "line_no": 41,
       "end_line": null,
@@ -3388,7 +3458,7 @@
       "confidence": "verified"
     },
     {
-      "id": 51,
+      "id": 56,
       "member_id": 25,
       "line_no": 14,
       "end_line": null,
@@ -3402,7 +3472,7 @@
       "confidence": "verified"
     },
     {
-      "id": 52,
+      "id": 57,
       "member_id": 25,
       "line_no": 16,
       "end_line": 18,
@@ -3416,7 +3486,7 @@
       "confidence": "verified"
     },
     {
-      "id": 53,
+      "id": 58,
       "member_id": 25,
       "line_no": 17,
       "end_line": null,
@@ -3430,7 +3500,7 @@
       "confidence": "verified"
     },
     {
-      "id": 54,
+      "id": 59,
       "member_id": 26,
       "line_no": 7,
       "end_line": 9,
@@ -5879,7 +5949,7 @@
       "id": 151,
       "scope": "global",
       "name": "coverage.rule_candidates",
-      "value": "54"
+      "value": "59"
     },
     {
       "id": 152,

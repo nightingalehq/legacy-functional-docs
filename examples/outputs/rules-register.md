@@ -20,14 +20,15 @@ Every candidate business rule found across the index, keyed by its stable `MEMBE
 | **MMP0100:BR-007** | `MMP0100` | [[MMP0100:44]] | 0 | `IF` | `STOCK-VIEW.GRADE-CODE NE ORDER-VIEW.GRADE-CODE` | `` |
 | **MMP0100:BR-008** | `MMP0100` | [[MMP0100:45]] | 1 | `ESCAPE BOTTOM` | `` | `` |
 | **MMP0100:BR-009** | `MMP0100` | [[MMP0100:47]] | 0 | `IF` | `STOCK-VIEW.PLANT-CODE = #PLANT` | `` |
-| **MMP0100:BR-010** | `MMP0100` | [[MMP0100:52]] | 0 | `DECIDE FOR FIRST CONDITION` | `` | `` |
-| **MMP0100:BR-011** | `MMP0100` | [[MMP0100:53]] | 1 | `WHEN` | `#AVAIL-TOTAL >= ORDER-VIEW.ORDER-WEIGHT` | `` |
-| **MMP0100:BR-012** | `MMP0100` | [[MMP0100:54]] | 1 | `MOVE` | `MOVE 'RLSD' TO ORDER-VIEW.ORDER-STATUS` | `RLSD` |
-| **MMP0100:BR-013** | `MMP0100` | [[MMP0100:55]] | 1 | `WHEN` | `#AVAIL-TOTAL >= ORDER-VIEW.ORDER-WEIGHT * (1 - #TOLERANCE-PCT / 100)` | `1,100` |
-| **MMP0100:BR-014** | `MMP0100` | [[MMP0100:56]] | 1 | `MOVE` | `MOVE 'PART' TO ORDER-VIEW.ORDER-STATUS` | `PART` |
-| **MMP0100:BR-015** | `MMP0100` | [[MMP0100:58]] | 1 | `WHEN` | `NONE` | `` |
-| **MMP0100:BR-016** | `MMP0100` | [[MMP0100:59]] | 1 | `MOVE` | `MOVE 30 TO #RETURN-CODE` | `30` |
-| **MMP0100:BR-017** | `MMP0100` | [[MMP0100:60]] | 1 | `ESCAPE ROUTINE` | `` | `` |
+| **MMP0100:BR-010** | `MMP0100` | [[MMP0100:48]] | 1 | `ADD` | `ADD STOCK-VIEW.AVAIL-WEIGHT TO #AVAIL-TOTAL` | `` |
+| **MMP0100:BR-011** | `MMP0100` | [[MMP0100:52]] | 0 | `DECIDE FOR FIRST CONDITION` | `` | `` |
+| **MMP0100:BR-012** | `MMP0100` | [[MMP0100:53]] | 1 | `WHEN` | `#AVAIL-TOTAL >= ORDER-VIEW.ORDER-WEIGHT` | `` |
+| **MMP0100:BR-013** | `MMP0100` | [[MMP0100:54]] | 1 | `MOVE` | `MOVE 'RLSD' TO ORDER-VIEW.ORDER-STATUS` | `RLSD` |
+| **MMP0100:BR-014** | `MMP0100` | [[MMP0100:55]] | 1 | `WHEN` | `#AVAIL-TOTAL >= ORDER-VIEW.ORDER-WEIGHT * (1 - #TOLERANCE-PCT / 100)` | `1,100` |
+| **MMP0100:BR-015** | `MMP0100` | [[MMP0100:56]] | 1 | `MOVE` | `MOVE 'PART' TO ORDER-VIEW.ORDER-STATUS` | `PART` |
+| **MMP0100:BR-016** | `MMP0100` | [[MMP0100:58]] | 1 | `WHEN` | `NONE` | `` |
+| **MMP0100:BR-017** | `MMP0100` | [[MMP0100:59]] | 1 | `MOVE` | `MOVE 30 TO #RETURN-CODE` | `30` |
+| **MMP0100:BR-018** | `MMP0100` | [[MMP0100:60]] | 1 | `ESCAPE ROUTINE` | `` | `` |
 | **MMP0200:BR-001** | `MMP0200` | [[MMP0200:12]] | 0 | `IF` | `#CERT-NO = ' '` | ` ` |
 | **MMP0200:BR-002** | `MMP0200` | [[MMP0200:16]] | 0 | `IF NO RECORDS FOUND` | `no records found for preceding database loop` | `` |
 | **MMP0200:BR-003** | `MMP0200` | [[MMP0200:21]] | 0 | `MOVE` | `MOVE 'MMP0300' TO #PGM` | `MMP0300` |
@@ -37,7 +38,11 @@ Every candidate business rule found across the index, keyed by its stable `MEMBE
 | **MMP0400:BR-003** | `MMP0400` | [[MMP0400:35]] | 1 | `ESCAPE ROUTINE` | `` | `` |
 | **MMP0400:BR-004** | `MMP0400` | [[MMP0400:37]] | 0 | `REJECT IF` | `ORDER-VIEW.ORDER-STATUS = 'HELD'` | `HELD` |
 | **MMP0400:BR-005** | `MMP0400` | [[MMP0400:38]] | 0 | `MOVE` | `MOVE 'HELD' TO ORDER-VIEW.ORDER-STATUS` | `HELD` |
-| **MMP0400:BR-006** | `MMP0400` | [[MMP0400:46]] | 0 | `MOVE` | `MOVE 'OPEN' TO HOLD-VIEW.HOLD-STATUS` | `OPEN` |
+| **MMP0400:BR-006** | `MMP0400` | [[MMP0400:42]] | 0 | `MOVE` | `MOVE #ORDER-NO TO HOLD-VIEW.ORDER-NO` | `` |
+| **MMP0400:BR-007** | `MMP0400` | [[MMP0400:43]] | 0 | `MOVE` | `MOVE #HOLD-REASON TO HOLD-VIEW.HOLD-REASON` | `` |
+| **MMP0400:BR-008** | `MMP0400` | [[MMP0400:44]] | 0 | `MOVE` | `MOVE #TODAY TO HOLD-VIEW.HOLD-DATE` | `` |
+| **MMP0400:BR-009** | `MMP0400` | [[MMP0400:45]] | 0 | `MOVE` | `MOVE #INSPECTOR-ID TO HOLD-VIEW.INSPECTOR-ID` | `` |
+| **MMP0400:BR-010** | `MMP0400` | [[MMP0400:46]] | 0 | `MOVE` | `MOVE 'OPEN' TO HOLD-VIEW.HOLD-STATUS` | `OPEN` |
 | **MMP9000:BR-001** | `MMP9000` | [[MMP9000:14]] | 0 | `IF` | `ORDER-VIEW.ORDER-STATUS = 'CONF' AND ORDER-VIEW.CUSTOMER-NO = 'C00123'` | `CONF,C00123` |
 | **MMP9000:BR-002** | `MMP9000` | [[MMP9000:16]] | 1 | `MOVE` | `MOVE 1 TO #FLAG` | `1` |
 | **MMP9300:BR-001** | `MMP9300` | [[MMP9300:12]] | 0 | `IF` | `#STATUS = 'A'` | `A` |
@@ -64,5 +69,5 @@ Every candidate business rule found across the index, keyed by its stable `MEMBE
 | **PRODSCHED:BR-003** | `PRODSCHED` | [[PRODSCHED:17]] | 1 | `ASSIGN` | `MSG = "Schedule could not be added"` | `Schedule could not be added` |
 | **SCRNENT:BR-001** | `SCRNENT` | [[SCRNENT:7]] | 0 | `IF` | `CH_UNIT = " "` | ` ` |
 
-Total: 54 rule candidate(s) across 18 batchable module(s).
+Total: 59 rule candidate(s) across 18 batchable module(s).
 

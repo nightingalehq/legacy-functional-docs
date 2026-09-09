@@ -12,6 +12,53 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-09):**
+- Fixed issue #149: `natural.py`'s `_match_arithmetic` deliberately skips a
+  COMPUTE/ADD/SUBTRACT/MULTIPLY/DIVIDE/MOVE/EXAMINE/bare-`:=` assignment
+  whose RHS has no literal (a pure variable/array-element move, e.g. `#REF
+  := #ARRAY(#INDEX)`) — reasonable on its own, but such a statement then
+  fell through to `extract()`'s own last-resort matcher, which set
+  `matched=True` purely on regex match without ever calling `insert()`.
+  Net effect: the statement left *no* trace anywhere -- no `rule_candidate`,
+  and (since "matched" suppresses the `unparsed_line` path too) no gap
+  either. A real SME review had flagged exactly this shape's complete
+  absence from a generated document as a significant comprehension gap.
+  - Added `_match_arithmetic_low_confidence` (`natural.py`), tried in that
+    same last-resort fallback (both the main loop and the generic-label
+    rematch path) right before the truly-structural no-op checks
+    (RESET/IGNORE/SET CONTROL/etc.): same COMPUTE/bare-`:=` shape as
+    `_match_arithmetic`, same loop-counter exclusion (`ADD 1 TO`/`SUBTRACT
+    1 FROM` still stays silent, on purpose), but with the literal gate
+    dropped and every row tagged `confidence='low'` — a new value alongside
+    `rule_candidate.confidence`'s existing `verified`/`inferred` (schema
+    comment in `db.py` updated to document it). The statement now leaves a
+    real trace, distinguishable downstream from a real literal-bearing
+    decision.
+  - Against the bundled fixtures: 5 previously-silent statements now
+    surface as low-confidence `rule_candidate`s — MMP0100:48's `ADD
+    STOCK-VIEW.AVAIL-WEIGHT TO #AVAIL-TOTAL` accumulator and MMP0400:42-45's
+    four variable-to-variable MOVEs populating `HOLD-VIEW` before its
+    `STORE`. `rule_candidates` 54 -> 59 in `tests/test_coverage_snapshot.py`'s
+    snapshot; `MMP0100`'s already-narrated module doc renumbered its
+    `BR-010`..`BR-017` to `BR-011`..`BR-018` and gained a new `BR-010` for
+    the newly-surfaced accumulator (per `reference/writing-rules.md`'s
+    "Stable rule IDs" section: inserting a rule earlier in the source shifts
+    every later ID in that module, by design) — propagated to every
+    generated-test artifact under `examples/outputs/tests/.../MMP0100.*`
+    that referenced the shifted IDs, and to the deterministic overview docs
+    (`rules-register.md`, `rules-theme-register.md`, `complexity.md`,
+    `test-plan-register.md`, `index.json`/`index.db`) via their own `mfdoc`
+    commands. `MMP0400` has no narrated module doc yet, so its own 4 new
+    rules needed no manual renumbering.
+  - Scoped to Natural only, matching the issue's own repro; `mantis.py` was
+    checked (per the issue's own suggestion) and has no equivalent
+    fallback-swallow risk in its own arithmetic/assignment matching, so it
+    was left untouched, as the issue itself only asked to check it.
+  - Item 2 in the issue (loosening `_match_arithmetic`'s literal-only gate
+    itself for the narrower case of a control-value-carrying variable) is
+    left as a follow-up, per the issue's own framing of it as a stretch
+    goal beyond the core fix.
+
 **Progress (2026-09-08):**
 - Fixed issue #133: neither completeness mechanism caught a whole
   `call_edge`/`interaction` statement (a `DO`/`PERFORM` subroutine call, a

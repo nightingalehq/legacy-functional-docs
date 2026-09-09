@@ -9,7 +9,7 @@
   "entity_definition_rate": 0.7368,
   "entity_fields": 71,
   "data_accesses": 18,
-  "rule_candidates": 54,
+  "rule_candidates": 59,
   "invocation_edges": 15,
   "invocations_resolved": 3,
   "call_resolution_rate": 0.2,

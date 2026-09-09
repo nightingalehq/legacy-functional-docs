@@ -69,7 +69,7 @@ CALLNAT 'ASSERT-EQUAL' #EXPECTED #ACTUAL 'test_grade_code_mismatch_escapes_loop_
 * #ORDER-NO #PLANT #RETURN-CODE; branch consequence unresolved, no
 * CALLNAT 'ASSERT-*' can be written for this scenario ...
 *
-* MMP0100:BR-011 [[MMP0100:53]]
+* MMP0100:BR-012 [[MMP0100:53]]
 * Branch: WHEN #AVAIL-TOTAL >= ORDER-VIEW.ORDER-WEIGHT
 * Scenario: test_sufficient_stock_sets_order_status_rlsd
 *
@@ -81,7 +81,7 @@ MOVE 'RLSD' TO #EXPECTED
 MOVE ORDER-VIEW.ORDER-STATUS TO #ACTUAL
 CALLNAT 'ASSERT-EQUAL' #EXPECTED #ACTUAL 'test_sufficient_stock_sets_order_status_rlsd'
 *
-* MMP0100:BR-013 [[MMP0100:55]]
+* MMP0100:BR-014 [[MMP0100:55]]
 * Branch: WHEN #AVAIL-TOTAL >= ORDER-VIEW.ORDER-WEIGHT * (1 - #TOLERANCE-PCT / 100)
 * Scenario: test_partial_within_tolerance_sets_order_status_part
 *
@@ -94,7 +94,7 @@ MOVE 'PART' TO #EXPECTED
 MOVE ORDER-VIEW.ORDER-STATUS TO #ACTUAL
 CALLNAT 'ASSERT-EQUAL' #EXPECTED #ACTUAL 'test_partial_within_tolerance_sets_order_status_part'
 *
-* MMP0100:BR-015 [[MMP0100:58]]
+* MMP0100:BR-016 [[MMP0100:58]]
 * Branch: WHEN NONE
 * Scenario: test_insufficient_stock_beyond_tolerance_sets_return_code_30
 *

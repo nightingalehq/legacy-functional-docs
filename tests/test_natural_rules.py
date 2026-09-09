@@ -151,18 +151,66 @@ def test_continuation_folds_a_condition_that_wraps_before_the_connective(indexed
     assert "CUSTOMER-NO" in row["condition"]
 
 
-def test_pure_accumulation_without_a_literal_is_not_captured(indexed_db):
+def test_pure_accumulation_without_a_literal_is_captured_at_low_confidence(indexed_db):
     """`ADD STOCK-VIEW.AVAIL-WEIGHT TO #AVAIL-TOTAL` has no literal operand --
-    it's an accumulator, not a business threshold, and must not be captured
-    as a rule candidate (that would bury the moves that do matter)."""
+    it's an accumulator, not a business threshold, so it must not be
+    captured at full ('verified') confidence, the same tier as a real
+    literal-bearing decision (that would bury the moves that do matter).
+    But per issue #149, it must no longer vanish with zero trace either --
+    previously this fell through extract()'s last-resort matcher, which
+    marked it matched without recording anything at all (no rule_candidate,
+    no unparsed_line gap). It's now captured as a rule_candidate tagged
+    confidence='low', distinguishable from a real decision downstream."""
     conn = indexed_db
     row = conn.execute(
         """
-        SELECT 1 FROM rule_candidate rc JOIN member m ON m.id = rc.member_id
+        SELECT confidence FROM rule_candidate rc JOIN member m ON m.id = rc.member_id
         WHERE m.name='MMP0100' AND rc.construct='ADD' AND rc.condition LIKE '%AVAIL-TOTAL%'
         """
     ).fetchone()
-    assert row is None
+    assert row is not None, "expected the accumulator to be captured, just at low confidence"
+    assert row["confidence"] == "low"
+    gap = conn.execute(
+        """
+        SELECT 1 FROM gap g JOIN member m ON m.id = g.member_id
+        WHERE g.gap_kind='unparsed_line' AND m.name='MMP0100' AND g.raw LIKE '%AVAIL-TOTAL%'
+        """
+    ).fetchone()
+    assert gap is None, "must not also raise an unparsed_line gap now that it's captured"
+
+
+def test_bare_variable_to_variable_assignment_with_no_literal_is_captured_at_low_confidence():
+    """Core regression for issue #149: a pure variable/array-element
+    assignment with no literal anywhere in the statement (e.g. re-anchoring
+    a working variable to the value at a computed array position) fell
+    through _match_arithmetic's literal gate *and* extract()'s last-resort
+    matcher swallowed it silently -- matched=True, no rule_candidate, no
+    unparsed_line gap. Zero trace anywhere. It must now surface as a
+    low-confidence rule_candidate instead."""
+    conn = _extract("#REF := #ARRAY(#INDEX)\n")
+    row = conn.execute(
+        "SELECT construct, confidence, fields_used FROM rule_candidate WHERE line_no=1"
+    ).fetchone()
+    assert row is not None, "expected #REF := #ARRAY(#INDEX) to be captured, even at low confidence"
+    assert row["construct"] == "ASSIGN"
+    assert row["confidence"] == "low"
+    assert row["fields_used"] is not None and "REF" in row["fields_used"]
+    gap = conn.execute("SELECT 1 FROM gap WHERE gap_kind='unparsed_line' AND line_no=1").fetchone()
+    assert gap is None, "must not also raise an unparsed_line gap now that it's captured"
+
+
+def test_loop_counter_idiom_still_has_zero_trace():
+    """The classic loop-counter idiom (`ADD 1 TO x`/`SUBTRACT 1 FROM x`) is
+    excluded from _match_arithmetic on purpose (RE_LOOP_COUNTER) -- almost
+    never a business decision. That exclusion must survive the low-
+    confidence fallback too: still no rule_candidate at all, same as
+    before issue #149's fix (and still no unparsed_line gap, since the
+    idiom is a recognised, just deliberately uncaptured, construct)."""
+    conn = _extract("ADD 1 TO #COUNT\n")
+    row = conn.execute("SELECT 1 FROM rule_candidate WHERE line_no=1").fetchone()
+    assert row is None, "loop-counter idiom must still not become a rule_candidate"
+    gap = conn.execute("SELECT 1 FROM gap WHERE gap_kind='unparsed_line' AND line_no=1").fetchone()
+    assert gap is None, "loop-counter idiom must still not raise an unparsed_line gap"
 
 
 def test_reset_is_recognised_and_not_an_unparsed_line(indexed_db):

@@ -255,10 +255,17 @@ CREATE TABLE IF NOT EXISTS rule_candidate (
     fields_used   TEXT,                   -- comma separated field/variable names referenced
     literals      TEXT,                   -- literal values in the condition (magic numbers/codes)
     raw           TEXT NOT NULL,
-    confidence    TEXT NOT NULL DEFAULT 'verified'  -- verified | inferred -- 'inferred' for
-                                          -- reporting-mode LOOP/depth inference (issue #5),
+    confidence    TEXT NOT NULL DEFAULT 'verified'  -- verified | inferred | low -- 'inferred'
+                                          -- for reporting-mode LOOP/depth inference (issue #5),
                                           -- where nesting is read from indentation, not an
-                                          -- explicit END-* keyword
+                                          -- explicit END-* keyword; 'low' for a COMPUTE/ADD/
+                                          -- SUBTRACT/MULTIPLY/DIVIDE/MOVE/EXAMINE/bare-`:=`
+                                          -- assignment whose RHS has no literal -- the kind
+                                          -- of statement _match_arithmetic's literal gate
+                                          -- normally declines to capture -- surfaced instead
+                                          -- of being silently dropped with no trace at all
+                                          -- (issue #149); a pure loop-counter ADD 1 TO/
+                                          -- SUBTRACT 1 FROM stays excluded even at this tier
 );
 CREATE INDEX IF NOT EXISTS ix_rule_member ON rule_candidate(member_id);
 

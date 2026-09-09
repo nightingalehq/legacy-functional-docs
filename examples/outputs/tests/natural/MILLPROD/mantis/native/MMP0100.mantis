@@ -77,7 +77,7 @@ PERFORM MMP0100-UNDER-TEST
 * branch -- no ACTUAL-RESULT/EXPECTED-RESULT comparison is made here.
 DISPLAY 'UNRESOLVED test_stock_plant_matches_param_plant: no expected consequence in brief'
 *
-* MMP0100:BR-011 [[MMP0100:53]]
+* MMP0100:BR-012 [[MMP0100:53]]
 * Branch: WHEN #AVAIL-TOTAL >= ORDER-VIEW.ORDER-WEIGHT
 * Scenario: test_full_availability_sets_status_rlsd
 *
@@ -96,7 +96,7 @@ ELSE
     DISPLAY 'FAIL test_full_availability_sets_status_rlsd: expected ' EXPECTED-RESULT ' got ' ACTUAL-RESULT
 END-IF
 *
-* MMP0100:BR-013 [[MMP0100:55]]
+* MMP0100:BR-014 [[MMP0100:55]]
 * Branch: WHEN #AVAIL-TOTAL >= ORDER-VIEW.ORDER-WEIGHT * (1 - #TOLERANCE-PCT / 100)
 * Scenario: test_partial_availability_within_tolerance_sets_status_part
 *
@@ -117,7 +117,7 @@ ELSE
     DISPLAY 'FAIL test_partial_availability_within_tolerance_sets_status_part: expected ' EXPECTED-RESULT ' got ' ACTUAL-RESULT
 END-IF
 *
-* MMP0100:BR-015 [[MMP0100:58]]
+* MMP0100:BR-016 [[MMP0100:58]]
 * Branch: WHEN NONE
 * Scenario: test_no_matching_when_sets_return_code_30
 *
