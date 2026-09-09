@@ -511,6 +511,367 @@ def test_natural_brief_keeps_using_data_area_includes_out_of_program_variables()
 
 # --- issue #148: FIND/READ/HISTOGRAM found-body extent must reach the brief
 
+def test_module_brief_summarizes_single_callers_guard_chain():
+    """Issue #151: a subroutine reachable from exactly one call site should
+    have its "Inbound callers" section summarize the caller's own preceding
+    guard/validation call sequence (already recorded, in order, as
+    `call_edge` rows) rather than citing only the call line itself. Fixture:
+    `ORDER-CTRL` validates a customer and confirms a balance, each gated by
+    its own IF, before ever reaching the single call to `SCHEDULE-RESET`.
+
+    The first IF also has a literal-bearing `MOVE` statement ahead of its
+    `CALLNAT`, deliberately -- a statement-shaped `rule_candidate` has no
+    block of its own and must never be mistaken for the enclosing guard
+    (regression coverage for `_enclosing_condition`/`_opens_a_block`)."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA
+    from mfdoc.dialects import natural
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'ORDER-CTRL', 'natural')")
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (2, 'SCHEDULE-RESET', 'natural')")
+
+    caller_src = (
+        "IF #CUST-VALID\n"                    # line 1
+        "  MOVE 'Y' TO #CUST-FLAG\n"           # line 2 -- statement, not a guard
+        "  CALLNAT 'VALIDATE-CUSTOMER'\n"      # line 3
+        "END-IF\n"                             # line 4
+        "IF #BAL-CONFIRMED\n"                  # line 5
+        "  CALLNAT 'CONFIRM-BALANCE'\n"        # line 6
+        "END-IF\n"                             # line 7
+        "CALLNAT 'SCHEDULE-RESET'\n"           # line 8
+    )
+    caller_lines = [(i + 1, None, t) for i, t in enumerate(caller_src.splitlines())]
+    natural.extract(conn, 1, caller_lines, "ORDER-CTRL")
+
+    callee_src = (
+        "FIND (1) SCHED-VIEW WITH SCHED-KEY = 'RESET'\n"
+        "  MOVE ' ' TO SCHED-VIEW.SCHED-STATUS\n"
+        "END-FIND\n"
+    )
+    callee_lines = [(i + 1, None, t) for i, t in enumerate(callee_src.splitlines())]
+    natural.extract(conn, 2, callee_lines, "SCHEDULE-RESET")
+
+    brief = module_brief(conn, "SCHEDULE-RESET", redact=NULL_REDACTOR)
+    inbound_section = brief.split("## Inbound callers", 1)[1].split("## ", 1)[0]
+
+    assert "the only known call site" in inbound_section
+    assert "VALIDATE-CUSTOMER" in inbound_section
+    assert "CONFIRM-BALANCE" in inbound_section
+    assert "#CUST-VALID" in inbound_section
+    assert "#BAL-CONFIRMED" in inbound_section
+    assert "[[ORDER-CTRL:1]]" in inbound_section     # IF #CUST-VALID
+    assert "[[ORDER-CTRL:3]]" in inbound_section      # CALLNAT VALIDATE-CUSTOMER
+    assert "[[ORDER-CTRL:5]]" in inbound_section      # IF #BAL-CONFIRMED
+    assert "[[ORDER-CTRL:6]]" in inbound_section      # CALLNAT CONFIRM-BALANCE
+
+    # The MOVE on line 2 must never be reported as VALIDATE-CUSTOMER's guard
+    # -- the guard is the enclosing IF's own condition, not the last
+    # statement-shaped rule_candidate that happens to precede the call.
+    assert "#CUST-FLAG" not in inbound_section
+    assert "when `MOVE" not in inbound_section
+    assert "[[ORDER-CTRL:2]]" not in inbound_section
+
+
+def test_module_brief_guard_chain_does_not_claim_unconditional_inside_uncaptured_construct():
+    """Copilot review on PR #151: a call inside a real block whose own
+    `rule_candidate.condition` wasn't captured (e.g. `DECIDE FOR FIRST
+    CONDITION`, which `natural.py` records with `condition=None`) is still
+    control-flow scoped -- rendering it as "unconditionally calls" would be
+    factually wrong, not merely uninformative. It must name the enclosing
+    construct and say the guard condition wasn't captured, never claim no
+    guard exists at all."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA
+    from mfdoc.dialects import natural
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'ORDER-CTRL', 'natural')")
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (2, 'SCHEDULE-RESET', 'natural')")
+
+    caller_src = (
+        "DECIDE FOR FIRST CONDITION\n"   # line 1 -- opens a block, condition=None
+        "  CALLNAT 'AUDIT-LOG'\n"        # line 2
+        "END-DECIDE\n"                   # line 3
+        "CALLNAT 'SCHEDULE-RESET'\n"     # line 4
+    )
+    caller_lines = [(i + 1, None, t) for i, t in enumerate(caller_src.splitlines())]
+    natural.extract(conn, 1, caller_lines, "ORDER-CTRL")
+
+    callee_src = "FIND (1) SCHED-VIEW WITH SCHED-KEY = 'RESET'\n  MOVE ' ' TO SCHED-VIEW.SCHED-STATUS\nEND-FIND\n"
+    callee_lines = [(i + 1, None, t) for i, t in enumerate(callee_src.splitlines())]
+    natural.extract(conn, 2, callee_lines, "SCHEDULE-RESET")
+
+    brief = module_brief(conn, "SCHEDULE-RESET", redact=NULL_REDACTOR)
+    inbound_section = brief.split("## Inbound callers", 1)[1].split("## ", 1)[0]
+
+    assert "unconditionally" not in inbound_section
+    assert "AUDIT-LOG" in inbound_section
+    assert "guard condition not captured" in inbound_section
+    assert "DECIDE FOR FIRST CONDITION" in inbound_section
+    assert "[[ORDER-CTRL:1]]" in inbound_section
+
+
+def test_module_brief_guard_chain_stops_at_a_closed_unresolved_extent_block():
+    """Copilot review on PR #151: DECIDE/FOR/REPEAT/ON ERROR/AT-EVENT never
+    get their own `end_line` backfilled (only IF/ELSE do), so a call *after*
+    such a block's real `END-DECIDE`/`END-FOR`/etc. must not be reported as
+    still scoped inside it just because `end_line` is NULL. Fixture: a call
+    sits after the DECIDE's own END-DECIDE, before the single call to
+    `SCHEDULE-RESET` -- it must be reported as its own, unscoped bullet, not
+    attributed to the already-closed DECIDE."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA
+    from mfdoc.dialects import natural
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'ORDER-CTRL', 'natural')")
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (2, 'SCHEDULE-RESET', 'natural')")
+
+    caller_src = (
+        "DECIDE FOR FIRST CONDITION\n"   # line 1 -- opens a block, condition=None
+        "  MOVE 'X' TO #FLAG\n"          # line 2
+        "END-DECIDE\n"                   # line 3 -- block actually closes here
+        "CALLNAT 'AUDIT-LOG'\n"          # line 4 -- outside the DECIDE
+        "CALLNAT 'SCHEDULE-RESET'\n"     # line 5
+    )
+    caller_lines = [(i + 1, None, t) for i, t in enumerate(caller_src.splitlines())]
+    natural.extract(conn, 1, caller_lines, "ORDER-CTRL")
+
+    callee_src = "FIND (1) SCHED-VIEW WITH SCHED-KEY = 'RESET'\n  MOVE ' ' TO SCHED-VIEW.SCHED-STATUS\nEND-FIND\n"
+    callee_lines = [(i + 1, None, t) for i, t in enumerate(callee_src.splitlines())]
+    natural.extract(conn, 2, callee_lines, "SCHEDULE-RESET")
+
+    brief = module_brief(conn, "SCHEDULE-RESET", redact=NULL_REDACTOR)
+    inbound_section = brief.split("## Inbound callers", 1)[1].split("## ", 1)[0]
+
+    assert "- calls `AUDIT-LOG` (`CALLNAT`) [[ORDER-CTRL:4]]" in inbound_section
+    assert "DECIDE" not in inbound_section
+    assert "guard condition not captured" not in inbound_section
+
+
+def test_module_brief_guard_chain_nested_block_close_does_not_close_the_outer_block():
+    """Copilot review on PR #151: a nested block's own close (an inner IF's
+    `END-IF`) must not be mistaken for closing an outer, unresolved-extent
+    block (a `DECIDE FOR FIRST CONDITION` with no `end_line` of its own).
+    Fixture nests an IF inside a DECIDE:
+
+    - a call still inside the DECIDE, after the inner IF's own END-IF,
+      must still be attributed to the DECIDE (not treated as unscoped);
+    - a call after the DECIDE's own END-DECIDE must be unscoped, not
+      attributed to the DECIDE just because an END-* line preceded it."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA
+    from mfdoc.dialects import natural
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'ORDER-CTRL', 'natural')")
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (2, 'SCHEDULE-RESET', 'natural')")
+
+    caller_src = (
+        "DECIDE FOR FIRST CONDITION\n"  # line 1 -- opens DECIDE, condition=None
+        "  IF #X\n"                     # line 2 -- opens nested IF, condition="#X"
+        "    CALLNAT 'INNER-CALL'\n"    # line 3 -- inside the nested IF
+        "  END-IF\n"                    # line 4 -- closes the nested IF only
+        "  CALLNAT 'STILL-IN-DECIDE'\n"  # line 5 -- back inside the DECIDE
+        "END-DECIDE\n"                  # line 6 -- closes the DECIDE
+        "CALLNAT 'AFTER-DECIDE'\n"      # line 7 -- outside the DECIDE
+        "CALLNAT 'SCHEDULE-RESET'\n"    # line 8 -- the single call site
+    )
+    caller_lines = [(i + 1, None, t) for i, t in enumerate(caller_src.splitlines())]
+    natural.extract(conn, 1, caller_lines, "ORDER-CTRL")
+
+    callee_src = "FIND (1) SCHED-VIEW WITH SCHED-KEY = 'RESET'\n  MOVE ' ' TO SCHED-VIEW.SCHED-STATUS\nEND-FIND\n"
+    callee_lines = [(i + 1, None, t) for i, t in enumerate(callee_src.splitlines())]
+    natural.extract(conn, 2, callee_lines, "SCHEDULE-RESET")
+
+    brief = module_brief(conn, "SCHEDULE-RESET", redact=NULL_REDACTOR)
+    inbound_section = brief.split("## Inbound callers", 1)[1].split("## ", 1)[0]
+    bullet_lines = [line for line in inbound_section.splitlines() if line.startswith("- ")]
+
+    def bullet_for(callee: str) -> str:
+        matches = [line for line in bullet_lines if f"`{callee}`" in line]
+        assert len(matches) == 1, f"expected exactly one bullet for {callee}, got {matches}"
+        return matches[0]
+
+    inner_call = bullet_for("INNER-CALL")
+    assert "when `#X` holds" in inner_call
+
+    still_in_decide = bullet_for("STILL-IN-DECIDE")
+    assert "DECIDE FOR FIRST CONDITION" in still_in_decide
+    assert "guard condition not captured" in still_in_decide
+    assert "[[ORDER-CTRL:1]]" in still_in_decide
+
+    after_decide = bullet_for("AFTER-DECIDE")
+    # Exact equality: no "scoped inside ..." / "when ... holds" wrapper --
+    # a bare call bullet is the only correct rendering once the DECIDE has
+    # actually closed.
+    assert after_decide == "- calls `AFTER-DECIDE` (`CALLNAT`) [[ORDER-CTRL:7]]"
+
+
+def test_module_brief_guard_chain_ignores_a_data_access_loops_own_end_line():
+    """Copilot review on PR #151: `_BLOCK_CLOSE_LINE_RE` must not match
+    `END-FIND`/`END-READ`/`END-HISTOGRAM` (or `END-WORK`/`END-ALL`/
+    `END-SUBROUTINE`/`END-BEFORE`/`END-PROCESS`) -- none of those pop
+    `open_blocks` in natural.py (`_END_TO_OPENERS`'s own keys), and
+    FIND/READ/HISTOGRAM never push onto it at all. A FIND...END-FIND data
+    access loop entirely inside a still-open DECIDE must not be mistaken
+    for closing that DECIDE."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA
+    from mfdoc.dialects import natural
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'ORDER-CTRL', 'natural')")
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (2, 'SCHEDULE-RESET', 'natural')")
+
+    caller_src = (
+        "DECIDE FOR FIRST CONDITION\n"                       # line 1
+        "  FIND (1) WIDGET-VIEW WITH WIDGET-KEY = 'X'\n"      # line 2
+        "    MOVE 'Y' TO #FLAG\n"                             # line 3
+        "  END-FIND\n"                                        # line 4 -- not a block close
+        "  CALLNAT 'STILL-IN-DECIDE'\n"                        # line 5
+        "END-DECIDE\n"                                         # line 6
+        "CALLNAT 'SCHEDULE-RESET'\n"                           # line 7
+    )
+    caller_lines = [(i + 1, None, t) for i, t in enumerate(caller_src.splitlines())]
+    natural.extract(conn, 1, caller_lines, "ORDER-CTRL")
+
+    callee_src = "FIND (1) SCHED-VIEW WITH SCHED-KEY = 'RESET'\n  MOVE ' ' TO SCHED-VIEW.SCHED-STATUS\nEND-FIND\n"
+    callee_lines = [(i + 1, None, t) for i, t in enumerate(callee_src.splitlines())]
+    natural.extract(conn, 2, callee_lines, "SCHEDULE-RESET")
+
+    brief = module_brief(conn, "SCHEDULE-RESET", redact=NULL_REDACTOR)
+    inbound_section = brief.split("## Inbound callers", 1)[1].split("## ", 1)[0]
+
+    still_in_decide = [
+        line for line in inbound_section.splitlines() if "`STILL-IN-DECIDE`" in line
+    ]
+    assert len(still_in_decide) == 1
+    assert "DECIDE FOR FIRST CONDITION" in still_in_decide[0]
+    assert "guard condition not captured" in still_in_decide[0]
+
+
+def test_module_brief_redacts_guard_chain_condition_text():
+    """The guard-chain condition text synthesized by `_caller_guard_chain` is
+    raw source (`rule_candidate.condition`), same as every other condition
+    rendering in this module -- it must go through `redact` before landing
+    in the brief, not be pasted in verbatim."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA
+    from mfdoc.dialects import natural
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'ORDER-CTRL', 'natural')")
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (2, 'SCHEDULE-RESET', 'natural')")
+
+    caller_src = (
+        "IF #CUST-VALID\n"
+        "  CALLNAT 'VALIDATE-CUSTOMER'\n"
+        "END-IF\n"
+        "CALLNAT 'SCHEDULE-RESET'\n"
+    )
+    caller_lines = [(i + 1, None, t) for i, t in enumerate(caller_src.splitlines())]
+    natural.extract(conn, 1, caller_lines, "ORDER-CTRL")
+
+    callee_src = "FIND (1) SCHED-VIEW WITH SCHED-KEY = 'RESET'\n  MOVE ' ' TO SCHED-VIEW.SCHED-STATUS\nEND-FIND\n"
+    callee_lines = [(i + 1, None, t) for i, t in enumerate(callee_src.splitlines())]
+    natural.extract(conn, 2, callee_lines, "SCHEDULE-RESET")
+
+    redact = lambda text: text.replace("#CUST-VALID", "[REDACTED]") if text else text
+    brief = module_brief(conn, "SCHEDULE-RESET", redact=redact)
+    inbound_section = brief.split("## Inbound callers", 1)[1].split("## ", 1)[0]
+
+    assert "#CUST-VALID" not in inbound_section
+    assert "[REDACTED]" in inbound_section
+
+
+def test_module_brief_guard_chain_never_claims_unconditional():
+    """Copilot review on PR #151: finding no enclosing `rule_candidate`
+    block for a preceding call is evidence it sits in the caller's main
+    line of execution, not proof -- a scanner gap or an unrecognised
+    control-flow shape could still be scoping it. The fallback bullet must
+    report the call itself without asserting "unconditionally", which
+    claims more than this brief can back."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA
+    from mfdoc.dialects import natural
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'ORDER-CTRL', 'natural')")
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (2, 'SCHEDULE-RESET', 'natural')")
+
+    caller_src = "CALLNAT 'VALIDATE-CUSTOMER'\nCALLNAT 'SCHEDULE-RESET'\n"
+    caller_lines = [(i + 1, None, t) for i, t in enumerate(caller_src.splitlines())]
+    natural.extract(conn, 1, caller_lines, "ORDER-CTRL")
+
+    callee_src = "FIND (1) SCHED-VIEW WITH SCHED-KEY = 'RESET'\n  MOVE ' ' TO SCHED-VIEW.SCHED-STATUS\nEND-FIND\n"
+    callee_lines = [(i + 1, None, t) for i, t in enumerate(callee_src.splitlines())]
+    natural.extract(conn, 2, callee_lines, "SCHEDULE-RESET")
+
+    brief = module_brief(conn, "SCHEDULE-RESET", redact=NULL_REDACTOR)
+    inbound_section = brief.split("## Inbound callers", 1)[1].split("## ", 1)[0]
+
+    assert "unconditionally" not in inbound_section
+    assert "- calls `VALIDATE-CUSTOMER` (`CALLNAT`) [[ORDER-CTRL:1]]" in inbound_section
+
+
+def test_module_brief_omits_guard_chain_when_more_than_one_caller():
+    """With more than one known call site there is no single guard chain to
+    point to -- each caller may gate the call differently, or not at all --
+    so the summary is deliberately scoped to the single-caller case, per
+    issue #151's suggested fix."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA
+    from mfdoc.dialects import natural
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'ORDER-CTRL', 'natural')")
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (2, 'BATCH-CTRL', 'natural')")
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (3, 'SCHEDULE-RESET', 'natural')")
+
+    for mid, mname, src in (
+        (1, "ORDER-CTRL", "IF #CUST-VALID\n  CALLNAT 'VALIDATE-CUSTOMER'\nEND-IF\nCALLNAT 'SCHEDULE-RESET'\n"),
+        (2, "BATCH-CTRL", "CALLNAT 'SCHEDULE-RESET'\n"),
+    ):
+        lines = [(i + 1, None, t) for i, t in enumerate(src.splitlines())]
+        natural.extract(conn, mid, lines, mname)
+
+    callee_src = "FIND (1) SCHED-VIEW WITH SCHED-KEY = 'RESET'\n  MOVE ' ' TO SCHED-VIEW.SCHED-STATUS\nEND-FIND\n"
+    callee_lines = [(i + 1, None, t) for i, t in enumerate(callee_src.splitlines())]
+    natural.extract(conn, 3, callee_lines, "SCHEDULE-RESET")
+
+    brief = module_brief(conn, "SCHEDULE-RESET", redact=NULL_REDACTOR)
+    inbound_section = brief.split("## Inbound callers", 1)[1].split("## ", 1)[0]
+
+    assert "the only known call site" not in inbound_section
+    assert "VALIDATE-CUSTOMER" not in inbound_section
+
+
 def test_module_brief_surfaces_find_found_body_extent_next_to_the_access():
     """The exact defect reported: a single-record `FIND (1) ... WITH
     <sentinel>` existence check with no IF/ELSE in sight, immediately

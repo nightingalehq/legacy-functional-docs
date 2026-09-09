@@ -120,6 +120,199 @@ def fetch_routines(conn, member_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+# construct names (first token) that open a block with a body -- an IF/
+# ELSE/DECIDE/FOR/REPEAT/WHILE/ON ERROR/AT-event's own rule_candidate row
+# can legitimately have `end_line IS NULL` and still enclose later lines
+# (see natural.py's `_match_rules`: only IF/ELSE ever get `end_line` filled
+# in via their own END-IF -- DECIDE/FOR/REPEAT/ON ERROR/AT-EVENT open a
+# real block too but never get their own end_line resolved at all today).
+# A statement-shaped rule_candidate (MOVE, COMPUTE, ADD, ASSIGN, VALUE,
+# WHEN, ESCAPE, REJECT IF, NONE/ANY/ALL, ...) is a single line with no body
+# of its own and *always* has `end_line IS NULL` -- treating that as
+# "extends indefinitely" the same way an unresolved block extent does
+# misattributes any later call to the last statement seen, instead of its
+# real enclosing IF/WHILE/etc. (issue #151 follow-up).
+_BLOCK_CONSTRUCT_FIRST_WORDS = {"IF", "ELSE", "DECIDE", "FOR", "REPEAT", "WHILE", "ON", "AT", "CASE"}
+
+
+def _opens_a_block(construct: str | None) -> bool:
+    if not construct:
+        return False
+    return construct.split()[0].upper() in _BLOCK_CONSTRUCT_FIRST_WORDS
+
+
+# A generic, dialect-agnostic "this line closes a block" shape, covering
+# both text-based dialects this repo currently supports: Natural's
+# `END-<CONSTRUCT>` and Mantis's bare `END`. Used only as a heuristic bound
+# on how far an unresolved block extent (`_opens_a_block` true, `end_line`
+# still NULL) can be trusted to reach -- DECIDE/FOR/REPEAT/ON ERROR/AT-EVENT
+# never get their own `end_line` backfilled today (only IF/ELSE do, via
+# `natural.py`'s `if_rule_ids`/`else_rule_ids`), so without this check a
+# call *after* such a block's real end would still read as enclosed by it
+# (Copilot review on PR #151).
+#
+# Deliberately narrower than "any END-<WORD> line": natural.py's own
+# `_END_TO_OPENERS` is the authority on which END-forms actually pop an
+# open_blocks entry -- END-FIND/END-READ/END-HISTOGRAM/END-WORK/END-ALL/
+# END-SUBROUTINE/END-BEFORE/END-PROCESS never do (FIND/READ/HISTOGRAM don't
+# even push onto open_blocks at all -- see that dict's own comment), so
+# matching them here would let a data-access loop's own closing line get
+# mistaken for closing an unrelated, still-open DECIDE/FOR/etc. around it.
+# This list is exactly `_END_TO_OPENERS`'s keys, spelled out as the actual
+# END-<CONSTRUCT> keyword each one closes.
+_BLOCK_CLOSE_LINE_RE = re.compile(
+    r"^\s*(END-(IF|DECIDE|FOR|REPEAT|ERROR|BREAK|ENDDATA|START|TOPPAGE|NOREC)|END)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _has_intervening_close(conn, member_id: int, rule_rows: list, opened_line: int,
+                            line_no: int) -> bool:
+    """Whether the block opened at `opened_line` has already closed by
+    `line_no` -- *not* whether any `END*`-shaped line appears in between.
+    A bare "any END-* line in range" check (an earlier version of this
+    function) misattributes a *nested* block's own close (an inner IF's
+    `END-IF` inside an outer, unresolved-extent DECIDE) as closing the
+    outer block too, dropping real guard-scope context for everything after
+    that inner close but still inside the outer one (Copilot review on PR
+    #151).
+
+    Mirrors the extractor's own `open_blocks` stack instead: walk every
+    block-opening `rule_candidate` row strictly between `opened_line` and
+    `line_no` as a nested "push", and every generic close-shaped source
+    line (`_BLOCK_CLOSE_LINE_RE`) as a "pop" -- interleaved by line number,
+    the same order the extractor itself sees them in. A pop while `depth>0`
+    closes some nested block, not this one; a pop at `depth==0` is the
+    first close that isn't accounted for by a nested opener already in
+    range, so it closes *this* block."""
+    nested_opens = [
+        rc["line_no"] for rc in rule_rows
+        if opened_line < rc["line_no"] <= line_no and _opens_a_block(rc["construct"])
+    ]
+    # Narrow to plausible close lines in SQL rather than fetching every
+    # line in range and filtering all of it in Python -- an avoidable N*M
+    # scan otherwise, since this runs once per unresolved-extent candidate
+    # per preceding call. Tabs are normalised to spaces before the LIKE
+    # check so a tab-indented "END..." line still matches the same way
+    # `_BLOCK_CLOSE_LINE_RE`'s `\s*` does; the regex below still does the
+    # exact match, this is only a pre-filter.
+    close_rows = conn.execute(
+        "SELECT line_no, text FROM source_line WHERE member_id=? AND line_no>? AND line_no<=?"
+        " AND UPPER(TRIM(REPLACE(text, CHAR(9), ' '))) LIKE 'END%'"
+        " ORDER BY line_no",
+        (member_id, opened_line, line_no),
+    ).fetchall()
+    closes = [r["line_no"] for r in close_rows if _BLOCK_CLOSE_LINE_RE.match(r["text"] or "")]
+    events = sorted([(ln, 0) for ln in nested_opens] + [(ln, 1) for ln in closes])
+    depth = 0
+    for _, is_close in events:
+        if not is_close:
+            depth += 1
+        elif depth > 0:
+            depth -= 1
+        else:
+            return True
+    return False
+
+
+def _enclosing_condition(conn, member_id: int, rule_rows: list, line_no: int) -> dict | None:
+    """The innermost `rule_candidate` row (already fetched, any order) whose
+    block encloses `line_no` -- `rc.line_no <= line_no` and either
+    `rc.end_line >= line_no`, or `rc.end_line` is unresolved *and* `rc`
+    actually opens a block (`_opens_a_block`) *and* no line between the
+    opener and `line_no` looks like a block close (`_has_intervening_close`)
+    -- kept as a candidate the same way `routine_for_line` treats an
+    unresolved routine end: still evidence the block continues at least
+    that far, absent evidence it already closed. A statement-shaped row
+    (`_opens_a_block` false) never encloses anything, regardless of its own
+    `end_line` -- it has no body to enclose with. Among matches, the one
+    with the greatest `line_no` is innermost (nesting is strictly
+    line-ordered here, the same assumption `routine_for_line` and
+    `_branch_data_access` already make), so a call inside a nested IF
+    reports that IF's own condition, not an outer one. Returns None when no
+    row encloses `line_no` -- not proof the call is unconditional, only that
+    this brief found no enclosing block for it (see `_caller_guard_chain`'s
+    own wording for that distinction)."""
+    match = None
+    for rc in rule_rows:
+        if rc["line_no"] > line_no:
+            continue
+        if rc["end_line"] is not None:
+            if rc["end_line"] < line_no:
+                continue
+        else:
+            if not _opens_a_block(rc["construct"]):
+                continue
+            if _has_intervening_close(conn, member_id, rule_rows, rc["line_no"], line_no):
+                continue
+        if match is None or rc["line_no"] > match["line_no"]:
+            match = rc
+    return match
+
+
+def _caller_guard_chain(conn, caller_id: int, caller_name: str, call_line_no: int,
+                         redact: Redactor = NULL_REDACTOR) -> list[str]:
+    """For a callee reachable from exactly one call site, the caller's own
+    `call_edge` rows strictly before that call (already ordered by
+    `line_no`, per `call_edge`'s own citation ordering elsewhere in this
+    module) -- the validation/confirmation/mode-gate calls the caller
+    performs before ever reaching this one, which module_brief's own
+    "Inbound callers" section previously dropped entirely by citing only the
+    call line itself (issue #151). Each preceding call is paired with its
+    innermost enclosing `rule_candidate` condition, when one exists, via
+    `_enclosing_condition` -- read-only synthesis over facts already in the
+    store, no new extraction. Returns rendered bullet lines, or an empty
+    list when there is nothing preceding this call in its own caller.
+
+    `condition` is raw source text (the same field every other condition
+    rendering in this module passes through `redact` before writing to the
+    brief -- see the "Top rules"/"Candidate business rules" sections below),
+    so it goes through the same `redact` call here rather than being pasted
+    in verbatim."""
+    preceding = conn.execute(
+        "SELECT * FROM call_edge WHERE caller_id=? AND line_no<? ORDER BY line_no",
+        (caller_id, call_line_no),
+    ).fetchall()
+    if not preceding:
+        return []
+    rule_rows = conn.execute(
+        "SELECT * FROM rule_candidate WHERE member_id=? ORDER BY line_no", (caller_id,)
+    ).fetchall()
+    lines = []
+    for call in preceding:
+        cond = _enclosing_condition(conn, caller_id, rule_rows, call["line_no"])
+        callee = call["callee_name"] or "UNKNOWN"
+        cite = _cite(caller_name, call["line_no"])
+        if cond and cond["condition"]:
+            lines.append(
+                f"- when `{redact(cond['condition'])}` holds {_cite(caller_name, cond['line_no'])}, "
+                f"calls `{callee}` (`{call['call_kind']}`) {cite}"
+            )
+        elif cond:
+            # `_enclosing_condition` found a real enclosing block (a DECIDE
+            # FOR CONDITION, an ELSE, ...) but that construct's own
+            # `condition` text wasn't captured -- the call is still
+            # control-flow scoped, just not by a condition this brief can
+            # quote. Saying "unconditionally" here would be wrong, not
+            # merely uninformative (Copilot review on PR #151).
+            lines.append(
+                f"- calls `{callee}` (`{call['call_kind']}`) {cite}, scoped inside "
+                f"`{cond['construct']}` {_cite(caller_name, cond['line_no'])} "
+                "(guard condition not captured)"
+            )
+        else:
+            # No enclosing rule_candidate block found at all. That's
+            # evidence this call sits in the caller's main line of
+            # execution, not proof of it -- a dialect scanner gap or a
+            # control-flow shape `_opens_a_block` doesn't recognise could
+            # still be scoping it. Report the call itself and let the
+            # absence of a guard line speak for it, rather than asserting
+            # "unconditionally", which claims more than this brief can back
+            # (Copilot review on PR #151).
+            lines.append(f"- calls `{callee}` (`{call['call_kind']}`) {cite}")
+    return lines
+
+
 def routine_for_line(routines: list[dict], line_no: int) -> dict | None:
     """Which of `routines` (as returned by fetch_routines, ordered by
     start_line) contains `line_no`, or None when the line belongs to the
@@ -749,7 +942,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
 
     inbound = conn.execute(
         """
-        SELECT c.name AS caller, ce.call_kind, ce.line_no
+        SELECT c.id AS caller_id, c.name AS caller, ce.call_kind, ce.line_no
           FROM call_edge ce JOIN member c ON c.id = ce.caller_id
          WHERE UPPER(ce.callee_name)=UPPER(?) ORDER BY c.name, ce.line_no
         """,
@@ -759,6 +952,25 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
         add("## Inbound callers")
         for r in inbound:
             add(f"- {_cite(r['caller'], r['line_no'])} `{r['call_kind']}` from `{r['caller']}`")
+        # Reachable from exactly one call site (issue #151): the "How it is
+        # invoked" section only had the call line itself to cite, never the
+        # caller's own preceding guard/validation sequence that decides
+        # whether and when that call happens. With more than one call site,
+        # there is no single guard chain to point to -- each caller may gate
+        # the call under a different condition, or none -- so this is
+        # deliberately scoped to the single-caller case only.
+        if len(inbound) == 1:
+            only = inbound[0]
+            guard_lines = _caller_guard_chain(
+                conn, only["caller_id"], only["caller"], only["line_no"], redact
+            )
+            if guard_lines:
+                add("")
+                add(
+                    f"This is the only known call site for `{name}`. Before reaching it, "
+                    f"`{only['caller']}` performs, in order:"
+                )
+                out.extend(guard_lines)
         add("")
 
     # --- interactions

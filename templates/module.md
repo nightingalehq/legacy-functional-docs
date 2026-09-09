@@ -32,6 +32,14 @@ Who calls it, with what, and from where — batch job step, CICS transaction, an
 module. Cite each. If nothing was found to invoke it, say so and cite the gap rather
 than leaving the section empty.
 
+When the brief's "Inbound callers" section names this as the only known call site
+for this member and follows with the caller's own guard chain ("Before reaching it,
+`CALLER` performs, in order: ..."), summarize that sequence here too — what the
+caller validates or confirms, and under what condition, before it ever reaches this
+call — instead of citing only the call line itself. A reader trying to understand
+when this module actually runs needs the caller's own decision to get here, not
+just the fact that a call statement exists.
+
 ## Inputs
 
 | Name | Format | Source | Notes | Citation |
