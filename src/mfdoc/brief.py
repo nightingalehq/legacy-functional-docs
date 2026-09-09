@@ -142,7 +142,8 @@ def _enclosing_condition(rule_rows: list, line_no: int) -> dict | None:
     return match
 
 
-def _caller_guard_chain(conn, caller_id: int, caller_name: str, call_line_no: int) -> list[str]:
+def _caller_guard_chain(conn, caller_id: int, caller_name: str, call_line_no: int,
+                         redact: Redactor = NULL_REDACTOR) -> list[str]:
     """For a callee reachable from exactly one call site, the caller's own
     `call_edge` rows strictly before that call (already ordered by
     `line_no`, per `call_edge`'s own citation ordering elsewhere in this
@@ -153,7 +154,13 @@ def _caller_guard_chain(conn, caller_id: int, caller_name: str, call_line_no: in
     innermost enclosing `rule_candidate` condition, when one exists, via
     `_enclosing_condition` -- read-only synthesis over facts already in the
     store, no new extraction. Returns rendered bullet lines, or an empty
-    list when there is nothing preceding this call in its own caller."""
+    list when there is nothing preceding this call in its own caller.
+
+    `condition` is raw source text (the same field every other condition
+    rendering in this module passes through `redact` before writing to the
+    brief -- see the "Top rules"/"Candidate business rules" sections below),
+    so it goes through the same `redact` call here rather than being pasted
+    in verbatim."""
     preceding = conn.execute(
         "SELECT * FROM call_edge WHERE caller_id=? AND line_no<? ORDER BY line_no",
         (caller_id, call_line_no),
@@ -170,7 +177,7 @@ def _caller_guard_chain(conn, caller_id: int, caller_name: str, call_line_no: in
         cite = _cite(caller_name, call["line_no"])
         if cond and cond["condition"]:
             lines.append(
-                f"- when `{cond['condition']}` holds {_cite(caller_name, cond['line_no'])}, "
+                f"- when `{redact(cond['condition'])}` holds {_cite(caller_name, cond['line_no'])}, "
                 f"calls `{callee}` (`{call['call_kind']}`) {cite}"
             )
         else:
@@ -826,7 +833,9 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
         # deliberately scoped to the single-caller case only.
         if len(inbound) == 1:
             only = inbound[0]
-            guard_lines = _caller_guard_chain(conn, only["caller_id"], only["caller"], only["line_no"])
+            guard_lines = _caller_guard_chain(
+                conn, only["caller_id"], only["caller"], only["line_no"], redact
+            )
             if guard_lines:
                 add("")
                 add(

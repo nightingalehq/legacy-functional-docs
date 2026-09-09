@@ -563,6 +563,43 @@ def test_module_brief_summarizes_single_callers_guard_chain():
     assert "[[ORDER-CTRL:5]]" in inbound_section
 
 
+def test_module_brief_redacts_guard_chain_condition_text():
+    """The guard-chain condition text synthesized by `_caller_guard_chain` is
+    raw source (`rule_candidate.condition`), same as every other condition
+    rendering in this module -- it must go through `redact` before landing
+    in the brief, not be pasted in verbatim."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA
+    from mfdoc.dialects import natural
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'ORDER-CTRL', 'natural')")
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (2, 'SCHEDULE-RESET', 'natural')")
+
+    caller_src = (
+        "IF #CUST-VALID\n"
+        "  CALLNAT 'VALIDATE-CUSTOMER'\n"
+        "END-IF\n"
+        "CALLNAT 'SCHEDULE-RESET'\n"
+    )
+    caller_lines = [(i + 1, None, t) for i, t in enumerate(caller_src.splitlines())]
+    natural.extract(conn, 1, caller_lines, "ORDER-CTRL")
+
+    callee_src = "FIND (1) SCHED-VIEW WITH SCHED-KEY = 'RESET'\n  MOVE ' ' TO SCHED-VIEW.SCHED-STATUS\nEND-FIND\n"
+    callee_lines = [(i + 1, None, t) for i, t in enumerate(callee_src.splitlines())]
+    natural.extract(conn, 2, callee_lines, "SCHEDULE-RESET")
+
+    redact = lambda text: text.replace("#CUST-VALID", "[REDACTED]") if text else text
+    brief = module_brief(conn, "SCHEDULE-RESET", redact=redact)
+    inbound_section = brief.split("## Inbound callers", 1)[1].split("## ", 1)[0]
+
+    assert "#CUST-VALID" not in inbound_section
+    assert "[REDACTED]" in inbound_section
+
+
 def test_module_brief_omits_guard_chain_when_more_than_one_caller():
     """With more than one known call site there is no single guard chain to
     point to -- each caller may gate the call differently, or not at all --

@@ -12,7 +12,7 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
-**Progress (2026-09-09b):**
+**Progress (2026-09-09):**
 - Fixed issue #151: real SME review feedback asked, across several
   independent examples, for two framing changes to the module-doc
   narrative rather than a new document type.
@@ -32,12 +32,12 @@ GitHub org.
     for a single-caller callee, the caller's own preceding `call_edge` rows
     (already ordered by `line_no`) are summarized with their innermost
     enclosing `rule_candidate` condition, when one exists -- read-only
-    synthesis over facts already in the store, no new extraction. Scoped
-    to exactly one known call site; with more than one caller there is no
-    single guard chain to point to. `templates/module.md`'s "How it is
-    invoked" section now instructs the narrator to use this when present.
-
-**Progress (2026-09-09):**
+    synthesis over facts already in the store, no new extraction, condition
+    text passed through `redact` like every other condition rendering in
+    this module. Scoped to exactly one known call site; with more than one
+    caller there is no single guard chain to point to. `templates/module.md`'s
+    "How it is invoked" section now instructs the narrator to use this when
+    present.
 - Fixed issue #148: `natural.py`'s `FIND`/`READ`/`HISTOGRAM` deliberately
   never push onto `open_blocks` (nesting integrity -- see
   `_END_TO_OPENERS`'s comment), which left statements between the verb line
