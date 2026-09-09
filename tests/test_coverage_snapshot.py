@@ -288,6 +288,21 @@ continuation line that already carries INTO). +1 member/code_member, +16
 source_lines, +1 rule_candidate (the folded COMPRESS), unparsed_lines
 unchanged (the continuation line folds instead of gapping), +1
 orphan_module/gaps_total (uncalled by design, as usual).
+
+2026-09-09: natural.py's arithmetic/assignment fallback no longer swallows
+a literal-free COMPUTE/ADD/SUBTRACT/MULTIPLY/DIVIDE/MOVE/EXAMINE/bare-`:=`
+statement with zero trace (issue #149) -- extract()'s last-resort matcher
+used to set matched=True on a bare regex match without ever calling
+insert(), so a pure variable/array-element assignment (no literal
+anywhere) landed neither as a rule_candidate nor as an unparsed_line gap.
+Such statements are now captured as a rule_candidate tagged
+confidence='low' instead (still excluding the ADD 1 TO/SUBTRACT 1 FROM
+loop-counter idiom, which stays untouched). Against this fixture set:
+five previously-silent statements now surface -- MMP0100:48's `ADD
+STOCK-VIEW.AVAIL-WEIGHT TO #AVAIL-TOTAL` accumulator, and MMP0400:42-45's
+four variable-to-variable MOVEs populating HOLD-VIEW before its STORE.
++5 rule_candidates (54 -> 59); unparsed_lines unchanged (these lines were
+never gaps, just previously invisible).
 """
 
 from __future__ import annotations
@@ -305,7 +320,7 @@ EXPECTED_COVERAGE = {
     "entity_definition_rate": 0.7368,
     "entity_fields": 71,
     "data_accesses": 18,
-    "rule_candidates": 54,
+    "rule_candidates": 59,
     "invocation_edges": 15,
     "invocations_resolved": 3,
     "call_resolution_rate": 0.2,

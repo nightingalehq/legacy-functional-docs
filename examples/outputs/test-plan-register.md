@@ -14,9 +14,9 @@ Every scenario `mfdoc test-plan` derived from the fact store, keyed by the same 
 | `MMP0100:BR-004` | `MMP0100` | unit | characterization | `IF` | `ORDER-VIEW.ORDER-STATUS NE 'CONF'` | [[MMP0100:38]] |
 | `MMP0100:BR-007` | `MMP0100` | unit | characterization | `IF` | `STOCK-VIEW.GRADE-CODE NE ORDER-VIEW.GRADE-CODE` | [[MMP0100:44]] |
 | `MMP0100:BR-009` | `MMP0100` | unit | characterization | `IF` | `STOCK-VIEW.PLANT-CODE = #PLANT` | [[MMP0100:47]] |
-| `MMP0100:BR-011` | `MMP0100` | unit | characterization | `WHEN` | `#AVAIL-TOTAL >= ORDER-VIEW.ORDER-WEIGHT` | [[MMP0100:53]] |
-| `MMP0100:BR-013` | `MMP0100` | unit | characterization | `WHEN` | `#AVAIL-TOTAL >= ORDER-VIEW.ORDER-WEIGHT * (1 - #TOLERANCE-PCT / 100)` | [[MMP0100:55]] |
-| `MMP0100:BR-015` | `MMP0100` | unit | characterization | `WHEN` | `NONE` | [[MMP0100:58]] |
+| `MMP0100:BR-012` | `MMP0100` | unit | characterization | `WHEN` | `#AVAIL-TOTAL >= ORDER-VIEW.ORDER-WEIGHT` | [[MMP0100:53]] |
+| `MMP0100:BR-014` | `MMP0100` | unit | characterization | `WHEN` | `#AVAIL-TOTAL >= ORDER-VIEW.ORDER-WEIGHT * (1 - #TOLERANCE-PCT / 100)` | [[MMP0100:55]] |
+| `MMP0100:BR-016` | `MMP0100` | unit | characterization | `WHEN` | `NONE` | [[MMP0100:58]] |
 | `MMP0200:BR-001` | `MMP0200` | unit | characterization | `IF` | `#CERT-NO = ' '` | [[MMP0200:12]] |
 | `MMP0200:BR-002` | `MMP0200` | unit | characterization | `IF NO RECORDS FOUND` | `no records found for preceding database loop` | [[MMP0200:16]] |
 | `MMP0200:BR-004` | `MMP0200` | unit | characterization | `ON ERROR` | `` | [[MMP0200:24]] |
