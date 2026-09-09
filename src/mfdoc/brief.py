@@ -141,13 +141,39 @@ def _opens_a_block(construct: str | None) -> bool:
     return construct.split()[0].upper() in _BLOCK_CONSTRUCT_FIRST_WORDS
 
 
-def _enclosing_condition(rule_rows: list, line_no: int) -> dict | None:
+# A generic, dialect-agnostic "this line closes a block" shape, covering
+# both text-based dialects this repo currently supports: Natural's
+# `END-<CONSTRUCT>` (END-DECIDE, END-FOR, END-REPEAT, END-ERROR, ...) and
+# Mantis's bare `END`. Used only as a heuristic bound on how far an
+# unresolved block extent (`_opens_a_block` true, `end_line` still NULL)
+# can be trusted to reach -- DECIDE/FOR/REPEAT/ON ERROR/AT-EVENT never get
+# their own `end_line` backfilled today (only IF/ELSE do, via
+# `natural.py`'s `if_rule_ids`/`else_rule_ids`), so without this check a
+# call *after* such a block's real end would still read as enclosed by it
+# (Copilot review on PR #151). A plain text match, not a reparse: good
+# enough for this best-effort narrative synthesis, where an occasional
+# miss costs a slightly less precise guard-chain summary, never a wrong
+# citation (this never touches what a document is allowed to cite).
+_BLOCK_CLOSE_LINE_RE = re.compile(r"^\s*END(-[A-Z]+)?\s*$", re.IGNORECASE)
+
+
+def _has_intervening_close(conn, member_id: int, opened_line: int, line_no: int) -> bool:
+    rows = conn.execute(
+        "SELECT text FROM source_line WHERE member_id=? AND line_no>? AND line_no<=?",
+        (member_id, opened_line, line_no),
+    ).fetchall()
+    return any(_BLOCK_CLOSE_LINE_RE.match(r["text"] or "") for r in rows)
+
+
+def _enclosing_condition(conn, member_id: int, rule_rows: list, line_no: int) -> dict | None:
     """The innermost `rule_candidate` row (already fetched, any order) whose
     block encloses `line_no` -- `rc.line_no <= line_no` and either
     `rc.end_line >= line_no`, or `rc.end_line` is unresolved *and* `rc`
-    actually opens a block (`_opens_a_block`) -- kept as a candidate the
-    same way `routine_for_line` treats an unresolved routine end: still
-    evidence the block continues at least that far. A statement-shaped row
+    actually opens a block (`_opens_a_block`) *and* no line between the
+    opener and `line_no` looks like a block close (`_has_intervening_close`)
+    -- kept as a candidate the same way `routine_for_line` treats an
+    unresolved routine end: still evidence the block continues at least
+    that far, absent evidence it already closed. A statement-shaped row
     (`_opens_a_block` false) never encloses anything, regardless of its own
     `end_line` -- it has no body to enclose with. Among matches, the one
     with the greatest `line_no` is innermost (nesting is strictly
@@ -162,8 +188,11 @@ def _enclosing_condition(rule_rows: list, line_no: int) -> dict | None:
         if rc["end_line"] is not None:
             if rc["end_line"] < line_no:
                 continue
-        elif not _opens_a_block(rc["construct"]):
-            continue
+        else:
+            if not _opens_a_block(rc["construct"]):
+                continue
+            if _has_intervening_close(conn, member_id, rc["line_no"], line_no):
+                continue
         if match is None or rc["line_no"] > match["line_no"]:
             match = rc
     return match
@@ -199,7 +228,7 @@ def _caller_guard_chain(conn, caller_id: int, caller_name: str, call_line_no: in
     ).fetchall()
     lines = []
     for call in preceding:
-        cond = _enclosing_condition(rule_rows, call["line_no"])
+        cond = _enclosing_condition(conn, caller_id, rule_rows, call["line_no"])
         callee = call["callee_name"] or "UNKNOWN"
         cite = _cite(caller_name, call["line_no"])
         if cond and cond["condition"]:

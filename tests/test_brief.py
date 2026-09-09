@@ -618,6 +618,47 @@ def test_module_brief_guard_chain_does_not_claim_unconditional_inside_uncaptured
     assert "[[ORDER-CTRL:1]]" in inbound_section
 
 
+def test_module_brief_guard_chain_stops_at_a_closed_unresolved_extent_block():
+    """Copilot review on PR #151: DECIDE/FOR/REPEAT/ON ERROR/AT-EVENT never
+    get their own `end_line` backfilled (only IF/ELSE do), so a call *after*
+    such a block's real `END-DECIDE`/`END-FOR`/etc. must not be reported as
+    still scoped inside it just because `end_line` is NULL. Fixture: a call
+    sits after the DECIDE's own END-DECIDE, before the single call to
+    `SCHEDULE-RESET` -- it must be reported as its own, unscoped bullet, not
+    attributed to the already-closed DECIDE."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA
+    from mfdoc.dialects import natural
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'ORDER-CTRL', 'natural')")
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (2, 'SCHEDULE-RESET', 'natural')")
+
+    caller_src = (
+        "DECIDE FOR FIRST CONDITION\n"   # line 1 -- opens a block, condition=None
+        "  MOVE 'X' TO #FLAG\n"          # line 2
+        "END-DECIDE\n"                   # line 3 -- block actually closes here
+        "CALLNAT 'AUDIT-LOG'\n"          # line 4 -- outside the DECIDE
+        "CALLNAT 'SCHEDULE-RESET'\n"     # line 5
+    )
+    caller_lines = [(i + 1, None, t) for i, t in enumerate(caller_src.splitlines())]
+    natural.extract(conn, 1, caller_lines, "ORDER-CTRL")
+
+    callee_src = "FIND (1) SCHED-VIEW WITH SCHED-KEY = 'RESET'\n  MOVE ' ' TO SCHED-VIEW.SCHED-STATUS\nEND-FIND\n"
+    callee_lines = [(i + 1, None, t) for i, t in enumerate(callee_src.splitlines())]
+    natural.extract(conn, 2, callee_lines, "SCHEDULE-RESET")
+
+    brief = module_brief(conn, "SCHEDULE-RESET", redact=NULL_REDACTOR)
+    inbound_section = brief.split("## Inbound callers", 1)[1].split("## ", 1)[0]
+
+    assert "- calls `AUDIT-LOG` (`CALLNAT`) [[ORDER-CTRL:4]]" in inbound_section
+    assert "DECIDE" not in inbound_section
+    assert "guard condition not captured" not in inbound_section
+
+
 def test_module_brief_redacts_guard_chain_condition_text():
     """The guard-chain condition text synthesized by `_caller_guard_chain` is
     raw source (`rule_candidate.condition`), same as every other condition
