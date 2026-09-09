@@ -507,3 +507,40 @@ def test_natural_brief_keeps_using_data_area_includes_out_of_program_variables()
         l for l in includes_section.splitlines() if "PDAWGT01" in l
     ][0]
     assert "data area include" in parameter_include_line
+
+
+# --- issue #148: FIND/READ/HISTOGRAM found-body extent must reach the brief
+
+def test_module_brief_surfaces_find_found_body_extent_next_to_the_access():
+    """The exact defect reported: a single-record `FIND (1) ... WITH
+    <sentinel>` existence check with no IF/ELSE in sight, immediately
+    followed by field assignments and an ESCAPE ROUTINE, must carry an
+    explicit "found-body extent" fact in the brief's Data access bullet --
+    a real fact the narrative stage can read, not proximity it has to
+    guess from and can invert (as happened: the assignment block got
+    narrated as the not-found default, the exact logical inverse of what
+    FIND...END-FIND does)."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA
+    from mfdoc.dialects import natural
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'TESTMOD', 'natural')")
+    src = (
+        "FIND (1) WIDGET-VIEW WITH WIDGET-KEY = 'SENTINEL'\n"
+        "  MOVE 'DEFAULT' TO #RESULT\n"
+        "  ADD 1 TO #COUNT\n"
+        "END-FIND\n"
+        "ESCAPE ROUTINE\n"
+    )
+    lines = [(i + 1, None, t) for i, t in enumerate(src.splitlines())]
+    natural.extract(conn, 1, lines, "TESTMOD")
+
+    brief = module_brief(conn, "TESTMOD", redact=NULL_REDACTOR)
+    access_section = brief.split("## Data access", 1)[1].split("## ", 1)[0]
+    find_line = [l for l in access_section.splitlines() if "FIND" in l and "WIDGET-VIEW" in l][0]
+    assert "found-body extent" in find_line
+    assert "[[TESTMOD:1-4]]" in find_line

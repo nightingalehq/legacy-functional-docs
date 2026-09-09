@@ -669,8 +669,24 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
                     f" -- **key built at** {_cite(name, r['key_source_line'])}: "
                     f"`{redact(r['key_source_expr'])}`"
                 )
+            # Found-body extent (issue #148): for FIND/READ/HISTOGRAM, the
+            # line range up to this verb's own END-FIND/END-READ/
+            # END-HISTOGRAM, once resolved -- an explicit fact that the
+            # statements in that range run only for a record this verb
+            # actually read/matched, so the narrative stage doesn't have
+            # to guess a found/not-found shape from line adjacency alone
+            # (and risk documenting the inverse of it, as happened before
+            # this fix existed). Absent (NULL) when no matching END- was
+            # found, or for a verb with no END- form at all (GET, SELECT,
+            # STORE, UPDATE, DELETE, READ WORK FILE) -- never guessed.
+            extent = (
+                f" -- **found-body extent** {_cite(name, r['line_no'], r['end_line'])}: "
+                "statements in this range run only when this verb reads/matches a "
+                "record; no implicit not-found branch unless the source shows one"
+                if r["end_line"] else ""
+            )
             add(f"- {_cite(name, r['line_no'])} `{r['verb']}` ({r['crud']}) on "
-                f"`{r['entity_name'] or 'UNKNOWN'}`{desc}{key}{flag}{source}")
+                f"`{r['entity_name'] or 'UNKNOWN'}`{desc}{key}{flag}{source}{extent}")
         add("")
 
     # --- unreferenced fields on every screen/table this member touches --

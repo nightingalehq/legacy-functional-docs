@@ -551,3 +551,64 @@ def test_a_line_folded_into_a_preceding_statement_does_not_also_gap_on_its_own()
     row = conn.execute("SELECT condition FROM rule_candidate WHERE construct='IF'").fetchone()
     assert row is not None
     assert "ORDER-STATUS NE 'B'" in row["condition"]
+
+
+# --- issue #148: FIND/READ/HISTOGRAM found-body extent -----------------
+
+
+def test_single_record_find_gets_found_body_extent_on_its_own_data_access_row():
+    """A single-record `FIND (1) ... WITH <sentinel>` existence check, with
+    no IF/ELSE anywhere in the source, must record its own body's line
+    range (`data_access.end_line`) so the narrative stage has an explicit
+    fact -- not proximity alone -- telling it the statements before
+    END-FIND are the found branch. Reproduces the issue's own synthetic
+    recipe: a sentinel-key FIND immediately followed by assignments and an
+    ESCAPE ROUTINE, nothing else."""
+    conn = _extract(
+        "FIND (1) WIDGET-VIEW WITH WIDGET-KEY = 'SENTINEL'\n"
+        "  MOVE 'DEFAULT' TO #RESULT\n"
+        "  ADD 1 TO #COUNT\n"
+        "END-FIND\n"
+        "ESCAPE ROUTINE\n"
+    )
+    row = conn.execute("SELECT line_no, end_line FROM data_access WHERE verb='FIND'").fetchone()
+    assert row is not None
+    assert row["line_no"] == 1
+    assert row["end_line"] == 4
+
+
+def test_find_found_body_extent_does_not_reintroduce_open_blocks_nesting():
+    """The fix must not push FIND/READ/HISTOGRAM onto `open_blocks` --
+    that's the deliberately-avoided regression `_END_TO_OPENERS` guards
+    against. A FIND nested inside an IF must still let the IF's own
+    END-IF close the IF, not get intercepted early by the FIND's own
+    END-FIND -- the IF's `end_line` must resolve to the END-IF line, not
+    the END-FIND line, and the FIND's own found-body extent must resolve
+    independently to its own END-FIND."""
+    conn = _extract(
+        "IF #MODE = 'A'\n"
+        "  FIND (1) WIDGET-VIEW WITH WIDGET-KEY = 'SENTINEL'\n"
+        "    MOVE 'DEFAULT' TO #RESULT\n"
+        "  END-FIND\n"
+        "END-IF\n"
+    )
+    if_row = conn.execute("SELECT line_no, end_line FROM rule_candidate WHERE construct='IF'").fetchone()
+    assert if_row is not None
+    assert if_row["end_line"] == 5
+    find_row = conn.execute("SELECT line_no, end_line FROM data_access WHERE verb='FIND'").fetchone()
+    assert find_row["end_line"] == 4
+
+
+def test_read_loop_body_also_gets_found_body_extent():
+    """A loop-shaped READ (no occurrence limit) gets the same extent fact
+    as a single-record FIND -- the mechanism isn't limited to the
+    existence-check idiom, since a loop body benefits from the same
+    explicit fact rather than relying on END-READ adjacency alone."""
+    conn = _extract(
+        "READ WIDGET-VIEW BY WIDGET-KEY\n"
+        "  MOVE WIDGET-NAME TO #NAME\n"
+        "END-READ\n"
+    )
+    row = conn.execute("SELECT line_no, end_line FROM data_access WHERE verb='READ'").fetchone()
+    assert row["line_no"] == 1
+    assert row["end_line"] == 3

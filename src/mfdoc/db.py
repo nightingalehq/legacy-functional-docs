@@ -154,7 +154,24 @@ CREATE TABLE IF NOT EXISTS data_access (
     key_source_line INTEGER,
     key_source_expr TEXT,
     raw           TEXT NOT NULL,
-    confidence    TEXT NOT NULL DEFAULT 'verified'
+    confidence    TEXT NOT NULL DEFAULT 'verified',
+    -- For a FIND/READ/HISTOGRAM database-loop verb, the line of its own
+    -- matching END-FIND/END-READ/END-HISTOGRAM, once found -- the "found
+    -- body" extent: statements in [line_no, end_line] run only for a
+    -- record this verb actually read/matched. Deliberately independent of
+    -- rule_candidate.end_line/open_blocks nesting-integrity tracking (see
+    -- natural.py's `_END_TO_OPENERS` comment) -- this verb still never
+    -- pushes onto open_blocks, so an END-FIND/READ/HISTOGRAM still can't
+    -- wrongly pop an unrelated IF/DECIDE/FOR/REPEAT. Without this, nothing
+    -- tells the narrative stage that the lines between a single-record
+    -- `FIND (1) ... WITH <key>` (a common existence-check idiom, no
+    -- IF/ELSE anywhere) and its END-FIND are the found branch, and
+    -- adjacency alone can just as easily read as a not-found default,
+    -- inverting the module's real behaviour (issue #148). NULL when no
+    -- matching END- was found before EOF, or for a verb form
+    -- (READ WORK FILE, GET, SELECT, STORE, UPDATE, DELETE) that has no
+    -- END- keyword of its own at all.
+    end_line      INTEGER
 );
 CREATE INDEX IF NOT EXISTS ix_access_member ON data_access(member_id);
 CREATE INDEX IF NOT EXISTS ix_access_entity ON data_access(entity_name);
@@ -420,6 +437,7 @@ _COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     ("rule_candidate", "pair_line_no", "INTEGER"),
     ("data_access", "key_source_line", "INTEGER"),
     ("data_access", "key_source_expr", "TEXT"),
+    ("data_access", "end_line", "INTEGER"),
     ("interaction", "dynamic", "INTEGER NOT NULL DEFAULT 0"),
 ]
 

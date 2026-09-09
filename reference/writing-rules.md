@@ -193,6 +193,22 @@ ELSE bullet, every one of those accesses belongs in the generated document,
 attributed to the branch that performs it -- not merged into the surrounding
 narrative as if unconditional, and not dropped.
 
+**Inventing a not-found branch for FIND/READ/HISTOGRAM.** Statements inside a
+`FIND`/`READ`/`HISTOGRAM` block run when a record is actually read or
+matched. There is no implicit "not found" branch — a Natural database loop
+that finds nothing simply skips its body and falls through past the
+`END-FIND`/`END-READ`/`END-HISTOGRAM`, with nothing else needed to say so.
+This is easy to get backwards for a single-record existence check (`FIND
+(1) <view> WITH <key>` immediately followed by a small block of
+assignments and no `IF`/`ELSE` anywhere): the assignment block is the
+*found* branch, never a "default when not found." Only document a
+not-found path when the source actually shows one — `IF NO RECORDS FOUND`
+(its own `rule_candidate` row), a separate counter check after the loop, or
+similar. The brief's "Data access" section marks a FIND/READ/HISTOGRAM's own
+body extent explicitly (`found-body extent [[MEMBER:LINE-LINE]]`) whenever
+its matching END- was found — treat that line range as the found branch, not
+as something to infer from proximity to the following code.
+
 **Blurring screen fields, program variables, and DB view fields together.**
 The brief's "Program variables and screen/MAP fields" section (and "Data views
 declared") tag every field's kind explicitly. Carry that into the Inputs and

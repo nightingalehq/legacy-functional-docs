@@ -575,6 +575,10 @@ def extract(conn, member_id: int, lines: list[tuple[int, str | None, str]], memb
     # interesting (usually the error/validation one).
     if_rule_ids: dict[int, int] = {}
     else_rule_ids: dict[int, int] = {}
+    # Found-body extent (issue #148): per-verb (READ/FIND/HISTOGRAM) stack
+    # of (data_access.id, opened_line) for a row not yet closed by its own
+    # END-. Deliberately not open_blocks -- see _match_rules' comment.
+    access_opens: dict[str, list[tuple[int, int]]] = {}
     # Reporting-mode LOOP nesting (issue #5) -- (line_no, indent_col) per
     # open LOOP, decoupled from open_blocks/the END-* keyword closing
     # mechanism above, since LOOP closes on dedent, not on a keyword. Stays
@@ -695,7 +699,8 @@ def extract(conn, member_id: int, lines: list[tuple[int, str | None, str]], memb
 
         # -------------------------------------------------------- data access
         if not matched:
-            matched = _match_data_access(conn, member_id, line_no, stmt, masked, view_to_ddm, label_to_view)
+            matched = _match_data_access(conn, member_id, line_no, stmt, masked, view_to_ddm,
+                                          label_to_view, access_opens)
 
         # ------------------------------------------------------------- calls
         if not matched:
@@ -725,7 +730,7 @@ def extract(conn, member_id: int, lines: list[tuple[int, str | None, str]], memb
         if not matched:
             matched, depth, open_blocks = _match_rules(
                 conn, member_id, line_no, stmt, masked, depth, open_blocks,
-                if_rule_ids, else_rule_ids)
+                if_rule_ids, else_rule_ids, access_opens)
 
         # ------------------------------------------------ arithmetic candidates
         if not matched:
@@ -757,7 +762,8 @@ def extract(conn, member_id: int, lines: list[tuple[int, str | None, str]], memb
         if not matched and (stripped := strip_generic_label(stmt, masked)):
             _label, stmt2, masked2 = stripped
             matched = (
-                _match_data_access(conn, member_id, line_no, stmt2, masked2, view_to_ddm, label_to_view)
+                _match_data_access(conn, member_id, line_no, stmt2, masked2, view_to_ddm,
+                                    label_to_view, access_opens)
                 or _match_calls(conn, member_id, line_no, stmt2, masked2, internal_subroutines, member_id)
                 or _match_interaction(conn, member_id, line_no, stmt2, masked2)
                 or (is_map and _match_map_body(conn, member_id, line_no, stmt2, masked2))
@@ -765,7 +771,7 @@ def extract(conn, member_id: int, lines: list[tuple[int, str | None, str]], memb
             if not matched:
                 matched, depth, open_blocks = _match_rules(
                     conn, member_id, line_no, stmt2, masked2, depth, open_blocks,
-                    if_rule_ids, else_rule_ids)
+                    if_rule_ids, else_rule_ids, access_opens)
             if not matched:
                 matched = _match_arithmetic(conn, member_id, line_no, stmt2, masked2, depth)
             if not matched:
@@ -828,17 +834,30 @@ def _resolve_loop_label(view: str, label_to_view: dict) -> tuple[str, str] | Non
     return None
 
 
-def _match_data_access(conn, member_id, line_no, stmt, masked, view_to_ddm, label_to_view=None) -> bool:
+def _match_data_access(conn, member_id, line_no, stmt, masked, view_to_ddm, label_to_view=None,
+                        access_opens=None) -> bool:
     label_to_view = label_to_view if label_to_view is not None else {}
     def rec(verb, crud, entity_name, via_view, key_expr, descriptor=None, confidence="verified"):
         eid = None
         if entity_name and not entity_name.startswith("#"):
             kind = "workfile" if verb.endswith("WORK FILE") else ("sql_table" if verb in {"SELECT", "INSERT", "UPDATE-SQL", "DELETE-SQL"} else "ddm")
             eid = upsert_entity(conn, entity_name, kind)
-        insert(conn, "data_access", member_id=member_id, line_no=line_no, verb=verb,
+        return insert(conn, "data_access", member_id=member_id, line_no=line_no, verb=verb,
                crud=crud, entity_name=entity_name, entity_id=eid, via_view=via_view,
                key_expr=(key_expr or "").strip()[:500] or None, descriptor=descriptor,
                raw=stmt.strip()[:500], confidence=confidence)
+
+    def rec_opener(opener, verb, crud, entity_name, via_view, key_expr, descriptor=None):
+        # FIND/READ/HISTOGRAM only -- the found-body extent (issue #148).
+        # Deliberately independent of open_blocks/rule_candidate nesting:
+        # this never pushes onto open_blocks (that's the property
+        # `_END_TO_OPENERS` protects), it only remembers this row's id so
+        # the dispatch loop can later fill in `data_access.end_line` once
+        # this verb's own END-<opener> is found.
+        row_id = rec(verb, crud, entity_name, via_view, key_expr, descriptor)
+        if access_opens is not None:
+            access_opens.setdefault(opener, []).append((row_id, line_no))
+        return row_id
 
     if (m := RE_READ_WORK.match(masked)):
         rec("READ WORK FILE", "R", f"WORKFILE-{m.group('num')}", None, m.group("rest"))
@@ -873,7 +892,7 @@ def _match_data_access(conn, member_id, line_no, stmt, masked, view_to_ddm, labe
             dm = re.search(r"\b(?:BY|WITH)\s+([A-Z0-9#@$&\-_.]+)", tail, re.I)
             if dm:
                 desc = dm.group(1).upper()
-            rec("READ", "R", ent, via, tail, desc)
+            rec_opener("READ", "READ", "R", ent, via, tail, desc)
             return True
 
     if (m := RE_FIND.match(masked)):
@@ -886,7 +905,7 @@ def _match_data_access(conn, member_id, line_no, stmt, masked, view_to_ddm, labe
         if dm:
             desc = dm.group(1).upper()
         verb = "FIND NUMBER" if (m.group("mods") or "").upper().startswith("NUMBER") else "FIND"
-        rec(verb, "R", ent, via, tail, desc)
+        rec_opener("FIND", verb, "R", ent, via, tail, desc)
         return True
 
     if (m := RE_HISTOGRAM.match(masked)):
@@ -895,7 +914,7 @@ def _match_data_access(conn, member_id, line_no, stmt, masked, view_to_ddm, labe
             label_to_view[m.group("label").upper()] = (ent, via)
         tail = m.group("rest") or ""
         dm = re.search(r"\b(?:FOR|VALUE\s+FOR)\s+(?:FIELD\s+)?([A-Z0-9#@$&\-_.]+)", tail, re.I)
-        rec("HISTOGRAM", "R", ent, via, tail, dm.group(1).upper() if dm else None)
+        rec_opener("HISTOGRAM", "HISTOGRAM", "R", ent, via, tail, dm.group(1).upper() if dm else None)
         return True
 
     if (m := RE_GET.match(masked)) and m.group(0).strip():
@@ -1135,7 +1154,8 @@ def _match_arithmetic_low_confidence(conn, member_id, line_no, stmt, masked, dep
 
 def _match_rules(conn, member_id, line_no, stmt, masked, depth, open_blocks,
                   if_rule_ids: dict[int, int] | None = None,
-                  else_rule_ids: dict[int, int] | None = None):
+                  else_rule_ids: dict[int, int] | None = None,
+                  access_opens: dict[str, list[tuple[int, int]]] | None = None):
     if_rule_ids = {} if if_rule_ids is None else if_rule_ids
     else_rule_ids = {} if else_rule_ids is None else else_rule_ids
 
@@ -1147,7 +1167,19 @@ def _match_rules(conn, member_id, line_no, stmt, masked, depth, open_blocks,
                raw=stmt.strip()[:500], pair_line_no=pair_line_no)
 
     if (m := RE_END_ANY.match(masked)):
-        openers = _END_TO_OPENERS.get(m.group(1).upper())
+        end_kw = m.group(1).upper()
+        # Found-body extent (issue #148) -- entirely separate from the
+        # open_blocks nesting-integrity handling just below: FIND/READ/
+        # HISTOGRAM never push onto open_blocks (see _END_TO_OPENERS'
+        # comment), so this closes the most recently opened same-verb
+        # data_access row directly, off its own access_opens stack, and
+        # never touches open_blocks at all -- an END-FIND still can't pop
+        # an unrelated IF/DECIDE/FOR/REPEAT the way it could before that
+        # fix, and this doesn't reintroduce any such coupling.
+        if access_opens and end_kw in access_opens and access_opens[end_kw]:
+            row_id, _opened_line = access_opens[end_kw].pop()
+            conn.execute("UPDATE data_access SET end_line=? WHERE id=?", (line_no, row_id))
+        openers = _END_TO_OPENERS.get(end_kw)
         if openers and open_blocks and open_blocks[-1][0] in openers:
             popped_construct, opened_line = open_blocks.pop()
             if popped_construct == "IF":
