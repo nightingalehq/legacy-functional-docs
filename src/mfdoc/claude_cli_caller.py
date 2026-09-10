@@ -80,8 +80,19 @@ class ClaudeCLICaller:
             raise RuntimeError(f"`claude -p` reported an error: {data.get('result')!r}")
 
         usage = data.get("usage") or {}
+        # Issue #169: `claude -p --output-format json`'s `usage` object is the
+        # same shape as the Anthropic Messages API's own usage object (the
+        # `claude` CLI's runtime is itself an Anthropic SDK client) -- under
+        # that shape, `input_tokens` alone reports only a turn's uncached
+        # portion once prompt caching is involved; the cache-write and
+        # cache-hit token counts are separate fields. `.get(..., 0)`
+        # everywhere so an older `claude` CLI that doesn't emit these fields,
+        # or a call that genuinely didn't cache anything, still defaults
+        # sensibly to 0 rather than raising or silently misreporting.
         return ModelResponse(
             text=data.get("result", ""),
             input_tokens=usage.get("input_tokens", 0),
             output_tokens=usage.get("output_tokens", 0),
+            cache_creation_input_tokens=usage.get("cache_creation_input_tokens", 0),
+            cache_read_input_tokens=usage.get("cache_read_input_tokens", 0),
         )

@@ -40,6 +40,39 @@ def test_parses_result_and_usage_from_output_json(monkeypatch):
     assert response.output_tokens == 4
 
 
+def test_parses_cache_token_fields_from_output_json(monkeypatch):
+    """Issue #169: `claude -p --output-format json`'s `usage` object is the
+    same shape as the Anthropic Messages API's -- `cache_creation_input_tokens`/
+    `cache_read_input_tokens` must be captured too, not just plain
+    input/output tokens, or cost reporting understates real spend."""
+    monkeypatch.setattr(
+        subprocess, "run",
+        _fake_run(stdout='{"is_error": false, "result": "pong", '
+                          '"usage": {"input_tokens": 2, "output_tokens": 4, '
+                          '"cache_creation_input_tokens": 1500, '
+                          '"cache_read_input_tokens": 3000}}'),
+    )
+    caller = ClaudeCLICaller()
+    response = caller("ping")
+    assert response.cache_creation_input_tokens == 1500
+    assert response.cache_read_input_tokens == 3000
+
+
+def test_cache_token_fields_default_to_zero_when_absent(monkeypatch):
+    """Older `claude` CLI versions (or a call that genuinely didn't cache
+    anything) may omit the cache fields entirely -- must default to 0, not
+    raise or leave the attribute missing."""
+    monkeypatch.setattr(
+        subprocess, "run",
+        _fake_run(stdout='{"is_error": false, "result": "pong", '
+                          '"usage": {"input_tokens": 2, "output_tokens": 4}}'),
+    )
+    caller = ClaudeCLICaller()
+    response = caller("ping")
+    assert response.cache_creation_input_tokens == 0
+    assert response.cache_read_input_tokens == 0
+
+
 def test_nonzero_exit_raises_with_stderr(monkeypatch):
     monkeypatch.setattr(subprocess, "run", _fake_run(stderr="boom", returncode=1))
     with pytest.raises(RuntimeError, match="boom"):

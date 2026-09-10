@@ -242,6 +242,9 @@ class ModelResponse:
     # cache entry (no cache_control sent, or a genuine cache miss) reports
     # 0 for the one that didn't apply, same as the SDK's own `Usage` object
     # (whose cache fields are `None`, not present, when caching wasn't used).
+    # Issue #169: `ClaudeCLICaller` populates these too, read off `claude -p
+    # --output-format json`'s own `usage` object -- `input_tokens` alone only
+    # reports a turn's uncached/cache-miss portion once caching is in play.
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0
 
