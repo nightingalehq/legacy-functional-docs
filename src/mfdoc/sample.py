@@ -23,7 +23,7 @@ import random
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .validate import CITATION, _logical_units, _split_frontmatter
+from .validate import CITATION, _logical_units, split_frontmatter
 
 
 @dataclass
@@ -66,7 +66,7 @@ def sample_claims(conn, doc_paths: list[Path], n_per_doc: int, seed: int) -> lis
     samples: list[ClaimSample] = []
     for path in sorted(doc_paths):
         text = path.read_text(encoding="utf-8")
-        _fm, body, _err = _split_frontmatter(text)
+        _fm, body, _err = split_frontmatter(text)
         pairs = claim_citation_pairs(body)
         if not pairs:
             continue

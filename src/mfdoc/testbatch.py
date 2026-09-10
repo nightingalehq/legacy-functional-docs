@@ -40,7 +40,7 @@ from .brief import (
 from .redact import NULL_REDACTOR, Redactor
 from .testlang import sidecar_path_for
 from .testplan import fetch_test_case_rows, test_case_brief, test_case_brief_chunk
-from .validate import BR_REF, _split_frontmatter, validate_test_doc
+from .validate import BR_REF, split_frontmatter, validate_test_doc
 
 # Same progress/diagnostic logger idea as batch.py -- see that module's
 # `logger` docstring; mirrored here for `mfdoc test-batch`'s own resumable,
@@ -242,7 +242,7 @@ def _aggregate_chunk_confidence(chunk_paths: list[Path]) -> dict[str, int]:
     for path in chunk_paths:
         if not path.exists():
             continue
-        fm, _, err = _split_frontmatter(path.read_text(encoding="utf-8"))
+        fm, _, err = split_frontmatter(path.read_text(encoding="utf-8"))
         if err or not isinstance(fm, dict):
             continue
         cs = fm.get("confidence_summary")

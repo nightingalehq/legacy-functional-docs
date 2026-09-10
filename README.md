@@ -292,6 +292,14 @@ mfdoc validate --config project.yml --docs docs/functional
 # smoke-test against the bundled fixtures and worked examples:
 mfdoc validate --config project.yml --docs examples/outputs
 
+# deterministic, no-model-call check for a generated document's own numbers
+# (rule counts cited as MEMBER:BR-nnn, front-matter `sources`, a gap-register's
+# stated totals, a system-overview's stated line-recognition rate) against
+# what the current fact store would produce today -- a cheap alternative to
+# reading a whole document side-by-side with a fresh brief after a
+# calibrate/derive refresh, to spot which of its own facts have gone stale
+mfdoc doc-drift --config project.yml --docs docs/functional
+
 # sample generated claims against their cited source and record whether the
 # source actually supports each one -- backs the min_citation_accuracy_rate
 # quality gate (see "Coverage gates" below); mfdoc gate fails that gate until

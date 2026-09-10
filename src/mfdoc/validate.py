@@ -218,7 +218,7 @@ def _uncited_assertions(body: str) -> list[str]:
     return out
 
 
-def _split_frontmatter(text: str) -> tuple[dict | None, str, str | None]:
+def split_frontmatter(text: str) -> tuple[dict | None, str, str | None]:
     if not text.startswith("---"):
         return None, text, "missing YAML front matter"
     parts = text.split("---", 2)
@@ -781,7 +781,7 @@ def validate_doc(conn, path: Path, outcome_field=OUTCOME_FIELD, _text: str | Non
     # (different line ranges each time), and this avoids re-running all
     # three _STATEMENT_SOURCES queries for every one of those citations.
     statement_rows_cache: dict[int, list] = {}
-    fm, body, fm_err = _split_frontmatter(text)
+    fm, body, fm_err = split_frontmatter(text)
     if fm_err:
         problems.append(fm_err)
     if fm is not None and fm.get("doc_type") == "register":
@@ -1190,7 +1190,7 @@ def _partition_pipeline_docs(conn, root: Path) -> tuple[list[Path], list[str], d
         if not known_members:
             in_scope.append(path)
             continue
-        fm, _, fm_err = _split_frontmatter(text)
+        fm, _, fm_err = split_frontmatter(text)
         bad_sources = None if fm_err else _out_of_scope_sources(fm, known_members)
         if bad_sources is None:
             in_scope.append(path)

@@ -201,7 +201,7 @@ def test_fix_generated_by_version_is_a_no_op_when_the_line_is_missing_or_differe
 def test_strip_response_preamble_removes_wrapping_code_fence():
     """A ClaudeCLICaller response (issue #150) can come back as the whole
     document wrapped in a single ```markdown fence -- the fence itself,
-    not just lead-in text, must be gone before _split_frontmatter sees it,
+    not just lead-in text, must be gone before split_frontmatter sees it,
     or the fence's own opening ``` line is what fails the leading-`---`
     check instead of the real front matter."""
     text = "---\ntitle: X\n---\nbody\n"
@@ -238,7 +238,7 @@ def test_strip_response_preamble_is_a_no_op_when_already_clean():
 def test_strip_response_preamble_leaves_text_with_no_frontmatter_at_all_unchanged():
     """No `---` anywhere in the response at all (e.g. the model refused, or
     produced something completely unrelated) -- nothing to rescue, so the
-    original text passes through untouched and _split_frontmatter's own
+    original text passes through untouched and split_frontmatter's own
     "missing YAML front matter" error still reports the real raw output,
     not something this function invented or truncated."""
     text = "I can't help with that.\n"

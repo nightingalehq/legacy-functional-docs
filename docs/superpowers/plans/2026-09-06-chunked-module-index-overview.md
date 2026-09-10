@@ -56,7 +56,7 @@
 
 **Interfaces:**
 - Produces: `_consolidated_gap_lines(conn, member_id: int, ok_chunk_paths: list[Path]) -> list[str]` -- `gap` table rows for `member_id`, ordered by real severity priority via `db.GAP_SEVERITY_ORDER_SQL` (same as `module_brief`'s own "Known gaps" section, which shares that constant), formatted `"[severity] gap_kind: detail"`, followed by every ok chunk's own `sme_questions` front-matter strings not already present verbatim, deduplicated overall.
-- Consumes: `_split_frontmatter` (already imported in `batch.py`).
+- Consumes: `split_frontmatter` (already imported in `batch.py`).
 
 - [ ] Add `_consolidated_gap_lines` to `batch.py`.
 - [ ] Test: two `gap` rows for a member plus two chunks whose `sme_questions` include one duplicate (of each other) and one duplicate of a gap row's own detail text -- assert the result has no duplicates and preserves gap-rows-first ordering.

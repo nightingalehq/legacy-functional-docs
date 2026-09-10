@@ -18,6 +18,7 @@
     mfdoc test-validate --config project.yml --docs tests_generated
     mfdoc batch    --config project.yml --out docs/functional/modules
     mfdoc validate --config project.yml --docs docs/functional
+    mfdoc doc-drift --config project.yml --docs docs/functional
     mfdoc sample-citations --config project.yml --docs docs/functional --judge human
     mfdoc export   --config project.yml --json out/index.json
 """
@@ -1245,6 +1246,35 @@ def cmd_validate(args) -> int:
     ) else 1
 
 
+def cmd_doc_drift(args) -> int:
+    """Deterministic, no-model-call check (see docdrift.py) for whether a
+    generated document's own citable numbers -- rule counts cited as
+    `MEMBER:BR-nnn`, front matter `sources`, a gap-register's own stated
+    totals, a system-overview's stated line-recognition rate -- still match
+    what the current fact store would produce. Complements `mfdoc validate`
+    (citation integrity) rather than replacing it: a document can validate
+    cleanly (every citation resolves) while still citing a rule count that
+    calibrate/derive has since moved past."""
+    from .docdrift import check_tree
+    cfg = load_config(args.config)
+    conn = connect(Path(args.config).parent / cfg["index_db"])
+    res = check_tree(conn, Path(args.docs))
+    for r in res["results"]:
+        if r["skipped"]:
+            continue
+        status = "OK   " if r["ok"] else "DRIFT"
+        print(f"{status} {r['path']}")
+        for p in r["problems"]:
+            print(f"       - {p}")
+    skipped = res["documents"] - res["documents_checked"]
+    print(
+        f"\n{res['documents_checked'] - res['documents_drifted']}/{res['documents_checked']} "
+        f"document(s) checked with no drift, {res['total_mismatches']} mismatch(es) total "
+        f"({skipped} document(s) skipped -- no checkable front matter, or doc_type: register)"
+    )
+    return 1 if res["documents_drifted"] else 0
+
+
 def cmd_test_validate(args) -> int:
     from .validate import validate_tests_tree
     cfg = load_config(args.config)
@@ -1657,6 +1687,11 @@ def main(argv=None) -> int:
     p.add_argument("--config", required=True)
     p.add_argument("--docs", required=True)
     p.set_defaults(func=cmd_validate)
+
+    p = sub.add_parser("doc-drift")
+    p.add_argument("--config", required=True)
+    p.add_argument("--docs", required=True, help="a single document, or a directory to check recursively")
+    p.set_defaults(func=cmd_doc_drift)
 
     p = sub.add_parser("test-validate")
     p.add_argument("--config", required=True)
