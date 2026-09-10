@@ -1066,7 +1066,7 @@ def test_validator_accepts_a_genuine_gap_register_question(indexed_db, tmp_path)
           "correct or should it be discarded?\n"
     )
     result = validate_doc(indexed_db, doc)
-    assert not any("no citation" in p for p in result["problems"]), result["problems"]
+    assert result["ok"] is True, result["problems"]
 
 
 def test_validator_still_rejects_a_declarative_sentence_with_an_embedded_question_mark(
