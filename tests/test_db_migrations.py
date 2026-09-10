@@ -59,6 +59,8 @@ def test_connect_adds_missing_columns_to_a_pre_existing_database(tmp_path):
     assert "key_source_line" in da_cols
     assert "key_source_expr" in da_cols
     assert "dynamic" in int_cols
+    sf_cols = {r["name"] for r in conn.execute("PRAGMA table_info(source_file)").fetchall()}
+    assert "dialect_hash" in sf_cols
 
 
 def test_connect_migration_lets_new_columns_be_inserted_on_an_old_db(tmp_path):

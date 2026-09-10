@@ -12,6 +12,37 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-10d):**
+- Fixed issue #194: `mfdoc ingest`'s incremental-ingest skip decision
+  compared only a source file's own content hash (`sha256`) against what was
+  recorded at last ingest, so a dialect parser code change with zero
+  source-file edits was invisible to it -- the stale, pre-fix fact store
+  was silently reused. Per a real regeneration run's cost report, this was
+  the single largest cost driver of that run (~1/3 of total spend): the
+  bug was only caught by a direct sqlite inspection, and the whole
+  downstream pipeline had to be re-run from `derive` onward once found.
+  Fixed by folding a hash of the dialect's own extractor module(s) into the
+  cache key: `cli._dialect_parser_hash(dialect)` hashes the file(s) behind
+  `DIALECT_ROUTER[dialect]` (via the new `DIALECT_PARSER_MODULES` map --
+  `mantis` includes `natural.py` too, since `mantis.extract` reuses
+  `natural.mask_literals`/`orig`), stored as a new `source_file.dialect_hash`
+  column (via `db._COLUMN_MIGRATIONS`, so an existing engagement's
+  `index.db` picks it up and simply re-parses every file once on upgrade).
+  Deliberately scoped to `dialects/*.py`, not `db.py`/`normalise.py` --
+  those are shared infrastructure that changes for reasons unrelated to any
+  one dialect's parsing; folding them in would invalidate every source file
+  on any unrelated schema/chunking edit instead of just the dialect whose
+  parser actually changed. Considered the issue's `--force` flag
+  alternative and rejected it per the issue's own reasoning: it depends on
+  a human remembering to pass it after a parser change, exactly the failure
+  mode that caused this. Added
+  `test_dialect_parser_code_change_invalidates_cache_without_source_edit`
+  and `test_dialect_parser_hash_differs_between_module_contents`
+  (tests/test_incremental_ingest.py), plus a `dialect_hash` column
+  assertion in `tests/test_db_migrations.py`. Full suite: 909 passed, 2
+  skipped; bundled fixture pipeline (`ingest`/`derive`/`coverage`/`validate
+  --docs examples`) still 71/71 documents clean, 0 invalid citations.
+
 **Progress (2026-09-10c):**
 - Fixed issue #184: `citations._rule_id(member_name, n)` is a pure
   formatting helper -- the ordinal `n` was independently re-derived by

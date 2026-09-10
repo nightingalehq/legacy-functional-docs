@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import functools
+import hashlib
 import json
 import logging
 import re
@@ -80,6 +82,59 @@ DIALECT_DEFAULT_TYPE = {
     "sql_ddl": "ddl", "cobol_copybook": "copybook", "jcl": "job", "cics_csd": "csd",
     "mantis_screen": "map",
 }
+
+#: Modules whose own source *is* the dialect's extraction logic -- everything
+#: `DIALECT_ROUTER[dialect]` executes for that dialect, including any helper
+#: it imports from a sibling dialect module (mantis.extract reuses
+#: natural.mask_literals/orig, so a fix to either must invalidate mantis's
+#: cache too). Deliberately scoped to `dialects/*.py`, not `db.py`/
+#: `normalise.py` -- those are shared infrastructure used by every dialect
+#: and changing far more often for reasons unrelated to any one dialect's
+#: parsing; folding them in here would invalidate every source file on
+#: every unrelated schema/chunking change instead of just the dialect whose
+#: parser actually changed. See issue #194.
+DIALECT_PARSER_MODULES: dict[str, tuple] = {
+    "natural": (natural,),
+    "mantis": (mantis, natural),
+    "adabas_fdt": (adabas,),
+    "ddm": (adabas,),
+    "supra_dir": (supra,),
+    "sql_ddl": (environment,),
+    "cobol_copybook": (environment,),
+    "jcl": (environment,),
+    "cics_csd": (environment,),
+    "mantis_screen": (screen,),
+}
+
+
+@functools.lru_cache(maxsize=None)
+def _dialect_parser_hash(dialect: str) -> str:
+    """Hash of the dialect extractor module(s)' own source code.
+
+    Folded into the per-source-file incremental-ingest cache key alongside
+    the source file's own content hash (see `cmd_ingest`) so that a parser
+    bug fix -- landed with zero source-file changes -- still forces every
+    file previously ingested under that dialect to be re-parsed on the next
+    `mfdoc ingest`, instead of the stale, pre-fix facts being silently
+    reused (issue #194: this was the single largest cost driver of a real
+    regeneration run, undetected by `mfdoc gate`/`coverage`).
+
+    Returns "" for a dialect with no registered parser module (e.g.
+    "unknown") -- that's fine, it just means a source file that ever lands
+    as "unknown" always gets re-processed, which is cheap (it only records
+    an `ambiguous_dialect` gap).
+    """
+    modules = DIALECT_PARSER_MODULES.get(dialect, ())
+    h = hashlib.sha256()
+    for mod in modules:
+        try:
+            h.update(Path(mod.__file__).read_bytes())
+        except (OSError, TypeError):
+            # No readable __file__ (e.g. a frozen/zipped install) -- fall
+            # back to whatever version marker the module offers rather than
+            # letting a missing-file quirk of the install crash `ingest`.
+            h.update(str(getattr(mod, "__version__", "")).encode())
+    return h.hexdigest()
 
 
 def load_config(path: str | Path) -> dict:
@@ -154,19 +209,40 @@ def cmd_ingest(args) -> int:
                 print(f"  ! skipped {path}: {exc}", file=sys.stderr)
                 continue
 
-            # Incremental ingest: a file whose content hasn't changed since
-            # the last run produces byte-identical facts if re-extracted, so
-            # skip it outright rather than paying the parse+extract cost
-            # again. A changed file keeps its source_file row (UPDATEd
-            # below, not delete-and-reinsert) so that upsert_member can still
-            # match this file's members by name/library/dialect and reuse
-            # their existing ids -- member identity across a content change
+            # Dialect must be known before the incremental-ingest skip check
+            # below (its cache key folds in the dialect parser's own code),
+            # so detection happens here, ahead of that check, rather than
+            # after it as previously.
+            text = "\n".join(lines)
+            dialect = normalise.detect_dialect(text, hint)
+            ranking = normalise.dialect_confidence(text)
+            dialect_hash = _dialect_parser_hash(dialect)
+
+            # Incremental ingest: a file whose content *and* whose dialect
+            # parser's own code are both unchanged since the last run
+            # produces byte-identical facts if re-extracted, so skip it
+            # outright rather than paying the parse+extract cost again. A
+            # changed file keeps its source_file row (UPDATEd below, not
+            # delete-and-reinsert) so that upsert_member can still match
+            # this file's members by name/library/dialect and reuse their
+            # existing ids -- member identity across a content change
             # should be stable for anything that references a member_id
             # externally, not just re-derived every time.
+            #
+            # dialect_hash guards against the case a bare sha256 comparison
+            # misses entirely: a dialect parser bug fix ships with no
+            # source-file edits at all, so the file's content hash is
+            # unchanged even though re-parsing it would now produce
+            # different facts. Without this, that stale, pre-fix fact store
+            # is silently reused (issue #194).
             existing_sf = conn.execute(
-                "SELECT id, sha256 FROM source_file WHERE path=?", (str(path),)
+                "SELECT id, sha256, dialect_hash FROM source_file WHERE path=?", (str(path),)
             ).fetchone()
-            if existing_sf and existing_sf["sha256"] == sha:
+            if (
+                existing_sf
+                and existing_sf["sha256"] == sha
+                and existing_sf["dialect_hash"] == dialect_hash
+            ):
                 skipped_unchanged += 1
                 continue
             # Members this file owned before this (re-)ingest -- anything in
@@ -196,9 +272,6 @@ def cmd_ingest(args) -> int:
                 a, b = str(seq_cfg).split(":")
                 seq_cols = (int(a) - 1, int(b))
 
-            text = "\n".join(lines)
-            dialect = normalise.detect_dialect(text, hint)
-            ranking = normalise.dialect_confidence(text)
             if seq_cols:
                 seq_cols_record = f"{seq_cols[0] + 1}:{seq_cols[1]}"
             elif leading_seq_width:
@@ -213,13 +286,13 @@ def cmd_ingest(args) -> int:
             if existing_sf:
                 sf_id = existing_sf["id"]
                 conn.execute(
-                    "UPDATE source_file SET sha256=?, encoding_in=?, seq_cols=?, "
-                    "line_count=?, ingest_run_id=? WHERE id=?",
-                    (sha, enc, seq_cols_record, len(lines), run_id, sf_id),
+                    "UPDATE source_file SET sha256=?, dialect_hash=?, encoding_in=?, "
+                    "seq_cols=?, line_count=?, ingest_run_id=? WHERE id=?",
+                    (sha, dialect_hash, enc, seq_cols_record, len(lines), run_id, sf_id),
                 )
             else:
                 sf_id = insert(conn, "source_file", path=str(path), origin_path=str(path),
-                               sha256=sha, encoding_in=enc,
+                               sha256=sha, dialect_hash=dialect_hash, encoding_in=enc,
                                seq_cols=seq_cols_record,
                                line_count=len(lines), ingest_run_id=run_id)
 
