@@ -191,6 +191,48 @@ GitHub org.
     a full retry. Full suite (`pytest`) and the bundled-fixture pipeline
     check (`ingest`/`derive`/`coverage`/`validate --docs examples`) both
     pass clean (71/71 documents, 0 invalid citations), no regressions.
+- Fixed issue #167: `classify_rules_llm` (`classify.py`) issued one
+  `caller(prompt)` call per LLM-eligible `rule_candidate` row, each a
+  tiny, cheap-in-tokens prompt asking for a single one-word theme. On a
+  real project this made `classify-rules` the slowest pipeline step in
+  wall-clock terms despite negligible token cost -- a call-count problem,
+  not a token-cost one (per the token-cost report tracked under epic
+  #156).
+  - Rows are now grouped into batches of `_DEFAULT_LLM_BATCH_SIZE`
+    (25, the same order of magnitude as `batch.py`'s
+    `DEFAULT_MAX_RULES_PER_CALL`, for consistency rather than any other
+    relationship) and sent as one prompt per batch via a new
+    `_build_batch_prompt`, cutting model-call count by roughly that
+    factor. `classify_rules_llm` gained an optional `batch_size`
+    parameter (default `None` -> the module constant) so tests (and any
+    future CLI flag) can override it without touching the constant.
+  - Responses are parsed back per-row by `_parse_batch_response`, which
+    matches each line to the row's own `rule_candidate.id` (not its
+    position in the batch) -- so a reordered, partial, or garbled
+    response can never misassign or drop another row in the same batch.
+    Every existing per-row check (taxonomy case-insensitive key
+    matching, `_looks_like_a_refusal_or_non_answer`, "can't confidently
+    theme stays structural") still runs per-row against the parsed text,
+    unchanged in behavior. A row with no usable line in its batch's
+    response is left 'structural' (counted in a new `unparsed` field on
+    the return dict) exactly as an individual failed/empty call was
+    before batching existed; `cmd_classify_rules` in `cli.py` prints it
+    when nonzero.
+  - Progress reporting and commit granularity stay per-row (not
+    per-batch) -- `progress_callback(i, total)` and the `_COMMIT_BATCH_SIZE`
+    commit cadence both still count individual rows, so `cli.py`'s
+    existing callback usage needed no changes.
+  - `tests/test_classify.py` gained unit tests for
+    `_build_batch_prompt`/`_parse_batch_response` (including a batch
+    with one malformed/unparseable row mixed with otherwise-good rows)
+    and an end-to-end test asserting call count drops below row count;
+    several pre-existing tests that assumed one call per row were
+    updated to either pass `batch_size=1` (where the test's point was
+    commit/token/limit accounting, not batching itself) or to echo each
+    row's id back from the fake caller so batched responses parse
+    successfully. Verified against the bundled fixtures with a
+    fake-echo caller: 59 structural rows across 3 model calls instead of
+    59 (default batch size 25).
 
 **Progress (2026-09-09):**
 - Fixed issue #151: real SME review feedback asked, across several

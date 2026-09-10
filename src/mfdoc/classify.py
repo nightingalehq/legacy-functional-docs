@@ -79,10 +79,23 @@ _MAX_THEME_WORDS = 6
 # classified before the raise stays committed instead of being lost.
 _COMMIT_BATCH_SIZE = 20
 
-# One serial model call per row is slow and easy to lose track of on a
-# real project's rule count -- print a running progress line every N rows
-# rather than going silent until the whole pass finishes.
+# One progress line every N rows rather than going silent until the whole
+# pass finishes -- progress is still reported per-row (see
+# classify_rules_llm's docstring) even though rows are now sent to the
+# model in groups (_DEFAULT_LLM_BATCH_SIZE below), since a caller cares
+# about "how far through the rule set are we", not "how many HTTP calls
+# has this made".
 _PROGRESS_INTERVAL = 10
+
+# How many rule_candidate rows are asked about in a single model call.
+# One call per row (the original design) is cheap in tokens but pays a
+# fixed per-call latency overhead every single time -- on a real
+# project's rule count that dominates wall-clock time even though the
+# tokens involved are trivial (see issue #167). Batching trades a larger,
+# still-cheap prompt for far fewer calls. Sized to the same order as
+# batch.py's DEFAULT_MAX_RULES_PER_CALL for consistency, not because the
+# two have any other relationship.
+_DEFAULT_LLM_BATCH_SIZE = 25
 
 
 def _looks_like_a_refusal_or_non_answer(theme: str) -> bool:
@@ -97,6 +110,66 @@ def _looks_like_a_refusal_or_non_answer(theme: str) -> bool:
     return False
 
 
+def _build_batch_prompt(items: list[tuple[int, str, str, str]]) -> str:
+    """Build one prompt asking for a theme for every row in `items` at
+    once, instead of issuing one call per row. Each item is
+    `(rc_id, member_name, condition, literals)` -- already redacted by
+    the caller.
+
+    The expected response format is one line per rule, `"<id>: <theme>"`,
+    where `<id>` is the row's own `rule_candidate.id` (not its position in
+    the batch) -- so a response can be matched back to the right row even
+    if the model reorders, skips, or only partially answers, and so a
+    stray/garbled line can never be misattributed to the wrong row.
+    """
+    lines = [
+        "For each numbered rule below, reply with exactly one short "
+        "lowercase business-theme word (e.g. eligibility, posting, "
+        "validation) -- one line per rule, in the exact format "
+        '"<id>: <theme>" where <id> is the number shown before each '
+        "rule below. Reply with nothing else -- no preamble, no blank "
+        "lines, no commentary.",
+        "",
+    ]
+    for rc_id, member_name, condition, literals in items:
+        lines.append(
+            f"{rc_id}: module={member_name} condition={condition!r} literals={literals!r}"
+        )
+    return "\n".join(lines)
+
+
+_BATCH_RESPONSE_LINE = re.compile(r"^\s*(\d+)\s*[:.\-]\s*(.+?)\s*$")
+
+
+def _parse_batch_response(text: str, expected_ids: list[int]) -> dict[int, str | None]:
+    """Parse a batched response back into `{rc_id: raw_theme_text}`.
+
+    Every id in `expected_ids` is present in the returned dict; an id
+    with no matching line in `text` (missing, garbled, or the model used
+    a different id) maps to `None` -- the caller leaves that row's
+    classification untouched (still 'structural'), exactly as an
+    individual failed/empty call does today, rather than guessing or
+    letting one bad line disturb any other row in the same batch. A line
+    naming an id outside this batch is ignored rather than accepted,
+    since it can't be attributed to any row this call was actually asked
+    about.
+    """
+    expected = set(expected_ids)
+    result: dict[int, str | None] = dict.fromkeys(expected_ids, None)
+    for line in text.strip().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        match = _BATCH_RESPONSE_LINE.match(line)
+        if not match:
+            continue
+        rc_id = int(match.group(1))
+        if rc_id not in expected:
+            continue
+        result[rc_id] = match.group(2).strip().lower()
+    return result
+
+
 def classify_rules_llm(
     conn,
     caller: ModelCaller,
@@ -104,6 +177,7 @@ def classify_rules_llm(
     taxonomy: dict[str, list[str]] | None = None,
     limit: int | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
+    batch_size: int | None = None,
 ) -> dict:
     """Ask the model for a one-word theme for every rule_candidate still
     classified 'structural' (the keyword taxonomy didn't match it).
@@ -144,18 +218,37 @@ def classify_rules_llm(
     would otherwise cap an implementation-defined subset that could
     differ between runs with no source change.
 
-    Every `_PROGRESS_INTERVAL`th row (and the last
-    row) invokes `progress_callback(i, total)` if one is given -- this
-    module is library code, not the CLI, so it never prints directly
-    (see batch.py/structural.py for the same convention); `cmd_classify_
-    rules` in cli.py passes a callback that does the actual printing.
-    Omitting the callback produces no output at all, just the return
-    value below. The returned dict reports `input_tokens`/`output_tokens`
-    accumulated from each call's `ModelResponse` (previously discarded)
-    alongside the reclassified count, so a caller can report usage/cost
-    the same way `mfdoc batch` does.
+    Rows are sent to the model in groups of `batch_size` (default
+    `_DEFAULT_LLM_BATCH_SIZE`) rather than one call per row -- one call
+    now asks for `batch_size` themes at once (see `_build_batch_prompt`),
+    cutting call count by roughly that factor, which is what actually
+    dominates wall-clock time on a real project's rule count (see issue
+    #167; the per-row prompt is cheap in tokens but each call still pays
+    a fixed latency overhead). Every check that used to apply to the
+    single response for a row -- taxonomy matching, refusal/non-answer
+    rejection, "can't confidently theme stays structural" -- still
+    applies per-row against a batched response (`_parse_batch_response`),
+    not just to a single top-line answer: a missing, garbled, or
+    wrongly-id'd line for one row in a batch leaves only that row
+    untouched (still 'structural') and never disturbs any other row in
+    the same batch.
+
+    Progress and commit granularity stay per-row, not per-batch: every
+    `_PROGRESS_INTERVAL`th row (and the last row) invokes
+    `progress_callback(i, total)` if one is given -- this module is
+    library code, not the CLI, so it never prints directly (see
+    batch.py/structural.py for the same convention); `cmd_classify_rules`
+    in cli.py passes a callback that does the actual printing. Omitting
+    the callback produces no output at all, just the return value below.
+    The returned dict reports `input_tokens`/`output_tokens` accumulated
+    from each call's `ModelResponse` (previously discarded) alongside the
+    reclassified count, so a caller can report usage/cost the same way
+    `mfdoc batch` does, plus `unparsed` -- how many rows had no usable
+    line in their batch's response, the batched equivalent of an
+    individual failed/empty call.
     """
     taxonomy_lookup = {theme.lower(): theme for theme in taxonomy} if taxonomy else None
+    size = batch_size if batch_size is not None else _DEFAULT_LLM_BATCH_SIZE
     query = """
         SELECT rc.id, rc.condition, rc.literals, m.name AS member_name
           FROM rule_candidate rc
@@ -173,46 +266,51 @@ def classify_rules_llm(
         rows = conn.execute(query).fetchall()
 
     reclassified = 0
+    unparsed = 0
     input_tokens = 0
     output_tokens = 0
     total = len(rows)
-    for i, row in enumerate(rows, start=1):
-        condition = redact(row["condition"]) or ""
-        literals = redact(row["literals"]) or ""
-        prompt = (
-            "Reply with exactly one short lowercase business-theme word "
-            f"(e.g. eligibility, posting, validation) for this rule from "
-            f"module {row['member_name']}: condition={condition!r} literals={literals!r}"
-        )
+    i = 0
+    for batch_start in range(0, total, size):
+        batch_rows = rows[batch_start : batch_start + size]
+        items = [
+            (row["id"], row["member_name"], redact(row["condition"]) or "", redact(row["literals"]) or "")
+            for row in batch_rows
+        ]
+        prompt = _build_batch_prompt(items)
         response = caller(prompt)
         input_tokens += response.input_tokens
         output_tokens += response.output_tokens
-        lines = response.text.strip().lower().splitlines()
-        if not lines:
-            continue
-        full_theme = lines[0]
-        if not full_theme:
-            continue
-        if taxonomy_lookup is not None:
-            if full_theme not in taxonomy_lookup:
-                continue
-            theme = taxonomy_lookup[full_theme]
-        else:
-            if _looks_like_a_refusal_or_non_answer(full_theme):
-                continue
-            theme = full_theme[:40]
-        conn.execute(
-            "UPDATE rule_theme SET theme=?, source='llm' WHERE rule_candidate_id=?",
-            (theme, row["id"]),
-        )
-        reclassified += 1
-        if i % _COMMIT_BATCH_SIZE == 0:
-            conn.commit()
-        if progress_callback is not None and (i % _PROGRESS_INTERVAL == 0 or i == total):
-            progress_callback(i, total)
+        parsed = _parse_batch_response(response.text, [row["id"] for row in batch_rows])
+
+        for row in batch_rows:
+            i += 1
+            full_theme = parsed.get(row["id"])
+            if not full_theme:
+                unparsed += 1
+            else:
+                if taxonomy_lookup is not None:
+                    theme = taxonomy_lookup.get(full_theme)
+                    accepted = theme is not None
+                elif _looks_like_a_refusal_or_non_answer(full_theme):
+                    accepted = False
+                else:
+                    theme = full_theme[:40]
+                    accepted = True
+                if accepted:
+                    conn.execute(
+                        "UPDATE rule_theme SET theme=?, source='llm' WHERE rule_candidate_id=?",
+                        (theme, row["id"]),
+                    )
+                    reclassified += 1
+            if i % _COMMIT_BATCH_SIZE == 0:
+                conn.commit()
+            if progress_callback is not None and (i % _PROGRESS_INTERVAL == 0 or i == total):
+                progress_callback(i, total)
     conn.commit()
     return {
         "reclassified": reclassified,
+        "unparsed": unparsed,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
     }

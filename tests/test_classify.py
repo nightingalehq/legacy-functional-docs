@@ -8,9 +8,27 @@ first layer (classify_rules_deterministic).
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from mfdoc import classify
+from mfdoc.batch import ModelResponse
+
+
+def _echo_theme_caller(theme: str):
+    """A fake caller for the batched protocol: replies with `<id>: theme`
+    for every row id it finds in the prompt (`_build_batch_prompt`
+    writes each row as a line starting with `<id>:`), regardless of how
+    many rows are in the batch or what their real ids are. Stands in for
+    a model that reliably answers every row with the same theme."""
+
+    def caller(prompt: str):
+        ids = re.findall(r"^(\d+):", prompt, re.MULTILINE)
+        text = "\n".join(f"{rc_id}: {theme}" for rc_id in ids)
+        return ModelResponse(text=text, input_tokens=0, output_tokens=0)
+
+    return caller
 
 
 @pytest.fixture(autouse=True)
@@ -66,12 +84,8 @@ def test_llm_fallback_reclassifies_structural_rows(indexed_db):
     conn = indexed_db
     classify.classify_rules_deterministic(conn, taxonomy={})
 
-    def fake_caller(prompt: str):
-        from mfdoc.batch import ModelResponse
-        return ModelResponse(text="posting", input_tokens=0, output_tokens=0)
-
     before = conn.execute("SELECT COUNT(*) FROM rule_theme WHERE source='structural'").fetchone()[0]
-    result = classify.classify_rules_llm(conn, fake_caller)
+    result = classify.classify_rules_llm(conn, _echo_theme_caller("posting"))
     after_llm = conn.execute("SELECT COUNT(*) FROM rule_theme WHERE source='llm'").fetchone()[0]
     assert result["reclassified"] == before
     assert after_llm == before
@@ -171,12 +185,8 @@ def test_llm_taxonomy_constrains_accepted_themes(indexed_db):
     conn = indexed_db
     classify.classify_rules_deterministic(conn, taxonomy={})
 
-    def off_taxonomy_caller(prompt: str):
-        from mfdoc.batch import ModelResponse
-        return ModelResponse(text="some other theme", input_tokens=0, output_tokens=0)
-
     result = classify.classify_rules_llm(
-        conn, off_taxonomy_caller, taxonomy={"validation": ["invalid"], "posting": ["post"]}
+        conn, _echo_theme_caller("some other theme"), taxonomy={"validation": ["invalid"], "posting": ["post"]}
     )
     assert result["reclassified"] == 0
     still_structural = conn.execute(
@@ -184,12 +194,8 @@ def test_llm_taxonomy_constrains_accepted_themes(indexed_db):
     ).fetchone()[0]
     assert still_structural == 0
 
-    def on_taxonomy_caller(prompt: str):
-        from mfdoc.batch import ModelResponse
-        return ModelResponse(text="Validation", input_tokens=0, output_tokens=0)
-
     result = classify.classify_rules_llm(
-        conn, on_taxonomy_caller, taxonomy={"validation": ["invalid"], "posting": ["post"]}
+        conn, _echo_theme_caller("Validation"), taxonomy={"validation": ["invalid"], "posting": ["post"]}
     )
     assert result["reclassified"] > 0
     llm_rows = conn.execute("SELECT theme FROM rule_theme WHERE source='llm'").fetchall()
@@ -217,17 +223,21 @@ def test_llm_fallback_commits_incrementally(indexed_db, monkeypatch):
         pass
 
     def flaky_caller(prompt: str):
-        from mfdoc.batch import ModelResponse
         calls["n"] += 1
         if calls["n"] == 2:
             raise Boom("simulated mid-run failure")
-        return ModelResponse(text="posting", input_tokens=0, output_tokens=0)
+        ids = re.findall(r"^(\d+):", prompt, re.MULTILINE)
+        return ModelResponse(text="\n".join(f"{rc_id}: posting" for rc_id in ids), input_tokens=0, output_tokens=0)
 
     import pytest
 
     monkeypatch.setattr(classify, "_COMMIT_BATCH_SIZE", 1)
+    # batch_size=1 so each row is its own model call -- this test is about
+    # commit granularity surviving a mid-run raise, not about batching
+    # itself, so it needs the flaky_caller's 2nd *call* to land on the
+    # 2nd *row* the same way it did before batching existed.
     with pytest.raises(Boom):
-        classify.classify_rules_llm(conn, flaky_caller)
+        classify.classify_rules_llm(conn, flaky_caller, batch_size=1)
 
     # Re-open a fresh connection view onto the same on-disk state is not
     # possible for an in-memory/session fixture, but conn.commit() having
@@ -300,10 +310,13 @@ def test_llm_reports_token_totals(indexed_db):
     PER_CALL_IN, PER_CALL_OUT = 37, 11
 
     def counting_caller(prompt: str):
-        from mfdoc.batch import ModelResponse
-        return ModelResponse(text="posting", input_tokens=PER_CALL_IN, output_tokens=PER_CALL_OUT)
+        ids = re.findall(r"^(\d+):", prompt, re.MULTILINE)
+        text = "\n".join(f"{rc_id}: posting" for rc_id in ids)
+        return ModelResponse(text=text, input_tokens=PER_CALL_IN, output_tokens=PER_CALL_OUT)
 
-    result = classify.classify_rules_llm(conn, counting_caller)
+    # batch_size=1 -- one model call per row, so per-call token totals map
+    # 1:1 onto structural_count the same way they did before batching.
+    result = classify.classify_rules_llm(conn, counting_caller, batch_size=1)
     assert result["reclassified"] == structural_count
     assert result["input_tokens"] == structural_count * PER_CALL_IN
     assert result["output_tokens"] == structural_count * PER_CALL_OUT
@@ -323,11 +336,14 @@ def test_llm_limit_caps_rows_sent_to_model(indexed_db):
     calls = {"n": 0}
 
     def counting_caller(prompt: str):
-        from mfdoc.batch import ModelResponse
         calls["n"] += 1
-        return ModelResponse(text="posting", input_tokens=0, output_tokens=0)
+        ids = re.findall(r"^(\d+):", prompt, re.MULTILINE)
+        return ModelResponse(text="\n".join(f"{rc_id}: posting" for rc_id in ids), input_tokens=0, output_tokens=0)
 
-    result = classify.classify_rules_llm(conn, counting_caller, limit=2)
+    # batch_size=1 so the call count itself still reflects exactly how
+    # many rows were sent, matching this test's original one-call-per-row
+    # assumption even though batching now groups calls by default.
+    result = classify.classify_rules_llm(conn, counting_caller, limit=2, batch_size=1)
     assert calls["n"] == 2
     assert result["reclassified"] == 2
 
@@ -369,11 +385,7 @@ def test_llm_limit_selection_is_deterministic_across_runs():
     def run_once():
         conn = build_conn()
 
-        def fake_caller(prompt: str):
-            from mfdoc.batch import ModelResponse
-            return ModelResponse(text="posting", input_tokens=0, output_tokens=0)
-
-        classify.classify_rules_llm(conn, fake_caller, limit=2)
+        classify.classify_rules_llm(conn, _echo_theme_caller("posting"), limit=2)
         reclassified_lines = {
             r["line_no"]
             for r in conn.execute(
@@ -408,13 +420,9 @@ def test_llm_progress_callback_receives_row_and_total(indexed_db, monkeypatch):
 
     monkeypatch.setattr(classify, "_PROGRESS_INTERVAL", 1)
 
-    def fake_caller(prompt: str):
-        from mfdoc.batch import ModelResponse
-        return ModelResponse(text="posting", input_tokens=0, output_tokens=0)
-
     seen: list[tuple[int, int]] = []
     result = classify.classify_rules_llm(
-        conn, fake_caller, progress_callback=lambda i, total: seen.append((i, total))
+        conn, _echo_theme_caller("posting"), progress_callback=lambda i, total: seen.append((i, total))
     )
     assert seen == [(i, structural_count) for i in range(1, structural_count + 1)]
     assert result["reclassified"] == structural_count
@@ -446,11 +454,7 @@ def test_llm_casing_matches_taxonomy_key_exactly(indexed_db):
     conn = indexed_db
     classify.classify_rules_deterministic(conn, taxonomy={})
 
-    def posting_caller(prompt: str):
-        from mfdoc.batch import ModelResponse
-        return ModelResponse(text="posting", input_tokens=0, output_tokens=0)
-
-    result = classify.classify_rules_llm(conn, posting_caller, taxonomy={"Posting": ["post"]})
+    result = classify.classify_rules_llm(conn, _echo_theme_caller("posting"), taxonomy={"Posting": ["post"]})
     assert result["reclassified"] > 0
     llm_rows = conn.execute("SELECT theme FROM rule_theme WHERE source='llm'").fetchall()
     assert all(r["theme"] == "Posting" for r in llm_rows)
@@ -467,11 +471,127 @@ def test_llm_matches_taxonomy_key_longer_than_40_chars(indexed_db):
     long_key = "eligibility-determination-for-retirement-benefit-adjustments"
     assert len(long_key) > 40
 
-    def long_key_caller(prompt: str):
-        from mfdoc.batch import ModelResponse
-        return ModelResponse(text=long_key, input_tokens=0, output_tokens=0)
-
-    result = classify.classify_rules_llm(conn, long_key_caller, taxonomy={long_key: ["x"]})
+    result = classify.classify_rules_llm(conn, _echo_theme_caller(long_key), taxonomy={long_key: ["x"]})
     assert result["reclassified"] > 0
     llm_rows = conn.execute("SELECT theme FROM rule_theme WHERE source='llm'").fetchall()
     assert all(r["theme"] == long_key for r in llm_rows)
+
+
+# --- Batching (issue #167): _build_batch_prompt / _parse_batch_response ---
+
+
+def test_build_batch_prompt_references_row_ids():
+    """Each row must appear in the prompt tagged with its own
+    rule_candidate id (not just its position in the batch), so a
+    response can be matched back to the right row unambiguously even if
+    the model reorders or skips one."""
+    items = [
+        (101, "MOD1", "cond-a", "lit-a"),
+        (202, "MOD2", "cond-b", "lit-b"),
+    ]
+    prompt = classify._build_batch_prompt(items)
+    assert "101:" in prompt
+    assert "202:" in prompt
+    assert "cond-a" in prompt
+    assert "lit-b" in prompt
+
+
+def test_parse_batch_response_matches_ids_regardless_of_order():
+    text = "202: posting\n101: eligibility\n"
+    parsed = classify._parse_batch_response(text, [101, 202])
+    assert parsed == {101: "eligibility", 202: "posting"}
+
+
+def test_parse_batch_response_missing_row_stays_none():
+    """A row the model skipped entirely (no line at all) must map to
+    None -- the caller leaves it 'structural', not guessed."""
+    text = "101: eligibility\n"
+    parsed = classify._parse_batch_response(text, [101, 202])
+    assert parsed == {101: "eligibility", 202: None}
+
+
+def test_parse_batch_response_garbled_line_does_not_misassign_others():
+    """A malformed/unparseable line for one row must not be attributed to
+    any row, and must not disturb parsing of the other, well-formed
+    lines in the same response."""
+    text = "101: eligibility\nnonsense line with no id\n202: posting\n"
+    parsed = classify._parse_batch_response(text, [101, 202])
+    assert parsed == {101: "eligibility", 202: "posting"}
+
+
+def test_parse_batch_response_ignores_id_outside_the_batch():
+    """A line naming an id that wasn't part of this batch's request must
+    be ignored rather than accepted -- it can't be reliably attributed to
+    any row this call was actually asked about."""
+    text = "999: posting\n101: eligibility\n"
+    parsed = classify._parse_batch_response(text, [101])
+    assert parsed == {101: "eligibility"}
+
+
+def test_llm_batch_with_one_malformed_row_leaves_only_that_row_structural(indexed_db):
+    """End-to-end: a batch of several rows where the response is missing
+    a usable line for exactly one of them must reclassify every other
+    row in the batch and leave only the malformed one at 'structural' --
+    not drop or misassign anything else in the batch."""
+    conn = indexed_db
+    classify.classify_rules_deterministic(conn, taxonomy={})
+    structural_rows = conn.execute(
+        "SELECT rule_candidate_id FROM rule_theme WHERE source='structural' "
+        "ORDER BY rule_candidate_id"
+    ).fetchall()
+    assert len(structural_rows) >= 3, "fixture needs >=3 structural rows to exercise this"
+    ids = [r["rule_candidate_id"] for r in structural_rows]
+    broken_id = ids[1]  # some row in the middle of the batch, not first/last
+
+    def caller(prompt: str):
+        row_ids = [int(m) for m in re.findall(r"^(\d+):", prompt, re.MULTILINE)]
+        lines = []
+        for rc_id in row_ids:
+            if rc_id == broken_id:
+                lines.append("this line has no id prefix at all")
+            else:
+                lines.append(f"{rc_id}: posting")
+        return ModelResponse(text="\n".join(lines), input_tokens=0, output_tokens=0)
+
+    result = classify.classify_rules_llm(conn, caller, batch_size=len(ids))
+    assert result["unparsed"] == 1
+    assert result["reclassified"] == len(ids) - 1
+
+    rows = conn.execute(
+        "SELECT rule_candidate_id, source, theme FROM rule_theme "
+        "WHERE rule_candidate_id IN ({})".format(",".join("?" * len(ids))),
+        ids,
+    ).fetchall()
+    by_id = {r["rule_candidate_id"]: r for r in rows}
+    assert by_id[broken_id]["source"] == "structural"
+    for rc_id in ids:
+        if rc_id != broken_id:
+            assert by_id[rc_id]["source"] == "llm"
+            assert by_id[rc_id]["theme"] == "posting"
+
+
+def test_llm_batching_reduces_call_count_below_row_count(indexed_db):
+    """The whole point of #167: grouping rows into one prompt per batch
+    must actually reduce the number of caller() invocations relative to
+    one-call-per-row, for a rule count bigger than one batch."""
+    conn = indexed_db
+    classify.classify_rules_deterministic(conn, taxonomy={})
+    structural_count = conn.execute(
+        "SELECT COUNT(*) FROM rule_theme WHERE source='structural'"
+    ).fetchone()[0]
+    assert structural_count >= 4, "fixture needs >=4 structural rows to exercise batching"
+
+    calls = {"n": 0}
+
+    def counting_caller(prompt: str):
+        calls["n"] += 1
+        ids = re.findall(r"^(\d+):", prompt, re.MULTILINE)
+        return ModelResponse(text="\n".join(f"{rc_id}: posting" for rc_id in ids), input_tokens=0, output_tokens=0)
+
+    batch_size = max(2, structural_count // 2)
+    result = classify.classify_rules_llm(conn, counting_caller, batch_size=batch_size)
+    import math
+
+    assert calls["n"] == math.ceil(structural_count / batch_size)
+    assert calls["n"] < structural_count
+    assert result["reclassified"] == structural_count
