@@ -275,6 +275,25 @@ GitHub org.
     prose checks — plausible follow-ups once/if a stable phrasing
     convention for them is established, but not reliable enough yet to
     ship without inventing an assumption about narrative wording.
+- Design spike for issue #173 (part of #156): wrote
+  `docs/superpowers/specs/2026-09-10-deterministic-rule-templating-design.md`,
+  proposing deterministic sentence templates for the most mechanical
+  `rule_candidate` shapes (single-condition-equals-literal → single MOVE/
+  ASSIGN action, plus a "no records found" guard-clause idiom), spliced
+  into the model's chunk brief as pre-rendered, cite-as-your-own sentences
+  rather than removed from generation entirely. Measuring against this
+  repo's own bundled `examples/` fixtures (the only "real" data available
+  to this repo — never client data, per `CLAUDE.md`) found roughly 22% of
+  59 `rule_candidate` rows meet the strict eligibility criteria, explicitly
+  caveated as a small, non-representative fixture sample, not a sizing
+  estimate. Recommendation: worth building, but only the narrowest slice
+  first — just the single-condition/single-literal/single-action shape,
+  behind an opt-in `options.narrative.template_eligible_rules` flag,
+  re-measured against a real engagement's fact store before adding the
+  guard-clause idiom, `ELSE`-paired variant, or any other shape. No
+  contradiction with the near-miss-patch generalization proposed in #170
+  or the deterministic auto-citation pass proposed in #171 — this design
+  composes with both rather than modifying either.
 
 **Progress (2026-09-09):**
 - Fixed issue #151: real SME review feedback asked, across several
