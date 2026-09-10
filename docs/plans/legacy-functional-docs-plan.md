@@ -115,6 +115,43 @@ GitHub org.
     bundled-fixture pipeline check (`mfdoc ingest`/`derive`/`coverage`/
     `validate --docs examples`), which is unaffected by this change (it
     doesn't call a model).
+- Fixed issue #169: `ClaudeCLICaller.__call__` (`claude_cli_caller.py`) only read
+  `usage.input_tokens`/`usage.output_tokens` off `claude -p --output-format
+  json`'s response, silently dropping `cache_creation_input_tokens`/
+  `cache_read_input_tokens` -- under the Anthropic Messages API's usage-object
+  shape (which the installed `claude` CLI's own runtime uses internally, and
+  which the CLI's `--output-format json` result reuses verbatim), plain
+  `input_tokens` reports only a turn's uncached/cache-miss portion once
+  prompt caching is in play, so every cost/usage report from a `--provider
+  claude-code` run was understating real input-token consumption.
+  - Verified directly: the installed `claude` CLI binary
+    (`~/.local/share/claude/versions/2.1.267`) itself contains the literal
+    string constants `cache_creation_input_tokens` and
+    `cache_read_input_tokens` in its own usage-accumulation logic (alongside
+    `input_tokens`/`output_tokens`), and a Zod-style schema fragment in the
+    same binary types a `usage` object with exactly those four fields (plus
+    a nested `cache_creation` object and `server_tool_use`/`service_tier`) --
+    this is the CLI's own internal usage shape, strong indirect evidence for
+    what `--print --output-format json`'s `usage` object carries, though no
+    live `claude -p` call was made in this sandboxed environment (no active
+    login/egress) to confirm the exact top-level JSON byte-for-byte.
+  - **Correction to this fix's own PR body:** at the time this fix was
+    written, its own investigation concluded `ModelResponse` didn't yet carry
+    `cache_creation_input_tokens`/`cache_read_input_tokens` and that #159/PR
+    #166 had only marked a stable prompt prefix with `cache_control`, not
+    added these fields. That was a mistaken read of #159's actual shipped
+    diff (confirmed on rebase, once both landed on `main` together): #159
+    *did* already add both fields to `ModelResponse` (for
+    `AnthropicCaller`/`VertexCaller`, via `model_response_from_message`).
+    This fix's own field addition was therefore redundant and was dropped on
+    rebase, keeping #159's original fields and comment (extended with a note
+    that `ClaudeCLICaller` populates them too) rather than duplicating them.
+  - `ClaudeCLICaller.__call__` now reads all four `usage` keys with
+    `.get(..., 0)` defaults, so an older `claude` CLI that omits the cache
+    fields (or a call that genuinely didn't cache anything) still defaults
+    sensibly to 0 rather than raising or under-reporting silently.
+  - `tests/test_claude_cli_caller.py`: added coverage for a fake `usage`
+    object carrying the cache fields, and for their absence defaulting to 0.
 
 **Progress (2026-09-09):**
 - Fixed issue #151: real SME review feedback asked, across several
