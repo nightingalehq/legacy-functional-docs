@@ -27,7 +27,7 @@ from pathlib import Path
 from . import graph
 from .brief import fetch_rule_candidate_rows
 from .db import resolve_member_by_name
-from .validate import BR_REF, _split_frontmatter
+from .validate import BR_REF, split_frontmatter
 
 # Doc types that carry a `module:` front-matter field naming the single
 # member this document is about -- see reference/writing-rules.md's front
@@ -208,7 +208,7 @@ def check_document(conn, path: Path) -> dict:
     `_artifact_consistency_problems` for that document family's own,
     narrower staleness check)."""
     text = path.read_text(encoding="utf-8")
-    fm, body, err = _split_frontmatter(text)
+    fm, body, err = split_frontmatter(text)
     if err or not isinstance(fm, dict):
         return {
             "path": str(path), "ok": True, "skipped": True, "problems": [],

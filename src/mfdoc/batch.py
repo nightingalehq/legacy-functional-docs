@@ -36,7 +36,7 @@ from .brief import (
 from .citations import _cite, _rule_id
 from .db import GAP_SEVERITY_ORDER_SQL
 from .redact import NULL_REDACTOR, Redactor
-from .validate import CITATION, _split_frontmatter, validate_doc
+from .validate import CITATION, split_frontmatter, validate_doc
 
 # Progress/diagnostic output for a long (potentially thousands-of-members,
 # hours-long) `mfdoc batch` run -- issue #83. This is deliberately *not*
@@ -93,7 +93,7 @@ def _fix_generated_by_version(text: str) -> str:
 # (`claude -p`): still following that same prompt, but under Claude Code's
 # own system prompt/agent framing, which can add a wrapping code fence or a
 # line or two of lead-in commentary ("Here's the requested document:")
-# before the actual document (issue #150). _split_frontmatter's own check is
+# before the actual document (issue #150). split_frontmatter's own check is
 # strict -- text must literally start with "---" -- so this has to be fixed
 # before the response reaches it, not by loosening that check.
 #
@@ -112,7 +112,7 @@ _FRONTMATTER_START = re.compile(r"(?m)^---[ \t]*$")
 
 def _looks_like_real_frontmatter(candidate: str) -> bool:
     """True if `candidate` (which starts with a `---` line) actually opens
-    a non-empty YAML mapping, per `_split_frontmatter` itself -- not just
+    a non-empty YAML mapping, per `split_frontmatter` itself -- not just
     a bare `---` line that happens to appear in the text for an unrelated
     reason. build_prompt's own section separator is literally the string
     `"\\n\\n---\\n\\n"`; naively treating any `---` line as a frontmatter
@@ -122,7 +122,7 @@ def _looks_like_real_frontmatter(candidate: str) -> bool:
     between this `---` and the next one has to actually parse as a
     mapping with at least one key -- a prompt section's prose (a markdown
     heading, a paragraph) never does."""
-    fm, _, err = _split_frontmatter(candidate)
+    fm, _, err = split_frontmatter(candidate)
     return err is None and isinstance(fm, dict) and bool(fm)
 
 
@@ -159,12 +159,12 @@ _PREAMBLE_SEARCH_WINDOW = 300
 
 def _strip_response_preamble(text: str) -> str:
     """Strip a wrapping code fence and any pre-`---` preamble text from a
-    raw model response, so `_split_frontmatter`'s leading-`---` check finds
+    raw model response, so `split_frontmatter`'s leading-`---` check finds
     the real front matter even when the caller added lead-in text or
     fenced the whole output. A no-op when `text` already starts with `---`,
     and a no-op (original `text` returned untouched) when no `---` line
     that actually opens a real YAML mapping is found near the start --
-    nothing to rescue, so `_split_frontmatter`'s own "missing YAML front
+    nothing to rescue, so `split_frontmatter`'s own "missing YAML front
     matter" error still reports the real raw output.
 
     Every "---" line within `_PREAMBLE_SEARCH_WINDOW` characters of the
@@ -709,7 +709,7 @@ def _aggregate_chunk_confidence(chunk_paths: list[Path]) -> dict[str, int]:
     for path in chunk_paths:
         if not path.exists():
             continue
-        fm, _, err = _split_frontmatter(path.read_text(encoding="utf-8"))
+        fm, _, err = split_frontmatter(path.read_text(encoding="utf-8"))
         if err or not isinstance(fm, dict):
             continue
         cs = fm.get("confidence_summary")
@@ -902,7 +902,7 @@ def _consolidated_gap_lines(conn, member_name: str, member_id: int,
     for path in ok_chunk_paths:
         if not path.exists():
             continue
-        fm, _, err = _split_frontmatter(path.read_text(encoding="utf-8"))
+        fm, _, err = split_frontmatter(path.read_text(encoding="utf-8"))
         if err or not isinstance(fm, dict):
             continue
         for q in fm.get("sme_questions") or []:

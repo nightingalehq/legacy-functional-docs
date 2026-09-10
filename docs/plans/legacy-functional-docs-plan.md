@@ -335,7 +335,7 @@ GitHub org.
   `VertexCaller` -- on real `mfdoc batch`/`test-batch` volume this produced
   responses that don't literally start with `---` (a wrapping code fence or
   a line of lead-in commentary before the document), failing
-  `_split_frontmatter`'s strict leading-`---` check, plus 600s subprocess
+  `split_frontmatter`'s strict leading-`---` check, plus 600s subprocess
   timeouts with nothing analogous to `AnthropicCaller.DEFAULT_MAX_TOKENS`
   bounding a single call's output.
   - Added `_strip_response_preamble` (`batch.py`), folded into the existing
