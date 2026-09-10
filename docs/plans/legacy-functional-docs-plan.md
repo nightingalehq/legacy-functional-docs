@@ -42,6 +42,32 @@ GitHub org.
   pin numbering consistency across a third consumer, alongside the
   existing `test_ids_match_rules_register_exactly` pairing
   `rules_register`/`thematic_rules_register`.
+- Design spike for issue #186 (part of #182): wrote
+  `docs/superpowers/specs/2026-09-10-narrative-memo-cache-design.md`,
+  covering a persistent cache that would reuse an already-validated
+  narrated sentence for a structurally identical `rule_candidate` elsewhere
+  in a project, keyed on a canonical fact-signature (condition operator +
+  literal-shape class + field identity + action shape, dialect-normalized).
+  Measuring against this repo's own bundled `examples/` fixtures (the same
+  59-row set #173's spike measured) found the guard-clause idiom repeats
+  cleanly twice but is already fully covered by #173's algorithmic
+  templating, while the one genuine same-signature collision actually
+  found in the fixtures (two different Mantis members, both with a local
+  `STATUS`/`MSG` field pair, same operator and literal shape, completely
+  different business meaning) demonstrates the false-match risk concretely
+  rather than hypothetically. Recommendation: do not build the general
+  cache — the shapes that repeat safely are already served by #173, and
+  the shapes that would need a cache are exactly the ones this measurement
+  shows can carry different content behind an identical signature. If
+  revisited, only the narrowest project-local slice (never cross-project,
+  both for signature-generalization and client-data-handling reasons),
+  with free-text literals excluded from eligibility entirely and a
+  mandatory three-part self-check (citation resolution, token-level
+  re-confirmation, `validate_doc`'s reversed-condition/completeness
+  checks) before any substituted sentence is ever surfaced — reusing #171's
+  own conservative splice discipline rather than trusting a signature
+  match alone — and even then only after a real engagement's fact store is
+  measured the same way.
 
 **Progress (2026-09-10b):**
 - Fixed issue #168: extended issue #159's prompt-caching pattern from
