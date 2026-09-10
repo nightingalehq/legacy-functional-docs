@@ -215,6 +215,171 @@ def test_explicit_timeout_overrides_the_default(monkeypatch):
     assert constructed["timeout"] == 30
 
 
+def test_call_sends_a_plain_string_when_no_cache_prefix_is_registered(monkeypatch):
+    """Issue #159: a caller nobody has told about a stable prefix (the
+    default, and every existing pre-#159 call site/test) must keep sending
+    exactly the same single-string `content` it always has -- no
+    behavior change unless something opts in via set_cache_prefixes."""
+    seen = {}
+
+    def create(**kwargs):
+        seen["content"] = kwargs["messages"][0]["content"]
+        return _fake_message()
+
+    module, _ = _fake_anthropic_module(create)
+    monkeypatch.setitem(sys.modules, "anthropic", module)
+
+    caller = AnthropicCaller()
+    caller("some prompt")
+    assert seen["content"] == "some prompt"
+
+
+def test_call_splits_a_matching_prefix_into_a_cached_content_block(monkeypatch):
+    """Once `set_cache_prefixes` has registered a stable prefix, a prompt
+    starting with it is split into two content blocks: the stable prefix,
+    marked with `cache_control: {"type": "ephemeral"}`, and the remaining
+    variable suffix, unmarked -- so the Anthropic API can actually cache
+    the shared prefix across calls."""
+    seen = {}
+
+    def create(**kwargs):
+        seen["content"] = kwargs["messages"][0]["content"]
+        return _fake_message()
+
+    module, _ = _fake_anthropic_module(create)
+    monkeypatch.setitem(sys.modules, "anthropic", module)
+
+    caller = AnthropicCaller()
+    caller.set_cache_prefixes(["stable prefix text\n\n---\n\n"])
+    caller("stable prefix text\n\n---\n\nvariable brief")
+
+    assert seen["content"] == [
+        {"type": "text", "text": "stable prefix text\n\n---\n\n",
+         "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": "variable brief"},
+    ]
+
+
+def test_call_falls_back_to_a_plain_string_when_the_prompt_does_not_share_the_prefix(monkeypatch):
+    """A registered prefix that this particular prompt doesn't start with
+    (e.g. build_uncited_patch_prompt's targeted-patch follow-up, which never
+    resends writing rules/template) must not be forced into a cache block
+    it doesn't actually share -- the prompt goes out exactly as given."""
+    seen = {}
+
+    def create(**kwargs):
+        seen["content"] = kwargs["messages"][0]["content"]
+        return _fake_message()
+
+    module, _ = _fake_anthropic_module(create)
+    monkeypatch.setitem(sys.modules, "anthropic", module)
+
+    caller = AnthropicCaller()
+    caller.set_cache_prefixes(["some other stable prefix\n\n---\n\n"])
+    caller("an unrelated prompt with no shared prefix")
+
+    assert seen["content"] == "an unrelated prompt with no shared prefix"
+
+
+def test_call_uses_the_longest_matching_prefix_when_more_than_one_matches(monkeypatch):
+    """A shorter registered prefix that happens to also be a leading
+    substring of a longer one must not win -- the longest actual match is
+    the correct (most specific) cache breakpoint."""
+    seen = {}
+
+    def create(**kwargs):
+        seen["content"] = kwargs["messages"][0]["content"]
+        return _fake_message()
+
+    module, _ = _fake_anthropic_module(create)
+    monkeypatch.setitem(sys.modules, "anthropic", module)
+
+    caller = AnthropicCaller()
+    caller.set_cache_prefixes(["short", "short and longer\n\n---\n\n"])
+    caller("short and longer\n\n---\n\nrest")
+
+    assert seen["content"][0]["text"] == "short and longer\n\n---\n\n"
+    assert seen["content"][1]["text"] == "rest"
+
+
+def test_set_cache_prefixes_treats_a_single_string_as_one_prefix_not_chars(monkeypatch):
+    """A caller passing a bare string (an easy mistake -- `str` is iterable)
+    must not have it silently exploded into one-character prefixes, which
+    would corrupt prompt splitting. A single string is one whole prefix."""
+    seen = {}
+
+    def create(**kwargs):
+        seen["content"] = kwargs["messages"][0]["content"]
+        return _fake_message()
+
+    module, _ = _fake_anthropic_module(create)
+    monkeypatch.setitem(sys.modules, "anthropic", module)
+
+    caller = AnthropicCaller()
+    caller.set_cache_prefixes("stable prefix text\n\n---\n\n")
+    caller("stable prefix text\n\n---\n\nvariable brief")
+
+    assert seen["content"] == [
+        {"type": "text", "text": "stable prefix text\n\n---\n\n",
+         "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": "variable brief"},
+    ]
+
+
+def test_set_cache_prefixes_accepts_none_as_clear(monkeypatch):
+    """`None` clears any previously registered prefixes -- an explicit
+    opt-out, distinct from passing an empty list."""
+    seen = {}
+
+    def create(**kwargs):
+        seen["content"] = kwargs["messages"][0]["content"]
+        return _fake_message()
+
+    module, _ = _fake_anthropic_module(create)
+    monkeypatch.setitem(sys.modules, "anthropic", module)
+
+    caller = AnthropicCaller()
+    caller.set_cache_prefixes(["stable prefix"])
+    caller.set_cache_prefixes(None)
+    caller("stable prefix and the rest")
+
+    assert seen["content"] == "stable prefix and the rest"
+
+
+def test_model_response_from_message_surfaces_cache_token_counts():
+    """Issue #159: the SDK's `Usage` object exposes
+    cache_creation_input_tokens/cache_read_input_tokens (confirmed against
+    the installed `anthropic` package's types/usage.py) -- thread them
+    through so cost reporting can eventually show real cache savings."""
+    from mfdoc.batch import model_response_from_message
+
+    block = types.SimpleNamespace(type="text", text="hi")
+    usage = types.SimpleNamespace(
+        input_tokens=10, output_tokens=20,
+        cache_creation_input_tokens=500, cache_read_input_tokens=1200,
+    )
+    message = types.SimpleNamespace(content=[block], usage=usage)
+    response = model_response_from_message(message)
+    assert response.cache_creation_input_tokens == 500
+    assert response.cache_read_input_tokens == 1200
+
+
+def test_model_response_from_message_defaults_cache_tokens_to_zero_when_absent():
+    """A `Usage` object with no cache fields at all (an SDK version that
+    predates them, or a mock in another test) must not raise -- and one
+    whose cache fields are the SDK's own `None` default (a real call that
+    never sent cache_control) must report 0, not None, so downstream
+    summing doesn't have to guard against None everywhere."""
+    from mfdoc.batch import model_response_from_message
+
+    block = types.SimpleNamespace(type="text", text="hi")
+    usage = types.SimpleNamespace(input_tokens=10, output_tokens=20)
+    message = types.SimpleNamespace(content=[block], usage=usage)
+    response = model_response_from_message(message)
+    assert response.cache_creation_input_tokens == 0
+    assert response.cache_read_input_tokens == 0
+
+
 def test_explicit_timeout_is_passed_alongside_an_api_key(monkeypatch):
     constructed = {}
 
