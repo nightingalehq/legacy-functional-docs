@@ -74,10 +74,29 @@ GitHub org.
   `DEFAULT_SPLITTERS` entry) changing isn't covered by this cache key,
   for the same over-invalidation reason `normalise.py`/`db.py` are
   excluded generally. Added
-  `test_dialect_parser_hash_fails_closed_for_a_sourceless_module`. Full
-  suite: 910 passed, 2 skipped; bundled fixture pipeline
-  (`ingest`/`derive`/`coverage`/`validate --docs examples`) still 71/71
-  documents clean, 0 invalid citations.
+  `test_dialect_parser_hash_fails_closed_for_a_sourceless_module`. A third
+  review round then caught: (8) a hinted source (the common case) was
+  still building its full joined `text` and calling `detect_dialect()`
+  ahead of the skip check, even though a configured hint makes the dialect
+  known for free -- restructured so a hinted file's dialect is just `hint`
+  with no join or scan at all, leaving the unavoidable full-text scan (for
+  an *unhinted* source, which must be scanned to auto-detect the dialect
+  before the skip decision either way) as the only new per-file cost this
+  fix adds; (9) added
+  `test_batch_recomputes_briefs_when_a_dialect_hash_changes`
+  (tests/test_batch.py) -- the existing corpus-signature regression
+  coverage only mutated `sha256`, not the new `dialect_hash` dimension;
+  (10) documented two further narrow, rare residual gaps in
+  `_dialect_parser_hash`'s docstring rather than chasing them into more
+  over-invalidation: `DIALECT_ROUTER`'s own wiring (which function it
+  calls per dialect) isn't hashed, only the target module's bytes are, so
+  repointing a router entry at a different function in an
+  already-listed, otherwise-unchanged module would slip through; and a
+  config-driven dialect (`supra_dir`'s `options.dialects.supra.labels`)
+  can have its effective behaviour changed by a `project.yml` edit alone,
+  which this key doesn't see at all. Full suite: 911 passed, 2 skipped;
+  bundled fixture pipeline (`ingest`/`derive`/`coverage`/`validate --docs
+  examples`) still 71/71 documents clean, 0 invalid citations.
 
 **Progress (2026-09-10c):**
 - Fixed issue #184: `citations._rule_id(member_name, n)` is a pure

@@ -158,18 +158,44 @@ def _dialect_parser_hash(dialect: str) -> str:
     at all gets a fresh, unstable digest every call instead (see below) --
     deliberately never cached as "unchanged" against a prior run.
 
-    Known limitation: this covers `DIALECT_PARSER_MODULES` only, not
-    `normalise.py` -- e.g. `normalise.DIALECT_SIGNATURES`/`detect_dialect`
-    (dialect classification) or `DEFAULT_SPLITTERS`/`split_members`
-    (member boundaries), both of which do carry dialect-specific entries
-    despite living in a shared module. A change to one of those entries
-    (as opposed to `normalise.py`'s genuinely dialect-neutral code --
-    encoding sniffing, generic chunk bookkeeping) is a real gap this cache
-    key doesn't close, and, per the same reasoning that kept `db.py`/
-    `normalise.py` out of the hashed set generally, isn't closed here
-    either: hashing all of `normalise.py` would invalidate every dialect on
-    any change to it, unrelated dialects included. Left as a documented
-    gap rather than a silent one -- see issue #194's PR discussion.
+    Known limitations, left as documented gaps rather than silent ones
+    (see issue #194's PR discussion) -- each is a real but narrower and
+    rarer case than the one #194 itself was about (a parser module's own
+    code changing with nothing else touched), and closing any of them
+    fully would mean hashing something several other, unrelated dialects
+    or files also depend on, reintroducing the over-invalidation problem
+    this cache design otherwise avoids:
+
+    - `normalise.py` is not covered -- e.g. `normalise.DIALECT_SIGNATURES`/
+      `detect_dialect` (dialect classification) or `DEFAULT_SPLITTERS`/
+      `split_members` (member boundaries), both of which do carry
+      dialect-specific entries despite living in a shared module. A change
+      to one of those entries (as opposed to `normalise.py`'s genuinely
+      dialect-neutral code -- encoding sniffing, generic chunk bookkeeping)
+      is not caught, for the same reason `db.py`/`normalise.py` are kept
+      out of the hashed set generally: hashing all of `normalise.py` would
+      invalidate every dialect on any change to it, unrelated dialects
+      included.
+    - `DIALECT_ROUTER`'s own wiring (which function it calls per dialect)
+      is not covered -- only the module(s) `DIALECT_PARSER_MODULES` names
+      are hashed, not `cli.py` itself. Repointing a router lambda at a
+      different function in an already-listed module, with that module's
+      own bytes otherwise unchanged, would not be noticed. In practice
+      this is vanishingly rare on its own (such a rewire is normally
+      accompanied by an edit to the target function too, which the module
+      hash does catch) and would require hashing `cli.py`'s own source
+      into every dialect's key to close, which is a much blunter
+      instrument than the problem warrants.
+    - A config-driven dialect (`supra_dir`'s `options.dialects.supra.labels`,
+      read by `supra.labels_from_options` -- see
+      `reference/mantis-supra.md`) can have its effective matching patterns
+      changed by a `project.yml` edit alone, with no source or module
+      change at all; this cache key does not see `options` at all. Closing
+      this fully would mean giving every dialect a documented, stable way
+      to declare which `options.*` subtree it depends on so it can be
+      folded in generically -- worth doing if a config-driven dialect
+      becomes as common as calibratable ones already are, but out of scope
+      here.
     """
     modules = DIALECT_PARSER_MODULES.get(dialect, ())
     h = hashlib.sha256()
@@ -273,14 +299,26 @@ def cmd_ingest(args) -> int:
             # Dialect must be known before the incremental-ingest skip check
             # below (its cache key folds in the dialect parser's own code),
             # so detection happens here, ahead of that check, rather than
-            # after it as previously. detect_dialect() returns `hint`
-            # immediately without scanning `text` when one is configured,
-            # so this stays cheap for the common (hinted) case -- unlike
-            # dialect_confidence() below, which always does a full regex
-            # scan and is deferred past the skip check so an unchanged,
-            # skipped file never pays for it.
-            text = "\n".join(lines)
-            dialect = normalise.detect_dialect(text, hint)
+            # after it as previously. With a configured hint, dialect is
+            # just `hint` -- skip building `text` (an O(file size) join)
+            # and calling detect_dialect() at all, so a hinted, unchanged,
+            # skipped file pays no extra cost at this stage versus before
+            # #194. Without a hint, detect_dialect() must scan the file's
+            # text to auto-detect the dialect regardless of whether the
+            # file turns out to be unchanged -- an unavoidable cost of
+            # needing the dialect before the skip decision, since there is
+            # no cheaper way to know the dialect of an unhinted source
+            # ahead of time. `text` is built once here and reused by
+            # dialect_confidence() below (which does its own full regex
+            # scan, deferred past the skip check so a *hinted* skipped file
+            # -- the common case -- never pays for it, even though an
+            # unhinted one already paid an equivalent cost above).
+            text = None
+            if hint:
+                dialect = hint
+            else:
+                text = "\n".join(lines)
+                dialect = normalise.detect_dialect(text, hint)
             dialect_hash = _dialect_parser_hash(dialect)
 
             # Incremental ingest: a file whose content *and* whose dialect
@@ -322,13 +360,15 @@ def cmd_ingest(args) -> int:
                     ).fetchall()
                 }
 
-            # Only needed for the ambiguity check below (and only when no
-            # explicit hint), but computed unconditionally here to match
-            # this function's pre-#194 behaviour exactly for every file
-            # that reaches this point (i.e. every non-skipped file) --
-            # deferred to here, past the skip check above, purely so a
-            # skipped file never pays for this full regex scan at all.
-            ranking = normalise.dialect_confidence(text)
+            # Only meaningful for the ambiguity check below, which never
+            # fires when a hint is configured (see its "and not hint"
+            # guard) -- so skip this full regex scan entirely for a hinted
+            # file, not just defer it. For an unhinted file, `text` was
+            # already built above to detect the dialect, so this is the
+            # only new cost this stage adds versus pre-#194 for that case
+            # -- and, same as before #194, deferred to here (past the skip
+            # check) so a skipped file never pays for it.
+            ranking = [] if hint else normalise.dialect_confidence(text)
 
             leading_seq_width = None
             if seq_cfg == "auto":
