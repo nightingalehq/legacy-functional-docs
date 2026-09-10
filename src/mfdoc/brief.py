@@ -16,7 +16,7 @@ import json
 import re
 import statistics
 
-from .citations import _cite, _rule_id
+from .citations import _cite, _rule_id, numbered_rule_candidates
 from .db import GAP_SEVERITY_ORDER_SQL
 from .redact import NULL_REDACTOR, Redactor
 from .sme_notes import Notes, notes_for
@@ -1015,7 +1015,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
                 "this is intentional, not a truncated brief; see the "
                 "PARTIAL BRIEF note above."
             )
-        for n, r in enumerate(rules, start=1):
+        for n, r in numbered_rule_candidates(rules):
             if rule_range and not (rule_range[0] <= n <= rule_range[1]):
                 continue
             bits = [f"**{_rule_id(name, n)}** {_cite(name, r['line_no'])} depth {r['depth']} `{r['construct']}`"]
@@ -1063,7 +1063,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
     # can look complete and still miss a validation rule it depends on.
     for cc_id, cc_name, cc_rules in _copycode_rule_candidates(conn, mid):
         add(f"## Business rules from included copycode `{cc_name}`")
-        for n, r in enumerate(cc_rules, start=1):
+        for n, r in numbered_rule_candidates(cc_rules):
             # IDs are qualified with the copycode's own name and numbered
             # from its own row order -- the same ID a direct brief of
             # cc_name would show, since the rule "lives" there regardless
@@ -1557,7 +1557,7 @@ def rules_register(conn, redact: Redactor = NULL_REDACTOR) -> str:
             continue
         modules_included += 1
         rules = rules_by_member_id.get(matches[0]["id"], [])
-        for n, r in enumerate(rules, start=1):
+        for n, r in numbered_rule_candidates(rules):
             total += 1
             # A literal `|` in source-derived condition/literal text would
             # otherwise be read as an extra column delimiter and corrupt the

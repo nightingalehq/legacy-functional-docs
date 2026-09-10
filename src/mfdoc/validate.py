@@ -21,7 +21,7 @@ from pathlib import Path
 import yaml
 
 from .brief import fetch_routines, fetch_rule_candidate_rows
-from .citations import _rule_id
+from .citations import _rule_id, numbered_rule_candidates
 from .conditions import (
     FAILURE_WORDS,
     OUTCOME_FIELD,
@@ -1255,7 +1255,7 @@ def module_completeness_problems(conn, results: list[dict]) -> list[str]:
             continue
         total = len(rows)
         have = cited.get(member.upper(), set())
-        missing = [n for n in range(1, total + 1) if n not in have]
+        missing = [n for n, _ in numbered_rule_candidates(rows) if n not in have]
         if not missing:
             continue
         span = _rule_id(member, missing[0])
