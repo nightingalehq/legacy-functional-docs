@@ -181,9 +181,16 @@ options:
       # `mfdoc classify-rules --llm-fallback`.
       llm_fallback: false
       # Keyword/regex taxonomy for `mfdoc classify-rules` -- theme name maps
-      # to a list of regexes matched against rule conditions/literals. No
-      # built-in default; declare only the business themes present in your
-      # codebase.
+      # to a list of regexes matched against rule conditions/literals. Left
+      # empty (or omitted), this falls back to a built-in taxonomy of
+      # generalizable business-rule vocabulary/structural shapes (see
+      # `classify.DEFAULT_TAXONOMY`: validation wording, outcome/return-code
+      # and status/flag fields, message fields, a "no rows found" gap
+      # phrase, arithmetic verbs) -- declaring your own taxonomy here
+      # replaces that built-in set entirely rather than extending it, the
+      # same replace-not-merge convention `options.validate
+      # .outcome_field_pattern` and `options.overview.dispatch_field_pattern`
+      # already use.
       taxonomy: {}
     complexity:
       # Metric for the complexity heatmap. rule_depth combines rule count

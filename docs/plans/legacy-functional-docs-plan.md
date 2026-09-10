@@ -30,6 +30,66 @@ GitHub org.
   test caller are unaffected. New tests in `tests/test_test_prompt_caching.py`
   mirror `tests/test_prompt_caching.py`'s coverage of the `batch.py`
   equivalents.
+**Progress (2026-09-10, later):**
+- Fixed issue #172: `classify_rules_deterministic`'s keyword taxonomy pass
+  only ever ran against whatever `options.overview.themes.taxonomy` a
+  project declared -- with the checked-in `project.yml`'s taxonomy left at
+  its documented empty default, every one of the bundled fixtures' 59
+  `rule_candidate` rows fell straight through to `source='structural'`
+  (`mfdoc classify-rules` reported `keyword: 0, structural: 59`), which is
+  exactly the "more work for the LLM fallback than necessary" problem #172
+  described.
+  - Reviewed the actual `condition`/`literals` text of all 59 fixture rows
+    (via `mfdoc ingest`/`derive` + a direct fact-store query, per this
+    repo's "no client data" policy -- these are the bundled, invented
+    steel-mill-order-management fixtures) for genuinely generalizable
+    shapes rather than fixture-specific hacks.
+  - Added `classify.DEFAULT_TAXONOMY` -- a built-in fallback taxonomy used
+    only when a project hasn't declared its own (`classify
+    .taxonomy_from_options`, wired into `cmd_classify_rules`), the same
+    replace-not-merge convention `conditions.OUTCOME_FIELD`/
+    `outcome_field_from_options` and `DISPATCH_FIELD`/
+    `dispatch_field_from_options` already establish. Its six themes are
+    common business-rule vocabulary and structural shapes, not a guess at
+    any client's field names: `validation` (required/invalid/missing
+    wording, and a comparison against a blank/space literal -- a common
+    required-field-check shape regardless of field name), `error-handling`
+    (RETURN-CODE/RESPONSE-CODE/ERROR-CODE/RC field names), `status`
+    (bare STATUS/STAT/FLAG fields), `messaging` (MSG/MESSAGE field
+    assignment), `data-access` (the "no records found for preceding
+    database loop" phrase mfdoc's own extraction generates for an empty
+    database loop), and `calculation` (ADD/SUBTRACT/MULTIPLY/DIVIDE/
+    COMPUTE). Identifier-shaped patterns use a custom
+    `(?<![A-Za-z0-9])...(?![A-Za-z0-9])` boundary instead of `\b`, so a
+    field name is isolated correctly whether the codebase joins words with
+    a hyphen (`ORDER-STATUS`, Natural's convention) or an underscore
+    (`SCHED_STATUS`, seen in this repo's own Mantis-style fixtures) --
+    `\b` alone only isolates the first, since underscore is itself a word
+    character.
+  - Re-running `mfdoc classify-rules --config project.yml` against the
+    fixtures now reports `keyword: 37, structural: 22` (62.7% keyword vs.
+    0% before), with no change to the fixture pipeline's citation
+    validation (`mfdoc validate --docs examples`: 71/71 documents still
+    clean, 0 invalid citations).
+  - **Caveat, same as #173's design spike modeled:** this repo's bundled
+    fixtures are a tiny, invented sample (59 rule_candidate rows from one
+    fictional system) -- the 62.7% figure says these six themes cover a
+    meaningful share of *this* sample's shapes, not that they'll cover a
+    comparable share of any real project's rule mix. A real project should
+    still review its own post-run `rule_theme` table filtered
+    `source='structural'` and declare its own
+    `options.overview.themes.taxonomy` (which fully replaces
+    `DEFAULT_TAXONOMY`, not merges with it) once it has a representative
+    sample to work from.
+  - New tests in `tests/test_classify.py`: coverage for
+    `taxonomy_from_options`'s fallback/replace-not-merge behavior, one test
+    per new theme against a real fixture row exhibiting that shape, a
+    regression test for the hyphen-vs-underscore boundary choice, an
+    aggregate check that the default taxonomy classifies at least half of
+    the fixture set, and a check that an explicit project taxonomy still
+    sees only its own declared themes take effect. Full suite (887 tests)
+    and the fixture pipeline (`ingest`/`derive`/`coverage`/`validate --docs
+    examples`) both pass with no regressions.
 
 **Progress (2026-09-10):**
 - Fixed issue #171: `batch.py`'s near-miss retry path (issue #131,

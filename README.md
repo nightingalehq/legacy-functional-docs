@@ -251,11 +251,12 @@ mfdoc rules-register --config project.yml --out docs/functional/rules-register.m
 # all configured under options.overview in project.yml, see below:
 mfdoc classify-rules --config project.yml
 # assigns each rule_candidate a business theme: keyword taxonomy first
-# (options.overview.themes.taxonomy), then an optional LLM fallback for
-# anything unmatched (--llm-fallback, or options.overview.themes.llm_fallback),
-# then a structural fallback (the rule's own member's library). Run this
-# before rules-theme-register or executive-summary docs, or every rule
-# reads as uncategorized.
+# (options.overview.themes.taxonomy, falling back to a built-in generic
+# taxonomy -- classify.DEFAULT_TAXONOMY -- if you haven't declared your
+# own), then an optional LLM fallback for anything unmatched (--llm-fallback,
+# or options.overview.themes.llm_fallback), then a structural fallback (the
+# rule's own member's library). Run this before rules-theme-register or
+# executive-summary docs, or every rule reads as uncategorized.
 mfdoc gap-summary --config project.yml --out docs/functional/gap-summary.md
 # gap counts by kind and severity, for the top of system-overview.md
 mfdoc data-flow --config project.yml --out docs/functional/data-flow.md
@@ -319,8 +320,11 @@ options:
     themes:
       # keyword/regex taxonomy for `mfdoc classify-rules` -- theme name to a
       # list of regexes matched against each rule_candidate's condition/
-      # literals; no built-in taxonomy, same "declare it, don't guess it"
-      # policy as options.redact/options.testgen above
+      # literals; left empty, falls back to a built-in taxonomy of
+      # generalizable business-rule vocabulary/structural shapes
+      # (classify.DEFAULT_TAXONOMY) -- declare your own here to replace it
+      # entirely (replace-not-merge), the same way options.validate
+      # .outcome_field_pattern/options.overview.dispatch_field_pattern do
       taxonomy: {}
       # let classify-rules fall back to an LLM pass for anything the
       # taxonomy above didn't match, instead of leaving it to the

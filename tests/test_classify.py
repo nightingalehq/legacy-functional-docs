@@ -595,3 +595,186 @@ def test_llm_batching_reduces_call_count_below_row_count(indexed_db):
     assert calls["n"] == math.ceil(structural_count / batch_size)
     assert calls["n"] < structural_count
     assert result["reclassified"] == structural_count
+
+
+# --- DEFAULT_TAXONOMY / taxonomy_from_options (issue #172) -----------------
+#
+# These exercise the built-in fallback taxonomy against this repo's own
+# bundled fixtures (examples/) -- the only "real" data available in this
+# repo (see CLAUDE.md). The fixture set is tiny (59 rule_candidate rows
+# from invented steel-mill-order-management source), so these patterns are
+# grounded in genuine shapes found there, not proof the taxonomy performs
+# this well on an arbitrary real project's rule mix -- a real project will
+# still want to declare its own `options.overview.themes.taxonomy` once it
+# has a representative sample of its own 'structural' rows to review.
+
+
+def test_taxonomy_from_options_falls_back_to_default_when_unset(indexed_db):
+    assert classify.taxonomy_from_options(None) is classify.DEFAULT_TAXONOMY
+    assert classify.taxonomy_from_options({}) is classify.DEFAULT_TAXONOMY
+    assert classify.taxonomy_from_options(
+        {"overview": {"themes": {"taxonomy": {}}}}
+    ) is classify.DEFAULT_TAXONOMY
+
+
+def test_taxonomy_from_options_declared_taxonomy_replaces_not_merges(indexed_db):
+    """A project's own declared taxonomy is used exactly as given -- it
+    must not come back with DEFAULT_TAXONOMY's themes mixed in, the same
+    replace-not-merge convention outcome_field_pattern/dispatch_field_pattern
+    already use."""
+    declared = {"posting": ["post"]}
+    result = classify.taxonomy_from_options({"overview": {"themes": {"taxonomy": declared}}})
+    assert result == declared
+    assert "status" not in result
+    assert "error-handling" not in result
+
+
+def test_default_taxonomy_classifies_return_code_assignment_as_error_handling(indexed_db):
+    conn = indexed_db
+    row = conn.execute(
+        "SELECT id FROM rule_candidate WHERE condition LIKE '%RETURN-CODE%' LIMIT 1"
+    ).fetchone()
+    assert row, "fixture must have a RETURN-CODE assignment to exercise this"
+    classify.classify_rules_deterministic(conn, classify.DEFAULT_TAXONOMY)
+    theme = conn.execute(
+        "SELECT theme, source FROM rule_theme WHERE rule_candidate_id=?", (row["id"],)
+    ).fetchone()
+    assert theme["source"] == "keyword"
+    assert theme["theme"] == "error-handling"
+
+
+def test_default_taxonomy_classifies_status_field_as_status(indexed_db):
+    conn = indexed_db
+    row = conn.execute(
+        "SELECT id FROM rule_candidate "
+        "WHERE condition LIKE '%ORDER-STATUS%' AND condition NOT LIKE '%RETURN-CODE%' LIMIT 1"
+    ).fetchone()
+    assert row, "fixture must have a status-field comparison to exercise this"
+    classify.classify_rules_deterministic(conn, classify.DEFAULT_TAXONOMY)
+    theme = conn.execute(
+        "SELECT theme, source FROM rule_theme WHERE rule_candidate_id=?", (row["id"],)
+    ).fetchone()
+    assert theme["source"] == "keyword"
+    assert theme["theme"] == "status"
+
+
+def test_default_taxonomy_status_matches_underscore_separated_field_names(indexed_db):
+    """Regression for the lookaround-boundary choice over `\\b`: `\\bSTATUS\\b`
+    would fail to isolate `STATUS` inside an underscore-joined identifier
+    like `SCHED_STATUS` (underscore counts as a word character), even though
+    it correctly isolates the hyphen-joined `ORDER-STATUS` convention. Both
+    naming styles appear in this repo's own fixtures (Natural vs. the
+    Mantis-style examples), so the pattern must catch both."""
+    conn = indexed_db
+    row = conn.execute(
+        "SELECT id FROM rule_candidate WHERE condition LIKE '%SCHED_STATUS%' LIMIT 1"
+    ).fetchone()
+    assert row, "fixture must have an underscore-separated STATUS field to exercise this"
+    classify.classify_rules_deterministic(conn, classify.DEFAULT_TAXONOMY)
+    theme = conn.execute(
+        "SELECT theme, source FROM rule_theme WHERE rule_candidate_id=?", (row["id"],)
+    ).fetchone()
+    assert theme["source"] == "keyword"
+    assert theme["theme"] == "status"
+
+
+def test_default_taxonomy_classifies_blank_field_check_as_validation(indexed_db):
+    conn = indexed_db
+    row = conn.execute(
+        "SELECT id FROM rule_candidate WHERE literals = ' ' LIMIT 1"
+    ).fetchone()
+    assert row, "fixture must have a blank/space-literal comparison to exercise this"
+    classify.classify_rules_deterministic(conn, classify.DEFAULT_TAXONOMY)
+    theme = conn.execute(
+        "SELECT theme, source FROM rule_theme WHERE rule_candidate_id=?", (row["id"],)
+    ).fetchone()
+    assert theme["source"] == "keyword"
+    assert theme["theme"] == "validation"
+
+
+def test_default_taxonomy_classifies_required_message_as_validation(indexed_db):
+    conn = indexed_db
+    row = conn.execute(
+        "SELECT id FROM rule_candidate WHERE condition LIKE '%required%' LIMIT 1"
+    ).fetchone()
+    assert row, "fixture must have a 'required' validation message to exercise this"
+    classify.classify_rules_deterministic(conn, classify.DEFAULT_TAXONOMY)
+    theme = conn.execute(
+        "SELECT theme, source FROM rule_theme WHERE rule_candidate_id=?", (row["id"],)
+    ).fetchone()
+    assert theme["source"] == "keyword"
+    assert theme["theme"] == "validation"
+
+
+def test_default_taxonomy_classifies_no_records_found_gap_as_data_access(indexed_db):
+    conn = indexed_db
+    row = conn.execute(
+        "SELECT id FROM rule_candidate WHERE condition LIKE '%no records found%' LIMIT 1"
+    ).fetchone()
+    assert row, "fixture must have a 'no records found' gap phrase to exercise this"
+    classify.classify_rules_deterministic(conn, classify.DEFAULT_TAXONOMY)
+    theme = conn.execute(
+        "SELECT theme, source FROM rule_theme WHERE rule_candidate_id=?", (row["id"],)
+    ).fetchone()
+    assert theme["source"] == "keyword"
+    assert theme["theme"] == "data-access"
+
+
+def test_default_taxonomy_classifies_message_field_assignment_as_messaging(indexed_db):
+    conn = indexed_db
+    row = conn.execute(
+        "SELECT id FROM rule_candidate WHERE condition LIKE '%#MESSAGE%' LIMIT 1"
+    ).fetchone()
+    assert row, "fixture must have a message-field assignment to exercise this"
+    classify.classify_rules_deterministic(conn, classify.DEFAULT_TAXONOMY)
+    theme = conn.execute(
+        "SELECT theme, source FROM rule_theme WHERE rule_candidate_id=?", (row["id"],)
+    ).fetchone()
+    assert theme["source"] == "keyword"
+    assert theme["theme"] == "messaging"
+
+
+def test_default_taxonomy_classifies_arithmetic_verb_as_calculation(indexed_db):
+    conn = indexed_db
+    row = conn.execute(
+        "SELECT id FROM rule_candidate WHERE condition LIKE 'ADD %' LIMIT 1"
+    ).fetchone()
+    assert row, "fixture must have an ADD statement to exercise this"
+    classify.classify_rules_deterministic(conn, classify.DEFAULT_TAXONOMY)
+    theme = conn.execute(
+        "SELECT theme, source FROM rule_theme WHERE rule_candidate_id=?", (row["id"],)
+    ).fetchone()
+    assert theme["source"] == "keyword"
+    assert theme["theme"] == "calculation"
+
+
+def test_default_taxonomy_shrinks_the_structural_fallback_set(indexed_db):
+    """The whole point of #172: against this repo's own fixtures, the
+    built-in taxonomy must classify a real share of what an empty/no
+    taxonomy would otherwise leave entirely 'structural' -- not just one
+    or two hand-picked rows."""
+    conn = indexed_db
+    total = conn.execute("SELECT COUNT(*) FROM rule_candidate").fetchone()[0]
+    counts = classify.classify_rules_deterministic(conn, classify.DEFAULT_TAXONOMY)
+    assert counts["keyword"] + counts["structural"] == total
+    assert counts["keyword"] > 0
+    # at least half of this fixture set's rows get a real keyword theme --
+    # see the module-docstring-adjacent comment above on how representative
+    # (or not) this small a sample is
+    assert counts["keyword"] >= total // 2
+
+
+def test_default_taxonomy_does_not_regress_an_explicit_project_taxonomy(indexed_db):
+    """A project that declares its own taxonomy must still see exactly its
+    own keywords take effect (via taxonomy_from_options), not have
+    DEFAULT_TAXONOMY's themes silently mixed in alongside them."""
+    conn = indexed_db
+    declared = {"posting": ["invalid"]}
+    resolved = classify.taxonomy_from_options({"overview": {"themes": {"taxonomy": declared}}})
+    classify.classify_rules_deterministic(conn, resolved)
+    themes_used = {
+        r["theme"] for r in conn.execute(
+            "SELECT DISTINCT theme FROM rule_theme WHERE source='keyword'"
+        ).fetchall()
+    }
+    assert themes_used <= {"posting"}
