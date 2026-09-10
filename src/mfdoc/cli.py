@@ -466,6 +466,8 @@ def cmd_classify_rules(args) -> int:
             progress_callback=_print_progress,
         )
         print(f"llm reclassified: {result['reclassified']}")
+        if result.get("unparsed"):
+            print(f"llm unparsed (left structural): {result['unparsed']}")
         narrative_opts = (cfg["options"] or {}).get("narrative") or {}
         pricing = narrative_opts.get("pricing") or {}
         cost_per_mtok_in = pricing.get("input_per_mtok")
