@@ -302,6 +302,50 @@ def test_call_uses_the_longest_matching_prefix_when_more_than_one_matches(monkey
     assert seen["content"][1]["text"] == "rest"
 
 
+def test_set_cache_prefixes_treats_a_single_string_as_one_prefix_not_chars(monkeypatch):
+    """A caller passing a bare string (an easy mistake -- `str` is iterable)
+    must not have it silently exploded into one-character prefixes, which
+    would corrupt prompt splitting. A single string is one whole prefix."""
+    seen = {}
+
+    def create(**kwargs):
+        seen["content"] = kwargs["messages"][0]["content"]
+        return _fake_message()
+
+    module, _ = _fake_anthropic_module(create)
+    monkeypatch.setitem(sys.modules, "anthropic", module)
+
+    caller = AnthropicCaller()
+    caller.set_cache_prefixes("stable prefix text\n\n---\n\n")
+    caller("stable prefix text\n\n---\n\nvariable brief")
+
+    assert seen["content"] == [
+        {"type": "text", "text": "stable prefix text\n\n---\n\n",
+         "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": "variable brief"},
+    ]
+
+
+def test_set_cache_prefixes_accepts_none_as_clear(monkeypatch):
+    """`None` clears any previously registered prefixes -- an explicit
+    opt-out, distinct from passing an empty list."""
+    seen = {}
+
+    def create(**kwargs):
+        seen["content"] = kwargs["messages"][0]["content"]
+        return _fake_message()
+
+    module, _ = _fake_anthropic_module(create)
+    monkeypatch.setitem(sys.modules, "anthropic", module)
+
+    caller = AnthropicCaller()
+    caller.set_cache_prefixes(["stable prefix"])
+    caller.set_cache_prefixes(None)
+    caller("stable prefix and the rest")
+
+    assert seen["content"] == "stable prefix and the rest"
+
+
 def test_model_response_from_message_surfaces_cache_token_counts():
     """Issue #159: the SDK's `Usage` object exposes
     cache_creation_input_tokens/cache_read_input_tokens (confirmed against

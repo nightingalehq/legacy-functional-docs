@@ -197,6 +197,68 @@ def test_call_splits_a_matching_prefix_into_a_cached_content_block(monkeypatch):
     ]
 
 
+def test_set_cache_prefixes_treats_a_single_string_as_one_prefix_not_chars(monkeypatch):
+    """A caller passing a bare string (an easy mistake -- `str` is iterable)
+    must not have it silently exploded into one-character prefixes, which
+    would corrupt prompt splitting. A single string is one whole prefix."""
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "some-project")
+    _fake_google_auth_package(monkeypatch)
+    seen = {}
+
+    class FakeMessages:
+        def create(self, **kw):
+            seen["content"] = kw["messages"][0]["content"]
+            return SimpleNamespace(
+                content=[SimpleNamespace(text="ok", type="text")],
+                usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+            )
+
+    fake_client = SimpleNamespace(messages=FakeMessages())
+    monkeypatch.setitem(sys.modules, "anthropic", SimpleNamespace(
+        AnthropicVertex=lambda **kw: fake_client, RateLimitError=Exception,
+        APIConnectionError=Exception, InternalServerError=Exception,
+    ))
+
+    caller = VertexCaller(project="some-project")
+    caller.set_cache_prefixes("stable prefix\n\n---\n\n")
+    caller("stable prefix\n\n---\n\nvariable part")
+
+    assert seen["content"] == [
+        {"type": "text", "text": "stable prefix\n\n---\n\n",
+         "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": "variable part"},
+    ]
+
+
+def test_set_cache_prefixes_accepts_none_as_clear(monkeypatch):
+    """`None` clears any previously registered prefixes -- an explicit
+    opt-out, distinct from passing an empty list."""
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "some-project")
+    _fake_google_auth_package(monkeypatch)
+    seen = {}
+
+    class FakeMessages:
+        def create(self, **kw):
+            seen["content"] = kw["messages"][0]["content"]
+            return SimpleNamespace(
+                content=[SimpleNamespace(text="ok", type="text")],
+                usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+            )
+
+    fake_client = SimpleNamespace(messages=FakeMessages())
+    monkeypatch.setitem(sys.modules, "anthropic", SimpleNamespace(
+        AnthropicVertex=lambda **kw: fake_client, RateLimitError=Exception,
+        APIConnectionError=Exception, InternalServerError=Exception,
+    ))
+
+    caller = VertexCaller(project="some-project")
+    caller.set_cache_prefixes(["stable prefix"])
+    caller.set_cache_prefixes(None)
+    caller("stable prefix and the rest")
+
+    assert seen["content"] == "stable prefix and the rest"
+
+
 def test_default_timeout_is_passed_to_the_anthropic_vertex_client(monkeypatch):
     monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "some-project")
     _fake_google_auth_package(monkeypatch)

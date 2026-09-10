@@ -119,8 +119,15 @@ class VertexCaller:
         # `cache_control: {"type": "ephemeral"}` breakpoint applies here too.
         self._cache_prefixes: tuple[str, ...] = ()
 
-    def set_cache_prefixes(self, prefixes) -> None:
-        """See AnthropicCaller.set_cache_prefixes -- identical contract."""
+    def set_cache_prefixes(self, prefixes: str | list[str] | tuple[str, ...] | None) -> None:
+        """See AnthropicCaller.set_cache_prefixes -- identical contract,
+        including a bare `str` being treated as one prefix (not iterated
+        character-by-character) and `None` clearing any registered
+        prefixes."""
+        if prefixes is None:
+            prefixes = ()
+        elif isinstance(prefixes, str):
+            prefixes = (prefixes,)
         self._cache_prefixes = tuple(sorted({p for p in prefixes if p}, key=len, reverse=True))
 
     def _content(self, prompt: str) -> str | list[dict]:

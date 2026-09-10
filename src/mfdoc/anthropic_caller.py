@@ -55,11 +55,19 @@ class AnthropicCaller:
         # before, one plain string with no cache_control at all.
         self._cache_prefixes: tuple[str, ...] = ()
 
-    def set_cache_prefixes(self, prefixes) -> None:
+    def set_cache_prefixes(self, prefixes: str | list[str] | tuple[str, ...] | None) -> None:
         """Register the stable prompt prefixes `__call__` should look for and
         mark with `cache_control: {"type": "ephemeral"}`. Safe to call more
         than once (a later call replaces, not appends); empty/falsy entries
-        are dropped."""
+        are dropped. A bare `str` is treated as a single one-element prefix
+        rather than iterated character-by-character (an easy mistake --
+        `str` is iterable -- that would otherwise register 1-character
+        prefixes and silently break prompt splitting). `None` clears any
+        previously registered prefixes."""
+        if prefixes is None:
+            prefixes = ()
+        elif isinstance(prefixes, str):
+            prefixes = (prefixes,)
         self._cache_prefixes = tuple(sorted({p for p in prefixes if p}, key=len, reverse=True))
 
     def _content(self, prompt: str) -> str | list[dict]:
