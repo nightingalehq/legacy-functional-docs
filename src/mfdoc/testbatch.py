@@ -26,8 +26,11 @@ from . import __version__
 from .batch import ModelCaller, DocResult
 from .batch import _corpus_signature as _base_corpus_signature
 from .batch import (
+    _auto_cite_uncited_assertions,
     _fix_generated_by_version,
+    _is_near_miss,
     _load_state,
+    _localized_findings,
     _output_subdir,
     _prune_stale_chunk_files,
     _save_state,
@@ -211,6 +214,62 @@ def build_test_prompt_cache_prefix(writing_rules: str, template: str, language: 
     return "\n\n---\n\n".join(stable) + "\n\n---\n\n"
 
 
+def build_localized_test_patch_prompt(
+    brief: str, current_text: str, uncited: list[str], reversed_findings: list[str],
+) -> str:
+    """Test-generation equivalent of batch.py's `build_localized_patch_prompt`
+    (issue #131, generalized by #170; ported here by #188): the same small,
+    targeted follow-up prompt for a near-miss `validate_test_doc` failure
+    (see `_is_near_miss`/`_localized_findings`, reused unchanged from
+    batch.py -- `validate_test_doc`'s only sentence-localized failure class
+    is the uncited-assertion one; a reversed-condition finding can never
+    occur here, since `validate_doc`'s `_reversed_condition_problems` call
+    is gated on `doc_type in ("module", "module_index")`, never
+    `doc_type: generated_test`. `reversed_findings` stays in the signature
+    only so this is a drop-in match for `_localized_findings`'s return
+    shape; it is always empty in practice for a test doc). Never resends
+    the writing rules/template/instructions: the model already demonstrated
+    it can follow them (the rest of `current_text`, including its one
+    fenced code block, is proof), so the only thing worth asking for again
+    is a citation or hedge fix to the specific flagged prose sentence(s)."""
+    sections = []
+    if uncited:
+        bullets = "\n".join(f"- {s}" for s in uncited)
+        sections.append(
+            "## Uncited assertive statements\n\n"
+            "The snippets below may be truncated to 140 characters; use "
+            "them to locate the full sentence in the current document. For "
+            "each, either add a `[[MEMBER:LINE]]` citation to a fact "
+            "already present in the brief below that supports it, or -- "
+            "only if no such fact exists -- rewrite it as an explicit "
+            "hedge instead of an assertion.\n\n" + bullets
+        )
+    if reversed_findings:
+        bullets = "\n".join(f"- {f}" for f in reversed_findings)
+        sections.append(
+            "## Comparison direction may be reversed\n\n"
+            "Each finding below names the exact `[[MEMBER:LINE]]` citation "
+            "whose surrounding sentence describes a comparison in the "
+            "opposite direction from what the cited source condition "
+            "means. Locate that sentence and correct which outcome it "
+            "describes so it matches the source condition's actual "
+            "polarity, without changing the citation itself.\n\n" + bullets
+        )
+    return (
+        "The document below is almost entirely valid first-draft generated "
+        "test documentation. A small number of specific, locatable "
+        "sentences have a flagged problem -- everything else in it, "
+        "including its fenced test code, already validated clean.\n\n"
+        "# Flagged findings (locate the matching sentence; fix only these)\n\n"
+        + "\n\n".join(sections) + "\n\n"
+        "Do not change anything else: no other sentence, heading, citation, "
+        "front-matter field, or any part of the fenced code block. Output "
+        "the complete corrected document, nothing else.\n\n"
+        "# Test brief\n\n" + brief + "\n\n"
+        "# Current document\n\n" + current_text
+    )
+
+
 def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: str, framework: str,
                                    out_path: Path, caller: ModelCaller, writing_rules: str,
                                    template: str, max_attempts: int = 2) -> DocResult:
@@ -235,7 +294,21 @@ def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: 
     validation failure's problems survive a later attempt raising, and a
     prior exception's message survives a later attempt's response still
     failing validation -- neither an unguarded `problems = [...]` on the
-    exception branch nor on the validation branch would keep both."""
+    exception branch nor on the validation branch would keep both.
+
+    A validation failure that `_is_near_miss` calls a near-miss (issue #131,
+    generalized by #170, ported to this test-generation path by #188: only
+    a handful of sentence-localized uncited-assertion findings -- nothing
+    structural, and never a reversed-condition finding, which
+    `validate_test_doc` can't produce, see `build_localized_test_patch_
+    prompt`'s docstring) gets one cheap targeted-patch attempt
+    (`build_localized_test_patch_prompt`) before counting against
+    `max_attempts` -- it doesn't consume one of the full-regeneration
+    attempts, since it asks for something far smaller than one. A response
+    failing for any other reason, or where the patch attempt itself doesn't
+    resolve everything (including the patch model call itself raising, the
+    same exception risk as the main call above), falls straight through to
+    the existing full-retry loop unchanged."""
     retry_note = None
     input_tokens = output_tokens = 0
     problems: list[str] = []
@@ -261,6 +334,79 @@ def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: 
         if result["ok"]:
             write_test_doc_with_sidecar(out_path, text, language)
             return DocResult(member_name, str(out_path), True, attempt, input_tokens, output_tokens, [])
+
+        if _is_near_miss(result):
+            uncited, reversed_findings = _localized_findings(result)
+
+            if uncited:
+                # Issue #171's deterministic, no-model-call auto-citation
+                # pass applies here exactly as it does for module docs --
+                # it operates only on `brief`/`current_text`, neither of
+                # which is module-doc-specific.
+                auto = _auto_cite_uncited_assertions(brief, text, uncited)
+                if auto is not None:
+                    candidate_text, remaining_uncited = auto
+                    candidate_result = validate_test_doc(conn, out_path, _text=candidate_text)
+                    if candidate_result["ok"]:
+                        logger.info(
+                            "%s: %d near-miss uncited assertion(s) auto-cited from the "
+                            "brief with no model call; document now validates clean",
+                            member_name, len(uncited) - len(remaining_uncited),
+                        )
+                        out_path.write_text(candidate_text, encoding="utf-8")
+                        write_test_doc_with_sidecar(out_path, candidate_text, language)
+                        return DocResult(
+                            member_name, str(out_path), True, attempt, input_tokens,
+                            output_tokens, [],
+                        )
+                    if _is_near_miss(candidate_result):
+                        logger.info(
+                            "%s: %d/%d near-miss uncited assertion(s) auto-cited from "
+                            "the brief with no model call; %d still need a targeted patch",
+                            member_name, len(uncited) - len(remaining_uncited), len(uncited),
+                            len(remaining_uncited),
+                        )
+                        text = candidate_text
+                        out_path.write_text(text, encoding="utf-8")
+                        result = candidate_result
+                        uncited, reversed_findings = _localized_findings(candidate_result)
+                    # else: the candidate is no longer a near-miss -- discard
+                    # it and fall through to the patch prompt using the
+                    # original, unpatched text/uncited/reversed_findings.
+
+            logger.warning(
+                "%s: validation failed on attempt %d/%d with %d near-miss "
+                "localized finding(s) only (%d uncited, %d reversed-condition) "
+                "-- trying a targeted patch before a full retry",
+                member_name, attempt, max_attempts,
+                len(uncited) + len(reversed_findings), len(uncited), len(reversed_findings),
+            )
+            patch_prompt = build_localized_test_patch_prompt(brief, text, uncited, reversed_findings)
+            try:
+                patch_response = caller(patch_prompt)
+            except Exception as exc:
+                logger.warning(
+                    "%s: targeted patch model call raised %s on attempt %d/%d: %s -- "
+                    "falling back to a full retry",
+                    member_name, exc.__class__.__name__, attempt, max_attempts, exc,
+                )
+            else:
+                input_tokens += patch_response.input_tokens
+                output_tokens += patch_response.output_tokens
+                text = _fix_generated_by_version(patch_response.text)
+                out_path.write_text(text, encoding="utf-8")
+                result = validate_test_doc(conn, out_path)
+                if result["ok"]:
+                    write_test_doc_with_sidecar(out_path, text, language)
+                    return DocResult(
+                        member_name, str(out_path), True, attempt, input_tokens, output_tokens, [],
+                    )
+                logger.warning(
+                    "%s: targeted patch attempt did not resolve validation (%d problem(s)); "
+                    "falling back to a full retry",
+                    member_name, len(result["problems"]),
+                )
+
         logger.warning(
             "%s: validation failed on attempt %d/%d (%d problem(s))",
             member_name, attempt, max_attempts, len(result["problems"]),
