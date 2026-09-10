@@ -1054,6 +1054,39 @@ def test_validator_still_rejects_a_genuinely_uncited_assertion_before_a_cited_on
     assert any("no citation" in p for p in result["problems"])
 
 
+def test_validator_accepts_a_genuine_gap_register_question(indexed_db, tmp_path):
+    """A genuine open SME/gap-register question phrased in the same idiom as
+    an assertive claim ("When X occurs, is Y the correct outcome?") is not
+    an assertion of behaviour and must not be flagged as an uncited claim --
+    only a declarative sentence should need a citation or hedge."""
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        GOOD_FRONTMATTER
+        + "\nWhen the batch job restarts mid-cycle, is the partial output "
+          "correct or should it be discarded?\n"
+    )
+    result = validate_doc(indexed_db, doc)
+    assert result["ok"] is True, result["problems"]
+
+
+def test_validator_still_rejects_a_declarative_sentence_with_an_embedded_question_mark(
+    indexed_db, tmp_path
+):
+    """The question exemption must be scoped to a unit that is *itself*
+    phrased as a question, not any unit that merely contains a `?`
+    somewhere inside it -- a declarative claim quoting a question (e.g. a
+    literal screen prompt) still needs its own citation or hedge."""
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        GOOD_FRONTMATTER
+        + '\nThe program displays the prompt "Continue?" before it validates '
+          "the order status.\n"
+    )
+    result = validate_doc(indexed_db, doc)
+    assert not result["ok"]
+    assert any("no citation" in p for p in result["problems"])
+
+
 def test_validator_rejects_module_doc_not_opening_with_a_heading(indexed_db, tmp_path):
     """A response that narrates commentary (e.g. restating its own scope)
     before the actual document content, rather than opening with the
