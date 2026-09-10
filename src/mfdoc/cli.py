@@ -929,6 +929,45 @@ def cmd_test_batch(args) -> int:
     return 1 if any_target_failed else 0
 
 
+def _print_batch_plan(plan) -> None:
+    """Print a `--dry-run mfdoc batch` plan (batch.BatchPlan) -- read before
+    committing to a real run, the same way `mfdoc coverage`/`mfdoc gate`'s
+    output is read before generating docs at all. See batch.plan_batch's
+    docstring for what "cache hit" means here and why it can differ from
+    what the CLI invocation alone would suggest."""
+    print(f"corpus signature: {'unchanged' if plan.corpus_unchanged else 'changed (or no prior state)'}")
+    for m in plan.members:
+        if m.status == "skip":
+            print(f"SKIP    {m.member:<20} cache hit -- no model call")
+        elif m.status == "render":
+            print(f"RENDER  {m.member:<20} single call")
+        else:
+            note = ""
+            if m.narrative_reusable is True:
+                note = " (whole-module narrative also reusable)"
+            elif m.narrative_reusable is False:
+                note = " (whole-module narrative would re-render too)"
+            print(
+                f"CHUNKED {m.member:<20} {m.chunks_reusable}/{m.chunk_count} chunks reusable, "
+                f"{m.chunks_to_render}/{m.chunk_count} would render{note}"
+            )
+    print()
+    print(
+        f"{plan.members_skip}/{plan.members_total} members skip (cache hit), "
+        f"{plan.members_render} render, {plan.members_chunked} chunked"
+    )
+    if plan.members_chunked:
+        print(
+            f"chunks: {plan.chunks_reusable}/{plan.chunks_total} reusable, "
+            f"{plan.chunks_to_render}/{plan.chunks_total} would render"
+        )
+        if plan.chunks_to_render == plan.chunks_total and plan.chunks_total > 0:
+            print(
+                "warning: every chunk of every chunked member would render -- a resumed "
+                "run here is effectively a full regeneration, not a cheap resume"
+            )
+
+
 def cmd_batch(args) -> int:
     """Batch harness for the high-volume, formulaic module docs (option C).
 
@@ -965,13 +1004,24 @@ def cmd_batch(args) -> int:
     index_template_path = base / "templates" / "module-index.md"
     index_template = index_template_path.read_text(encoding="utf-8") if index_template_path.exists() else None
 
+    narrative_opts = (cfg["options"] or {}).get("narrative") or {}
+    pricing = narrative_opts.get("pricing") or {}
+    lexicon = narrative_opts.get("lexicon") or {}
+
+    if getattr(args, "dry_run", False):
+        plan = batch_mod.plan_batch(
+            conn, members, base / args.out, redact=redact,
+            state_path=(base / args.state) if args.state else None,
+            lexicon=lexicon, max_rules_per_call=narrative_opts.get("max_rules_per_call"),
+            sme_notes=sme_notes, writing_rules=writing_rules, index_template=index_template,
+        )
+        _print_batch_plan(plan)
+        return 0
+
     caller = _build_model_caller(args)
     if caller is None:
         return 1
 
-    narrative_opts = (cfg["options"] or {}).get("narrative") or {}
-    pricing = narrative_opts.get("pricing") or {}
-    lexicon = narrative_opts.get("lexicon") or {}
     summary = batch_mod.run_batch(
         conn, members, base / args.out, caller, writing_rules, template, redact=redact,
         concurrency=args.concurrency,
@@ -1658,6 +1708,12 @@ def main(argv=None) -> int:
     p.add_argument("--state", default=".mfdoc/batch-state.json",
                     help="resume-state file path, relative to --config's directory; "
                          "empty string disables resume tracking")
+    p.add_argument("--dry-run", action="store_true",
+                    help="report how many members/chunks this run would actually skip "
+                         "(cache hit) versus render, without calling the model or writing "
+                         "anything -- read this before a resumed run that looks cheap turns "
+                         "out to be a full re-render (issue #160). No --model/--provider/"
+                         "--caller is needed; exits before any of that is touched")
     p.add_argument("--caller", choices=["anthropic", "fake-echo"], default="anthropic",
                     help="fake-echo makes no network call -- for CI/dry-run smoke tests")
     p.add_argument("--provider", choices=["anthropic", "vertex", "claude-code"], default="anthropic",

@@ -231,6 +231,19 @@ mfdoc batch --config project.yml --out docs/functional/modules
 # facts actually on record for a member -- e.g.
 # docs/functional/modules/natural/MILLPROD/MMP0100.md
 
+mfdoc batch --config project.yml --out docs/functional/modules --dry-run
+# --dry-run: preview a batch run before spending any model calls -- a
+# cheap, local, no-model-call pass computes what a real run over these same
+# arguments would actually do (skip vs. render, and for a chunked member,
+# how many of its chunks would hit the cache vs. re-render) and prints it,
+# same as this now-familiar report, but with no model call and nothing
+# written to disk. No --model/--provider/API key needed. Worth running
+# before any resumed batch that's expected to be cheap -- a chunked
+# member's per-chunk cache key is sensitive to an unrelated rule added or
+# removed earlier in the same member (see citations.py's `_rule_id`
+# docstring), so a "resume" can silently turn into a full re-render; this
+# is how to see that before it costs anything, not after (issue #160).
+
 # an engagement-scale batch/test-batch run is long enough that the routine
 # progress (a member skipped on resume, a chunk completing, a transient
 # error being retried) is worth watching or keeping: --verbose (-v) raises

@@ -98,6 +98,12 @@ mfdoc gate      --config project.yml     # pass/fail vs options.quality_gates
 mfdoc calibrate --config project.yml --dialect mantis   # Mantis/Supra usually need this
 mfdoc brief     --config project.yml --system|--module NAME|--entity NAME
 mfdoc batch     --config project.yml --out docs/functional/modules  # needs mfdoc[batch] + ANTHROPIC_API_KEY
+mfdoc batch     --config project.yml --out docs/functional/modules --dry-run
+# --dry-run: cheap, local, no-model-call preview of what a resumed run would
+# actually do -- how many members/chunks would hit the cache versus need a
+# real render -- printed before any model call or write; no --model/
+# --provider/API key needed. Read this before a resume that looks cheap
+# turns out to be a full re-render (issue #160; see batch.plan_batch).
 # --verbose/-v (DEBUG-level progress: resumed skips, chunk N/M, retries) and
 # --log-file PATH (also write that logging to a file) are top-level flags,
 # given *before* the subcommand -- e.g. `mfdoc -v --log-file batch.log batch

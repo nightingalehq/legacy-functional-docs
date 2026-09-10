@@ -1470,6 +1470,34 @@ def _render_module_index_doc(member_name: str, system: str | None,
     return fm + "\n".join(body_parts)
 
 
+def _chunk_reuse_ok(conn, prior_chunks: dict | None, i: int, brief_hash: str,
+                     chunk_path: Path) -> bool:
+    """Whether chunk `i` can be reused verbatim -- no model call -- given a
+    prior run's chunk_state and this chunk's freshly-computed brief hash:
+    the prior run must have recorded this exact chunk as clean (`ok` True)
+    with the same `brief_sha256`, its output file must still exist on disk,
+    and it must still validate today (validate_doc's own logic can have
+    changed since it was last checked, even though the content hasn't).
+
+    A failed chunk is never a reuse candidate: it leaves its last (invalid)
+    attempt on disk, so treating it as reusable would re-validate the same
+    bad file forever and the chunk would never re-render.
+
+    Shared by _generate_module_doc_chunked's real reuse path and
+    plan_batch's dry-run estimate (issue #160) so both apply exactly the
+    same reuse rule -- a preview that used a second, slightly different
+    copy of this logic could drift from what a real run actually does."""
+    prior_chunk = (prior_chunks or {}).get(str(i))
+    reusable = (
+        isinstance(prior_chunk, dict) and prior_chunk.get("ok") is True
+        and prior_chunk.get("brief_sha256") == brief_hash
+        and chunk_path.exists()
+    )
+    if not reusable:
+        return False
+    return validate_doc(conn, chunk_path)["ok"]
+
+
 def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rule_rows: list,
                                   out_path: Path, caller: ModelCaller, writing_rules: str,
                                   template: str, redact: Redactor, lexicon: dict[str, str] | None,
@@ -1569,27 +1597,10 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
             sme_notes=sme_notes,
         )
         brief_hash = hashlib.sha256(brief.encode("utf-8")).hexdigest()
-        prior_chunk = (prior_chunks or {}).get(str(i))
-        # Only a chunk the prior run recorded as *clean* is a reuse
-        # candidate: a failed chunk leaves its last (invalid) attempt on
-        # disk, so reusing it would re-validate the same bad file forever
-        # and the chunk would never re-render.
-        reusable = (
-            isinstance(prior_chunk, dict) and prior_chunk.get("ok") is True
-            and prior_chunk.get("brief_sha256") == brief_hash
-            and chunk_path.exists()
-        )
         result = None
-        if reusable:
-            # Re-validate rather than trust the stored "ok" flag verbatim --
-            # the *content* is cached, but validate_doc's own logic can have
-            # changed since it was last checked, and this costs no model call.
-            # A re-validation failure falls through to a normal regeneration
-            # below rather than being reported as terminal.
-            revalidated = validate_doc(conn, chunk_path)
-            if revalidated["ok"]:
-                result = DocResult(member_name, str(chunk_path), True, 0, 0, 0, [])
-                logger.debug("%s: chunk %d/%d reused (unchanged)", member_name, i, chunk_count)
+        if _chunk_reuse_ok(conn, prior_chunks, i, brief_hash, chunk_path):
+            result = DocResult(member_name, str(chunk_path), True, 0, 0, 0, [])
+            logger.debug("%s: chunk %d/%d reused (unchanged)", member_name, i, chunk_count)
         if result is None:
             logger.info("%s: chunk %d/%d generating", member_name, i, chunk_count)
             # A caller exception here (transient network error, rate limit,
@@ -2209,3 +2220,175 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
         total_duration_s=sum(r.duration_s for r in results),
         total_retries=sum(r.retries for r in results),
     )
+
+
+@dataclass
+class MemberPlan:
+    """One member's resume estimate from plan_batch -- what run_batch would
+    actually do for this member, computed the same way but with no model
+    call and no write. `status` is one of:
+
+    - "skip": corpus- or member-level resume hit -- run_batch would call
+      `module_brief()` at most once (member-level check) and no model.
+    - "render": a normal (non-chunked) member that will make exactly one
+      model call (plus a possible validation retry).
+    - "chunked": an over-threshold member rendered as several chunks --
+      `chunk_count`/`chunks_reusable` describe how many of those chunks
+      would actually need a model call versus be reused from prior state.
+    """
+    member: str
+    status: str
+    chunk_count: int | None = None
+    chunks_reusable: int | None = None
+    narrative_reusable: bool | None = None
+
+    @property
+    def chunks_to_render(self) -> int | None:
+        if self.chunk_count is None or self.chunks_reusable is None:
+            return None
+        return self.chunk_count - self.chunks_reusable
+
+
+@dataclass
+class BatchPlan:
+    """Whole-run resume estimate from plan_batch -- see that function's
+    docstring. Aggregates MemberPlan entries into the totals cli.py prints
+    before a real `mfdoc batch` run spends any model calls (issue #160)."""
+    corpus_unchanged: bool
+    members: list[MemberPlan]
+
+    @property
+    def members_total(self) -> int:
+        return len(self.members)
+
+    @property
+    def members_skip(self) -> int:
+        return sum(1 for m in self.members if m.status == "skip")
+
+    @property
+    def members_render(self) -> int:
+        return sum(1 for m in self.members if m.status == "render")
+
+    @property
+    def members_chunked(self) -> int:
+        return sum(1 for m in self.members if m.status == "chunked")
+
+    @property
+    def chunks_total(self) -> int:
+        return sum(m.chunk_count or 0 for m in self.members if m.status == "chunked")
+
+    @property
+    def chunks_reusable(self) -> int:
+        return sum(m.chunks_reusable or 0 for m in self.members if m.status == "chunked")
+
+    @property
+    def chunks_to_render(self) -> int:
+        return self.chunks_total - self.chunks_reusable
+
+
+def plan_batch(conn, members: list[str], out_dir: Path,
+               redact: Redactor = NULL_REDACTOR,
+               state_path: Path | None = None,
+               lexicon: dict[str, str] | None = None,
+               max_rules_per_call: int | None = None,
+               sme_notes: dict | None = None,
+               writing_rules: str | None = None,
+               index_template: str | None = None) -> BatchPlan:
+    """Cheap, local, no-model-call preview of what `run_batch` over these
+    same arguments would actually do -- every brief a real run would render
+    is computed and hashed exactly the same way (corpus-level check, then
+    per-member brief hash, then -- for an over-threshold member -- each
+    chunk's own brief hash via the same `_chunk_reuse_ok` a real chunked
+    render uses), but no model is ever called and nothing is written to
+    disk. Meant to be read before committing to a real `mfdoc batch` run,
+    the same way `mfdoc coverage`/`mfdoc gate` are read before generating
+    docs at all.
+
+    This exists because a "resume" can silently be a full regeneration in
+    disguise: `_rule_id`'s `BR-nnn` numbering (see citations.py) -- and
+    hence a chunk's own rendered brief text -- is a position in that
+    member's whole rule list, so a single rule added or removed anywhere
+    earlier in the same member renumbers every later rule and changes every
+    later chunk's brief hash, even when that chunk's own routine's facts
+    are otherwise unchanged (issue #160's motivating case). There is no way
+    to tell from the CLI invocation alone whether a given resume will
+    actually hit the per-chunk cache or fully re-render every chunk --
+    this function does the same (cheap, deterministic) hashing work a real
+    run would, up front, so that can be seen before it costs anything.
+
+    `writing_rules`/`index_template` are optional: when given, a chunked
+    member whose every chunk is reusable also gets a `narrative_reusable`
+    verdict (whether the whole-module reconciliation call would also be
+    skipped) -- omitted (left None) when not given, since computing it
+    needs the same inputs a real reconciliation call would build its prompt
+    from."""
+    threshold = _resolve_max_rules_per_call(max_rules_per_call)
+    state = _load_state(state_path) if state_path else {}
+    corpus_sig = (
+        _corpus_signature(conn, redact, lexicon, sme_notes, extra=[str(threshold)]) if state_path else None
+    )
+    corpus_unchanged = bool(state_path) and state.get("_corpus_sha256") == corpus_sig
+
+    plans: list[MemberPlan] = []
+    for name in members:
+        subdir = _output_subdir(conn, name)
+        out_path = out_dir / subdir / f"{name}.md"
+        state_key = f"{subdir.as_posix()}/{name}"
+        prior = state.get(state_key)
+        prior_ok = isinstance(prior, dict) and prior.get("ok") and out_path.exists()
+
+        if corpus_unchanged and prior_ok:
+            plans.append(MemberPlan(name, "skip"))
+            continue
+
+        brief = module_brief(conn, name, redact=redact, lexicon=lexicon, sme_notes=sme_notes)
+        brief_hash = hashlib.sha256(f"{brief}\x00{threshold}".encode("utf-8")).hexdigest()
+        if prior_ok and prior.get("brief_sha256") == brief_hash:
+            plans.append(MemberPlan(name, "skip"))
+            continue
+
+        rows, ambiguous_libs = fetch_rule_candidate_rows(conn, name)
+        if ambiguous_libs or not rows or len(rows) <= threshold:
+            plans.append(MemberPlan(name, "render"))
+            continue
+
+        routines = fetch_routines(conn, rows[0]["member_id"])
+        ranges = routine_aware_chunk_ranges([r["line_no"] for r in rows], routines, threshold)
+        chunk_count = len(ranges)
+        chunk_width = len(str(chunk_count))
+        prior_chunks = prior.get("chunks") if isinstance(prior, dict) else None
+        chunks_reusable = 0
+        chunk_bodies: list[tuple[int, str]] = []
+        for i, (start, end) in enumerate(ranges, start=1):
+            chunk_path = out_path.with_name(f"{out_path.stem}.chunk{i:0{chunk_width}d}{out_path.suffix}")
+            chunk_brief = module_brief(
+                conn, name, redact=redact, lexicon=lexicon,
+                rule_range=(start, end), chunk_info=(i, chunk_count), sme_notes=sme_notes,
+            )
+            chunk_hash = hashlib.sha256(chunk_brief.encode("utf-8")).hexdigest()
+            if _chunk_reuse_ok(conn, prior_chunks, i, chunk_hash, chunk_path):
+                chunks_reusable += 1
+                if writing_rules is not None and chunk_path.exists():
+                    chunk_bodies.append((i, chunk_path.read_text(encoding="utf-8")))
+
+        narrative_reusable = None
+        if writing_rules is not None and chunks_reusable == chunk_count and len(chunk_bodies) == chunk_count:
+            narrative_input_hash = hashlib.sha256(
+                "\x00".join(f"{index}:{body}" for index, body in chunk_bodies).encode("utf-8")
+                + b"\x00" + writing_rules.encode("utf-8")
+                + b"\x00" + (index_template or "").encode("utf-8")
+            ).hexdigest()
+            prior_narrative = (prior_chunks or {}).get("_narrative") if isinstance(prior_chunks, dict) else None
+            narrative_reusable = bool(
+                isinstance(prior_narrative, dict) and prior_narrative.get("ok")
+                and prior_narrative.get("input_sha256") == narrative_input_hash
+                and isinstance(prior_narrative.get("sections"), dict)
+                and set(prior_narrative["sections"]) == set(NARRATIVE_SECTIONS)
+            )
+
+        plans.append(MemberPlan(
+            name, "chunked", chunk_count=chunk_count, chunks_reusable=chunks_reusable,
+            narrative_reusable=narrative_reusable,
+        ))
+
+    return BatchPlan(corpus_unchanged=corpus_unchanged, members=plans)
