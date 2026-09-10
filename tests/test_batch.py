@@ -695,6 +695,182 @@ def test_reversed_condition_only_gets_a_targeted_patch_not_a_full_retry(indexed_
     assert "module template" not in patch_prompt  # template not resent
 
 
+def test_find_confident_citation_clear_match():
+    """A sentence whose key tokens (backtick/quote-delimited literals and
+    field names) are all present on exactly one already-cited brief line is
+    a confident match."""
+    brief_lines = [("[[MMP0100:38]]", "- [[MMP0100:38]] when `ORDER-STATUS` equals `'CONF'` the order is rejected")]
+    sentence = "The module rejects the order when `ORDER-STATUS` equals `'CONF'`."
+    assert batch_mod._find_confident_citation(sentence, brief_lines) == "[[MMP0100:38]]"
+
+
+def test_find_confident_citation_no_tokens_declines():
+    """A sentence with no backtick/quote-delimited tokens at all has
+    nothing specific to match on -- must decline rather than guess from
+    plain-word overlap."""
+    brief_lines = [("[[MMP0100:38]]", "- [[MMP0100:38]] the system validates the account balance before posting")]
+    sentence = "The system also validates the account balance before posting."
+    assert batch_mod._find_confident_citation(sentence, brief_lines) is None
+
+
+def test_find_confident_citation_ambiguous_declines():
+    """Two brief lines that each carry only part of the sentence's key
+    tokens -- neither is a superset -- so there is no unambiguous match."""
+    brief_lines = [
+        ("[[MMP0100:38]]", "- [[MMP0100:38]] `ORDER-STATUS` is the transaction outcome field"),
+        ("[[MMP0100:40]]", "- [[MMP0100:40]] a rejected order is one whose status equals `'CONF'`"),
+    ]
+    sentence = "The module rejects the order when `ORDER-STATUS` equals `'CONF'`."
+    assert batch_mod._find_confident_citation(sentence, brief_lines) is None
+
+
+def test_splice_citation_wrapped_sentence_declines():
+    """A sentence that doesn't appear verbatim in the document text (e.g.
+    because it was wrapped across source lines, so the joined single-line
+    form `_logical_units` produced isn't a literal substring) must not be
+    guessed at -- `_splice_citation` returns `None`."""
+    current_text = "Some text.\n\nThe module rejects the order\nwhen ORDER-STATUS equals 'CONF'.\n"
+    sentence = "The module rejects the order when ORDER-STATUS equals 'CONF'."
+    assert batch_mod._splice_citation(current_text, sentence, "[[MMP0100:38]]") is None
+
+
+def test_near_miss_uncited_assertion_auto_cited_with_zero_model_calls(indexed_db, tmp_path):
+    """Issue #171: when the flagged uncited sentence is a close paraphrase
+    of a fact the same brief already states with a citation elsewhere --
+    same field names, just missing the `[[MEMBER:LINE]]` tag -- the
+    deterministic auto-citation pass must splice that citation in directly
+    and re-validate, with no second (patch) model call at all.
+
+    Uses `GRADE-CODE`/`STOCK-VIEW.GRADE-CODE` (line 44 of the repo's own
+    MMP0100 fixture: `IF STOCK-VIEW.GRADE-CODE NE ORDER-VIEW.GRADE-CODE`) --
+    deliberately not an outcome field (`ORDER-STATUS`, `RETURN-CODE`, ...),
+    so `_reversed_condition_problems` never fires here and this test stays
+    isolated to the uncited-assertion path issue #171 targets."""
+    calls = {"n": 0}
+
+    def caller(prompt: str) -> batch_mod.ModelResponse:
+        calls["n"] += 1
+        return batch_mod.ModelResponse(
+            text=(
+                GOOD_FRONTMATTER.format(member="MMP0100")
+                + "\n# MMP0100\n\nDoes something [[MMP0100:1]]. "
+                "The module skips the row when `GRADE-CODE` does not equal "
+                "`STOCK-VIEW.GRADE-CODE`.\n"
+            ),
+            input_tokens=10, output_tokens=20,
+        )
+
+    out_path = tmp_path / "MMP0100.md"
+    brief = (
+        "# Fact brief: MMP0100\n\n"
+        "- [[MMP0100:44]] when `GRADE-CODE` does not equal `STOCK-VIEW.GRADE-CODE` "
+        "the row is skipped\n"
+    )
+    result = batch_mod._generate_module_doc_from_brief(
+        indexed_db, "MMP0100", brief, out_path, caller, "cite everything", "module template",
+    )
+    assert result.ok, result.problems
+    assert calls["n"] == 1  # no second (patch) model call needed
+    assert result.attempts == 1
+    written = out_path.read_text(encoding="utf-8")
+    assert "`STOCK-VIEW.GRADE-CODE` [[MMP0100:44]]." in written
+
+
+def test_near_miss_uncited_assertion_no_confident_match_falls_back_to_patch(indexed_db, tmp_path):
+    """Negative case for issue #171: when the flagged sentence's key tokens
+    aren't an unambiguous subset of any single already-cited brief line --
+    here, two different brief lines each carry only one of the sentence's
+    two tokens -- the deterministic pass must find no confident match and
+    fall back to the existing model-patch path unchanged, rather than
+    guessing which citation to attach."""
+    calls = {"n": 0}
+    prompts: list[str] = []
+
+    def caller(prompt: str) -> batch_mod.ModelResponse:
+        calls["n"] += 1
+        prompts.append(prompt)
+        if calls["n"] == 1:
+            return batch_mod.ModelResponse(
+                text=(
+                    GOOD_FRONTMATTER.format(member="MMP0100")
+                    + "\n# MMP0100\n\nDoes something [[MMP0100:1]]. "
+                    "The module skips the row when `GRADE-CODE` does not equal "
+                    "`STOCK-VIEW.GRADE-CODE`.\n"
+                ),
+                input_tokens=10, output_tokens=20,
+            )
+        return batch_mod.ModelResponse(
+            text=(
+                GOOD_FRONTMATTER.format(member="MMP0100")
+                + "\n# MMP0100\n\nDoes something [[MMP0100:1]]. "
+                "The module skips the row when `GRADE-CODE` does not equal "
+                "`STOCK-VIEW.GRADE-CODE` [[MMP0100:44]].\n"
+            ),
+            input_tokens=5, output_tokens=8,
+        )
+
+    out_path = tmp_path / "MMP0100.md"
+    # Neither brief line alone carries both of the sentence's key tokens,
+    # so no single line's tokens are a superset of the sentence's -- the
+    # deterministic pass must decline rather than pick either one.
+    brief = (
+        "# Fact brief: MMP0100\n\n"
+        "- [[MMP0100:44]] `GRADE-CODE` is the grade key field on the order\n"
+        "- [[MMP0100:45]] a skipped row is one whose grade differs from "
+        "`STOCK-VIEW.GRADE-CODE`\n"
+    )
+    result = batch_mod._generate_module_doc_from_brief(
+        indexed_db, "MMP0100", brief, out_path, caller, "cite everything", "module template",
+    )
+    assert result.ok, result.problems
+    assert calls["n"] == 2  # deterministic pass declined; model patch still ran
+    assert result.attempts == 1
+    patch_prompt = prompts[1]
+    assert "Flagged findings (locate the matching sentence; fix only these)" in patch_prompt
+    assert "Uncited assertive statements" in patch_prompt
+
+
+def test_reversed_condition_near_miss_unaffected_by_auto_citation(indexed_db, tmp_path):
+    """Issue #171 is uncited-assertion-only: a near-miss made up entirely of
+    reversed-condition findings (no uncited assertions at all) must never
+    invoke the auto-citation pass, confirmed here by monkeypatching it to
+    raise if called -- the reversed-condition path must reach the model
+    patch exactly as it did before this issue."""
+    def _boom(*a, **k):
+        raise AssertionError("_auto_cite_uncited_assertions must not run for a reversed-"
+                              "condition-only near-miss")
+    orig = batch_mod._auto_cite_uncited_assertions
+    batch_mod._auto_cite_uncited_assertions = _boom
+    try:
+        calls = {"n": 0}
+        reversed_text = (
+            GOOD_FRONTMATTER.format(member="MMP0100")
+            + "\n# MMP0100\n\nThe module rejects the order when the order status "
+            "equals 'CONF' [[MMP0100:38]].\n"
+        )
+        fixed_text = (
+            GOOD_FRONTMATTER.format(member="MMP0100")
+            + "\n# MMP0100\n\nThe module rejects the order when the order status "
+            "is not 'CONF' [[MMP0100:38]].\n"
+        )
+
+        def caller(prompt: str) -> batch_mod.ModelResponse:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return batch_mod.ModelResponse(text=reversed_text, input_tokens=10, output_tokens=20)
+            return batch_mod.ModelResponse(text=fixed_text, input_tokens=5, output_tokens=8)
+
+        out_path = tmp_path / "MMP0100.md"
+        brief = "# Fact brief: MMP0100\n\nSome brief text [[MMP0100:38]].\n"
+        result = batch_mod._generate_module_doc_from_brief(
+            indexed_db, "MMP0100", brief, out_path, caller, "cite everything", "module template",
+        )
+        assert result.ok, result.problems
+        assert calls["n"] == 2
+    finally:
+        batch_mod._auto_cite_uncited_assertions = orig
+
+
 def test_missing_front_matter_still_gets_a_full_retry(indexed_db, tmp_path):
     """Negative case for issue #170: a structural failure (missing/broken
     front matter entirely) is never sentence-localized, so it must keep

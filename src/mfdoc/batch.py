@@ -36,7 +36,7 @@ from .brief import (
 from .citations import _cite, _rule_id
 from .db import GAP_SEVERITY_ORDER_SQL
 from .redact import NULL_REDACTOR, Redactor
-from .validate import CITATION, split_frontmatter, validate_doc
+from .validate import CITATION, _logical_units, split_frontmatter, validate_doc
 
 # Progress/diagnostic output for a long (potentially thousands-of-members,
 # hours-long) `mfdoc batch` run -- issue #83. This is deliberately *not*
@@ -505,6 +505,166 @@ def _is_near_miss(result: dict) -> bool:
     return 0 < total <= NEAR_MISS_MAX_LOCALIZED
 
 
+# Issue #171: even a near-miss uncited assertion (see `_is_near_miss` above)
+# always paid for a full model call to fix -- even though a common shape is
+# that the model's prose is a correct paraphrase of a fact the *same brief*
+# already states with a citation elsewhere, and it simply dropped or
+# misplaced the `[[MEMBER:LINE]]` tag. `_auto_cite_uncited_assertions`
+# handles that shape entirely in code: no model call, just a text splice --
+# and only for the uncited-assertion class. Reversed-condition findings have
+# no equivalent shape (the fix is a polarity correction to existing prose,
+# not "attach a citation that already exists elsewhere for this exact
+# claim"), so this pass is never invoked for them; the reversed-condition
+# near-miss path is unchanged by this issue.
+
+# A backtick- or quote-delimited token -- a field/rule name like
+# `ORDER-STATUS` or a literal like `'CONF'` -- is the only thing
+# `_find_confident_citation` treats as evidence two lines describe the same
+# fact. brief.py already wraps every field name, literal, and condition
+# fragment it renders in backticks (see e.g. module_brief's per-row
+# `` f"...`{...}`..." `` calls); reusing that convention means the token set
+# is already exactly "the specific things this line asserts", not just any
+# shared word. A bare-word overlap ("the", "system", "before posting") is
+# exactly the false-positive risk issue #171 asks this pass to avoid, so
+# plain words are never considered tokens at all.
+_KEY_TOKEN = re.compile(r"`([^`\n]+)`|'([^'\n]+)'|\"([^\"\n]+)\"")
+
+
+def _key_tokens(text: str) -> set[str]:
+    """Every backtick- or quote-delimited token in `text`, kept verbatim
+    including its surrounding quote characters where present -- so a
+    quoted literal `'CONF'` and the bare word `CONF` are never treated as
+    the same token. An assertion that names the field but not the literal
+    value it's compared against (or vice versa) is deliberately not a match
+    on that token alone."""
+    tokens: set[str] = set()
+    for m in _KEY_TOKEN.finditer(text):
+        tok = next(g for g in m.groups() if g is not None).strip()
+        if tok:
+            tokens.add(tok)
+    return tokens
+
+
+def _brief_cited_lines(brief: str) -> list[tuple[str, str]]:
+    """(citation, line) for every line in `brief` carrying at least one
+    `[[MEMBER:LINE]]` citation -- the candidate set `_find_confident_
+    citation` searches for a matching already-cited fact."""
+    out = []
+    for line in brief.splitlines():
+        m = CITATION.search(line)
+        if m:
+            out.append((m.group(0), line))
+    return out
+
+
+def _find_confident_citation(sentence: str, brief_lines: list[tuple[str, str]]) -> str | None:
+    """The citation from the single brief-cited line whose key tokens (see
+    `_key_tokens`) are a superset of `sentence`'s, or `None` when there is
+    no confident match.
+
+    Deliberately conservative, per issue #171's explicit tradeoff: a false
+    positive here (the wrong citation attached to a sentence) is worse than
+    the one model call this whole pass exists to save, so this returns
+    `None` -- meaning "fall back to `build_localized_patch_prompt`" -- in
+    every case except a clean, unambiguous match:
+
+    - `sentence` names no key tokens at all (nothing specific to match on --
+      most commonly a genuinely uncited claim with no fixable citation
+      anywhere, which is exactly what still needs a model to write a real
+      hedge or new sentence, not a spliced-in citation).
+    - No brief line's tokens are a superset of `sentence`'s (a *partial*
+      overlap is not enough -- every specific literal/field-name token the
+      sentence names must be present on that one line).
+    - More than one brief line qualifies (ambiguous: attaching either
+      citation could be wrong, so neither is attached).
+
+    This catches real paraphrases (same field name and literal, reworded
+    prose) but will not catch a paraphrase that drops the literal/field name
+    entirely, or a fact spread across multiple brief lines -- those still
+    cost the one model call this issue is optimizing away for the common
+    case, which is the intended tradeoff."""
+    sentence_tokens = _key_tokens(sentence)
+    if not sentence_tokens:
+        return None
+    matches = {
+        cite for cite, line in brief_lines
+        if sentence_tokens <= _key_tokens(line)
+    }
+    return matches.pop() if len(matches) == 1 else None
+
+
+# A sentence ends at its own terminating punctuation, optionally followed by
+# a closing quote/paren -- the citation is spliced in just before that
+# punctuation, matching where a model-written citation for the same claim
+# would normally sit ("...equals `'CONF'` [[MMP0100:5]].").
+_SENTENCE_END = re.compile(r"[.!?]+[\"'”’)]*\s*$")
+
+
+def _splice_citation(current_text: str, sentence: str, citation: str) -> str | None:
+    """`current_text` with `citation` spliced into the one occurrence of
+    `sentence`, immediately before its terminating punctuation -- or `None`
+    when `sentence` doesn't appear in `current_text` exactly once (e.g. it
+    was wrapped across source lines, so the single-line form
+    `_logical_units` produces doesn't match verbatim, or it happens to
+    recur). Refusing to guess which occurrence in that case is the same
+    conservative choice as `_find_confident_citation`'s: fall back to the
+    model patch rather than splice in the wrong place."""
+    if current_text.count(sentence) != 1:
+        return None
+    m = _SENTENCE_END.search(sentence)
+    if m:
+        patched = sentence[:m.start()] + " " + citation + sentence[m.start():]
+    else:
+        patched = sentence + " " + citation
+    return current_text.replace(sentence, patched, 1)
+
+
+def _auto_cite_uncited_assertions(
+    brief: str, current_text: str, uncited: list[str],
+) -> tuple[str, list[str]] | None:
+    """Issue #171's deterministic auto-citation pass: for each snippet in
+    `uncited` (truncated flagged-sentence text from a near-miss
+    `validate_doc` result -- see `_uncited_assertions`), locate its full,
+    untruncated sentence in `current_text` and try `_find_confident_
+    citation` against `brief`'s own already-cited lines.
+
+    Returns `(patched_text, remaining_uncited)` where `remaining_uncited`
+    holds the original snippets (unchanged) for whichever sentences did
+    *not* get a confident match -- the caller still owes those to
+    `build_localized_patch_prompt` -- or `None` when nothing in `uncited`
+    got a confident match at all (nothing to re-validate; caller should
+    proceed exactly as before this pass existed).
+
+    Scoped to uncited assertions only (never called for reversed-condition
+    findings): see the module-level comment above `_KEY_TOKEN`."""
+    _, body, err = split_frontmatter(current_text)
+    if err:
+        return None
+    units = [u.strip() for u in _logical_units(body)]
+    brief_lines = _brief_cited_lines(brief)
+    patched_text = current_text
+    remaining: list[str] = []
+    patched_any = False
+    for snippet in uncited:
+        full = next((u for u in units if u[:140] == snippet), None)
+        if full is None:
+            remaining.append(snippet)
+            continue
+        citation = _find_confident_citation(full, brief_lines)
+        if citation is None:
+            remaining.append(snippet)
+            continue
+        spliced = _splice_citation(patched_text, full, citation)
+        if spliced is None:
+            remaining.append(snippet)
+            continue
+        patched_text = spliced
+        patched_any = True
+    if not patched_any:
+        return None
+    return patched_text, remaining
+
+
 def build_localized_patch_prompt(
     brief: str, current_text: str, uncited: list[str], reversed_findings: list[str],
 ) -> str:
@@ -644,6 +804,48 @@ def _generate_module_doc_from_brief(conn, member_name: str, brief: str, out_path
 
         if _is_near_miss(result):
             uncited, reversed_findings = _localized_findings(result)
+
+            if uncited:
+                # Issue #171: try a deterministic, no-model-call fix first --
+                # only for the uncited-assertion findings (never reversed-
+                # condition ones, see _auto_cite_uncited_assertions).
+                auto = _auto_cite_uncited_assertions(brief, text, uncited)
+                if auto is not None:
+                    candidate_text, remaining_uncited = auto
+                    candidate_result = validate_doc(conn, out_path, _text=candidate_text)
+                    if candidate_result["ok"]:
+                        logger.info(
+                            "%s: %d near-miss uncited assertion(s) auto-cited from the "
+                            "brief with no model call; chunk now validates clean",
+                            member_name, len(uncited) - len(remaining_uncited),
+                        )
+                        out_path.write_text(candidate_text, encoding="utf-8")
+                        return DocResult(
+                            member_name, str(out_path), True, attempt, input_tokens,
+                            output_tokens, [], duration_s=duration_s, retries=retries,
+                        )
+                    if _is_near_miss(candidate_result):
+                        # Auto-citation resolved some (not all) of the
+                        # findings and didn't introduce anything non-
+                        # localized -- keep the patched text and the
+                        # narrowed finding lists, so the fallback patch
+                        # prompt below only asks about what's still wrong.
+                        logger.info(
+                            "%s: %d/%d near-miss uncited assertion(s) auto-cited from "
+                            "the brief with no model call; %d still need a targeted patch",
+                            member_name, len(uncited) - len(remaining_uncited), len(uncited),
+                            len(remaining_uncited),
+                        )
+                        text = candidate_text
+                        out_path.write_text(text, encoding="utf-8")
+                        result = candidate_result
+                        uncited, reversed_findings = _localized_findings(candidate_result)
+                    # else: the candidate is no longer a near-miss (an
+                    # auto-cited splice landed somewhere that broke a
+                    # different check) -- discard it and fall through to
+                    # the patch prompt using the original, unpatched
+                    # `text`/`uncited`/`reversed_findings` instead.
+
             logger.warning(
                 "%s: validation failed on attempt %d/%d with %d near-miss "
                 "localized finding(s) only (%d uncited, %d reversed-condition) "

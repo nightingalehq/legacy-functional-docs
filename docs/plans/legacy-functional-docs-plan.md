@@ -32,6 +32,53 @@ GitHub org.
   equivalents.
 
 **Progress (2026-09-10):**
+- Fixed issue #171: `batch.py`'s near-miss retry path (issue #131,
+  generalized to reversed-condition findings by #170) always spent a full
+  second model call to patch a near-miss chunk, even for the common shape
+  where the flagged uncited sentence is a close paraphrase of a fact the
+  *same brief* already states with a citation elsewhere -- the model wrote
+  correct content but dropped or misplaced the `[[MEMBER:LINE]]` tag.
+  - Added a deterministic pass, scoped to uncited-assertion findings only
+    (never reversed-condition ones -- that finding's fix is a polarity
+    correction to existing prose, not "attach a citation that already
+    exists elsewhere for this claim", so it has no equivalent shape):
+    `_auto_cite_uncited_assertions` locates each flagged sentence's full
+    (untruncated) text via `_logical_units`, then `_find_confident_
+    citation` searches the brief's own already-cited lines for one whose
+    key tokens are a *superset* of the sentence's. On a confident match it
+    splices the citation into the document text in code and the caller
+    (`_generate_module_doc_from_brief`) re-runs `validate_doc` -- only
+    falling back to `build_localized_patch_prompt` (unchanged) for
+    whichever sentences (if any) got no confident match.
+  - **The conservatism tradeoff, spelled out for a future reader:** "key
+    tokens" means only backtick- or quote-delimited substrings (a field name
+    like `` `ORDER-STATUS` `` or a literal like `` `'CONF'` ``) -- brief.py
+    already wraps every field name/literal/condition fragment it renders in
+    backticks, so reusing that convention means the token set is exactly
+    "the specific things this line asserts", never a bare shared word ("the
+    system", "order", "before posting"). A match requires *every* one of
+    the sentence's key tokens to appear on one single brief line, and
+    exactly one brief line to qualify -- a partial overlap, or more than one
+    equally-plausible line, declines rather than guesses. This means the
+    pass reliably catches "same field name(s) and literal(s), just missing
+    the tag" but will *not* catch a paraphrase that drops the literal/field
+    name entirely, rewords a value without quoting it, or draws on a fact
+    spread across more than one brief line -- those still cost the one
+    model call this issue optimizes away for the common case, which is the
+    intended tradeoff (a false negative here just falls through to the
+    existing patch/retry path unchanged; a false positive would mean an
+    attached citation that doesn't actually support the sentence, which is
+    worse than spending the model call).
+  - New tests in `tests/test_batch.py`: unit-level coverage for
+    `_find_confident_citation` (clear match / no-tokens / ambiguous) and
+    `_splice_citation` (declines on a non-verbatim, e.g. wrapped, sentence),
+    plus integration tests proving a clear-cut case gets auto-cited with
+    zero model calls, an ambiguous case falls back to the model patch
+    unchanged, and the reversed-condition near-miss path is untouched
+    (verified by monkeypatching `_auto_cite_uncited_assertions` to raise if
+    called for a reversed-condition-only near-miss). Full suite and the
+    fixture pipeline (`ingest`/`derive`/`coverage`/`validate --docs
+    examples`) both pass with no regressions (71/71 documents clean).
 - Fixed issue #157: `conditions.py`'s `_NEGATION_NEAR_LITERAL` denylist had
   no entry for "neither"/"nor" -- "the field is neither X nor Y" (a common
   narration of a compound `<>` condition over two literals) read as an
