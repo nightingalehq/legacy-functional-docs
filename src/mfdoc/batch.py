@@ -1814,9 +1814,18 @@ def _corpus_signature(conn, redact: Redactor = NULL_REDACTOR,
                        sme_notes: dict | None = None,
                        extra: list[str] | None = None) -> str:
     """Fingerprint of every input to module_brief() that isn't the derive
-    code itself: every source_file's (path, sha256) (order-independent),
-    the installed mfdoc version, and the effective redact/lexicon/sme_notes
-    policy.
+    code itself: every source_file's (path, sha256, dialect_hash)
+    (order-independent), the installed mfdoc version, and the effective
+    redact/lexicon/sme_notes policy.
+
+    `dialect_hash` (issue #194's per-source-file dialect-parser-code
+    fingerprint, set by `cli.cmd_ingest`) is included alongside `sha256`
+    for the same reason `sha256` is: a dialect parser fix applied in place,
+    with no `__version__` bump, changes what `mfdoc ingest` puts in the
+    fact store for that file without changing its path or content hash.
+    Without folding this in too, a resumed `mfdoc batch`/`test-batch` could
+    read `_corpus_sha256` as unchanged and skip re-deriving a brief whose
+    underlying facts have, in fact, changed.
 
     A per-source_file-only check isn't safe on its own even for the source
     dimension: module_brief() also pulls in facts owned by other members
@@ -1842,7 +1851,7 @@ def _corpus_signature(conn, redact: Redactor = NULL_REDACTOR,
     into the same signature rather than reimplementing this function --
     order matters and is the caller's to keep stable across runs.
     """
-    rows = conn.execute("SELECT path, sha256 FROM source_file ORDER BY path").fetchall()
+    rows = conn.execute("SELECT path, sha256, dialect_hash FROM source_file ORDER BY path").fetchall()
     digest = hashlib.sha256()
     digest.update(__version__.encode("utf-8"))
     digest.update(b"\x00")
@@ -1850,6 +1859,8 @@ def _corpus_signature(conn, redact: Redactor = NULL_REDACTOR,
         digest.update(r["path"].encode("utf-8"))
         digest.update(b"\x00")
         digest.update(r["sha256"].encode("utf-8"))
+        digest.update(b"\x00")
+        digest.update((r["dialect_hash"] or "").encode("utf-8"))
         digest.update(b"\x00")
     digest.update(redact.signature().encode("utf-8"))
     digest.update(b"\x00")

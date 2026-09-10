@@ -38,6 +38,12 @@ CREATE TABLE interaction (
     id INTEGER PRIMARY KEY, member_id INTEGER NOT NULL, line_no INTEGER NOT NULL,
     kind TEXT NOT NULL, target TEXT, fields TEXT
 );
+-- Pre-#194 shape: no dialect_hash column yet.
+CREATE TABLE source_file (
+    id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE, origin_path TEXT,
+    sha256 TEXT NOT NULL, encoding_in TEXT, seq_cols TEXT, line_count INTEGER,
+    ingest_run_id INTEGER
+);
 """
 
 
@@ -82,10 +88,15 @@ def test_connect_migration_lets_new_columns_be_inserted_on_an_old_db(tmp_path):
         "INSERT INTO interaction (member_id, line_no, kind, target, dynamic) "
         "VALUES (1, 3, 'CONVERSE', 'SCREEN1', 1)"
     )
+    conn.execute(
+        "INSERT INTO source_file (path, sha256, dialect_hash) VALUES ('p', 'sha', 'dh')"
+    )
     row = conn.execute("SELECT pair_line_no FROM rule_candidate").fetchone()
     assert row["pair_line_no"] == 1
     row = conn.execute("SELECT dynamic FROM interaction").fetchone()
     assert row["dynamic"] == 1
+    row = conn.execute("SELECT dialect_hash FROM source_file WHERE path='p'").fetchone()
+    assert row["dialect_hash"] == "dh"
 
 
 def test_connect_migration_backfills_existing_interaction_rows_with_default(tmp_path):

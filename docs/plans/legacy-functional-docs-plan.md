@@ -14,34 +14,46 @@ GitHub org.
 
 **Progress (2026-09-10d):**
 - Fixed issue #194: `mfdoc ingest`'s incremental-ingest skip decision
-  compared only a source file's own content hash (`sha256`) against what was
-  recorded at last ingest, so a dialect parser code change with zero
-  source-file edits was invisible to it -- the stale, pre-fix fact store
-  was silently reused. Per a real regeneration run's cost report, this was
-  the single largest cost driver of that run (~1/3 of total spend): the
-  bug was only caught by a direct sqlite inspection, and the whole
-  downstream pipeline had to be re-run from `derive` onward once found.
-  Fixed by folding a hash of the dialect's own extractor module(s) into the
-  cache key: `cli._dialect_parser_hash(dialect)` hashes the file(s) behind
+  compared only a source file's own content hash (`sha256`) against what
+  was recorded at last ingest, so a dialect parser code change with zero
+  source-file edits was invisible to it and the stale, pre-fix fact store
+  was silently reused -- undetected by `mfdoc gate`/`coverage`, and costly
+  to recover from once found (the whole downstream pipeline has to be
+  re-run from `derive` onward). Fixed by folding a hash of the dialect's
+  own extractor module(s) into the cache key: `cli._dialect_parser_hash
+  (dialect)` hashes the dialect name plus the source of the file(s) behind
   `DIALECT_ROUTER[dialect]` (via the new `DIALECT_PARSER_MODULES` map --
   `mantis` includes `natural.py` too, since `mantis.extract` reuses
-  `natural.mask_literals`/`orig`), stored as a new `source_file.dialect_hash`
-  column (via `db._COLUMN_MIGRATIONS`, so an existing engagement's
-  `index.db` picks it up and simply re-parses every file once on upgrade).
-  Deliberately scoped to `dialects/*.py`, not `db.py`/`normalise.py` --
-  those are shared infrastructure that changes for reasons unrelated to any
-  one dialect's parsing; folding them in would invalidate every source file
-  on any unrelated schema/chunking edit instead of just the dialect whose
-  parser actually changed. Considered the issue's `--force` flag
-  alternative and rejected it per the issue's own reasoning: it depends on
-  a human remembering to pass it after a parser change, exactly the failure
-  mode that caused this. Added
+  `natural.mask_literals`/`orig`; the dialect name itself is hashed in too,
+  so two dialects sharing one module, like `adabas_fdt`/`ddm` both routing
+  through `adabas.py`, still get distinct cache keys), stored as a new
+  `source_file.dialect_hash` column (via `db._COLUMN_MIGRATIONS`, so an
+  existing index.db picks it up and simply re-parses every file once on
+  upgrade). `cli.py` now asserts at import time that every `DIALECT_ROUTER`
+  key has a `DIALECT_PARSER_MODULES` entry, and
+  `reference/adding-a-dialect.md`'s registration checklist covers it, so a
+  future dialect can't silently ship without this guard. Also folded
+  `dialect_hash` into `batch._corpus_signature` (shared by `mfdoc batch`
+  and `test-batch`'s resumable-state fast path), which previously hashed
+  only `(path, sha256)` and so could take a corpus-level skip past a
+  parser fix that changed facts without changing `sha256` or the installed
+  version. Deliberately scoped to `dialects/*.py`, not `db.py`/
+  `normalise.py` -- those are shared infrastructure that changes for
+  reasons unrelated to any one dialect's parsing; folding them in would
+  invalidate every source file on any unrelated schema/chunking edit
+  instead of just the dialect whose parser actually changed. Considered
+  the issue's `--force` flag alternative and rejected it per the issue's
+  own reasoning: it depends on a human remembering to pass it after a
+  parser change, exactly the failure mode that caused this. Added
   `test_dialect_parser_code_change_invalidates_cache_without_source_edit`
   and `test_dialect_parser_hash_differs_between_module_contents`
-  (tests/test_incremental_ingest.py), plus a `dialect_hash` column
-  assertion in `tests/test_db_migrations.py`. Full suite: 909 passed, 2
-  skipped; bundled fixture pipeline (`ingest`/`derive`/`coverage`/`validate
-  --docs examples`) still 71/71 documents clean, 0 invalid citations.
+  (tests/test_incremental_ingest.py), plus a real pre-migration
+  `source_file` table (no `dialect_hash` column) to
+  `tests/test_db_migrations.py`'s fixture so its migration assertions
+  actually exercise that upgrade path rather than only checking a
+  freshly-created table. Full suite: 909 passed, 2 skipped; bundled
+  fixture pipeline (`ingest`/`derive`/`coverage`/`validate --docs
+  examples`) still 71/71 documents clean, 0 invalid citations.
 
 **Progress (2026-09-10c):**
 - Fixed issue #184: `citations._rule_id(member_name, n)` is a pure

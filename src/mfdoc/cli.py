@@ -29,6 +29,7 @@ import argparse
 import datetime as _dt
 import functools
 import hashlib
+import inspect
 import json
 import logging
 import re
@@ -93,6 +94,12 @@ DIALECT_DEFAULT_TYPE = {
 #: parsing; folding them in here would invalidate every source file on
 #: every unrelated schema/chunking change instead of just the dialect whose
 #: parser actually changed. See issue #194.
+#:
+#: Every `DIALECT_ROUTER` key must have an entry here (checked below at
+#: import time) -- adding a dialect to the router without a matching entry
+#: here would silently exempt it from this cache-invalidation guard
+#: entirely, exactly the failure mode issue #194 is about. See also
+#: `reference/adding-a-dialect.md`'s registration checklist.
 DIALECT_PARSER_MODULES: dict[str, tuple] = {
     "natural": (natural,),
     "mantis": (mantis, natural),
@@ -106,34 +113,66 @@ DIALECT_PARSER_MODULES: dict[str, tuple] = {
     "mantis_screen": (screen,),
 }
 
+_missing_parser_modules = DIALECT_ROUTER.keys() - DIALECT_PARSER_MODULES.keys()
+if _missing_parser_modules:
+    raise AssertionError(
+        f"DIALECT_PARSER_MODULES is missing an entry for {sorted(_missing_parser_modules)} "
+        f"-- every DIALECT_ROUTER dialect needs one, or a parser-code change for it "
+        f"silently bypasses the issue #194 cache-invalidation guard"
+    )
+
 
 @functools.lru_cache(maxsize=None)
 def _dialect_parser_hash(dialect: str) -> str:
-    """Hash of the dialect extractor module(s)' own source code.
+    """Hash identifying both a dialect's extraction entry point and its
+    parser module(s)' own current source code.
 
     Folded into the per-source-file incremental-ingest cache key alongside
     the source file's own content hash (see `cmd_ingest`) so that a parser
     bug fix -- landed with zero source-file changes -- still forces every
     file previously ingested under that dialect to be re-parsed on the next
     `mfdoc ingest`, instead of the stale, pre-fix facts being silently
-    reused (issue #194: this was the single largest cost driver of a real
-    regeneration run, undetected by `mfdoc gate`/`coverage`).
+    reused (issue #194).
 
-    Returns "" for a dialect with no registered parser module (e.g.
-    "unknown") -- that's fine, it just means a source file that ever lands
-    as "unknown" always gets re-processed, which is cheap (it only records
-    an `ambiguous_dialect` gap).
+    The `dialect` name itself is hashed in, not just its module(s)' bytes:
+    several dialects share one module (`adabas_fdt`/`ddm` both route
+    through `adabas.py`, `sql_ddl`/`cobol_copybook`/`jcl`/`cics_csd` all
+    route through `environment.py`), so hashing only module content would
+    let one dialect's cached entry satisfy another that happens to share a
+    module -- e.g. a source file reclassified from `adabas_fdt` to `ddm`
+    between runs (same bytes, same module, different entry point) would
+    wrongly read as "unchanged" despite needing `extract_ddm` instead of
+    `extract_fdt`.
+
+    Every registered dialect (including one with no matching
+    `DIALECT_PARSER_MODULES` entry, which can't happen for anything in
+    `DIALECT_ROUTER` -- see the assertion above -- but can for "unknown")
+    gets a stable digest here, since the dialect name alone is always
+    hashed in; a source file classified "unknown" is unaffected by this
+    cache at all, though, since `cmd_ingest` skips extraction entirely for
+    it regardless of what this returns.
     """
     modules = DIALECT_PARSER_MODULES.get(dialect, ())
     h = hashlib.sha256()
+    h.update(dialect.encode("utf-8"))
     for mod in modules:
+        h.update(b"\x00")
+        h.update(mod.__name__.encode("utf-8"))
+        h.update(b"\x00")
         try:
-            h.update(Path(mod.__file__).read_bytes())
+            # inspect.getsource() goes through the module's own loader
+            # (linecache honours a PEP 302 loader's get_source()), so this
+            # still works under zipimport/frozen installs where a bare
+            # `Path(mod.__file__)` read can't -- __file__ itself may be
+            # absent or not a plain filesystem path there.
+            src = inspect.getsource(mod)
         except (OSError, TypeError):
-            # No readable __file__ (e.g. a frozen/zipped install) -- fall
-            # back to whatever version marker the module offers rather than
-            # letting a missing-file quirk of the install crash `ingest`.
-            h.update(str(getattr(mod, "__version__", "")).encode())
+            # No source available at all (a genuinely sourceless frozen
+            # module) -- fall back to a version marker so this dialect at
+            # least gets *a* stable, distinguishing digest rather than
+            # silently contributing nothing to the hash.
+            src = f"<no-source:{getattr(mod, '__version__', '')}>"
+        h.update(src.encode("utf-8", errors="replace"))
     return h.hexdigest()
 
 
@@ -212,10 +251,14 @@ def cmd_ingest(args) -> int:
             # Dialect must be known before the incremental-ingest skip check
             # below (its cache key folds in the dialect parser's own code),
             # so detection happens here, ahead of that check, rather than
-            # after it as previously.
+            # after it as previously. detect_dialect() returns `hint`
+            # immediately without scanning `text` when one is configured,
+            # so this stays cheap for the common (hinted) case -- unlike
+            # dialect_confidence() below, which always does a full regex
+            # scan and is deferred past the skip check so an unchanged,
+            # skipped file never pays for it.
             text = "\n".join(lines)
             dialect = normalise.detect_dialect(text, hint)
-            ranking = normalise.dialect_confidence(text)
             dialect_hash = _dialect_parser_hash(dialect)
 
             # Incremental ingest: a file whose content *and* whose dialect
@@ -256,6 +299,14 @@ def cmd_ingest(args) -> int:
                         "SELECT id FROM member WHERE source_file_id=?", (existing_sf["id"],)
                     ).fetchall()
                 }
+
+            # Only needed for the ambiguity check below (and only when no
+            # explicit hint), but computed unconditionally here to match
+            # this function's pre-#194 behaviour exactly for every file
+            # that reaches this point (i.e. every non-skipped file) --
+            # deferred to here, past the skip check above, purely so a
+            # skipped file never pays for this full regex scan at all.
+            ranking = normalise.dialect_confidence(text)
 
             leading_seq_width = None
             if seq_cfg == "auto":
