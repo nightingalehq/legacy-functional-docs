@@ -170,9 +170,16 @@ four components, each dialect-normalized:
    since matching on the literal's actual value would only ever match a
    rule against its own earlier self, not a structurally similar sibling:
    - `short_code` — ≤ 8 characters, no lowercase letters, no embedded
-     space (`'X9'`, `'CONF'`, `10`, `40`) — the shape a status/return/flag
-     code takes.
-   - `numeric` — a bare number with no surrounding quotes.
+     space, quoted or a bare unquoted number (`'X9'`, `'CONF'`, `10`,
+     `40`) — the shape a status/return/flag code takes. Bucket order
+     matters: this test is checked *before* `numeric` below, so any bare
+     number of 8 characters or fewer is `short_code`, not `numeric` —
+     the two buckets are mutually exclusive by length, not by whether the
+     literal happens to be a number.
+   - `numeric` — a bare number, no surrounding quotes, **longer than 8
+     characters** (so it falls outside `short_code`'s length cap) — a
+     value shaped like an amount or an identifier rather than a
+     status/return/flag code.
    - `blank_or_empty` — an empty string or all-space literal (the
      "mandatory field not entered" idiom).
    - `free_text` — contains a lowercase letter and a space — a
@@ -245,10 +252,19 @@ touched by `derive`):
 ```sql
 CREATE TABLE IF NOT EXISTS narrative_memo (
     id                       INTEGER PRIMARY KEY,
-    signature                TEXT NOT NULL,   -- canonical signature string, see above
-    dialect                  TEXT NOT NULL,
+    signature                TEXT NOT NULL,   -- canonical signature string, see above --
+                                               -- dialect-normalized (operator_class unifies
+                                               -- a Natural `NE` and a Mantis `<>`), so this
+                                               -- is the sole lookup/uniqueness key by design:
+                                               -- cross-dialect reuse *within* one project is
+                                               -- intended, not an oversight -- see (1) above
+    dialect                  TEXT NOT NULL,   -- informational only (the source row's own
+                                               -- dialect, for debugging/audit) -- never part
+                                               -- of the lookup key or the UNIQUE constraint,
+                                               -- since the signature is already normalized
+                                               -- across dialects on purpose
     sentence_template        TEXT NOT NULL,   -- validated sentence, substitutable
-                                               -- tokens left as literal backtick-/
+                                               -- tokens left as literal backtick- or
                                                -- quote-delimited spans (see below),
                                                -- not a separate placeholder syntax
     source_rule_candidate_id INTEGER NOT NULL REFERENCES rule_candidate(id),
@@ -264,7 +280,8 @@ CREATE TABLE IF NOT EXISTS narrative_memo (
 A memo is *derived* from an already-validated sentence, not authored
 separately: after `_generate_module_doc_from_brief` returns `ok=True` for a
 chunk, a pass over that chunk's own body locates the one logical unit
-(`validate._logical_units`) carrying each non-#173-eligible rule's own
+(`_logical_units`, imported directly from `validate.py` the same way
+`batch.py` already does) carrying each non-#173-eligible rule's own
 citation, and — only for a rule whose signature isn't already in
 `narrative_memo` — records it as a candidate template.
 
@@ -298,8 +315,15 @@ re-derivation or a paraphrase of the new value.
 signature alone.** Before a memo's substituted sentence is ever surfaced
 to the model (as a #173-style "reuse this, do not rewrite it" brief
 annotation) or spliced directly into a document, the substituted candidate
-must independently pass the same three checks #171's
-`_auto_cite_uncited_assertions` already runs before trusting a splice:
+must independently pass three checks, matching the same discipline #171's
+near-miss flow already applies around a splice — #171's own
+`_auto_cite_uncited_assertions` itself only splices a citation onto an
+uncited assertion; the checks below are the ones the surrounding
+`_generate_module_doc_from_brief` flow already runs (a fresh `validate_doc`
+re-check on the assembled document after the splice, see "plugging into
+the existing call/validate loop" below) — reused here as an *independent*
+check on a memo candidate before it is ever surfaced, not attributed to
+`_auto_cite_uncited_assertions` itself:
 
 1. **Citation resolution** — the new `[[MEMBER:LINE]]` inserted by
    substitution must resolve against the fact store exactly as
