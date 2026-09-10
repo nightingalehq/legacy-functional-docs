@@ -217,10 +217,25 @@ FAILURE_WORDS = re.compile(
 # checkable set.
 _NEGATION_NEAR_LITERAL = re.compile(
     r"\b(not|isn't|is\s+not|other\s+than|differs?\s+from|unless|except|"
-    r"does(?:n't|\s+not)\s+equal|no\s+longer|NE)\b"
+    r"does(?:n't|\s+not)\s+equal|no\s+longer|neither|nor|NE)\b"
     r"|<>|!=",
     re.IGNORECASE,
 )
+
+# Markers that commonly introduce a negated *list* of literals spanning an
+# "or" ("other than X or Y", "except X or Y", "unless X or Y") -- unlike a
+# bare "not", these apply to every operand in the list, not just the one
+# immediately after the marker. Used only by `_clip_at_clause_boundary` to
+# decide whether an "or" boundary is a genuine clause conjunction (safe to
+# clip at) or part of one of these negated-list idioms (must not be clipped,
+# or the marker gets stripped away from the list's later operands -- issue
+# #157). Deliberately narrower than `_NEGATION_NEAR_LITERAL`: "not"/"isn't"
+# read as governing only their own clause, so they're excluded here even
+# though they're negation markers -- including them would risk suppressing
+# legitimate clause-boundary clipping for a genuinely independent second
+# clause joined by "or" that just happens to follow an unrelated "not"
+# earlier in the sentence.
+_LIST_NEGATION = re.compile(r"\b(neither|other\s+than|except|unless)\b", re.IGNORECASE)
 
 # Relational phrasing near a literal, checked in this order because the
 # compound "no more/less than" phrases are a substring superset of the plain
@@ -258,11 +273,35 @@ def _clip_at_clause_boundary(text: str, *, keep_end: bool) -> str:
     `keep_end=True` is for the *before*-literal half: keep only the text
     after its last conjunction (the part nearest the literal, in the same
     clause as it). `keep_end=False` is for the *after*-literal half: keep
-    only the text before its first conjunction, for the same reason."""
+    only the text before its first conjunction, for the same reason.
+
+    Exception (issue #157): if the boundary about to be clipped away (on the
+    *before*-literal half only) is an "or" preceded somewhere earlier in
+    `text` by a negated-list marker (`_LIST_NEGATION` -- "other than X or Y",
+    "neither X nor Y", ...), that "or" isn't a separate clause's conjunction
+    -- it's the same negated list the marker introduces, still governing
+    this literal too. Clipping there would strip the marker away from this
+    (later) operand's own search window. But the fix must not go further
+    than that: it only extends the kept window back to the negated-list
+    marker itself, not all the way to the start of `text` (issue #157 PR
+    #164 review) -- otherwise a genuinely earlier, unrelated clause
+    boundary (its own "and"/"or") before that marker would no longer clip,
+    letting that earlier clause's own hedge word leak into this literal's
+    polarity, reopening the exact issue #90 regression class this whole
+    function exists to prevent. "and" is never treated this way -- unlike
+    "or", it doesn't appear in any of this module's negated-list idioms, so
+    an "and" boundary always marks a genuine separate clause."""
     matches = list(_CLAUSE_BOUNDARY.finditer(text))
     if not matches:
         return text
-    return text[matches[-1].end():] if keep_end else text[:matches[0].start()]
+    if keep_end:
+        cut = matches[-1]
+        if cut.group().lower() == "or":
+            markers = list(_LIST_NEGATION.finditer(text[:cut.start()]))
+            if markers:
+                return text[markers[-1].start():]
+        return text[cut.end():]
+    return text[:matches[0].start()]
 
 
 def prose_polarity(sentence: str, literal: str, window: int = 40) -> str | None:

@@ -239,6 +239,42 @@ def test_prose_polarity_still_reads_hedge_word_on_the_same_side_of_an_and_clause
     ) == "ge"
 
 
+def test_prose_polarity_detects_neither_nor_negation():
+    """Issue #157: "the field is neither X nor Y" is a common narration of a
+    compound `<>` condition over two literals. Read literally, with no
+    "neither"/"nor" entry in the negation denylist, this looked like an
+    unhedged equality claim on both literals. Both operands of a
+    "neither ... nor ..." construction must read as negated."""
+    sentence = "the field is neither 'FOO' nor 'BAR'"
+    assert prose_polarity(sentence, "FOO") == "ne"
+    assert prose_polarity(sentence, "BAR") == "ne"
+
+
+def test_prose_polarity_other_than_x_or_y_negates_both_operands():
+    """Issue #157: "value other than X or Y" legitimately negates both X and
+    Y. Clipping the "before" search window at the "or" clause boundary
+    stripped "other than" away from Y's own window, so Y alone still read as
+    an unhedged equality claim even though the sentence correctly negates
+    it. Both operands must read as negated."""
+    sentence = "a value other than 'FOO' or 'BAR'"
+    assert prose_polarity(sentence, "FOO") == "ne"
+    assert prose_polarity(sentence, "BAR") == "ne"
+
+
+def test_prose_polarity_list_negation_does_not_leak_earlier_clause_hedge():
+    """Issue #157 follow-up (PR #164 review): the list-negation exception in
+    `_clip_at_clause_boundary` must only keep the list-negation marker itself
+    ("other than") in the window -- it must not disable clause-boundary
+    clipping for the *entire* window back to its start. A sentence with its
+    own, earlier clause boundary carrying an unrelated hedge word ("at least",
+    describing a different operand entirely) must not have that hedge word
+    leak into this later literal's polarity -- that's exactly the issue #90
+    regression class this exception must not reopen."""
+    sentence = "at least '4' and other than 'FOO' or 'BAR'"
+    assert prose_polarity(sentence, "FOO") == "ne"
+    assert prose_polarity(sentence, "BAR") == "ne"
+
+
 def test_prose_polarity_or_equal_is_not_a_clause_boundary():
     """"or equal (to)" is part of relational phrasing ("greater/less than or
     equal to"), not a logical clause conjunction. Without excluding it,

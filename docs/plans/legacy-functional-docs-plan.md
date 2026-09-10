@@ -13,6 +13,40 @@ GitHub org.
   flows and the gap register, where judgement matters most.
 
 **Progress (2026-09-10):**
+- Fixed issue #157: `conditions.py`'s `_NEGATION_NEAR_LITERAL` denylist had
+  no entry for "neither"/"nor" -- "the field is neither X nor Y" (a common
+  narration of a compound `<>` condition over two literals) read as an
+  unhedged equality claim on both literals, producing a false "comparison
+  direction may be reversed" failure in `validate.py`. Same real branch
+  shape (`IF field<>X AND field<>Y`) also hit a second, related gap: for
+  "value other than X or Y", `_clip_at_clause_boundary` clipped the
+  "before"-literal search window at the "or" clause boundary, which
+  stripped "other than" away from the second literal's (Y's) own window --
+  so Y alone still read as an unhedged equality claim even though the
+  sentence correctly negates it.
+  - Added "neither"/"nor" to `_NEGATION_NEAR_LITERAL`.
+  - Added a new, narrower `_LIST_NEGATION` marker set ("neither", "other
+    than", "except", "unless" -- the idioms that negate a whole list of
+    operands, not just the clause immediately after the marker).
+    `_clip_at_clause_boundary`'s "before"-literal half now skips clipping at
+    an "or" boundary specifically when a `_LIST_NEGATION` marker appears
+    earlier in the window -- "and" is never treated this way, since none of
+    these idioms use "and" to join list operands, so a genuine "and"-joined
+    independent clause still clips exactly as before (issue #90 unaffected).
+  - This is dialect-neutral -- it's a prose-negation fix in `validate.py`'s
+    shared comparison-direction cross-check, not a dialect scanner, so no
+    per-dialect variant is needed.
+  - A third shape from the same issue (a broad citation range paired with a
+    generic non-outcome-asserting phrase matching a bare literal substring
+    with no relational context at all) is left as a documented follow-up --
+    no clean fix was obvious without risking new false negatives on
+    genuinely reversed conditions, and the issue itself allowed leaving it
+    open rather than forcing something risky.
+  - New tests in `tests/test_conditions.py`:
+    `test_prose_polarity_detects_neither_nor_negation`,
+    `test_prose_polarity_other_than_x_or_y_negates_both_operands`. Full
+    suite and the fixture pipeline (`ingest`/`derive`/`coverage`/`validate
+    --docs examples`) both pass with no regressions (71/71 documents clean).
 - Fixed issue #158: `validate.py`'s `ASSERTIVE` regex matches a unit's
   opening words ("When ", "If ", "The system", etc.) to decide whether it
   needs a citation or hedge, with no exemption for a unit that is itself a
