@@ -1351,6 +1351,58 @@ def test_batch_recomputes_briefs_when_a_source_file_changes(indexed_db, tmp_path
         indexed_db.commit()
 
 
+def test_batch_recomputes_briefs_when_a_dialect_hash_changes(indexed_db, tmp_path, monkeypatch):
+    """issue #194: a dialect-parser code change with no source-file edit at
+    all changes `source_file.dialect_hash` (set by `cli.cmd_ingest`) with
+    `sha256` left untouched -- the corpus-level skip must notice this
+    exactly the way it notices a `sha256` change, not just take the
+    corpus-unchanged fast path past it."""
+    row = indexed_db.execute(
+        "SELECT source_file_id AS id FROM member WHERE name = 'MMP0100'"
+    ).fetchone()
+    file_id = row["id"]
+    original_dialect_hash = indexed_db.execute(
+        "SELECT dialect_hash FROM source_file WHERE id = ?", (file_id,)
+    ).fetchone()["dialect_hash"]
+
+    members = ["MMP0100", "MMP0200"]
+    state_path = tmp_path / "state.json"
+    caller = FakeCaller()
+    try:
+        first = batch_mod.run_batch(
+            indexed_db, members, tmp_path / "out", caller, "rules", "template",
+            state_path=state_path,
+        )
+        assert first.ok == 2
+
+        # Simulate a re-ingest picking up an in-place dialect-parser fix:
+        # bump dialect_hash directly, as `mfdoc ingest` would after
+        # recomputing `cli._dialect_parser_hash` for a changed module,
+        # leaving sha256 (and the installed mfdoc version) untouched.
+        indexed_db.execute(
+            "UPDATE source_file SET dialect_hash = ? WHERE id = ?",
+            ("deadbeef" + (original_dialect_hash or ""), file_id),
+        )
+        indexed_db.commit()
+
+        calls = _track_module_brief_calls(monkeypatch)
+
+        second = batch_mod.run_batch(
+            indexed_db, members, tmp_path / "out", caller, "rules", "template",
+            state_path=state_path,
+        )
+        # Corpus signature changed, so the per-member fallback re-derives
+        # every brief, the same as a sha256 change would.
+        assert set(calls) == {"MMP0100", "MMP0200"}
+        assert second.skipped == 2 and second.ok == 2
+    finally:
+        indexed_db.execute(
+            "UPDATE source_file SET dialect_hash = ? WHERE id = ?",
+            (original_dialect_hash, file_id),
+        )
+        indexed_db.commit()
+
+
 def test_batch_recomputes_when_redact_policy_changes_with_no_source_edits(indexed_db, tmp_path, monkeypatch):
     """redact is a project.yml config knob, not anything a source_file hash
     can see -- the corpus-level skip must not mask a policy change with no

@@ -12,6 +12,92 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-10d):**
+- Fixed issue #194: `mfdoc ingest`'s incremental-ingest skip decision
+  compared only a source file's own content hash (`sha256`) against what
+  was recorded at last ingest, so a dialect parser code change with zero
+  source-file edits was invisible to it and the stale, pre-fix fact store
+  was silently reused -- undetected by `mfdoc gate`/`coverage`, and costly
+  to recover from once found (the whole downstream pipeline has to be
+  re-run from `derive` onward). Fixed by folding a hash of the dialect's
+  own extractor module(s) into the cache key: `cli._dialect_parser_hash
+  (dialect)` hashes the dialect name plus the source of the file(s) behind
+  `DIALECT_ROUTER[dialect]` (via the new `DIALECT_PARSER_MODULES` map --
+  `mantis` includes `natural.py` too, since `mantis.extract` reuses
+  `natural.mask_literals`/`orig`; the dialect name itself is hashed in too,
+  so two dialects sharing one module, like `adabas_fdt`/`ddm` both routing
+  through `adabas.py`, still get distinct cache keys), stored as a new
+  `source_file.dialect_hash` column (via `db._COLUMN_MIGRATIONS`, so an
+  existing index.db picks it up and simply re-parses every file once on
+  upgrade). `cli.py` now asserts at import time that every `DIALECT_ROUTER`
+  key has a `DIALECT_PARSER_MODULES` entry, and
+  `reference/adding-a-dialect.md`'s registration checklist covers it, so a
+  future dialect can't silently ship without this guard. Also folded
+  `dialect_hash` into `batch._corpus_signature` (shared by `mfdoc batch`
+  and `test-batch`'s resumable-state fast path), which previously hashed
+  only `(path, sha256)` and so could take a corpus-level skip past a
+  parser fix that changed facts without changing `sha256` or the installed
+  version. Deliberately scoped to `dialects/*.py`, not `db.py`/
+  `normalise.py` -- those are shared infrastructure that changes for
+  reasons unrelated to any one dialect's parsing; folding them in would
+  invalidate every source file on any unrelated schema/chunking edit
+  instead of just the dialect whose parser actually changed. Considered
+  the issue's `--force` flag alternative and rejected it per the issue's
+  own reasoning: it depends on a human remembering to pass it after a
+  parser change, exactly the failure mode that caused this. Added
+  `test_dialect_parser_code_change_invalidates_cache_without_source_edit`
+  and `test_dialect_parser_hash_differs_between_module_contents`
+  (tests/test_incremental_ingest.py), plus a real pre-migration
+  `source_file` table (no `dialect_hash` column) to
+  `tests/test_db_migrations.py`'s fixture so its migration assertions
+  actually exercise that upgrade path rather than only checking a
+  freshly-created table. Two rounds of Copilot PR review then caught: (1)
+  the hash needs the dialect *name* folded in too, not just module
+  content, since `adabas_fdt`/`ddm` (and the four `environment.py`
+  dialects) share one module and would otherwise satisfy each other's
+  cache entry; (2) `inspect.getsource()` instead of a raw `__file__` read,
+  so this still works under zipimport/frozen installs; (3) deferred
+  `normalise.dialect_confidence()`'s full regex scan until after the skip
+  check, so an unchanged/skipped file no longer pays for it; (4) an
+  import-time assertion that every `DIALECT_ROUTER` dialect has a
+  `DIALECT_PARSER_MODULES` entry, documented in
+  `reference/adding-a-dialect.md`'s registration checklist; (5) folded
+  `dialect_hash` into `batch._corpus_signature` too (shared by `mfdoc
+  batch`/`test-batch`'s resumable-state fast path, which previously hashed
+  only `(path, sha256)` and could take a corpus-level skip past an
+  in-place parser fix); (6) a module `inspect.getsource()` can't read at
+  all now fails closed (a fresh UUID every call, never "unchanged") rather
+  than falling back to a `__version__` marker that isn't guaranteed to
+  bump on every real code change; (7) documented, rather than silently
+  left, the residual gap that a dialect-specific entry living inside
+  `normalise.py` itself (a `DIALECT_SIGNATURES` pattern, a
+  `DEFAULT_SPLITTERS` entry) changing isn't covered by this cache key,
+  for the same over-invalidation reason `normalise.py`/`db.py` are
+  excluded generally. Added
+  `test_dialect_parser_hash_fails_closed_for_a_sourceless_module`. A third
+  review round then caught: (8) a hinted source (the common case) was
+  still building its full joined `text` and calling `detect_dialect()`
+  ahead of the skip check, even though a configured hint makes the dialect
+  known for free -- restructured so a hinted file's dialect is just `hint`
+  with no join or scan at all, leaving the unavoidable full-text scan (for
+  an *unhinted* source, which must be scanned to auto-detect the dialect
+  before the skip decision either way) as the only new per-file cost this
+  fix adds; (9) added
+  `test_batch_recomputes_briefs_when_a_dialect_hash_changes`
+  (tests/test_batch.py) -- the existing corpus-signature regression
+  coverage only mutated `sha256`, not the new `dialect_hash` dimension;
+  (10) documented two further narrow, rare residual gaps in
+  `_dialect_parser_hash`'s docstring rather than chasing them into more
+  over-invalidation: `DIALECT_ROUTER`'s own wiring (which function it
+  calls per dialect) isn't hashed, only the target module's bytes are, so
+  repointing a router entry at a different function in an
+  already-listed, otherwise-unchanged module would slip through; and a
+  config-driven dialect (`supra_dir`'s `options.dialects.supra.labels`)
+  can have its effective behaviour changed by a `project.yml` edit alone,
+  which this key doesn't see at all. Full suite: 911 passed, 2 skipped;
+  bundled fixture pipeline (`ingest`/`derive`/`coverage`/`validate --docs
+  examples`) still 71/71 documents clean, 0 invalid citations.
+
 **Progress (2026-09-10c):**
 - Fixed issue #184: `citations._rule_id(member_name, n)` is a pure
   formatting helper -- the ordinal `n` was independently re-derived by

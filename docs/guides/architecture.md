@@ -55,9 +55,19 @@ Reads whatever files `project.yml` points at, per source set:
   `mantis`, `adabas_fdt`, `ddm`, `supra_dir`, `sql_ddl`, `cobol_copybook`,
   `jcl`, `cics_csd`, `mantis_screen`.
 
-Ingest is incremental: a file whose `sha256` matches the `source_file` row
-from the last run is skipped outright, and everything it owns (members,
-derived facts) is left exactly as it was. A changed file's members are
+Ingest is incremental: a file whose `sha256` *and* `dialect_hash` both
+match the `source_file` row from the last run is skipped outright, and
+everything it owns (members, derived facts) is left exactly as it was.
+`dialect_hash` (`cli._dialect_parser_hash`) fingerprints the dialect's own
+extractor module(s) (`DIALECT_PARSER_MODULES`) alongside its content hash,
+so a dialect-parser code change with no source-file edit at all still
+forces a re-parse instead of silently reusing stale, pre-fix facts (issue
+#194) — a bare content-hash check can't see a parser-code change at all.
+This is deliberately scoped to `dialects/*.py`, not `normalise.py` or
+`db.py`; a dialect-specific entry living inside `normalise.py` itself
+(a `DIALECT_SIGNATURES` pattern, a `DEFAULT_SPLITTERS` entry) changing is
+a known, documented gap this cache key doesn't close — see
+`cli._dialect_parser_hash`'s docstring for why. A changed file's members are
 purged and re-extracted (`db.purge_member_facts`, keeping the member's `id`
 stable if its identity — name/library/dialect — is unchanged) rather than
 appended alongside the stale rows; a member a changed file no longer

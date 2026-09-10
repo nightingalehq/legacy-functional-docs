@@ -39,7 +39,17 @@ Two obligations:
 2. Add a signature to `normalise.DIALECT_SIGNATURES` — a regex that reliably fires
    on this dialect and rarely on others. Put it above `natural` and `mantis` if it
    is more specific, since ordering breaks ties.
-3. Add the entry to `DIALECT_ROUTER` and `DIALECT_DEFAULT_TYPE` in `cli.py`.
+3. Add the entry to `DIALECT_ROUTER`, `DIALECT_DEFAULT_TYPE`, and
+   `DIALECT_PARSER_MODULES` in `cli.py` — the last of these lists every
+   module whose source *is* this dialect's extraction logic (itself, plus
+   any sibling dialect module it imports a helper from, the way
+   `mantis.py` imports `natural.mask_literals`/`orig`). It backs the
+   incremental-ingest cache-invalidation guard from issue #194: a dialect
+   without an entry here would have any future parser fix to it silently
+   invisible to `mfdoc ingest`'s change-detection, exactly the bug #194
+   fixed. `cli.py` asserts at import time that every `DIALECT_ROUTER` key
+   has a matching entry, so a missing one fails loudly rather than shipping
+   silently.
 4. Add a fixture under `examples/inputs/<name>/` and a source set in the example
    config.
 5. If members arrive concatenated, add a splitter to `normalise.DEFAULT_SPLITTERS`

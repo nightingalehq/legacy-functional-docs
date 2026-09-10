@@ -28,6 +28,11 @@ CREATE TABLE IF NOT EXISTS source_file (
     path          TEXT NOT NULL UNIQUE,   -- path as ingested (normalised copy)
     origin_path   TEXT,                   -- original path/member as supplied
     sha256        TEXT NOT NULL,
+    dialect_hash  TEXT,                   -- hash of the dialect parser module(s) at last ingest
+                                           -- (see cli._dialect_parser_hash); folded into the
+                                           -- incremental-ingest cache key alongside sha256 so a
+                                           -- parser code change invalidates every source file
+                                           -- hashed under that dialect, even with sha256 unchanged
     encoding_in   TEXT,                   -- cp037, cp500, utf-8 ...
     seq_cols      TEXT,                   -- e.g. '73:80' if sequence numbers stripped
     line_count    INTEGER,
@@ -439,6 +444,7 @@ _COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     ("data_access", "key_source_expr", "TEXT"),
     ("data_access", "end_line", "INTEGER"),
     ("interaction", "dynamic", "INTEGER NOT NULL DEFAULT 0"),
+    ("source_file", "dialect_hash", "TEXT"),
 ]
 
 

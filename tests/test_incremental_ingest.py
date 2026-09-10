@@ -16,7 +16,8 @@ from types import SimpleNamespace
 import yaml
 
 from mfdoc import cli, graph
-from mfdoc.db import connect
+from mfdoc.db import connect, insert
+from mfdoc.dialects import natural
 
 
 def _connect(args):
@@ -192,6 +193,113 @@ def test_changed_file_is_reingested_without_touching_other_members(tmp_path):
         "SELECT name FROM variable WHERE member_id=? ORDER BY line_no", (proga_id_after,)
     ).fetchall()
     assert [r["name"] for r in variables] == ["#STATUS", "#FLAG"]
+
+
+def test_dialect_parser_hash_differs_between_module_contents(tmp_path, monkeypatch):
+    """`cli._dialect_parser_hash` reads the actual module file(s) off disk,
+    so a real edit to a dialect module's source (not just its behaviour)
+    must change the hash it returns -- this is what lets the cache key
+    notice a parser code change with no source-file edit at all."""
+    from types import ModuleType
+
+    cli._dialect_parser_hash.cache_clear()
+    fake = ModuleType("fake_dialect_module")
+    module_path = tmp_path / "fake_dialect.py"
+    module_path.write_text("VERSION = 1\n", encoding="utf-8")
+    fake.__file__ = str(module_path)
+    monkeypatch.setitem(cli.DIALECT_PARSER_MODULES, "fake", (fake,))
+
+    hash_before = cli._dialect_parser_hash("fake")
+    cli._dialect_parser_hash.cache_clear()
+    module_path.write_text("VERSION = 2\n", encoding="utf-8")
+    hash_after = cli._dialect_parser_hash("fake")
+
+    assert hash_before != hash_after
+    cli._dialect_parser_hash.cache_clear()
+
+
+def test_dialect_parser_hash_fails_closed_for_a_sourceless_module(monkeypatch):
+    """A module `inspect.getsource()` can't read from (a genuinely
+    sourceless frozen module, with no guarantee its own `__version__`, if
+    any, is bumped on every code change) must never be treated as
+    "unchanged" -- `_dialect_parser_hash` must return a different value on
+    every call for it, so such a dialect's files are always re-parsed
+    rather than risking a quieter repeat of issue #194."""
+    from types import ModuleType
+
+    cli._dialect_parser_hash.cache_clear()
+    sourceless = ModuleType("fake_sourceless_module")
+    # No __file__ at all -- inspect.getsource() raises TypeError for this,
+    # the same as it would for a real frozen/zipimport module with no
+    # source available.
+    monkeypatch.setitem(cli.DIALECT_PARSER_MODULES, "sourceless", (sourceless,))
+
+    first = cli._dialect_parser_hash("sourceless")
+    cli._dialect_parser_hash.cache_clear()
+    second = cli._dialect_parser_hash("sourceless")
+
+    assert first != second
+    cli._dialect_parser_hash.cache_clear()
+
+
+def test_dialect_parser_code_change_invalidates_cache_without_source_edit(tmp_path, monkeypatch):
+    """issue #194: a dialect parser code change, landed with zero source-file
+    edits, must not be served from the stale pre-fix fact store. The
+    incremental-ingest skip decision has to fold in something that changes
+    when the parser's own code changes, not just the source file's content
+    hash -- this exercises that via `cli._dialect_parser_hash` directly
+    (real edit-and-rerun-the-suite is impractical here) while also proving
+    the resulting re-parse actually reaches the fact store, by having the
+    stand-in "fixed" parser record a new, distinguishable fact.
+    """
+    natural_dir = tmp_path / "natural"
+    natural_dir.mkdir()
+    (natural_dir / "PROGA.nsp").write_text(PROGRAM_A_V1, encoding="utf-8")
+    config_path = _write_project(tmp_path, natural_dir)
+    args = SimpleNamespace(config=str(config_path))
+
+    # First ingest, as if the natural dialect parser were pinned at some
+    # known version "v1".
+    monkeypatch.setattr(cli, "_dialect_parser_hash", lambda dialect: "v1")
+    assert cli.cmd_ingest(args) == 0
+    conn = _connect(args)
+    proga_id = conn.execute("SELECT id FROM member WHERE name='PROGA'").fetchone()["id"]
+    assert conn.execute(
+        "SELECT dialect_hash FROM source_file WHERE path=?",
+        (str(natural_dir / "PROGA.nsp"),),
+    ).fetchone()["dialect_hash"] == "v1"
+    conn.close()
+
+    # Simulate a dialect-parser bug fix landing with *no* source-file edit
+    # at all: PROGA.nsp is untouched (same content, same sha256), only the
+    # parser's own code -- standing in here for a real edit to natural.py --
+    # changes, and its version consequently moves to "v2".
+    real_extract = natural.extract
+
+    def fixed_extract(conn, member_id, lines, member_name="?"):
+        real_extract(conn, member_id, lines, member_name)
+        insert(conn, "rule_candidate", member_id=member_id, line_no=1,
+               construct="MOVE", raw="NEW-RULE-FROM-FIXED-PARSER")
+
+    monkeypatch.setattr(natural, "extract", fixed_extract)
+    monkeypatch.setattr(cli, "_dialect_parser_hash", lambda dialect: "v2")
+
+    assert cli.cmd_ingest(args) == 0
+
+    conn = _connect(args)
+    assert conn.execute(
+        "SELECT dialect_hash FROM source_file WHERE path=?",
+        (str(natural_dir / "PROGA.nsp"),),
+    ).fetchone()["dialect_hash"] == "v2"
+    raws = {
+        r["raw"] for r in conn.execute(
+            "SELECT raw FROM rule_candidate WHERE member_id=?", (proga_id,)
+        ).fetchall()
+    }
+    assert "NEW-RULE-FROM-FIXED-PARSER" in raws, (
+        "a dialect-parser code change with no source edit must force a "
+        "re-parse, not silently reuse the stale pre-fix fact store"
+    )
 
 
 def test_member_dropped_from_a_changed_multi_member_file_is_purged(tmp_path):
