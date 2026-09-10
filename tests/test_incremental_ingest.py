@@ -218,6 +218,30 @@ def test_dialect_parser_hash_differs_between_module_contents(tmp_path, monkeypat
     cli._dialect_parser_hash.cache_clear()
 
 
+def test_dialect_parser_hash_fails_closed_for_a_sourceless_module(monkeypatch):
+    """A module `inspect.getsource()` can't read from (a genuinely
+    sourceless frozen module, with no guarantee its own `__version__`, if
+    any, is bumped on every code change) must never be treated as
+    "unchanged" -- `_dialect_parser_hash` must return a different value on
+    every call for it, so such a dialect's files are always re-parsed
+    rather than risking a quieter repeat of issue #194."""
+    from types import ModuleType
+
+    cli._dialect_parser_hash.cache_clear()
+    sourceless = ModuleType("fake_sourceless_module")
+    # No __file__ at all -- inspect.getsource() raises TypeError for this,
+    # the same as it would for a real frozen/zipimport module with no
+    # source available.
+    monkeypatch.setitem(cli.DIALECT_PARSER_MODULES, "sourceless", (sourceless,))
+
+    first = cli._dialect_parser_hash("sourceless")
+    cli._dialect_parser_hash.cache_clear()
+    second = cli._dialect_parser_hash("sourceless")
+
+    assert first != second
+    cli._dialect_parser_hash.cache_clear()
+
+
 def test_dialect_parser_code_change_invalidates_cache_without_source_edit(tmp_path, monkeypatch):
     """issue #194: a dialect parser code change, landed with zero source-file
     edits, must not be served from the stale pre-fix fact store. The

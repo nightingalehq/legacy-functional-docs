@@ -34,6 +34,7 @@ import json
 import logging
 import re
 import sys
+import uuid
 from pathlib import Path
 
 import yaml
@@ -93,7 +94,10 @@ DIALECT_DEFAULT_TYPE = {
 #: and changing far more often for reasons unrelated to any one dialect's
 #: parsing; folding them in here would invalidate every source file on
 #: every unrelated schema/chunking change instead of just the dialect whose
-#: parser actually changed. See issue #194.
+#: parser actually changed. See issue #194. Known, documented gap: a
+#: dialect-specific entry living inside `normalise.py` itself (a
+#: `DIALECT_SIGNATURES` pattern, a `DEFAULT_SPLITTERS` entry) changing is
+#: NOT covered by this -- see `_dialect_parser_hash`'s docstring.
 #:
 #: Every `DIALECT_ROUTER` key must have an entry here (checked below at
 #: import time) -- adding a dialect to the router without a matching entry
@@ -150,7 +154,22 @@ def _dialect_parser_hash(dialect: str) -> str:
     gets a stable digest here, since the dialect name alone is always
     hashed in; a source file classified "unknown" is unaffected by this
     cache at all, though, since `cmd_ingest` skips extraction entirely for
-    it regardless of what this returns.
+    it regardless of what this returns. A module this can't get source for
+    at all gets a fresh, unstable digest every call instead (see below) --
+    deliberately never cached as "unchanged" against a prior run.
+
+    Known limitation: this covers `DIALECT_PARSER_MODULES` only, not
+    `normalise.py` -- e.g. `normalise.DIALECT_SIGNATURES`/`detect_dialect`
+    (dialect classification) or `DEFAULT_SPLITTERS`/`split_members`
+    (member boundaries), both of which do carry dialect-specific entries
+    despite living in a shared module. A change to one of those entries
+    (as opposed to `normalise.py`'s genuinely dialect-neutral code --
+    encoding sniffing, generic chunk bookkeeping) is a real gap this cache
+    key doesn't close, and, per the same reasoning that kept `db.py`/
+    `normalise.py` out of the hashed set generally, isn't closed here
+    either: hashing all of `normalise.py` would invalidate every dialect on
+    any change to it, unrelated dialects included. Left as a documented
+    gap rather than a silent one -- see issue #194's PR discussion.
     """
     modules = DIALECT_PARSER_MODULES.get(dialect, ())
     h = hashlib.sha256()
@@ -168,10 +187,13 @@ def _dialect_parser_hash(dialect: str) -> str:
             src = inspect.getsource(mod)
         except (OSError, TypeError):
             # No source available at all (a genuinely sourceless frozen
-            # module) -- fall back to a version marker so this dialect at
-            # least gets *a* stable, distinguishing digest rather than
-            # silently contributing nothing to the hash.
-            src = f"<no-source:{getattr(mod, '__version__', '')}>"
+            # module, with no guarantee its __version__, if any, is even
+            # bumped on every code change) -- fail closed rather than fall
+            # back to a marker that could stay stable across a real code
+            # change: a fresh, non-reproducible value here guarantees this
+            # dialect's files are always re-parsed rather than risking a
+            # second, quieter version of the exact bug issue #194 fixed.
+            src = uuid.uuid4().hex
         h.update(src.encode("utf-8", errors="replace"))
     return h.hexdigest()
 

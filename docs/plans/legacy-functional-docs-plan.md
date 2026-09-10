@@ -51,9 +51,33 @@ GitHub org.
   `source_file` table (no `dialect_hash` column) to
   `tests/test_db_migrations.py`'s fixture so its migration assertions
   actually exercise that upgrade path rather than only checking a
-  freshly-created table. Full suite: 909 passed, 2 skipped; bundled
-  fixture pipeline (`ingest`/`derive`/`coverage`/`validate --docs
-  examples`) still 71/71 documents clean, 0 invalid citations.
+  freshly-created table. Two rounds of Copilot PR review then caught: (1)
+  the hash needs the dialect *name* folded in too, not just module
+  content, since `adabas_fdt`/`ddm` (and the four `environment.py`
+  dialects) share one module and would otherwise satisfy each other's
+  cache entry; (2) `inspect.getsource()` instead of a raw `__file__` read,
+  so this still works under zipimport/frozen installs; (3) deferred
+  `normalise.dialect_confidence()`'s full regex scan until after the skip
+  check, so an unchanged/skipped file no longer pays for it; (4) an
+  import-time assertion that every `DIALECT_ROUTER` dialect has a
+  `DIALECT_PARSER_MODULES` entry, documented in
+  `reference/adding-a-dialect.md`'s registration checklist; (5) folded
+  `dialect_hash` into `batch._corpus_signature` too (shared by `mfdoc
+  batch`/`test-batch`'s resumable-state fast path, which previously hashed
+  only `(path, sha256)` and could take a corpus-level skip past an
+  in-place parser fix); (6) a module `inspect.getsource()` can't read at
+  all now fails closed (a fresh UUID every call, never "unchanged") rather
+  than falling back to a `__version__` marker that isn't guaranteed to
+  bump on every real code change; (7) documented, rather than silently
+  left, the residual gap that a dialect-specific entry living inside
+  `normalise.py` itself (a `DIALECT_SIGNATURES` pattern, a
+  `DEFAULT_SPLITTERS` entry) changing isn't covered by this cache key,
+  for the same over-invalidation reason `normalise.py`/`db.py` are
+  excluded generally. Added
+  `test_dialect_parser_hash_fails_closed_for_a_sourceless_module`. Full
+  suite: 910 passed, 2 skipped; bundled fixture pipeline
+  (`ingest`/`derive`/`coverage`/`validate --docs examples`) still 71/71
+  documents clean, 0 invalid citations.
 
 **Progress (2026-09-10c):**
 - Fixed issue #184: `citations._rule_id(member_name, n)` is a pure

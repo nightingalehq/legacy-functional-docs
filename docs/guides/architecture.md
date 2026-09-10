@@ -63,7 +63,11 @@ extractor module(s) (`DIALECT_PARSER_MODULES`) alongside its content hash,
 so a dialect-parser code change with no source-file edit at all still
 forces a re-parse instead of silently reusing stale, pre-fix facts (issue
 #194) — a bare content-hash check can't see a parser-code change at all.
-A changed file's members are
+This is deliberately scoped to `dialects/*.py`, not `normalise.py` or
+`db.py`; a dialect-specific entry living inside `normalise.py` itself
+(a `DIALECT_SIGNATURES` pattern, a `DEFAULT_SPLITTERS` entry) changing is
+a known, documented gap this cache key doesn't close — see
+`cli._dialect_parser_hash`'s docstring for why. A changed file's members are
 purged and re-extracted (`db.purge_member_facts`, keeping the member's `id`
 stable if its identity — name/library/dialect — is unchanged) rather than
 appended alongside the stale rows; a member a changed file no longer
