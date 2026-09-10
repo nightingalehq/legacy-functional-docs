@@ -18,6 +18,78 @@ from typing import Callable
 from .batch import ModelCaller
 from .redact import NULL_REDACTOR, Redactor
 
+# A built-in fallback taxonomy used only when a project hasn't declared its
+# own `options.overview.themes.taxonomy` (see `taxonomy_from_options`) --
+# the same replace-not-merge convention `conditions.OUTCOME_FIELD`/
+# `outcome_field_from_options` and `conditions.DISPATCH_FIELD`/
+# `dispatch_field_from_options` already establish for a built-in default
+# that a project can fully override. These are generalizable business-rule
+# vocabulary and structural shapes -- common validation wording, an
+# outcome/return-code or status/flag field being set or compared, a
+# message field being populated, a "no rows found" gap phrase mfdoc itself
+# generates, or a generic arithmetic verb -- not a guess at any specific
+# client's field names (issue #172). A project whose codebase uses
+# different conventions still supplies its own complete taxonomy to
+# replace this one, per `options.overview.themes.taxonomy`'s own doc
+# comment in project.yml.
+#
+# Identifier-shaped patterns (RETURN-CODE, STATUS, MSG, ...) use a custom
+# `(?<![A-Za-z0-9])...(?![A-Za-z0-9])` boundary instead of `\b` on purpose:
+# `\b` treats underscore as a word character, so it would fail to isolate
+# `STATUS` inside an underscore-separated name like `SCHED_STATUS` (seen in
+# this repo's own Mantis-style fixtures) even though it correctly isolates
+# the hyphen-separated `ORDER-STATUS` Natural convention -- the lookaround
+# form treats hyphen and underscore the same way, matching both naming
+# styles without picking one dialect's convention over the other.
+DEFAULT_TAXONOMY: dict[str, list[str]] = {
+    "validation": [
+        r"\b(required|invalid|missing|mandatory|not\s+valid|must\s+not|could\s+not)\b",
+        r"\bnot\s+found\b",
+        # a comparison against a blank/space literal -- a common
+        # required-field check shape regardless of field name
+        r"(?:=|<>)\s*['\"]\s*['\"]",
+    ],
+    "error-handling": [
+        r"(?<![A-Za-z0-9])(?:RETURN[-_]?CODE|RESPONSE[-_]?CODE|RESP[-_]?CODE|"
+        r"ERROR[-_]?CODE|RET[-_]?CODE)(?![A-Za-z0-9])",
+        r"(?<![A-Za-z0-9])RC(?![A-Za-z0-9])",
+    ],
+    "status": [
+        r"(?<![A-Za-z0-9])(?:STATUS|STAT|FLAG)(?![A-Za-z0-9])",
+    ],
+    "messaging": [
+        r"(?<![A-Za-z0-9])(?:MSG|MESSAGE)(?![A-Za-z0-9])",
+    ],
+    "data-access": [
+        # the "no records found for preceding database loop" phrasing
+        # mfdoc's own extraction records for an empty database loop --
+        # generic tool-generated gap text, not client content
+        r"\bno\s+records?\s+found\b",
+    ],
+    "calculation": [
+        r"\b(?:ADD|SUBTRACT|MULTIPLY|DIVIDE|COMPUTE)\b",
+    ],
+}
+
+
+def taxonomy_from_options(options: dict | None) -> dict[str, list[str]]:
+    """The taxonomy to use for `classify_rules_deterministic`, from
+    `options.overview.themes.taxonomy` in project.yml, or the built-in
+    `DEFAULT_TAXONOMY` if unset/empty.
+
+    Mirrors `conditions.outcome_field_from_options`/
+    `dispatch_field_from_options` exactly: a declared taxonomy is used
+    exactly as given, never merged with the built-in one -- a project
+    whose business vocabulary doesn't match `DEFAULT_TAXONOMY`'s themes
+    supplies its own complete taxonomy rather than getting default themes
+    mixed in alongside its own.
+    """
+    themes = ((options or {}).get("overview") or {}).get("themes") or {}
+    declared = themes.get("taxonomy")
+    if declared:
+        return declared
+    return DEFAULT_TAXONOMY
+
 
 def classify_rules_deterministic(conn, taxonomy: dict[str, list[str]]) -> dict:
     """Classify every rule_candidate not already keyword- or llm-classified

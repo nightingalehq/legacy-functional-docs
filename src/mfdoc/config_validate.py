@@ -257,8 +257,12 @@ OPTION_SPECS: list[OptionSpec] = [
 
     # Dialect-keyed and theme-keyed regex lists (cli.py's cmd_ingest folds
     # options.splitters into normalise.split_members's splitters dict;
-    # cmd_classify_rules passes options.overview.themes.taxonomy straight
-    # into classify.classify_rules_deterministic) -- same lazily-compiled-
+    # cmd_classify_rules resolves options.overview.themes.taxonomy via
+    # classify.taxonomy_from_options -- which falls back to the built-in
+    # classify.DEFAULT_TAXONOMY when this key is unset/empty, the same
+    # replace-not-merge convention outcome_field_pattern/
+    # dispatch_field_pattern use -- before passing the result into
+    # classify.classify_rules_deterministic) -- same lazily-compiled-
     # at-point-of-use gap as the single-pattern keys above, just keyed by a
     # project-chosen dialect/theme name instead of a fixed leaf.
     OptionSpec("options.splitters", (dict,),

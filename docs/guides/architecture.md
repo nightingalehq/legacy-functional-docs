@@ -237,7 +237,9 @@ do.
   `mfdoc classify-rules` assigns each `rule_candidate` a business theme in
   three layers, run in order, never as independent passes: a project-defined
   keyword/regex taxonomy (`options.overview.themes.taxonomy`, deterministic,
-  always runs first); an optional LLM pass over whatever the taxonomy didn't
+  always runs first, falling back to the built-in `classify.DEFAULT_TAXONOMY`
+  when a project hasn't declared its own — see `taxonomy_from_options`);
+  an optional LLM pass over whatever the taxonomy didn't
   match (`classify_rules_llm`, gated on `options.overview.themes.llm_fallback`
   or `--llm-fallback`); a structural fallback — the rule's own member's
   library, or `uncategorized` — for anything still unclassified once the

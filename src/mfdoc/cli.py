@@ -445,7 +445,7 @@ def cmd_classify_rules(args) -> int:
     cfg = load_config(args.config)
     conn = connect(Path(args.config).parent / cfg["index_db"])
     themes_cfg = ((cfg["options"] or {}).get("overview") or {}).get("themes") or {}
-    taxonomy = themes_cfg.get("taxonomy") or {}
+    taxonomy = classify.taxonomy_from_options(cfg["options"])
     counts = classify.classify_rules_deterministic(conn, taxonomy)
     print(f"keyword: {counts['keyword']}, structural: {counts['structural']}")
     if getattr(args, "llm_fallback", None) is None:
