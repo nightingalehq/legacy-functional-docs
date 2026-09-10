@@ -33,7 +33,7 @@ from .brief import (
     chunk_density_metrics, fetch_routines, fetch_rule_candidate_rows, flag_density_outliers,
     format_density_note, module_brief, routine_aware_chunk_ranges, routine_for_line,
 )
-from .citations import _cite, _rule_id
+from .citations import _cite, _rule_id, numbered_rule_candidates
 from .db import GAP_SEVERITY_ORDER_SQL
 from .redact import NULL_REDACTOR, Redactor
 from .validate import CITATION, _logical_units, split_frontmatter, validate_doc
@@ -1567,7 +1567,7 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
     for routine in routines:
         end_line = routine["end_line"] if routine["end_line"] is not None else routine["start_line"]
         ordinal = next(
-            (pos for pos, r in enumerate(rule_rows, start=1)
+            (pos for pos, r in numbered_rule_candidates(rule_rows)
              if routine["start_line"] <= r["line_no"] <= end_line),
             None,
         )

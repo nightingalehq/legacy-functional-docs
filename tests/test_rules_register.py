@@ -58,6 +58,31 @@ def test_covers_every_rule_candidate_in_batchable_modules(indexed_db):
     assert actual == expected
 
 
+def test_ids_match_module_brief_exactly(indexed_db):
+    """Pins BR-nnn numbering across a third consumer beyond the
+    rules_register/thematic_rules_register pairing `test_ids_match_
+    rules_register_exactly` (test_structural_thematic_rollup.py) already
+    covers -- module_brief's own "Candidate business rules" section must
+    assign the exact same MEMBER:BR-nnn ids the flat register does for the
+    same member, since both are meant to derive from the identical
+    ordinal computation (see citations.numbered_rule_candidates)."""
+    from mfdoc.brief import module_brief
+    from mfdoc.redact import NULL_REDACTOR
+
+    conn = indexed_db
+    register = brief.rules_register(conn)
+    module_doc = module_brief(conn, "MMP0100", redact=NULL_REDACTOR)
+
+    register_ids = {
+        m for m in re.findall(r"\*\*(MMP0100:BR-\d+)\*\*", register)
+    }
+    module_ids = {
+        m for m in re.findall(r"\*\*(MMP0100:BR-\d+)\*\*", module_doc)
+    }
+    assert register_ids, "expected at least one MMP0100 rule in the register"
+    assert register_ids == module_ids
+
+
 def test_regeneration_is_byte_identical(indexed_db):
     """Re-running against unchanged source must reproduce the same string --
     the same guarantee `_rule_id` already gives per-module, extended to the

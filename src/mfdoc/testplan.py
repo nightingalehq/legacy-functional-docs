@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 
-from .citations import _cite, _rule_id
+from .citations import _cite, _rule_id, numbered_rule_candidates
 from .db import group_members_by_name, insert, resolve_member_by_name
 
 # rule_candidate construct *prefixes* treated as branch/decision points worth
@@ -170,12 +170,13 @@ def build_member_test_cases(conn, mid: int, name: str, overlay: dict | None = No
     ).fetchall()
 
     inserted: list[dict] = []
-    # Numbered over *every* rule_candidate row, matching brief.py's
-    # `## Candidate business rules` enumeration exactly -- so a scenario's
-    # BR-nnn id is the same id a reviewer sees in the module doc/rules
-    # register, not a second, disagreeing numbering scheme for the same rule.
-    for idx, r in enumerate(rules):
-        n = idx + 1
+    # Numbered over *every* rule_candidate row via numbered_rule_candidates()
+    # -- the same ordinal assignment brief.py's `## Candidate business
+    # rules` enumeration uses -- so a scenario's BR-nnn id is the same id a
+    # reviewer sees in the module doc/rules register, not a second,
+    # disagreeing numbering scheme for the same rule.
+    for n, r in numbered_rule_candidates(rules):
+        idx = n - 1
         if not _is_branch_row(r):
             continue
         when = {

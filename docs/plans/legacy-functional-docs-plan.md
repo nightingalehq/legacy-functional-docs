@@ -12,6 +12,37 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-10c):**
+- Fixed issue #184: `citations._rule_id(member_name, n)` is a pure
+  formatting helper -- the ordinal `n` was independently re-derived by
+  five call sites, each running its own `SELECT ... FROM rule_candidate
+  ... ORDER BY line_no` plus its own `enumerate(rows, start=1)`, with
+  nothing enforcing that they stayed in lockstep. Added
+  `citations.numbered_rule_candidates(rows)` -- a thin, single-source-of-
+  truth wrapper over that `enumerate(rows, start=1)` -- and switched every
+  call site to it: `brief.module_brief`'s "Candidate business rules" and
+  copycode-rules sections, `brief.rules_register`,
+  `structural.thematic_rules_register` (whose per-member running counter
+  became a `groupby` over its own already member_id/line_no-ordered bulk
+  query, applying the shared helper per member run instead of hand-rolling
+  the counter), `testplan.build_member_test_cases`'s scenario naming,
+  `validate.module_completeness_problems`'s missing-citation-range
+  reporting, and `batch`'s chunk-boundary routine-to-chunk mapping. Only
+  the ordinal-assignment step moved -- every call site's own query
+  (several already shared via `brief.fetch_rule_candidate_rows`, others
+  batched across members for performance and correctly left as bulk
+  queries) is unchanged, since the goal was removing the *redundant
+  enumeration*, not forcing an awkward combined fetch+number helper where
+  a query was already in flight for other data. Pure refactor, no
+  numbering-scheme change: full test suite (907 passed) and the bundled
+  fixture pipeline (`ingest`/`derive`/`coverage`/`validate --docs
+  examples`, 71/71 documents clean, 0 invalid citations of 750) both
+  confirm identical `BR-nnn` output before and after. Added
+  `test_ids_match_module_brief_exactly` (tests/test_rules_register.py) to
+  pin numbering consistency across a third consumer, alongside the
+  existing `test_ids_match_rules_register_exactly` pairing
+  `rules_register`/`thematic_rules_register`.
+
 **Progress (2026-09-10b):**
 - Fixed issue #168: extended issue #159's prompt-caching pattern from
   `batch.py` to `testbatch.py`. Added `build_test_prompt_parts`/

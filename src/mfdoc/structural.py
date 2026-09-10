@@ -9,11 +9,12 @@ belongs in brief.py's narrative-brief functions instead, not here.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import re
 from collections import defaultdict
 
 from . import graph
-from .citations import _cite, _rule_id
+from .citations import _cite, _rule_id, numbered_rule_candidates
 from .conditions import DISPATCH_FIELD, comparisons_in
 from .redact import NULL_REDACTOR, Redactor
 
@@ -756,23 +757,26 @@ def thematic_rules_register(conn, redact: Redactor = NULL_REDACTOR) -> str:
     # Sequence numbers assigned in member_id/line_no order (matching
     # rules_register()'s numbering exactly) -- theme grouping happens only
     # in the second pass below, after every rule_id is already fixed.
-    per_member_seq: dict[int, int] = {}
+    # `rule_rows` is already ORDER BY rc.member_id, rc.line_no above, so each
+    # member's rows form one contiguous run -- numbered_rule_candidates()
+    # (the same ordinal assignment rules_register() itself uses) is applied
+    # per run via groupby, rather than a hand-rolled running counter.
     by_theme: dict[str, list[str]] = {}
     source_counts_by_theme: dict[str, dict[str, int]] = {}
     total = 0
-    for r in rule_rows:
-        member_name = id_to_name[r["member_id"]]
-        per_member_seq[r["member_id"]] = per_member_seq.get(r["member_id"], 0) + 1
-        rule_id = _rule_id(member_name, per_member_seq[r["member_id"]])
-        cond = redact(r["condition"]).replace("|", "\\|") if r["condition"] else ""
-        lits = redact(r["literals"]).replace("|", "\\|") if r["literals"] else ""
-        by_theme.setdefault(r["theme"], []).append(
-            f"| **{rule_id}** | `{member_name}` | {_cite(member_name, r['line_no'])} | "
-            f"{r['depth']} | `{r['construct']}` | `{cond}` | `{lits}` |"
-        )
-        theme_counts = source_counts_by_theme.setdefault(r["theme"], {})
-        theme_counts[r["theme_source"]] = theme_counts.get(r["theme_source"], 0) + 1
-        total += 1
+    for member_id, member_rule_rows in itertools.groupby(rule_rows, key=lambda r: r["member_id"]):
+        member_name = id_to_name[member_id]
+        for n, r in numbered_rule_candidates(list(member_rule_rows)):
+            rule_id = _rule_id(member_name, n)
+            cond = redact(r["condition"]).replace("|", "\\|") if r["condition"] else ""
+            lits = redact(r["literals"]).replace("|", "\\|") if r["literals"] else ""
+            by_theme.setdefault(r["theme"], []).append(
+                f"| **{rule_id}** | `{member_name}` | {_cite(member_name, r['line_no'])} | "
+                f"{r['depth']} | `{r['construct']}` | `{cond}` | `{lits}` |"
+            )
+            theme_counts = source_counts_by_theme.setdefault(r["theme"], {})
+            theme_counts[r["theme_source"]] = theme_counts.get(r["theme_source"], 0) + 1
+            total += 1
 
     out = ["---", 'title: "Rules register — by theme"', "doc_type: register", "---", "",
            "# Rules register — by theme", "", (
