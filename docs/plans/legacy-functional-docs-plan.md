@@ -233,6 +233,48 @@ GitHub org.
     successfully. Verified against the bundled fixtures with a
     fake-echo caller: 59 structural rows across 3 model calls instead of
     59 (default batch size 25).
+- Closed issue #161: new deterministic `mfdoc doc-drift` command
+  (`docdrift.py`), following `structural.py`'s pure-extraction/comparison,
+  no-model-call contract. Given a generated document (or a directory of
+  them) and the current fact store, reports which of the document's own
+  citable numbers no longer match what the fact store would produce
+  today — a `mfdoc coverage`-style plain mismatch list, not a document
+  rewrite. Complements `mfdoc validate` (citation *integrity*) rather than
+  replacing it: a document can validate cleanly while still citing a stale
+  number.
+  - v1 checks four things, each independently additive (a document with
+    none of the checkable patterns present reports no mismatches rather
+    than a false failure): (1) for `doc_type: module`/`module_index`/
+    `executive_summary` docs, the highest `MEMBER:BR-nnn` id cited in the
+    body against `fetch_rule_candidate_rows`'s current count for that
+    member — this is the one number in a narrative document that's
+    contractually fixed text (`reference/writing-rules.md` requires
+    copying it in verbatim), not paraphrased prose, which is what makes it
+    reliable where an arbitrary prose numeric claim is not; (2)
+    front-matter `sources:` entries still resolving to a real member or
+    entity; (3) a `doc_type: gap-register` document's own stated "N gap(s)
+    total"/"N high, N medium, N low" figures against a fresh `gap` table
+    count; (4) a `doc_type: system-overview` document's stated "NN.N% line
+    recognition" against a freshly recomputed `graph.coverage()`. Running
+    it against this repo's own `examples/outputs/docs` found three of
+    these fixture docs were themselves already stale relative to the
+    checked-in fixtures' current derive output (gap-register.md's totals,
+    system-overview.md's line-recognition figure, ORDENQ.md's rule count) —
+    a real, if modest, proof that the check works as intended.
+  - Deliberately out of scope for v1 (noted in the PR rather than left
+    implicit, per this file's "Update the documentation" guidance): the
+    `confidence_summary` front-matter counts the issue's own text named as
+    a candidate check turned out, on inspection against this repo's real
+    example docs, to require counting `*(inferred ...)*`/`*(unresolved
+    ...)*` inline markers in freeform prose — a heuristic that undercounted
+    against `examples/outputs/docs/natural/MILLPROD/MMP0100.md`'s own
+    already-accepted body, i.e. exactly the kind of guessed pattern-match
+    CLAUDE.md's architecture principles warn against relying on. Also out
+    of scope: `call_resolution_rate`/`entity_definition_rate` and
+    executive-summary risk-score ("risk score NN (rule count NN, ...)")
+    prose checks — plausible follow-ups once/if a stable phrasing
+    convention for them is established, but not reliable enough yet to
+    ship without inventing an assumption about narrative wording.
 
 **Progress (2026-09-09):**
 - Fixed issue #151: real SME review feedback asked, across several
