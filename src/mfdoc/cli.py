@@ -186,16 +186,18 @@ def _dialect_parser_hash(dialect: str) -> str:
       hash does catch) and would require hashing `cli.py`'s own source
       into every dialect's key to close, which is a much blunter
       instrument than the problem warrants.
-    - A config-driven dialect (`supra_dir`'s `options.dialects.supra.labels`,
-      read by `supra.labels_from_options` -- see
-      `reference/mantis-supra.md`) can have its effective matching patterns
-      changed by a `project.yml` edit alone, with no source or module
-      change at all; this cache key does not see `options` at all. Closing
-      this fully would mean giving every dialect a documented, stable way
-      to declare which `options.*` subtree it depends on so it can be
-      folded in generically -- worth doing if a config-driven dialect
-      becomes as common as calibratable ones already are, but out of scope
-      here.
+    - Effective per-source *options* are not covered at all -- neither a
+      config-driven dialect's own knobs (`supra_dir`'s
+      `options.dialects.supra.labels`, read by `supra.labels_from_options`
+      -- see `reference/mantis-supra.md`) nor `cmd_ingest`'s own
+      `options.splitters` override (which can move a member boundary for
+      any dialect). Either changing with no source or module edit at all
+      is invisible to this cache key. Closing this fully would mean giving
+      every dialect (and `cmd_ingest` itself, for `options.splitters`) a
+      documented, stable way to declare which `options.*` subtree it
+      depends on so it can be folded in generically -- worth doing if a
+      config-driven dialect becomes as common as calibratable ones already
+      are, but out of scope here.
     """
     modules = DIALECT_PARSER_MODULES.get(dialect, ())
     h = hashlib.sha256()
