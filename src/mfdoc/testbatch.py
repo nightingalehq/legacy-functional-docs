@@ -147,16 +147,35 @@ def select_test_batch_members(conn) -> list[str]:
     return [r["name"] for r in rows]
 
 
-def build_test_prompt(brief: str, writing_rules: str, template: str, language: str,
-                       framework: str, retry_note: str | None = None) -> str:
+_TEST_BATCH_INSTRUCTIONS_TEMPLATE = (
+    "You are writing first-draft {language}/{framework} tests for one legacy "
+    "mainframe module, from a fact brief that already cites every scenario back "
+    "to source. Follow the writing rules and template exactly. Never assert a "
+    "consequence that isn't in the brief's cited source excerpt -- write up to "
+    "the branch decision and mark it `unresolved` instead of inventing one. "
+    "Output only the completed document (front matter + one fenced code block), "
+    "nothing else."
+)
+
+
+def build_test_prompt_parts(brief: str, writing_rules: str, template: str, language: str,
+                             framework: str, retry_note: str | None = None) -> list[str]:
+    """The ordered sections `build_test_prompt` joins into one flat string,
+    returned unjoined -- same split as batch.py's `build_prompt_parts`
+    (issue #159, extended here by #168): a stable prefix (instructions +
+    writing rules + template, byte-identical across every chunk/member/retry
+    for one language/framework target in a project's test-generation run)
+    followed by the per-call variable suffix (test brief, and on a retry,
+    the retry note). `build_test_prompt` itself is just
+    `"\\n\\n---\\n\\n".join(...)` of this; `build_test_prompt_cache_prefix`
+    derives the same stable prefix from the first three sections here so
+    AnthropicCaller/VertexCaller can mark it as an ephemeral cache
+    breakpoint without re-parsing a joined string. Unlike build_prompt_parts,
+    the instructions section itself varies per language/framework -- so the
+    cache prefix (and set_cache_prefixes registration) is necessarily
+    per-target too, not shared across a `--matrix` run's different targets."""
     parts = [
-        f"You are writing first-draft {language}/{framework} tests for one legacy "
-        "mainframe module, from a fact brief that already cites every scenario back "
-        "to source. Follow the writing rules and template exactly. Never assert a "
-        "consequence that isn't in the brief's cited source excerpt -- write up to "
-        "the branch decision and mark it `unresolved` instead of inventing one. "
-        "Output only the completed document (front matter + one fenced code block), "
-        "nothing else.",
+        _TEST_BATCH_INSTRUCTIONS_TEMPLATE.format(language=language, framework=framework),
         "# Writing rules\n\n" + writing_rules,
         "# Template\n\n" + template,
         "# Test brief\n\n" + brief,
@@ -166,7 +185,30 @@ def build_test_prompt(brief: str, writing_rules: str, template: str, language: s
             "# Previous attempt failed validation\n\n" + retry_note
             + "\n\nFix these problems and resend the complete document."
         )
-    return "\n\n---\n\n".join(parts)
+    return parts
+
+
+def build_test_prompt(brief: str, writing_rules: str, template: str, language: str,
+                       framework: str, retry_note: str | None = None) -> str:
+    return "\n\n---\n\n".join(
+        build_test_prompt_parts(brief, writing_rules, template, language, framework, retry_note)
+    )
+
+
+def build_test_prompt_cache_prefix(writing_rules: str, template: str, language: str, framework: str) -> str:
+    """The exact leading substring of every `build_test_prompt(...)` call
+    sharing this `writing_rules`/`template`/`language`/`framework` (i.e.
+    every call for one target in one project's test-batch run) --
+    instructions + writing rules + template, with the trailing section
+    separator included so it lines up with where `# Test brief` starts.
+    AnthropicCaller/VertexCaller mark this whole prefix with
+    `cache_control: {"type": "ephemeral"}` (issue #159, extended to
+    test-batch by #168) so it's billed once per project/target run instead
+    of once per call; a caller with no cache-prefix support (ClaudeCLICaller,
+    the fake-echo test caller) never sees this at all -- run_test_batch only
+    hands it to callers that expose `set_cache_prefixes`."""
+    stable = build_test_prompt_parts("", writing_rules, template, language, framework)[:3]
+    return "\n\n---\n\n".join(stable) + "\n\n---\n\n"
 
 
 def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: str, framework: str,
@@ -552,6 +594,24 @@ def _checkpoint(state: dict, state_path: Path | None, corpus_sig: str | None) ->
     _save_state(state_path, state)
 
 
+def _apply_test_cache_prefix(caller: ModelCaller, writing_rules: str, template: str,
+                              language: str, framework: str) -> None:
+    """Hand `caller` this run's stable test-prompt prefix (issue #168,
+    mirroring batch.py's `_apply_cache_prefixes` from #159), once, up front
+    -- every build_test_prompt call for this language/framework target in
+    one project run shares the same writing_rules/template/language/
+    framework text, so there's no reason to recompute or re-send this per
+    call. Only a caller that opts in by exposing `set_cache_prefixes`
+    (AnthropicCaller, VertexCaller) is touched at all -- `getattr(...,
+    None)` leaves ClaudeCLICaller and the fake-echo test caller (neither has
+    any such method, nor any equivalent to `cache_control`) completely
+    untouched."""
+    set_cache_prefixes = getattr(caller, "set_cache_prefixes", None)
+    if set_cache_prefixes is None:
+        return
+    set_cache_prefixes([build_test_prompt_cache_prefix(writing_rules, template, language, framework)])
+
+
 def run_test_batch(conn, members: list[str], language: str, framework: str, out_dir: Path,
                     caller: ModelCaller, writing_rules: str, template: str,
                     redact: Redactor = NULL_REDACTOR, concurrency: int = 4,
@@ -586,6 +646,7 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
     batch.py's state key includes the subdir -- two batchable members can
     share a bare name across libraries/dialects."""
     threshold = _resolve_max_scenarios_per_call(max_scenarios_per_call)
+    _apply_test_cache_prefix(caller, writing_rules, template, language, framework)
     state = _load_state(state_path) if state_path else {}
     corpus_sig = (
         _corpus_signature(conn, language, framework, threshold, redact, sme_notes) if state_path else None

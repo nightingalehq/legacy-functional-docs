@@ -12,6 +12,25 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-10b):**
+- Fixed issue #168: extended issue #159's prompt-caching pattern from
+  `batch.py` to `testbatch.py`. Added `build_test_prompt_parts`/
+  `build_test_prompt_cache_prefix`, mirroring `build_prompt_parts`/
+  `build_prompt_cache_prefix` exactly -- `build_test_prompt` is now just
+  `"\n\n---\n\n".join(build_test_prompt_parts(...))`, and the cache-prefix
+  helper derives the stable leading substring (instructions + writing
+  rules + template) from the same three parts. One difference from
+  `batch.py`'s version: `build_test_prompt`'s instructions section is
+  templated on `language`/`framework`, so the stable prefix -- and the
+  `_apply_test_cache_prefix` call `run_test_batch` now makes once per
+  project/target run -- is necessarily per-target rather than shared
+  across a `--matrix` invocation's different language/framework
+  combinations. Wired via the same `getattr(caller, "set_cache_prefixes",
+  None)` duck-typing `run_batch` uses, so `ClaudeCLICaller`/the fake-echo
+  test caller are unaffected. New tests in `tests/test_test_prompt_caching.py`
+  mirror `tests/test_prompt_caching.py`'s coverage of the `batch.py`
+  equivalents.
+
 **Progress (2026-09-10):**
 - Fixed issue #157: `conditions.py`'s `_NEGATION_NEAR_LITERAL` denylist had
   no entry for "neither"/"nor" -- "the field is neither X nor Y" (a common
