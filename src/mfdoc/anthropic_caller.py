@@ -8,6 +8,7 @@ requires it installed.
 from __future__ import annotations
 
 from .batch import ModelResponse, model_response_from_message
+from .model_errors import QuotaExhaustedError, is_quota_exhaustion_error
 from .retry import DEFAULT_MAX_RETRIES, call_with_retry
 
 DEFAULT_MODEL = "claude-sonnet-4-5"
@@ -106,9 +107,25 @@ class AnthropicCaller:
             nonlocal retries
             retries = attempt
 
-        response = call_with_retry(
-            do_call, lambda exc: isinstance(exc, self._retryable_errors),
-            max_retries=self.max_retries, on_retry=on_retry,
-        )
+        try:
+            response = call_with_retry(
+                do_call, lambda exc: isinstance(exc, self._retryable_errors),
+                max_retries=self.max_retries, on_retry=on_retry,
+            )
+        except Exception as exc:
+            # Issue #198: a rate limit/billing error that survives every
+            # retry (rather than resolving within the backoff budget above)
+            # is the same "everything failed at once" quota-exhaustion
+            # pattern `ClaudeCLICaller` detects from `claude -p`'s output --
+            # raise the same structured exception here instead of letting
+            # this generic API exception propagate indistinguishably from
+            # any other final failure.
+            if is_quota_exhaustion_error(exc):
+                raise QuotaExhaustedError(
+                    f"Anthropic API call failed after retries, looks like usage-limit/quota "
+                    f"exhaustion: {exc.__class__.__name__}: {exc}",
+                    detail=str(exc),
+                ) from exc
+            raise
         response.retries = retries
         return response

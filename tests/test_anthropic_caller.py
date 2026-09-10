@@ -12,6 +12,7 @@ import types
 import pytest
 
 from mfdoc.anthropic_caller import DEFAULT_TIMEOUT_S, AnthropicCaller
+from mfdoc.model_errors import QuotaExhaustedError
 
 
 class _FakeRateLimitError(Exception):
@@ -159,6 +160,55 @@ def test_gives_up_after_max_retries_on_a_persistent_transient_error(monkeypatch)
     with pytest.raises(_FakeInternalServerError):
         caller("some prompt")
     assert calls["n"] == 3  # initial attempt + 2 retries
+
+
+def test_rate_limit_error_surviving_every_retry_raises_quota_exhausted(monkeypatch):
+    """Issue #198: a plain, generic transient-error exhaustion (the test
+    above, `_FakeInternalServerError`) must still propagate as itself --
+    only a rate limit (429) that survives every retry looks like real
+    usage-limit/quota exhaustion rather than an ordinary transient 5xx, and
+    should come back as the distinct `QuotaExhaustedError`, not the raw SDK
+    exception, so a wrapping orchestrator can tell the two apart without
+    re-deriving the "everything failed at once" pattern by eye."""
+    calls = {"n": 0}
+
+    def create(**kwargs):
+        calls["n"] += 1
+        exc = _FakeRateLimitError("simulated persistent 429")
+        exc.status_code = 429
+        raise exc
+
+    module, _ = _fake_anthropic_module(create)
+    monkeypatch.setitem(sys.modules, "anthropic", module)
+    monkeypatch.setattr("mfdoc.retry.time.sleep", lambda s: None)
+
+    caller = AnthropicCaller(max_retries=2)
+    with pytest.raises(QuotaExhaustedError, match="usage-limit/quota exhaustion") as excinfo:
+        caller("some prompt")
+    assert calls["n"] == 3  # initial attempt + 2 retries, same budget as a generic error
+    assert "simulated persistent 429" in excinfo.value.detail
+
+
+def test_billing_error_type_raises_quota_exhausted_even_without_retrying(monkeypatch):
+    """A `billing_error`-typed response (credit balance too low) isn't in
+    `_retryable_errors`, so it fails on the first attempt -- still must be
+    recognized as quota exhaustion, not left as a generic non-retryable
+    failure indistinguishable from a real 400."""
+    calls = {"n": 0}
+
+    def create(**kwargs):
+        calls["n"] += 1
+        exc = _FakeBadRequestError("simulated billing error: credit balance too low")
+        exc.type = "billing_error"
+        raise exc
+
+    module, _ = _fake_anthropic_module(create)
+    monkeypatch.setitem(sys.modules, "anthropic", module)
+
+    caller = AnthropicCaller(max_retries=5)
+    with pytest.raises(QuotaExhaustedError):
+        caller("some prompt")
+    assert calls["n"] == 1  # never retried -- not in _retryable_errors
 
 
 def test_a_non_retryable_error_propagates_without_retrying(monkeypatch):

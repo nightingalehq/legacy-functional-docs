@@ -34,6 +34,7 @@ import json
 import subprocess
 
 from .batch import ModelResponse
+from .model_errors import QuotaExhaustedError, is_quota_exhaustion_text
 
 DEFAULT_TIMEOUT_S = 600
 
@@ -69,6 +70,19 @@ class ClaudeCLICaller:
             raise RuntimeError(f"`claude -p` timed out after {self.timeout}s") from exc
 
         if proc.returncode != 0:
+            # Issue #198: `claude -p` surfaces Claude Code's own usage-limit
+            # exhaustion (5-hour/weekly reset) as just another nonzero exit,
+            # indistinguishable at this point from a genuine content/tooling
+            # failure -- check stderr (and stdout, in case the JSON payload
+            # still made it out despite the nonzero exit) for the same
+            # substrings Claude Code itself uses to recognize this condition
+            # before falling back to the generic failure below.
+            if is_quota_exhaustion_text(proc.stderr, proc.stdout):
+                raise QuotaExhaustedError(
+                    f"`claude -p` usage limit/quota exhausted (exit {proc.returncode}): "
+                    f"{proc.stderr.strip()}",
+                    detail=proc.stderr.strip(),
+                )
             raise RuntimeError(f"`claude -p` exited {proc.returncode}: {proc.stderr.strip()}")
 
         try:
@@ -77,7 +91,17 @@ class ClaudeCLICaller:
             raise RuntimeError(f"`claude -p --output-format json` produced unparseable output: {proc.stdout[:500]!r}") from exc
 
         if data.get("is_error"):
-            raise RuntimeError(f"`claude -p` reported an error: {data.get('result')!r}")
+            result_text = data.get("result")
+            # Same detection as the nonzero-exit branch above -- a quota
+            # exhaustion can also come back as exit 0 with `is_error: true`
+            # and the usage-limit message in `result` rather than a nonzero
+            # exit at all.
+            if is_quota_exhaustion_text(result_text, proc.stderr):
+                raise QuotaExhaustedError(
+                    f"`claude -p` usage limit/quota exhausted: {result_text!r}",
+                    detail=str(result_text) if result_text is not None else None,
+                )
+            raise RuntimeError(f"`claude -p` reported an error: {result_text!r}")
 
         usage = data.get("usage") or {}
         # Issue #169: `claude -p --output-format json`'s `usage` object is the
