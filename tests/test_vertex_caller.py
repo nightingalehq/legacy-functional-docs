@@ -140,6 +140,63 @@ def test_call_does_not_retry_a_non_transient_error(monkeypatch):
     assert attempts["n"] == 1
 
 
+def test_call_sends_a_plain_string_when_no_cache_prefix_is_registered(monkeypatch):
+    """Issue #159: same default-unchanged contract as AnthropicCaller -- no
+    set_cache_prefixes call means every prompt goes out exactly as before."""
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "some-project")
+    _fake_google_auth_package(monkeypatch)
+    seen = {}
+
+    class FakeMessages:
+        def create(self, **kw):
+            seen["content"] = kw["messages"][0]["content"]
+            return SimpleNamespace(
+                content=[SimpleNamespace(text="ok", type="text")],
+                usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+            )
+
+    fake_client = SimpleNamespace(messages=FakeMessages())
+    monkeypatch.setitem(sys.modules, "anthropic", SimpleNamespace(
+        AnthropicVertex=lambda **kw: fake_client, RateLimitError=Exception,
+        APIConnectionError=Exception, InternalServerError=Exception,
+    ))
+
+    caller = VertexCaller(project="some-project")
+    caller("some prompt")
+    assert seen["content"] == "some prompt"
+
+
+def test_call_splits_a_matching_prefix_into_a_cached_content_block(monkeypatch):
+    """Issue #159: same cache-block-splitting contract as AnthropicCaller."""
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "some-project")
+    _fake_google_auth_package(monkeypatch)
+    seen = {}
+
+    class FakeMessages:
+        def create(self, **kw):
+            seen["content"] = kw["messages"][0]["content"]
+            return SimpleNamespace(
+                content=[SimpleNamespace(text="ok", type="text")],
+                usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+            )
+
+    fake_client = SimpleNamespace(messages=FakeMessages())
+    monkeypatch.setitem(sys.modules, "anthropic", SimpleNamespace(
+        AnthropicVertex=lambda **kw: fake_client, RateLimitError=Exception,
+        APIConnectionError=Exception, InternalServerError=Exception,
+    ))
+
+    caller = VertexCaller(project="some-project")
+    caller.set_cache_prefixes(["stable prefix\n\n---\n\n"])
+    caller("stable prefix\n\n---\n\nvariable part")
+
+    assert seen["content"] == [
+        {"type": "text", "text": "stable prefix\n\n---\n\n",
+         "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": "variable part"},
+    ]
+
+
 def test_default_timeout_is_passed_to_the_anthropic_vertex_client(monkeypatch):
     monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "some-project")
     _fake_google_auth_package(monkeypatch)

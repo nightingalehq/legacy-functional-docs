@@ -64,6 +64,57 @@ GitHub org.
   - Dialect-neutral: this operates on `_logical_units`' plain-text output
     after markdown unwrapping, the same layer `ASSERTIVE`/`HEDGE`/`CITATION`
     already operate on, with nothing dialect-specific to vary per project.
+- Fixed issue #159: `batch.py`'s `build_prompt`/`build_reconciliation_prompt`
+  assembled one flat prompt string per call, and `AnthropicCaller`/
+  `VertexCaller` sent it as a single plain content block with no
+  `cache_control` -- so the large writing-rules/template prefix, byte-
+  identical across every chunk/member/retry in one project run, was billed
+  at full price on every single call instead of being cached.
+  - Kept `build_prompt`/`build_reconciliation_prompt`'s return type (a flat
+    string) and the `ModelCaller = Callable[[str], ModelResponse]` interface
+    completely unchanged -- `ClaudeCLICaller` and the `fake-echo` test
+    caller keep receiving exactly the same flat string as before, with no
+    special-casing anywhere in `batch.py`'s call sites. Each prompt builder
+    now has a companion `..._parts(...) -> list[str]` helper (single source
+    of truth: the flat-string builder is just `"\n\n---\n\n".join(parts)`)
+    and a `..._cache_prefix(...) -> str` helper that derives the exact
+    stable leading substring from the same inputs -- no re-parsing of an
+    already-joined string.
+  - `build_reconciliation_prompt` also had its section order changed:
+    `member_name` (previously woven into the very first sentence) now comes
+    after the writing-rules/index-template sections, not before them --
+    otherwise no cache prefix could ever be byte-identical across two
+    different members, since a cache breakpoint requires an exact match of
+    everything preceding it, not just the marked block's own text.
+  - `AnthropicCaller`/`VertexCaller` gained `set_cache_prefixes(prefixes)`
+    (a caller-side opt-in, empty by default) and split a prompt matching a
+    registered prefix into two content blocks -- the stable prefix, marked
+    `cache_control: {"type": "ephemeral"}`, and the variable remainder,
+    unmarked. A prompt matching no registered prefix (or a caller nobody
+    ever called `set_cache_prefixes` on, e.g. any pre-existing test) is
+    sent exactly as before, one plain string. `run_batch` computes both
+    prefixes once per project run and hands them to any caller exposing
+    the method (`getattr(..., None)` duck-typing), touching nothing else.
+  - Confirmed (against the installed `anthropic` 1.4.0 wheel's
+    `types/usage.py`) that the SDK's `Usage` object already exposes
+    `cache_creation_input_tokens`/`cache_read_input_tokens` (both
+    `Optional[int]`, `None` when caching wasn't used) -- threaded both
+    through `ModelResponse`/`model_response_from_message` (defaulting to 0)
+    so cost reporting can eventually show real cache savings.
+    `BatchSummary`/`estimate_cost` don't yet aggregate or price these
+    fields -- deliberately scoped out as a follow-up, not a blocker, since
+    the caching fix itself needed neither.
+  - `testbatch.py`'s own `build_test_prompt` (a separate, parallel prompt
+    builder for `mfdoc test-batch`) was not touched -- out of scope for
+    this issue, which named only `batch.py`/`anthropic_caller.py`, but the
+    same technique would apply there.
+  - No live end-to-end run against the real Anthropic API was possible in
+    this environment (no `ANTHROPIC_API_KEY`); verified instead with unit
+    tests against a faked SDK client (`tests/test_anthropic_caller.py`,
+    `tests/test_vertex_caller.py`, `tests/test_prompt_caching.py`) plus the
+    bundled-fixture pipeline check (`mfdoc ingest`/`derive`/`coverage`/
+    `validate --docs examples`), which is unaffected by this change (it
+    doesn't call a model).
 
 **Progress (2026-09-09):**
 - Fixed issue #151: real SME review feedback asked, across several

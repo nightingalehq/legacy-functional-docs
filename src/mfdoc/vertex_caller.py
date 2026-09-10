@@ -113,6 +113,25 @@ class VertexCaller:
         self._retryable_errors = (
             anthropic.RateLimitError, anthropic.APIConnectionError, anthropic.InternalServerError,
         )
+        # Issue #159: same cache-prefix mechanism as AnthropicCaller (see its
+        # matching comment/set_cache_prefixes docstring) -- Vertex fronts the
+        # identical Claude models and `messages.create` shape, so the same
+        # `cache_control: {"type": "ephemeral"}` breakpoint applies here too.
+        self._cache_prefixes: tuple[str, ...] = ()
+
+    def set_cache_prefixes(self, prefixes) -> None:
+        """See AnthropicCaller.set_cache_prefixes -- identical contract."""
+        self._cache_prefixes = tuple(sorted({p for p in prefixes if p}, key=len, reverse=True))
+
+    def _content(self, prompt: str) -> str | list[dict]:
+        """See AnthropicCaller._content -- identical contract."""
+        for prefix in self._cache_prefixes:
+            if prompt.startswith(prefix):
+                return [
+                    {"type": "text", "text": prefix, "cache_control": {"type": "ephemeral"}},
+                    {"type": "text", "text": prompt[len(prefix):]},
+                ]
+        return prompt
 
     def __call__(self, prompt: str) -> ModelResponse:
         def do_call() -> ModelResponse:
@@ -124,7 +143,7 @@ class VertexCaller:
                 message = self._client.messages.create(
                     model=self.model,
                     max_tokens=self.max_tokens,
-                    messages=[{"role": "user", "content": prompt}],
+                    messages=[{"role": "user", "content": self._content(prompt)}],
                 )
             return model_response_from_message(message)
 

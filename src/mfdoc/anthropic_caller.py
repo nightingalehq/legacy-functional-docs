@@ -45,13 +45,45 @@ class AnthropicCaller:
         self._retryable_errors = (
             anthropic.RateLimitError, anthropic.APIConnectionError, anthropic.InternalServerError,
         )
+        # Issue #159: stable, byte-identical-across-calls prompt prefixes
+        # (batch.py's build_prompt_cache_prefix/build_reconciliation_prompt_
+        # cache_prefix) this caller has been told about, longest first so a
+        # prompt matching more than one candidate uses the most specific
+        # match. Empty until batch.py's run_batch calls set_cache_prefixes --
+        # a caller nobody ever calls that on (e.g. one built directly in a
+        # test, or used outside `mfdoc batch`) sends every prompt exactly as
+        # before, one plain string with no cache_control at all.
+        self._cache_prefixes: tuple[str, ...] = ()
+
+    def set_cache_prefixes(self, prefixes) -> None:
+        """Register the stable prompt prefixes `__call__` should look for and
+        mark with `cache_control: {"type": "ephemeral"}`. Safe to call more
+        than once (a later call replaces, not appends); empty/falsy entries
+        are dropped."""
+        self._cache_prefixes = tuple(sorted({p for p in prefixes if p}, key=len, reverse=True))
+
+    def _content(self, prompt: str) -> str | list[dict]:
+        """`prompt` split into a cached stable-prefix block plus a plain
+        variable-suffix block, for whichever registered cache prefix (if
+        any) `prompt` actually starts with -- or `prompt` itself, unchanged,
+        when none matches (no prefixes registered yet, or this particular
+        prompt doesn't share one, e.g. build_uncited_patch_prompt's
+        targeted-patch follow-up, which never resends writing rules or
+        template in the first place -- see its own docstring)."""
+        for prefix in self._cache_prefixes:
+            if prompt.startswith(prefix):
+                return [
+                    {"type": "text", "text": prefix, "cache_control": {"type": "ephemeral"}},
+                    {"type": "text", "text": prompt[len(prefix):]},
+                ]
+        return prompt
 
     def __call__(self, prompt: str) -> ModelResponse:
         def do_call() -> ModelResponse:
             message = self._client.messages.create(
                 model=self.model,
                 max_tokens=self.max_tokens,
-                messages=[{"role": "user", "content": prompt}],
+                messages=[{"role": "user", "content": self._content(prompt)}],
             )
             return model_response_from_message(message)
 

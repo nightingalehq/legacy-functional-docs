@@ -233,6 +233,17 @@ class ModelResponse:
     # care about retries keeps working unchanged; a retrying caller sets this
     # on the response it returns (see AnthropicCaller.__call__).
     retries: int = 0
+    # Issue #159: tokens the Anthropic SDK's `Usage` object reports spent
+    # writing this call's prompt into the ephemeral cache, and tokens read
+    # back out of an existing cache entry instead of being billed at full
+    # input-token price. Both default 0 -- every existing ModelResponse(...)
+    # call site (real or in tests) that doesn't know or care about caching
+    # keeps working unchanged, and a real call that didn't create or hit a
+    # cache entry (no cache_control sent, or a genuine cache miss) reports
+    # 0 for the one that didn't apply, same as the SDK's own `Usage` object
+    # (whose cache fields are `None`, not present, when caching wasn't used).
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
 
 
 # A caller takes a prompt and returns a ModelResponse. Swap in a fake for
@@ -245,12 +256,23 @@ def model_response_from_message(message) -> ModelResponse:
     every ModelCaller backed by that SDK's `messages.create` response shape
     (anthropic_caller.py's direct-API client and vertex_caller.py's
     Claude-via-Vertex client both return this same shape), so a future change
-    to how text/usage is extracted only needs to land in one place."""
+    to how text/usage is extracted only needs to land in one place.
+
+    `cache_creation_input_tokens`/`cache_read_input_tokens` are read via
+    `getattr` with a `None`-coalescing fallback to 0: both are declared
+    `Optional[int] = None` on the SDK's `Usage` model (confirmed against
+    the installed `anthropic` package's `types/usage.py`), present with a
+    real count only when the request actually sent `cache_control` and
+    either created or hit a cache entry -- never absent as an attribute,
+    but frequently `None`."""
     text = "".join(block.text for block in message.content if block.type == "text")
+    usage = message.usage
     return ModelResponse(
         text=text,
-        input_tokens=message.usage.input_tokens,
-        output_tokens=message.usage.output_tokens,
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        cache_creation_input_tokens=getattr(usage, "cache_creation_input_tokens", None) or 0,
+        cache_read_input_tokens=getattr(usage, "cache_read_input_tokens", None) or 0,
     )
 
 
@@ -314,14 +336,30 @@ def _output_subdir(conn, name: str) -> Path:
     return Path(*parts)
 
 
-def build_prompt(brief: str, writing_rules: str, template: str, retry_note: str | None = None) -> str:
+_BATCH_INSTRUCTIONS = (
+    "You are writing first-draft functional documentation for one legacy "
+    "mainframe module. Follow the writing rules and template exactly. "
+    "Never assert behaviour that cannot be traced to a specific source "
+    "line in the brief below -- drop or mark `unresolved` anything that "
+    "isn't. Output only the completed document (front matter + body), "
+    "nothing else."
+)
+
+
+def build_prompt_parts(brief: str, writing_rules: str, template: str,
+                        retry_note: str | None = None) -> list[str]:
+    """The ordered sections `build_prompt` joins into one flat string,
+    returned unjoined -- issue #159's single source of truth for the split
+    between the stable prefix (instructions + writing rules + template,
+    byte-identical across every chunk/member/retry in one project run) and
+    the per-call variable suffix (fact brief, and on a retry, the retry
+    note). `build_prompt` itself is just `"\\n\\n---\\n\\n".join(...)` of
+    this; `build_prompt_cache_prefix` derives the same stable prefix from
+    the first three sections here so AnthropicCaller/VertexCaller can mark
+    it as an ephemeral cache breakpoint without re-parsing a joined
+    string."""
     parts = [
-        "You are writing first-draft functional documentation for one legacy "
-        "mainframe module. Follow the writing rules and template exactly. "
-        "Never assert behaviour that cannot be traced to a specific source "
-        "line in the brief below -- drop or mark `unresolved` anything that "
-        "isn't. Output only the completed document (front matter + body), "
-        "nothing else.",
+        _BATCH_INSTRUCTIONS,
         "# Writing rules\n\n" + writing_rules,
         "# Template\n\n" + template,
         "# Fact brief\n\n" + brief,
@@ -331,7 +369,26 @@ def build_prompt(brief: str, writing_rules: str, template: str, retry_note: str 
             "# Previous attempt failed validation\n\n" + retry_note
             + "\n\nFix these problems and resend the complete document."
         )
-    return "\n\n---\n\n".join(parts)
+    return parts
+
+
+def build_prompt(brief: str, writing_rules: str, template: str, retry_note: str | None = None) -> str:
+    return "\n\n---\n\n".join(build_prompt_parts(brief, writing_rules, template, retry_note))
+
+
+def build_prompt_cache_prefix(writing_rules: str, template: str) -> str:
+    """The exact leading substring of every `build_prompt(...)` call sharing
+    this `writing_rules`/`template` (i.e. every call in one project's batch
+    run) -- instructions + writing rules + template, with the trailing
+    section separator included so it lines up with where `# Fact brief`
+    starts. AnthropicCaller/VertexCaller mark this whole prefix with
+    `cache_control: {"type": "ephemeral"}` (issue #159) so it's billed once
+    per project run instead of once per call; a caller with no cache-prefix
+    support (ClaudeCLICaller, the fake-echo test caller) never sees this at
+    all -- run_batch only hands it to callers that expose
+    `set_cache_prefixes`."""
+    stable = build_prompt_parts("", writing_rules, template)[:3]
+    return "\n\n---\n\n".join(stable) + "\n\n---\n\n"
 
 
 # Corrective hints keyed by a substring of a validate_doc problem -- appended
@@ -790,6 +847,54 @@ def _consolidated_gap_lines(conn, member_name: str, member_id: int,
     return lines
 
 
+_RECONCILIATION_INSTRUCTIONS = (
+    "You are reconciling several already-validated, already-cited excerpts of "
+    "one legacy mainframe module -- one excerpt per chunk that module's "
+    "business-rule set was split into for documentation purposes -- into one "
+    "coherent whole-module statement. Do not invent any claim, fact, or "
+    "citation that is not already present, in substance, in the excerpts "
+    "below; every sentence you write must carry a citation copied from one "
+    "of them. Where excerpts genuinely conflict, prefer the more specific or "
+    "more heavily-cited statement and note the discrepancy as an "
+    "`(unresolved)` item rather than silently picking one.\n\n"
+    "Output exactly five sections, in this exact order, headed exactly as "
+    "shown, and nothing else -- no preamble, no restating these "
+    "instructions:\n\n" + "\n".join(f"## {h}" for h in NARRATIVE_SECTIONS)
+)
+
+
+def build_reconciliation_prompt_parts(member_name: str, chunk_sources: list[str], writing_rules: str,
+                                       index_template: str | None,
+                                       retry_note: str | None = None) -> list[str]:
+    """The ordered sections `build_reconciliation_prompt` joins into one flat
+    string, returned unjoined -- same purpose as `build_prompt_parts` (issue
+    #159): the generic reconciliation instructions and writing rules (plus,
+    when configured, the module-index template) are byte-identical across
+    every chunked member and every retry in one project run; `member_name`
+    and the chunk excerpts being reconciled are the only things that vary,
+    so they're deliberately placed last (not first, as the original prompt
+    text had it) -- a variable section anywhere before the stable prefix
+    would break the exact-prefix match `build_reconciliation_prompt_cache_
+    prefix` relies on. `build_reconciliation_prompt` itself is just
+    `"\\n\\n---\\n\\n".join(...)` of this."""
+    parts = [
+        _RECONCILIATION_INSTRUCTIONS,
+        "# Writing rules\n\n" + writing_rules,
+    ]
+    if index_template:
+        parts.append("# Module-index template (for section-content expectations)\n\n" + index_template)
+    parts.append(
+        f"# Module being reconciled: {member_name}\n\n"
+        "# Per-chunk excerpts to reconcile\n\n" + "\n\n---\n\n".join(chunk_sources)
+    )
+    if retry_note:
+        parts.append(
+            "# Previous attempt failed validation\n\n" + retry_note
+            + "\n\nFix these problems and resend all five sections, in order."
+        )
+    return parts
+
+
 def build_reconciliation_prompt(member_name: str, chunk_sources: list[str], writing_rules: str,
                                  index_template: str | None, retry_note: str | None = None) -> str:
     """Prompt for the one bounded model call `_generate_module_index_narrative`
@@ -802,30 +907,22 @@ def build_reconciliation_prompt(member_name: str, chunk_sources: list[str], writ
     see the design spec (docs/superpowers/specs/2026-09-06-chunked-module-
     index-overview-design.md) for why that keeps this safe from the same
     silent-truncation risk chunking itself exists to guard against."""
-    parts = [
-        f"You are reconciling several already-validated, already-cited excerpts of "
-        f"the SAME legacy mainframe module, `{member_name}` -- one excerpt per chunk "
-        "this module's business-rule set was split into for documentation purposes -- "
-        "into one coherent whole-module statement. Do not invent any claim, fact, or "
-        "citation that is not already present, in substance, in the excerpts "
-        "below; every sentence you write must carry a citation copied from one "
-        "of them. Where excerpts genuinely conflict, prefer the more specific or "
-        "more heavily-cited statement and note the discrepancy as an "
-        "`(unresolved)` item rather than silently picking one.\n\n"
-        "Output exactly five sections, in this exact order, headed exactly as "
-        "shown, and nothing else -- no preamble, no restating these "
-        "instructions:\n\n" + "\n".join(f"## {h}" for h in NARRATIVE_SECTIONS),
-        "# Writing rules\n\n" + writing_rules,
-    ]
-    if index_template:
-        parts.append("# Module-index template (for section-content expectations)\n\n" + index_template)
-    parts.append("# Per-chunk excerpts to reconcile\n\n" + "\n\n---\n\n".join(chunk_sources))
-    if retry_note:
-        parts.append(
-            "# Previous attempt failed validation\n\n" + retry_note
-            + "\n\nFix these problems and resend all five sections, in order."
-        )
-    return "\n\n---\n\n".join(parts)
+    return "\n\n---\n\n".join(
+        build_reconciliation_prompt_parts(member_name, chunk_sources, writing_rules, index_template, retry_note)
+    )
+
+
+def build_reconciliation_prompt_cache_prefix(writing_rules: str, index_template: str | None) -> str:
+    """The exact leading substring of every `build_reconciliation_prompt(...)`
+    call sharing this `writing_rules`/`index_template` -- reconciliation
+    instructions + writing rules (+ module-index template, if configured) --
+    with the trailing section separator included. Unlike `build_prompt`'s
+    prefix, this one is stable across every chunked member and retry in a
+    project run (member_name and the chunk excerpts always come after it --
+    see `build_reconciliation_prompt_parts`), so AnthropicCaller/VertexCaller
+    can mark it as its own `cache_control` breakpoint (issue #159)."""
+    stable = build_reconciliation_prompt_parts("", [], writing_rules, index_template)[:-1]
+    return "\n\n---\n\n".join(stable) + "\n\n---\n\n"
 
 
 def _reconciliation_source(chunk_index: int, chunk_body: str) -> str:
@@ -1549,6 +1646,25 @@ def _skip_result(name: str, out_path: Path, prior: dict) -> DocResult:
     return DocResult(name, str(out_path), True, prior.get("attempts", 1), 0, 0, [], skipped=True)
 
 
+def _apply_cache_prefixes(caller: ModelCaller, writing_rules: str, template: str,
+                           index_template: str | None) -> None:
+    """Hand `caller` this run's stable prompt prefixes (issue #159), once,
+    up front -- every build_prompt/build_reconciliation_prompt call in one
+    project run shares the same writing_rules/template/index_template text,
+    so there's no reason to recompute or re-send this per call. Only a
+    caller that opts in by exposing `set_cache_prefixes` (AnthropicCaller,
+    VertexCaller) is touched at all -- `getattr(..., None)` leaves
+    ClaudeCLICaller and the fake-echo test caller (neither has any such
+    method, nor any equivalent to `cache_control`) completely untouched."""
+    set_cache_prefixes = getattr(caller, "set_cache_prefixes", None)
+    if set_cache_prefixes is None:
+        return
+    set_cache_prefixes([
+        build_prompt_cache_prefix(writing_rules, template),
+        build_reconciliation_prompt_cache_prefix(writing_rules, index_template),
+    ])
+
+
 def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
               writing_rules: str, template: str, redact: Redactor = NULL_REDACTOR,
               concurrency: int = 4, state_path: Path | None = None,
@@ -1606,6 +1722,7 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
     per-member tier below runs unconditionally anyway.
     """
     threshold = _resolve_max_rules_per_call(max_rules_per_call)
+    _apply_cache_prefixes(caller, writing_rules, template, index_template)
     state = _load_state(state_path) if state_path else {}
     corpus_sig = (
         _corpus_signature(conn, redact, lexicon, sme_notes, extra=[str(threshold)]) if state_path else None
