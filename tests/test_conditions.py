@@ -261,6 +261,20 @@ def test_prose_polarity_other_than_x_or_y_negates_both_operands():
     assert prose_polarity(sentence, "BAR") == "ne"
 
 
+def test_prose_polarity_list_negation_does_not_leak_earlier_clause_hedge():
+    """Issue #157 follow-up (PR #164 review): the list-negation exception in
+    `_clip_at_clause_boundary` must only keep the list-negation marker itself
+    ("other than") in the window -- it must not disable clause-boundary
+    clipping for the *entire* window back to its start. A sentence with its
+    own, earlier clause boundary carrying an unrelated hedge word ("at least",
+    describing a different operand entirely) must not have that hedge word
+    leak into this later literal's polarity -- that's exactly the issue #90
+    regression class this exception must not reopen."""
+    sentence = "at least '4' and other than 'FOO' or 'BAR'"
+    assert prose_polarity(sentence, "FOO") == "ne"
+    assert prose_polarity(sentence, "BAR") == "ne"
+
+
 def test_prose_polarity_or_equal_is_not_a_clause_boundary():
     """"or equal (to)" is part of relational phrasing ("greater/less than or
     equal to"), not a logical clause conjunction. Without excluding it,

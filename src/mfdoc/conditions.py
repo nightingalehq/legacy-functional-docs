@@ -281,17 +281,25 @@ def _clip_at_clause_boundary(text: str, *, keep_end: bool) -> str:
     "neither X nor Y", ...), that "or" isn't a separate clause's conjunction
     -- it's the same negated list the marker introduces, still governing
     this literal too. Clipping there would strip the marker away from this
-    (later) operand's own search window, so the text is left unclipped
-    instead. "and" is never treated this way -- unlike "or", it doesn't
-    appear in any of this module's negated-list idioms, so an "and" boundary
-    always marks a genuine separate clause."""
+    (later) operand's own search window. But the fix must not go further
+    than that: it only extends the kept window back to the negated-list
+    marker itself, not all the way to the start of `text` (issue #157 PR
+    #164 review) -- otherwise a genuinely earlier, unrelated clause
+    boundary (its own "and"/"or") before that marker would no longer clip,
+    letting that earlier clause's own hedge word leak into this literal's
+    polarity, reopening the exact issue #90 regression class this whole
+    function exists to prevent. "and" is never treated this way -- unlike
+    "or", it doesn't appear in any of this module's negated-list idioms, so
+    an "and" boundary always marks a genuine separate clause."""
     matches = list(_CLAUSE_BOUNDARY.finditer(text))
     if not matches:
         return text
     if keep_end:
         cut = matches[-1]
-        if cut.group().lower() == "or" and _LIST_NEGATION.search(text[:cut.start()]):
-            return text
+        if cut.group().lower() == "or":
+            markers = list(_LIST_NEGATION.finditer(text[:cut.start()]))
+            if markers:
+                return text[markers[-1].start():]
         return text[cut.end():]
     return text[:matches[0].start()]
 
