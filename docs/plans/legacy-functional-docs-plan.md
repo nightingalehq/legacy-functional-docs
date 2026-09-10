@@ -152,6 +152,45 @@ GitHub org.
     sensibly to 0 rather than raising or under-reporting silently.
   - `tests/test_claude_cli_caller.py`: added coverage for a fake `usage`
     object carrying the cache fields, and for their absence defaulting to 0.
+- Fixed issue #170 (continuation of #131, part of #156): the token-cost
+  ledger's root-cause analysis found repeated full-chunk regenerations
+  chasing a small number of flagged sentences were the single largest
+  driver of `mfdoc batch`'s token spend, and #131's cheap targeted-patch
+  path only ever applied to one failure class (uncited-and-unhedged
+  assertive statements). Generalized it in `batch.py`:
+  - `_is_near_miss_uncited`/`build_uncited_patch_prompt` became
+    `_is_near_miss`/`build_localized_patch_prompt`, backed by a new
+    `_localized_findings` helper that classifies every entry in
+    `validate_doc`'s `problems` list as either sentence-localized (names a
+    specific citation/snippet a patch prompt can point back at) or
+    structural. Two localized shapes are recognized so far: the original
+    uncited-assertion summary problem, and `validate._reversed_condition_
+    problems`'s reversed-comparison-direction findings (each already names
+    its flagged `[[MEMBER:LINE]]` citation). The moment any problem doesn't
+    fit either shape, `_localized_findings` returns `None` and the whole
+    failure falls through to the existing full-chunk retry, unchanged --
+    missing/malformed front matter, a broken forward-reference, an invalid
+    citation, and any other structural check stay full-retry-only.
+  - `NEAR_MISS_MAX_UNCITED` was renamed `NEAR_MISS_MAX_LOCALIZED` and now
+    bounds the *combined* count of localized findings (uncited assertions
+    plus reversed-condition flags together), not just uncited ones.
+  - `build_localized_patch_prompt` keeps #131's shape (no writing rules or
+    template resent, only the flagged findings and an instruction to leave
+    everything else unchanged) but renders one section per finding kind
+    present, so a chunk with both an uncited assertion and a reversed
+    condition gets one combined patch call rather than two separate ones.
+  - Dialect-neutral by construction: both recognized failure classes come
+    from `validate.py` checks that already operate on `rule_candidate`/
+    citation data every dialect's extractor populates the same way: no
+    Natural-only or Mantis-only branching was needed.
+  - Tests (`tests/test_batch.py`): renamed/extended the existing near-miss
+    boundary and patch-vs-fallback tests, added a reversed-condition-only
+    near-miss test using the repo's own MMP0100 fixture (`ORDER-STATUS NE
+    'CONF'` at line 38) exercising the same call->validate->retry loop, and
+    a negative test confirming a missing-front-matter failure still forces
+    a full retry. Full suite (`pytest`) and the bundled-fixture pipeline
+    check (`ingest`/`derive`/`coverage`/`validate --docs examples`) both
+    pass clean (71/71 documents, 0 invalid citations), no regressions.
 
 **Progress (2026-09-09):**
 - Fixed issue #151: real SME review feedback asked, across several

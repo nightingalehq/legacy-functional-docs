@@ -428,70 +428,132 @@ def _retry_note(problems: list[str]) -> str:
     return bullets + "\n\n" + "\n".join(hints)
 
 
-# Issue #131: across two real regenerations, the large majority of `mfdoc
-# batch`'s token cost came from full-chunk regenerations chasing down a
-# handful of sentences flagged as "uncited assertive statement" in chunks
+# Issue #131 (generalized by #170): across two real regenerations, the large
+# majority of `mfdoc batch`'s token cost came from full-chunk regenerations
+# chasing down a handful of sentences flagged by validate_doc, in chunks
 # that were otherwise already valid -- fixing 2 sentences out of a 40-rule
-# chunk cost the same (a whole fresh model call, re-narrating everything)
-# as regenerating from scratch. `NEAR_MISS_MAX_UNCITED` bounds how small
-# "a handful" has to be (matching the issue's own "1-5 per attempt" report)
-# before `_is_near_miss_uncited` calls a validation failure a near-miss
-# worth a cheap targeted patch (see `build_uncited_patch_prompt`) instead of
-# going straight to a full chunk retry -- a chunk failing for any other
-# reason (a real citation-format error, a structurally broken response, or
-# simply too many uncited sentences to call "almost right") still falls
-# through to the existing full-retry path unchanged.
-NEAR_MISS_MAX_UNCITED = 3
+# chunk cost the same (a whole fresh model call, re-narrating everything) as
+# regenerating from scratch. `NEAR_MISS_MAX_LOCALIZED` bounds how small "a
+# handful" has to be (matching #131's original "1-5 per attempt" report)
+# before `_is_near_miss` calls a validation failure a near-miss worth a
+# cheap targeted patch (see `build_localized_patch_prompt`) instead of going
+# straight to a full chunk retry. This only applies to failure classes that
+# are *sentence-localized* -- they name a specific citation/snippet a patch
+# prompt can point the model back at. Two are recognized so far: uncited-
+# and-unhedged assertive statements (#131's original case) and reversed-
+# condition flags (`validate._reversed_condition_problems`, #170). A chunk
+# failing for any other reason -- a real citation-format error, missing/
+# malformed front matter, a broken forward-reference, a structurally broken
+# response, or simply too many localized findings to call "almost right" --
+# still falls through to the existing full-retry path unchanged, since
+# those failure classes aren't tied to one sentence a small patch could fix.
+NEAR_MISS_MAX_LOCALIZED = 3
+
+# The exact prefix `validate._reversed_condition_problems` uses for every
+# problem string it produces -- each one already names the flagged
+# `[[MEMBER:LINE]]` citation and what's wrong with it, so `_localized_
+# findings` only needs to recognize the shape, not re-derive anything from
+# the fact store.
+_REVERSED_CONDITION_PREFIX = "comparison direction may be reversed near "
 
 
-def _is_near_miss_uncited(result: dict) -> bool:
-    """True when `result` (a `validate_doc` return value) failed validation
-    for exactly one reason -- a small number of uncited-and-unhedged
-    assertive statements -- and nothing else. `validate_doc` appends exactly
-    one summary problem for every uncited assertion found together (`"{n}
-    assertive statement(s) carry no citation and no hedge"`), so `problems`
-    having exactly that one entry is enough to know no other check (front
-    matter, citation resolution, reversed-condition, ...) also failed --
-    this deliberately does not pattern-match that string, since
-    `uncited_assertions` (the actual flagged sentences) is the authoritative
-    signal `validate_doc` already computed it from."""
+def _localized_findings(result: dict) -> tuple[list[str], list[str]] | None:
+    """Split `result["problems"]` (a `validate_doc` return value) into the
+    two sentence-localized failure classes `_is_near_miss` recognizes --
+    uncited-and-unhedged assertive statements and reversed-condition flags
+    -- returning `None` the moment any problem in the list doesn't fit
+    either shape. That `None` is what tells `_is_near_miss` a failure isn't
+    (purely) localized: a structural problem (missing front matter, a
+    broken forward-reference, an invalid citation, anything not tied to one
+    specific sentence) means the whole chunk still needs a full retry, even
+    if it also happens to carry a localized finding alongside it."""
     uncited = result.get("uncited_assertions") or []
-    return (
-        not result["ok"]
-        and len(result["problems"]) == 1
-        and 0 < len(uncited) <= NEAR_MISS_MAX_UNCITED
+    # `validate_doc` appends exactly one summary problem for every uncited
+    # assertion found together (`"{n} assertive statement(s) carry no
+    # citation and no hedge"`) -- this deliberately reconstructs that exact
+    # string to match against, rather than pattern-matching on a substring,
+    # since `uncited_assertions` (the actual flagged sentences) is the
+    # authoritative signal `validate_doc` already computed it from.
+    uncited_problem = (
+        f"{len(uncited)} assertive statement(s) carry no citation and no hedge"
+        if uncited else None
     )
+    reversed_findings: list[str] = []
+    for p in result["problems"]:
+        if p == uncited_problem:
+            continue
+        if p.startswith(_REVERSED_CONDITION_PREFIX):
+            reversed_findings.append(p)
+            continue
+        return None
+    return uncited, reversed_findings
 
 
-def build_uncited_patch_prompt(brief: str, current_text: str, uncited: list[str]) -> str:
+def _is_near_miss(result: dict) -> bool:
+    """True when `result` (a `validate_doc` return value) failed validation
+    for reasons that are *entirely* sentence-localized (see
+    `_localized_findings`) and small enough in total to count as "almost
+    right" (`NEAR_MISS_MAX_LOCALIZED`) rather than a response that needs a
+    full rewrite."""
+    if result["ok"]:
+        return False
+    split = _localized_findings(result)
+    if split is None:
+        return False
+    uncited, reversed_findings = split
+    total = len(uncited) + len(reversed_findings)
+    return 0 < total <= NEAR_MISS_MAX_LOCALIZED
+
+
+def build_localized_patch_prompt(
+    brief: str, current_text: str, uncited: list[str], reversed_findings: list[str],
+) -> str:
     """A far smaller, targeted follow-up prompt for the near-miss case
-    `_is_near_miss_uncited` detects -- issue #131. Unlike `build_prompt`'s
-    full-retry prompt, this never resends the writing rules or template:
-    the model already demonstrated it can follow them (the rest of
-    `current_text` is proof), so the only thing worth asking for again is a
-    fix to the specific flagged sentences, using a citation already present
-    in `brief` (the same fact brief the original response was written from)
-    or, failing that, an explicit hedge. Everything else in the document is
+    `_is_near_miss` detects (issue #131, generalized by #170). Unlike
+    `build_prompt`'s full-retry prompt, this never resends the writing
+    rules or template: the model already demonstrated it can follow them
+    (the rest of `current_text` is proof), so the only thing worth asking
+    for again is a fix to the specific flagged findings -- using a citation
+    already present in `brief` (the same fact brief the original response
+    was written from), an explicit hedge, or a corrected comparison
+    direction, depending on the finding. Everything else in the document is
     asked to come back unchanged -- far cheaper, and far less likely to
     perturb an otherwise-valid chunk, than a full from-scratch chunk
-    regeneration paying to fix one or two sentences out of dozens."""
-    bullets = "\n".join(f"- {s}" for s in uncited)
+    regeneration paying to fix one or two findings out of dozens of correct
+    sentences."""
+    sections = []
+    if uncited:
+        bullets = "\n".join(f"- {s}" for s in uncited)
+        sections.append(
+            "## Uncited assertive statements\n\n"
+            "The snippets below may be truncated to 140 characters; use "
+            "them to locate the full sentence in the current document. For "
+            "each, either add a `[[MEMBER:LINE]]` citation to a fact "
+            "already present in the brief below that supports it, or -- "
+            "only if no such fact exists -- rewrite it as an explicit "
+            "hedge instead of an assertion.\n\n" + bullets
+        )
+    if reversed_findings:
+        bullets = "\n".join(f"- {f}" for f in reversed_findings)
+        sections.append(
+            "## Comparison direction may be reversed\n\n"
+            "Each finding below names the exact `[[MEMBER:LINE]]` citation "
+            "whose surrounding sentence describes a comparison in the "
+            "opposite direction from what the cited source condition "
+            "means. Locate that sentence and correct which outcome it "
+            "describes so it matches the source condition's actual "
+            "polarity, without changing the citation itself.\n\n" + bullets
+        )
     return (
         "The document below is almost entirely valid first-draft functional "
-        "documentation. A small number of sentences assert behaviour without "
-        "a `[[MEMBER:LINE]]` citation or an explicit hedge (`inferred`, "
-        "`unresolved`, etc.) -- everything else in it already validated "
+        "documentation. A small number of specific, locatable sentences "
+        "have a flagged problem -- everything else in it already validated "
         "clean.\n\n"
-        "# Flagged snippets (locate the matching sentence; fix only these)\n\n"
-        "The snippets below may be truncated to 140 characters; use them to "
-        "locate the full sentence in the current document.\n\n"
-        + bullets + "\n\n"
-        "For each flagged sentence, either add a `[[MEMBER:LINE]]` citation "
-        "to a fact already present in the brief below that supports it, or "
-        "-- only if no such fact exists -- rewrite it as an explicit hedge "
-        "instead of an assertion. Do not change anything else: no other "
-        "sentence, heading, citation, or front-matter field. Output the "
-        "complete corrected document, nothing else.\n\n"
+        "# Flagged findings (locate the matching sentence; fix only these)\n\n"
+        + "\n\n".join(sections) + "\n\n"
+        "Do not change anything else: no other sentence, heading, citation, "
+        "or front-matter field. Output the complete corrected document, "
+        "nothing else.\n\n"
         "# Fact brief\n\n" + brief + "\n\n"
         "# Current document\n\n" + current_text
     )
@@ -547,12 +609,13 @@ def _generate_module_doc_from_brief(conn, member_name: str, brief: str, out_path
     single-call path and _generate_module_doc_chunked's per-chunk calls
     below (mirrors testbatch.py's _generate_test_doc_from_brief).
 
-    A validation failure that `_is_near_miss_uncited` calls a near-miss
-    (issue #131: only a handful of uncited-and-unhedged assertive
-    statements, nothing else wrong) gets one cheap targeted-patch attempt
-    (`build_uncited_patch_prompt`) before counting against `max_attempts` --
-    it doesn't consume one of the full-regeneration attempts, since it asks
-    for something far smaller than one. A chunk failing for any other
+    A validation failure that `_is_near_miss` calls a near-miss (issue #131,
+    generalized by #170: only a handful of sentence-localized findings --
+    uncited-and-unhedged assertive statements and/or reversed-condition
+    flags -- nothing structural wrong) gets one cheap targeted-patch attempt
+    (`build_localized_patch_prompt`) before counting against `max_attempts`
+    -- it doesn't consume one of the full-regeneration attempts, since it
+    asks for something far smaller than one. A chunk failing for any other
     reason, or where the patch attempt itself doesn't resolve everything,
     falls straight through to the existing full-chunk retry loop unchanged."""
     retry_note = None
@@ -579,14 +642,16 @@ def _generate_module_doc_from_brief(conn, member_name: str, brief: str, out_path
                 duration_s=duration_s, retries=retries,
             )
 
-        if _is_near_miss_uncited(result):
+        if _is_near_miss(result):
+            uncited, reversed_findings = _localized_findings(result)
             logger.warning(
-                "%s: validation failed on attempt %d/%d with %d near-miss uncited "
-                "assertive statement(s) only -- trying a targeted patch before a "
-                "full chunk retry",
-                member_name, attempt, max_attempts, len(result["uncited_assertions"]),
+                "%s: validation failed on attempt %d/%d with %d near-miss "
+                "localized finding(s) only (%d uncited, %d reversed-condition) "
+                "-- trying a targeted patch before a full chunk retry",
+                member_name, attempt, max_attempts,
+                len(uncited) + len(reversed_findings), len(uncited), len(reversed_findings),
             )
-            patch_prompt = build_uncited_patch_prompt(brief, text, result["uncited_assertions"])
+            patch_prompt = build_localized_patch_prompt(brief, text, uncited, reversed_findings)
             patch_response, patch_elapsed = _timed_call(caller, patch_prompt)
             input_tokens += patch_response.input_tokens
             output_tokens += patch_response.output_tokens
