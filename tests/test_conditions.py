@@ -275,6 +275,20 @@ def test_prose_polarity_list_negation_does_not_leak_earlier_clause_hedge():
     assert prose_polarity(sentence, "BAR") == "ne"
 
 
+def test_prose_polarity_neither_nor_matches_explicit_double_negation():
+    """Issue #196: a double-inequality guard (`A<>"FOO" AND A<>"BAR"`) is
+    narrated equivalently either as two explicit negations ("A is not 'FOO'
+    and is not 'BAR'") or as one "neither ... nor ..." construction ("A is
+    neither 'FOO' nor 'BAR'"). Both are the same guard narrated two ways and
+    must read identically for both operands -- confirms the issue #157/PR
+    #164 fix generalizes to this exact recurring shape rather than being a
+    narrower coincidence."""
+    explicit = "A is not 'FOO' and is not 'BAR'"
+    neither_nor = "A is neither 'FOO' nor 'BAR'"
+    assert prose_polarity(explicit, "FOO") == prose_polarity(neither_nor, "FOO") == "ne"
+    assert prose_polarity(explicit, "BAR") == prose_polarity(neither_nor, "BAR") == "ne"
+
+
 def test_prose_polarity_or_equal_is_not_a_clause_boundary():
     """"or equal (to)" is part of relational phrasing ("greater/less than or
     equal to"), not a logical clause conjunction. Without excluding it,

@@ -98,6 +98,23 @@ GitHub org.
   bundled fixture pipeline (`ingest`/`derive`/`coverage`/`validate --docs
   examples`) still 71/71 documents clean, 0 invalid citations.
 
+**Progress (2026-09-10e):**
+- Investigated issue #196 ("`validate.py`'s negation-detection regex misses
+  the 'neither X nor Y' framing of a double-inequality guard"). The fix
+  this issue asks for was already shipped: commit f274c3e (PR #164, closing
+  issue #157) added `neither`/`nor` to `conditions._NEGATION_NEAR_LITERAL`
+  and the `_LIST_NEGATION` clause-boundary exception a few hours before
+  #196 was filed -- #196's evidence (4 occurrences across 2 regen runs) was
+  gathered before that fix landed and is the same recurring gap #157
+  already describes. Confirmed on this branch (checked out fresh from
+  `main`, which already contains f274c3e) that `conditions.prose_polarity`
+  reads "A is not 'FOO' and is not 'BAR'" and "A is neither 'FOO' nor
+  'BAR'" identically (`ne` for both operands, both phrasings). Added
+  `tests/test_conditions.py::test_prose_polarity_neither_nor_matches_explicit_double_negation`,
+  the explicit equivalence test #196 asked for, to lock that in as a named
+  regression case distinct from #157's own tests. No production code
+  change needed -- full suite: 908 passed, 2 skipped.
+
 **Progress (2026-09-10c):**
 - Fixed issue #184: `citations._rule_id(member_name, n)` is a pure
   formatting helper -- the ordinal `n` was independently re-derived by
