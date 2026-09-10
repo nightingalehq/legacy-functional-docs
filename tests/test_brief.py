@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from mfdoc.brief import (
+    MemberFacts,
     _rule_id,
+    build_member_facts,
     chunk_density_metrics,
     entity_brief,
     flag_density_outliers,
@@ -905,3 +907,122 @@ def test_module_brief_surfaces_find_found_body_extent_next_to_the_access():
     find_line = [l for l in access_section.splitlines() if "FIND" in l and "WIDGET-VIEW" in l][0]
     assert "found-body extent" in find_line
     assert "[[TESTMOD:1-4]]" in find_line
+
+
+# --- issue #183: build_member_facts() lets a chunked member's per-chunk
+# module_brief() calls share one member-level fact-gather instead of each
+# re-running the same whole-member queries (interface, data access, calls,
+# inbound callers, gaps, ...) that module_brief's own docstring says are
+# unaffected by rule_range.
+
+
+class _CountingConn:
+    """Wraps a real sqlite3 connection, counting every `execute()` call --
+    including ones made by helpers module_brief/build_member_facts call
+    internally (fetch_routines, _natural_screen_field_names,
+    unused_entity_fields_for_member, _caller_guard_chain,
+    _copycode_rule_candidates, resolve_member_by_name), not just calls made
+    directly by module_brief's own body. Delegates everything else
+    (row_factory, commit, ...) to the wrapped connection unchanged."""
+
+    def __init__(self, real):
+        self._real = real
+        self.calls = 0
+
+    def execute(self, *args, **kwargs):
+        self.calls += 1
+        return self._real.execute(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def test_build_member_facts_returns_every_whole_member_section_module_brief_needs(indexed_db):
+    """A sanity check that build_member_facts() actually gathered the same
+    facts module_brief renders sections from -- MMP0100 has params/other
+    vars/routines/data access/calls/rules/gaps in its own fixture source, so
+    a MemberFacts built from it should carry all of them, not an
+    accidentally-empty subset."""
+    facts = build_member_facts(indexed_db, "MMP0100", NULL_REDACTOR)
+    assert isinstance(facts, MemberFacts)
+    assert facts.name == "MMP0100"
+    assert facts.rules, "MMP0100's fixture source has rule_candidate rows"
+    assert facts.routines, "MMP0100's fixture source has internal routines"
+
+
+def test_build_member_facts_reused_across_chunks_makes_no_further_queries(indexed_db):
+    """The whole point of issue #183: once a member's MemberFacts is built,
+    every one of that member's per-chunk module_brief() calls must make
+    zero additional fact-store queries for the whole-member sections --
+    reusing raw rows already fetched, not re-querying them under a
+    different rule_range each time."""
+    counting = _CountingConn(indexed_db)
+    facts = build_member_facts(counting, "MMP0100", NULL_REDACTOR)
+    assert counting.calls > 5, "sanity: building facts should run several whole-member queries"
+
+    counting.calls = 0
+    for i, rule_range in enumerate([(1, 6), (7, 12), (13, 18)], start=1):
+        module_brief(
+            counting, "MMP0100", redact=NULL_REDACTOR,
+            rule_range=rule_range, chunk_info=(i, 3), facts=facts,
+        )
+    assert counting.calls == 0, (
+        "module_brief() must not touch the fact store at all when a MemberFacts "
+        "for this member is already given"
+    )
+
+
+def test_module_brief_output_identical_whether_facts_are_shared_or_rebuilt_per_chunk(indexed_db):
+    """Proves Part 1 is a pure efficiency refactor: rendering the same
+    member's chunks from one shared MemberFacts must produce byte-identical
+    output to the old behaviour of letting each chunk's own module_brief()
+    call rebuild its facts from scratch (facts=None, the default)."""
+    facts = build_member_facts(indexed_db, "MMP0100", NULL_REDACTOR)
+    ranges = [(1, 6), (7, 12), (13, 18)]
+    for i, rule_range in enumerate(ranges, start=1):
+        chunk_info = (i, len(ranges))
+        shared = module_brief(
+            indexed_db, "MMP0100", redact=NULL_REDACTOR,
+            rule_range=rule_range, chunk_info=chunk_info, facts=facts,
+        )
+        rebuilt = module_brief(
+            indexed_db, "MMP0100", redact=NULL_REDACTOR,
+            rule_range=rule_range, chunk_info=chunk_info,
+        )
+        assert shared == rebuilt, f"chunk {i}: shared-facts output diverged from a fresh per-chunk fetch"
+
+
+def test_module_brief_output_identical_with_chunk_map_whether_facts_are_shared(indexed_db):
+    """Same identity guarantee as above, but with chunk_map given too (the
+    "documented in chunk N" annotation on the Internal routines section) --
+    that annotation depends on chunk_info's current-chunk position, not on
+    anything cached in MemberFacts, so it must still vary correctly per
+    chunk even when every chunk shares one MemberFacts."""
+    facts = build_member_facts(indexed_db, "MMP0100", NULL_REDACTOR)
+    routines = facts.routines
+    assert routines, "sanity: MMP0100 must have routines for this test to mean anything"
+    chunk_map = {r["name"].upper(): (idx % 3) + 1 for idx, r in enumerate(routines)}
+    ranges = [(1, 6), (7, 12), (13, 18)]
+    for i, rule_range in enumerate(ranges, start=1):
+        chunk_info = (i, len(ranges))
+        shared = module_brief(
+            indexed_db, "MMP0100", redact=NULL_REDACTOR,
+            rule_range=rule_range, chunk_info=chunk_info, chunk_map=chunk_map, facts=facts,
+        )
+        rebuilt = module_brief(
+            indexed_db, "MMP0100", redact=NULL_REDACTOR,
+            rule_range=rule_range, chunk_info=chunk_info, chunk_map=chunk_map,
+        )
+        assert shared == rebuilt, f"chunk {i}: shared-facts output diverged with chunk_map set"
+
+
+def test_build_member_facts_returns_ambiguous_markdown_string_like_module_brief_did(indexed_db):
+    """build_member_facts() must preserve module_brief's own graceful
+    "no such member" early return -- callers (batch.py's chunked loop) treat
+    a str result as a complete brief rather than a MemberFacts to render
+    from."""
+    facts = build_member_facts(indexed_db, "NO-SUCH-MEMBER-AT-ALL", NULL_REDACTOR)
+    assert isinstance(facts, str)
+    assert "No such member in the index" in facts
+    # module_brief() itself must return the identical text for the same lookup.
+    assert module_brief(indexed_db, "NO-SUCH-MEMBER-AT-ALL", redact=NULL_REDACTOR) == facts

@@ -30,8 +30,9 @@ from typing import Callable
 
 from . import __version__
 from .brief import (
-    chunk_density_metrics, fetch_routines, fetch_rule_candidate_rows, flag_density_outliers,
-    format_density_note, module_brief, routine_aware_chunk_ranges, routine_for_line,
+    build_member_facts, chunk_density_metrics, fetch_routines, fetch_rule_candidate_rows,
+    flag_density_outliers, format_density_note, module_brief, routine_aware_chunk_ranges,
+    routine_for_line,
 )
 from .citations import _cite, _rule_id, numbered_rule_candidates
 from .db import GAP_SEVERITY_ORDER_SQL
@@ -1589,12 +1590,20 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
         f"{out_path.stem}.chunk{n:0{chunk_width}d}{out_path.suffix}" for n in range(1, chunk_count + 1)
     }
     _prune_stale_chunk_files(out_path, expected_chunk_names)
+    # Built once for the whole member (issue #183) -- every whole-member
+    # section module_brief() renders (interface, data access, calls,
+    # inbound callers, gaps, ...) is identical across this member's chunks,
+    # since none of it depends on rule_range. Sharing one fact-gather here
+    # instead of letting each chunk's own module_brief() call re-run those
+    # ~15 fact-store queries is the whole point of this loop no longer
+    # calling module_brief() with facts=None.
+    member_facts = build_member_facts(conn, member_name, redact)
     for i, (start, end) in enumerate(ranges, start=1):
         chunk_path = out_path.with_name(f"{out_path.stem}.chunk{i:0{chunk_width}d}{out_path.suffix}")
         brief = module_brief(
             conn, member_name, redact=redact, lexicon=lexicon,
             rule_range=(start, end), chunk_info=(i, chunk_count), chunk_map=chunk_map,
-            sme_notes=sme_notes,
+            sme_notes=sme_notes, facts=member_facts,
         )
         brief_hash = hashlib.sha256(brief.encode("utf-8")).hexdigest()
         result = None
@@ -2370,11 +2379,17 @@ def plan_batch(conn, members: list[str], out_dir: Path,
         prior_chunks = prior.get("chunks") if isinstance(prior, dict) else None
         chunks_reusable = 0
         chunk_bodies: list[tuple[int, str]] = []
+        # Same member-level fact-gather reuse as _generate_module_doc_chunked
+        # (issue #183) -- this dry-run path hashes every chunk's brief just
+        # like a real render would, so it pays the same per-chunk cost
+        # unless the whole-member facts are shared across the loop too.
+        member_facts = build_member_facts(conn, name, redact)
         for i, (start, end) in enumerate(ranges, start=1):
             chunk_path = out_path.with_name(f"{out_path.stem}.chunk{i:0{chunk_width}d}{out_path.suffix}")
             chunk_brief = module_brief(
                 conn, name, redact=redact, lexicon=lexicon,
                 rule_range=(start, end), chunk_info=(i, chunk_count), sme_notes=sme_notes,
+                facts=member_facts,
             )
             chunk_hash = hashlib.sha256(chunk_brief.encode("utf-8")).hexdigest()
             if _chunk_reuse_ok(conn, prior_chunks, i, chunk_hash, chunk_path):

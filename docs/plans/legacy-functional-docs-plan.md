@@ -261,6 +261,68 @@ GitHub org.
   quota-shaped and genuine-failure paths for every caller; full suite (923
   passed, 2 skipped) and the bundled fixture pipeline both green.
 
+**Progress (2026-09-10g):**
+- Fixed issue #183 Part 1 (PR #206): `module_brief(conn, member_name, rule_range=...)`
+  ran ~15 whole-member fact-store queries (interface, data access, calls,
+  inbound callers, gaps, ...) on *every* chunk of a chunked member, even
+  though none of that content depends on `rule_range` -- for a member split
+  into 16-30 chunks, the same fixed queries and the same large rendered
+  text ran/were resent 16-30 times over. Split `module_brief` into
+  `build_member_facts(conn, member_name, redact)` (runs every whole-member
+  query once, returning a `MemberFacts` of raw rows) and `module_brief`
+  itself, now optionally taking a `facts=` param and skipping every query
+  it covers when given. `_generate_module_doc_chunked` and `plan_batch`
+  (`batch.py`) now build one `MemberFacts` per member before their chunk
+  loops and pass it to every chunk's `module_brief` call; every other call
+  site (`cli.py`, the single-call narrate path, tests) is unaffected --
+  `facts=None` (the default) rebuilds it exactly as before. Also moved
+  `_branch_data_access`'s per-rule data-access lookup (previously its own
+  `conn.execute` per IF/ELSE rule with a branch) to filter the same
+  `data_access` rows `module_brief` already fetches once, in Python,
+  rather than adding a query per rendered rule on top of the ~15
+  whole-member ones -- verified via a `_CountingConn` test wrapper that a
+  chunked member's per-chunk `module_brief` calls make **zero** further
+  fact-store queries once a `MemberFacts` is shared across them. Pure
+  efficiency refactor, no behaviour change: new tests in `tests/test_brief.py`
+  assert byte-identical `module_brief` output (with and without
+  `chunk_map`) whether facts are shared across a member's chunks or
+  rebuilt per chunk exactly as before this change; full suite (912 passed,
+  2 skipped -- 907 baseline + 5 new) and the bundled fixture pipeline
+  (`ingest`/`derive`/`coverage`/`validate --docs examples`, 71/71 documents
+  clean, 0 invalid citations) both pass.
+  - Part 2 (reuse `MemberFacts` as a second prompt-cache breakpoint,
+    #159/#168-style) deferred to #207, not attempted here.
+    Confirmed the Anthropic API's documented limit (4 cache-control
+    breakpoints per request) isn't the blocker -- a second breakpoint
+    alongside the existing project-level one is well within budget. The
+    real blocker: `module_brief`'s section order doesn't put every
+    rule_range-independent section before the rule_range-dependent
+    "Candidate business rules" section -- copycode rules and gaps render
+    *after* it -- so a chunked member's brief is shaped `[shared A]
+    [chunk-specific][shared B]`, not `[shared][chunk-specific]`, and
+    `AnthropicCaller._content` only knows how to cache one contiguous
+    leading prefix per breakpoint. Fixing that needs a real design
+    decision (reorder sections vs. cache only the leading "shared A" slice
+    vs. something else), not just wiring a second `cache_control` block on
+    top of Part 1 -- see #207 for the options considered.
+  - Copilot review on PR #206 then caught: (1) `run_batch`/`plan_batch`
+    each still gathered a member's whole-member facts a second time in the
+    chunked path, after their own routing/hashing pass had already built
+    them -- fixed by threading that same `MemberFacts` through
+    `generate_module_doc`/`_generate_module_doc_chunked` instead of
+    discarding it; (2) `_branch_data_access`'s Python-side filter over
+    `data_access` rows was itself O(rules * data_access) -- switched to
+    `bisect` over a precomputed `line_no` list, O(rules * log
+    data_access); (3) `MemberFacts.guard_lines` was pre-rendered with
+    whichever `redact` `build_member_facts` happened to be called with,
+    so reusing a `MemberFacts` under a different `redact` could leak
+    unredacted guard-chain text -- `build_member_facts` no longer takes a
+    `redact` at all; it stores raw guard-chain facts
+    (`_caller_guard_chain_facts`) and `module_brief` renders them via the
+    new `_render_guard_chain(facts, caller_name, redact)` using its own
+    caller's `redact` every time, the same as every other field. Full
+    suite: 913 passed, 2 skipped.
+
 **Progress (2026-09-10c):**
 - Fixed issue #184: `citations._rule_id(member_name, n)` is a pure
   formatting helper -- the ordinal `n` was independently re-derived by
