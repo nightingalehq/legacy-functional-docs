@@ -389,6 +389,37 @@ def unparsed_line_shapes(conn, dialect: str) -> list[dict]:
     return sorted(shapes.values(), key=lambda e: -e["count"])
 
 
+def dialect_coverage(conn, dialect: str) -> dict:
+    """`coverage()`'s `unparsed_lines`/`line_recognition_rate` pair, scoped
+    to one dialect instead of the whole fact store -- the number a
+    dialect-specific narrative claim (the language-guide doc's own
+    `dialect:` front-matter subject, or a reference guide's worked example
+    for `mantis`/`natural`) should actually be compared against, since a
+    codebase mixing dialects can easily have one at 99% and another at 60%
+    while the system-wide figure `coverage()` reports sits in between and
+    matches neither (see issue #199 -- `docdrift._dialect_stats_drift`
+    consumes this). Same rounding convention as `coverage()`'s own
+    `line_recognition_rate` (4 decimal places); 0 when the dialect has no
+    ingested source lines at all, same "empty means 0, not a ZeroDivisionError"
+    convention `coverage()` uses."""
+    def scalar(sql, *args):
+        return conn.execute(sql, args).fetchone()[0]
+
+    lines = scalar(
+        "SELECT COUNT(*) FROM source_line sl JOIN member m ON m.id = sl.member_id "
+        "WHERE m.dialect=?", dialect,
+    )
+    unparsed = scalar(
+        "SELECT COUNT(*) FROM gap g JOIN member m ON m.id = g.member_id "
+        "WHERE g.gap_kind='unparsed_line' AND m.dialect=?", dialect,
+    )
+    return {
+        "source_lines": lines,
+        "unparsed_lines": unparsed,
+        "line_recognition_rate": round(1 - (unparsed / lines), 4) if lines else 0,
+    }
+
+
 def referenced_entities(conn, member_id: int) -> list[dict]:
     """Every entity (Adabas file, Supra dataset, Mantis screen/map, ...)
     this member is known to touch: read/written via data_access, declared

@@ -10,7 +10,7 @@ from __future__ import annotations
 import sqlite3
 import textwrap
 
-from mfdoc import docdrift
+from mfdoc import docdrift, graph
 from mfdoc.db import SCHEMA
 
 
@@ -403,3 +403,139 @@ def test_cli_doc_drift_exit_code(tmp_path):
 
     (docs_dir / "WGT0100.md").write_text(_module_doc(br_count=2), encoding="utf-8")
     assert cli.cmd_doc_drift(SimpleNamespace(config=str(config_path), docs=str(docs_dir))) == 1
+
+
+def _language_guide_doc(dialect, unparsed_lines, rate):
+    return textwrap.dedent(f"""\
+        ---
+        title: "{dialect} — language guide"
+        doc_type: language-guide
+        system: "WGT"
+        dialect: "{dialect}"
+        generated_by: legacy-functional-docs 0.1.0
+        generated_at: "2026-09-10"
+        review_status: draft
+        reviewers: []
+        confidence_summary: {{verified: 0, inferred: 0, unresolved: 0}}
+        sources: []
+        sme_questions: []
+        ---
+
+        # {dialect} — language guide
+
+        This codebase's `{dialect}` source has {unparsed_lines} unparsed lines,
+        a {rate} line-recognition rate.
+        """)
+
+
+def _seed_dialect_coverage(conn, dialect, total_lines, unparsed, member="WGT0200"):
+    """`total_lines` source lines for one member of `dialect`, `unparsed`
+    of them flagged with a matching `unparsed_line` gap -- issue #199's
+    dialect-scoped stats. `member` is overridable so a test can seed two
+    different dialects without colliding on `member(name, library,
+    dialect)`'s uniqueness constraint under the same default name+library."""
+    mid = _insert_member(conn, member, dialect=dialect)
+    for line_no in range(1, total_lines + 1):
+        conn.execute(
+            "INSERT INTO source_line (member_id, line_no, text) VALUES (?, ?, 'X')",
+            (mid, line_no),
+        )
+    for line_no in range(1, unparsed + 1):
+        conn.execute(
+            "INSERT INTO gap (member_id, line_no, gap_kind, severity, detail, raw) "
+            "VALUES (?, ?, 'unparsed_line', 'low', 'x', 'FOO BAR')",
+            (mid, line_no),
+        )
+
+
+def test_dialect_stats_drift_detected_when_unparsed_count_is_stale(tmp_path):
+    conn = _conn()
+    _seed_dialect_coverage(conn, "mantis", total_lines=10, unparsed=1)
+    # A second dialect with deliberately different totals -- proves the
+    # check compares against `mantis`'s own figures, not some system-wide
+    # or wrong-dialect number that would happen to also flag/pass here.
+    _seed_dialect_coverage(conn, "natural", total_lines=4, unparsed=2, member="NAT0100")
+    conn.commit()  # mantis: 1 unparsed of 10 -> 0.9; natural: 2 of 4 -> 0.5
+
+    doc_path = tmp_path / "language-guide.md"
+    # Doc still claims the pre-fix figures from a since-improved parser.
+    doc_path.write_text(_language_guide_doc("mantis", unparsed_lines=4, rate="0.6000"),
+                         encoding="utf-8")
+
+    result = docdrift.check_document(conn, doc_path)
+    assert not result["ok"]
+    problems = "\n".join(result["problems"])
+    assert "4 unparsed line(s)" in problems and "has 1" in problems
+    assert "0.6 line-recognition rate" in problems and "computes 0.9" in problems
+
+
+def test_dialect_stats_no_drift_when_freshly_regenerated(tmp_path):
+    conn = _conn()
+    _seed_dialect_coverage(conn, "mantis", total_lines=10, unparsed=1)
+    _seed_dialect_coverage(conn, "natural", total_lines=4, unparsed=2, member="NAT0100")
+    conn.commit()  # mantis: 1 unparsed of 10 -> 0.9; natural: 2 of 4 -> 0.5
+
+    doc_path = tmp_path / "language-guide.md"
+    doc_path.write_text(_language_guide_doc("mantis", unparsed_lines=1, rate="0.9000"),
+                         encoding="utf-8")
+
+    result = docdrift.check_document(conn, doc_path)
+    assert result["ok"]
+    assert result["problems"] == []
+
+
+def test_dialect_coverage_is_scoped_to_one_dialect():
+    """graph.dialect_coverage's own regression: an implementation that
+    accidentally dropped the `m.dialect` filter (or returned system-wide
+    totals) would report identical figures for both dialects seeded here,
+    despite their source/gap totals being deliberately different."""
+    conn = _conn()
+    _seed_dialect_coverage(conn, "mantis", total_lines=10, unparsed=1)
+    _seed_dialect_coverage(conn, "natural", total_lines=4, unparsed=2, member="NAT0100")
+    conn.commit()
+
+    mantis = graph.dialect_coverage(conn, "mantis")
+    natural = graph.dialect_coverage(conn, "natural")
+    assert mantis == {"source_lines": 10, "unparsed_lines": 1, "line_recognition_rate": 0.9}
+    assert natural == {"source_lines": 4, "unparsed_lines": 2, "line_recognition_rate": 0.5}
+
+
+def test_dialect_stats_drift_ignores_non_language_guide_doc_with_dialect_field():
+    """A module doc also carries a `dialect:` field (its own member's
+    dialect, per `templates/module.md`), but names a member-scoped claim,
+    not a whole-dialect one -- this check must not compare it against
+    `dialect_coverage`'s whole-dialect totals (issue #199 review)."""
+    conn = _conn()
+    _seed_dialect_coverage(conn, "mantis", total_lines=10, unparsed=1)
+    conn.commit()  # 1 unparsed of 10 -> 0.9 line-recognition rate
+
+    fm = {"doc_type": "module", "dialect": "mantis"}
+    body = "This module has 999 unparsed lines, a 0.1000 line-recognition rate."
+    assert docdrift._dialect_stats_drift(conn, fm, body) == []
+
+
+def test_language_guide_sources_placeholder_is_not_flagged(tmp_path):
+    """`templates/language-guide.md`'s canonical `sources` value is a
+    descriptive placeholder, not a member/entity name -- a real, freshly
+    generated language guide using it verbatim must still validate clean
+    (issue #199 review)."""
+    conn = _conn()
+    conn.commit()
+    text = textwrap.dedent("""\
+        ---
+        title: "mantis — language guide"
+        doc_type: language-guide
+        dialect: "mantis"
+        sources: ["mantis source files"]
+        confidence_summary: {verified: 0, inferred: 0, unresolved: 0}
+        sme_questions: []
+        ---
+
+        # mantis — language guide
+        """)
+    doc_path = tmp_path / "language-guide.md"
+    doc_path.write_text(text, encoding="utf-8")
+
+    result = docdrift.check_document(conn, doc_path)
+    assert result["ok"]
+    assert result["problems"] == []

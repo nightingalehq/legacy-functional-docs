@@ -2,12 +2,16 @@
 
 A generated document's own front matter and prose carry a handful of
 numbers/facts that already have an exact counterpart computed somewhere in
-the fact store (`fetch_rule_candidate_rows` for rule counts, `graph.coverage`
-for coverage rates, the `gap`/`entity`/`member` tables directly). After a
-`calibrate`/`derive` refresh, those two can drift apart with nothing to
-notice it short of a human (or an agent) re-reading the whole document
-side-by-side with a fresh brief -- exactly the judgement-shaped-but-
-mechanical comparison this module replaces (issue #161).
+the fact store (`fetch_rule_candidate_rows` for rule counts, `graph.coverage`/
+`graph.dialect_coverage` for coverage rates, the `gap`/`entity`/`member`
+tables directly). After a `calibrate`/`derive` refresh, those two can drift
+apart with nothing to notice it short of a human (or an agent) re-reading
+the whole document side-by-side with a fresh brief -- exactly the
+judgement-shaped-but-mechanical comparison this module replaces (issue
+#161; extended in issue #199 to a dialect-scoped unparsed-line count/
+line-recognition rate, since a document naming one dialect's own figures
+can drift independently of the system-wide numbers `_coverage_rate_drift`
+already checks).
 
 Every check here follows structural.py's contract: pure extraction/
 comparison over already-computed facts, no synthesis, no model call, and a
@@ -51,6 +55,16 @@ _GAP_SEVERITY_RE = re.compile(r"(\d+)\s+high,\s*(\d+)\s+medium,\s*(\d+)\s+low", 
 # stage conventionally restates it as a percentage in prose -- see
 # examples/outputs/docs/system-overview.md's "96.9% line recognition".
 _LINE_RECOGNITION_RE = re.compile(r"(\d+(?:\.\d+)?)\s*%\s+line recognition", re.I)
+
+# A dialect-scoped narrative claim (a language-guide's own prose, a
+# calibration write-up) states these as an absolute count and a raw
+# fraction rather than system-overview's rounded percentage -- see issue
+# #199's "N unparsed lines"/"X.XXXX line-recognition rate" examples. Both
+# are matched loosely (case-insensitive, "line-recognition"/"line
+# recognition" either hyphenated or not) since a narrative pass phrases
+# this by hand; the literal number is the load-bearing part.
+_UNPARSED_COUNT_RE = re.compile(r"(\d+)\s+unparsed lines?", re.I)
+_DIALECT_RATE_RE = re.compile(r"(\d+\.\d+)\s+line[- ]recognition rate", re.I)
 
 
 def _rule_count_drift(conn, fm: dict, body: str) -> list[str]:
@@ -113,7 +127,16 @@ def _sources_drift(conn, fm: dict) -> list[str]:
     a real member or entity in the current index -- a name that doesn't is
     concrete evidence this document was generated against a different
     ingest (a rename, a removed member, a re-scoped project.yml), even
-    before reading a word of the body."""
+    before reading a word of the body.
+
+    Exempts `doc_type: language-guide` -- `templates/language-guide.md`
+    populates `sources` with a descriptive placeholder (`["{DIALECT} source
+    files"]`), not a member/entity name, per its own design (issue #91).
+    Mirrors `validate.py`'s identical exclusion for the same doc type and
+    the same reason -- without it, a real, freshly generated language guide
+    could never validate clean under this check (issue #199 review)."""
+    if fm.get("doc_type") == "language-guide":
+        return []
     sources = fm.get("sources")
     if not isinstance(sources, list):
         return []
@@ -198,6 +221,81 @@ def _coverage_rate_drift(conn, fm: dict, body: str) -> list[str]:
     return []
 
 
+def _decimal_places(text: str) -> int:
+    """Number of digits after the decimal point in a `\\d+\\.\\d+`-shaped
+    match's text, e.g. `2` for `"0.90"` -- used to round the fact store's
+    current rate to the same precision a document actually claimed, rather
+    than accepting anything within a fixed absolute tolerance (issue #199
+    review: a fixed 0.0005 tolerance would accept a claim that is stale at
+    the precision it was itself written to, e.g. 0.9004 read as "matching"
+    a true 0.9000)."""
+    return len(text.split(".", 1)[1])
+
+
+def _dialect_stats_drift(conn, fm: dict, body: str) -> list[str]:
+    """Compares a dialect-scoped "N unparsed lines" / "X.XXXX
+    line-recognition rate" claim in `body` against `graph.dialect_coverage`
+    for the dialect named in front matter's `dialect:` field -- see
+    `templates/language-guide.md`, the one document type that names its
+    single subject dialect this way (its `{DIALECT}` front-matter
+    placeholder).
+
+    Restricted to `doc_type: language-guide` specifically, unlike
+    `_sources_drift`'s doc_type-agnostic gating: `dialect` is not a
+    document-wide scope marker for every document type -- `templates/
+    module.md` also carries one, but names the *member's own* dialect, not
+    a claim about the whole dialect's totals. Comparing a module doc's
+    member-scoped claim against `dialect_coverage`'s whole-dialect figures
+    would misreport drift for a document that was never making a
+    dialect-wide claim in the first place (issue #199 review).
+
+    Both regexes are searched before `dialect_coverage` is ever called, so
+    a tree containing many documents that don't state these figures at all
+    (the common case) doesn't pay for two `COUNT(*)` scans per document
+    just to find nothing to compare.
+
+    Only meaningful when `dialect:` is a real string naming a dialect this
+    fact store actually ingested anything for; a dialect with zero ingested
+    source lines has nothing live to compare against (silently skipped,
+    same "no basis for comparison" contract every other check here
+    follows) rather than reported as 0-vs-N drift."""
+    if fm.get("doc_type") != "language-guide":
+        return []
+    dialect = fm.get("dialect")
+    if not isinstance(dialect, str) or not dialect.strip():
+        return []
+    dialect = dialect.strip()
+    count_match = _UNPARSED_COUNT_RE.search(body)
+    rate_match = _DIALECT_RATE_RE.search(body)
+    if not count_match and not rate_match:
+        return []
+    stats = graph.dialect_coverage(conn, dialect)
+    if not stats["source_lines"]:
+        return []
+    problems: list[str] = []
+    if count_match:
+        claimed = int(count_match.group(1))
+        current = stats["unparsed_lines"]
+        if claimed != current:
+            problems.append(
+                f"document states {claimed} unparsed line(s) for dialect '{dialect}', "
+                f"but the current fact store has {current} -- regenerate from a fresh "
+                f"`mfdoc lang-guide --config project.yml --dialect {dialect}`"
+            )
+    if rate_match:
+        claimed_text = rate_match.group(1)
+        claimed_rate = float(claimed_text)
+        current_rate = round(stats["line_recognition_rate"], _decimal_places(claimed_text))
+        if claimed_rate != current_rate:
+            problems.append(
+                f"document states a {claimed_rate} line-recognition rate for dialect "
+                f"'{dialect}', but the current fact store computes {current_rate} -- "
+                f"regenerate from a fresh `mfdoc lang-guide --config project.yml "
+                f"--dialect {dialect}`"
+            )
+    return problems
+
+
 def check_document(conn, path: Path) -> dict:
     """One document's drift report: `{"path", "ok", "skipped", "problems",
     "note"}`. `skipped` is True (with `problems` always `[]`) for anything
@@ -224,6 +322,7 @@ def check_document(conn, path: Path) -> dict:
         *_sources_drift(conn, fm),
         *_gap_register_drift(conn, fm, body),
         *_coverage_rate_drift(conn, fm, body),
+        *_dialect_stats_drift(conn, fm, body),
     ]
     return {"path": str(path), "ok": not problems, "skipped": False, "problems": problems}
 

@@ -114,9 +114,10 @@ mfdoc doc-drift --config project.yml --docs docs/functional
 # deterministic, no-model-call check: does a generated document's own citable
 # numbers (rule counts cited as MEMBER:BR-nnn, front-matter `sources`, a
 # gap-register's stated totals, a system-overview's stated line-recognition
-# rate) still match what the current fact store computes -- a cheap
-# alternative to a human/agent re-reading a whole document against a fresh
-# brief after a calibrate/derive refresh (see docdrift.py)
+# rate, or a language-guide's own dialect-scoped unparsed-line count/
+# line-recognition rate) still match what the current fact store computes --
+# a cheap alternative to a human/agent re-reading a whole document against a
+# fresh brief after a calibrate/derive refresh (see docdrift.py)
 mfdoc sample-citations --config project.yml --docs docs/functional --judge human
 # samples generated claims against cited source, records a human verdict --
 # backs the min_citation_accuracy_rate gate; mfdoc gate fails that gate
@@ -250,8 +251,10 @@ source ─▶ [0 Ingest: normalise.py] ─▶ [1 Extract: dialects/*.py] ─▶ 
   `validate.py` -- not whether a citation resolves, but whether a
   document's own citable *numbers* (a rule count cited as `MEMBER:BR-nnn`,
   front-matter `sources`, a gap-register's stated totals, a
-  system-overview's stated line-recognition rate) still match what the
-  fact store computes today. Same deterministic, no-model-call contract as
+  system-overview's stated line-recognition rate, or a language-guide's own
+  dialect-scoped unparsed-line count/line-recognition rate via
+  `graph.dialect_coverage`) still match what the fact store computes today.
+  Same deterministic, no-model-call contract as
   `structural.py`; a document can validate cleanly (every citation
   resolves) while still citing a rule count `mfdoc calibrate`/`mfdoc
   derive` has since moved past -- this is what catches that case cheaply,
