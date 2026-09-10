@@ -435,26 +435,27 @@ def test_generate_module_doc_from_brief_tracks_duration_and_retries_across_attem
 
 
 def test_is_near_miss_uncited_boundary():
-    """`_is_near_miss_uncited` (issue #131) is true only when validation
-    failed for exactly one reason -- a small number (<= NEAR_MISS_MAX_UNCITED)
-    of uncited-and-unhedged assertive statements -- and false the moment
-    either bound is crossed: too many uncited sentences, or any other
+    """`_is_near_miss` (issue #131, generalized by #170) is true only when
+    validation failed for reasons that are entirely sentence-localized --
+    here, a small number (<= NEAR_MISS_MAX_LOCALIZED) of uncited-and-
+    unhedged assertive statements -- and false the moment either bound is
+    crossed: too many uncited sentences, or any other (non-localized)
     problem alongside them (here, an invalid citation)."""
-    at_limit = ["x"] * batch_mod.NEAR_MISS_MAX_UNCITED
+    at_limit = ["x"] * batch_mod.NEAR_MISS_MAX_LOCALIZED
     within_bound = {
         "ok": False,
         "problems": [f"{len(at_limit)} assertive statement(s) carry no citation and no hedge"],
         "uncited_assertions": at_limit,
     }
-    assert batch_mod._is_near_miss_uncited(within_bound)
+    assert batch_mod._is_near_miss(within_bound)
 
-    over_limit = ["x"] * (batch_mod.NEAR_MISS_MAX_UNCITED + 1)
+    over_limit = ["x"] * (batch_mod.NEAR_MISS_MAX_LOCALIZED + 1)
     too_many = {
         "ok": False,
         "problems": [f"{len(over_limit)} assertive statement(s) carry no citation and no hedge"],
         "uncited_assertions": over_limit,
     }
-    assert not batch_mod._is_near_miss_uncited(too_many)
+    assert not batch_mod._is_near_miss(too_many)
 
     mixed_with_other_problem = {
         "ok": False,
@@ -464,13 +465,58 @@ def test_is_near_miss_uncited_boundary():
         ],
         "uncited_assertions": ["a"],
     }
-    assert not batch_mod._is_near_miss_uncited(mixed_with_other_problem)
+    assert not batch_mod._is_near_miss(mixed_with_other_problem)
+
+
+def test_is_near_miss_reversed_condition_only():
+    """Issue #170: a validation failure whose only problem(s) are
+    reversed-condition flags (each naming a specific `[[MEMBER:LINE]]`
+    citation) is a near-miss too, not just the uncited-assertion case --
+    it's exactly as sentence-localized, just from a different check."""
+    one_reversed = {
+        "ok": False,
+        "problems": [
+            "comparison direction may be reversed near [[MMP0100:5]]: text reads "
+            "as though STATUS-FLAG equals 'OK', but the source condition means "
+            "STATUS-FLAG does not equal 'OK'"
+        ],
+        "uncited_assertions": [],
+    }
+    assert batch_mod._is_near_miss(one_reversed)
+
+    too_many_reversed = {
+        "ok": False,
+        "problems": [
+            f"comparison direction may be reversed near [[MMP0100:{n}]]: "
+            "text reads as though X equals 'Y', but the source condition "
+            "means X does not equal 'Y'"
+            for n in range(batch_mod.NEAR_MISS_MAX_LOCALIZED + 1)
+        ],
+        "uncited_assertions": [],
+    }
+    assert not batch_mod._is_near_miss(too_many_reversed)
+
+
+def test_is_near_miss_structural_failure_excluded():
+    """A structural/whole-document failure (missing front matter) is never
+    a near-miss, even alongside a localized finding -- it isn't tied to one
+    sentence a targeted patch could fix, so the chunk must still fall
+    through to a full retry."""
+    missing_front_matter = {
+        "ok": False,
+        "problems": [
+            "front matter missing required key: doc_type",
+            "1 assertive statement(s) carry no citation and no hedge",
+        ],
+        "uncited_assertions": ["a"],
+    }
+    assert not batch_mod._is_near_miss(missing_front_matter)
 
 
 def test_near_miss_uncited_assertion_gets_a_targeted_patch_not_a_full_retry(indexed_db, tmp_path):
     """Issue #131: a chunk whose only validation problem is a single
     near-miss uncited assertive statement gets a cheap targeted-patch
-    follow-up call (build_uncited_patch_prompt) instead of a full chunk
+    follow-up call (build_localized_patch_prompt) instead of a full chunk
     regeneration -- the second call must carry the flagged-sentence prompt,
     not the writing rules/template/"Previous attempt failed" full-retry
     prompt, and must not consume one of the full-regeneration attempts."""
@@ -508,7 +554,8 @@ def test_near_miss_uncited_assertion_gets_a_targeted_patch_not_a_full_retry(inde
     assert calls["n"] == 2
     assert result.attempts == 1  # the patch call doesn't count as a full-retry attempt
     patch_prompt = prompts[1]
-    assert "Flagged snippets (locate the matching sentence; fix only these)" in patch_prompt
+    assert "Flagged findings (locate the matching sentence; fix only these)" in patch_prompt
+    assert "Uncited assertive statements" in patch_prompt
     assert "truncated to 140 characters" in patch_prompt
     assert "Previous attempt failed validation" not in patch_prompt
     assert "cite everything" not in patch_prompt  # writing rules not resent
@@ -559,11 +606,11 @@ def test_near_miss_patch_failure_falls_back_to_full_chunk_retry(indexed_db, tmp_
 
 def test_multiple_uncited_assertions_still_trigger_a_full_retry(indexed_db, tmp_path):
     """A genuinely broken response -- more uncited assertions than
-    NEAR_MISS_MAX_UNCITED allows -- must skip the targeted-patch path
+    NEAR_MISS_MAX_LOCALIZED allows -- must skip the targeted-patch path
     entirely and go straight to the existing full-chunk retry, unchanged
     from before issue #131's fix."""
     uncited_sentences = "".join(
-        f"The system performs step {i}. " for i in range(batch_mod.NEAR_MISS_MAX_UNCITED + 1)
+        f"The system performs step {i}. " for i in range(batch_mod.NEAR_MISS_MAX_LOCALIZED + 1)
     )
     broken_text = (
         GOOD_FRONTMATTER.format(member="MMP0100")
@@ -594,7 +641,87 @@ def test_multiple_uncited_assertions_still_trigger_a_full_retry(indexed_db, tmp_
     assert calls["n"] == 2
     assert result.attempts == 2
     assert "Previous attempt failed validation" in prompts[1]
-    assert "Flagged sentences (fix only these)" not in prompts[1]
+    assert "Flagged findings (locate the matching sentence; fix only these)" not in prompts[1]
+
+
+def test_reversed_condition_only_gets_a_targeted_patch_not_a_full_retry(indexed_db, tmp_path):
+    """Issue #170: a chunk whose only validation problem is a single
+    near-miss reversed-condition flag gets the same cheap targeted-patch
+    treatment as the uncited-assertion case -- a full chunk regeneration
+    must not be triggered just because the localized failure came from a
+    different check.
+
+    The repo's own MMP0100 fixture (examples/inputs/natural/MMP0100.nsp)
+    has `IF ORDER-VIEW.ORDER-STATUS NE 'CONF'` at line 38 -- ORDER-STATUS
+    matches the outcome-field pattern (`\\bSTATUS\\b`), so a sentence
+    narrating this as the status *equalling* 'CONF' describes the opposite
+    polarity from the source condition, which is exactly the shape
+    `_reversed_condition_problems` flags."""
+    calls = {"n": 0}
+    prompts: list[str] = []
+
+    reversed_text = (
+        GOOD_FRONTMATTER.format(member="MMP0100")
+        + "\n# MMP0100\n\nThe module rejects the order when the order status "
+        "equals 'CONF' [[MMP0100:38]].\n"
+    )
+    fixed_text = (
+        GOOD_FRONTMATTER.format(member="MMP0100")
+        + "\n# MMP0100\n\nThe module rejects the order when the order status "
+        "is not 'CONF' [[MMP0100:38]].\n"
+    )
+
+    def caller(prompt: str) -> batch_mod.ModelResponse:
+        calls["n"] += 1
+        prompts.append(prompt)
+        if calls["n"] == 1:
+            return batch_mod.ModelResponse(text=reversed_text, input_tokens=10, output_tokens=20)
+        return batch_mod.ModelResponse(text=fixed_text, input_tokens=5, output_tokens=8)
+
+    out_path = tmp_path / "MMP0100.md"
+    brief = "# Fact brief: MMP0100\n\nSome brief text [[MMP0100:38]].\n"
+    result = batch_mod._generate_module_doc_from_brief(
+        indexed_db, "MMP0100", brief, out_path, caller, "cite everything", "module template",
+    )
+    assert result.ok, result.problems
+    assert calls["n"] == 2
+    assert result.attempts == 1  # the patch call doesn't count as a full-retry attempt
+    patch_prompt = prompts[1]
+    assert "Flagged findings (locate the matching sentence; fix only these)" in patch_prompt
+    assert "Comparison direction may be reversed" in patch_prompt
+    assert "[[MMP0100:38]]" in patch_prompt
+    assert "Previous attempt failed validation" not in patch_prompt
+    assert "cite everything" not in patch_prompt  # writing rules not resent
+    assert "module template" not in patch_prompt  # template not resent
+
+
+def test_missing_front_matter_still_gets_a_full_retry(indexed_db, tmp_path):
+    """Negative case for issue #170: a structural failure (missing/broken
+    front matter entirely) is never sentence-localized, so it must keep
+    falling straight through to the existing full-chunk retry path,
+    unchanged, even though it's the same shape of "small number of
+    problems" a localized near-miss might have."""
+    calls = {"n": 0}
+    prompts: list[str] = []
+
+    def caller(prompt: str) -> batch_mod.ModelResponse:
+        calls["n"] += 1
+        prompts.append(prompt)
+        if calls["n"] == 1:
+            return batch_mod.ModelResponse(text="not even front matter", input_tokens=10, output_tokens=20)
+        text = GOOD_FRONTMATTER.format(member="MMP0100") + "\n# MMP0100\n\nDoes something [[MMP0100:1]].\n"
+        return batch_mod.ModelResponse(text=text, input_tokens=1, output_tokens=1)
+
+    out_path = tmp_path / "MMP0100.md"
+    brief = "# Fact brief: MMP0100\n\nSome brief text [[MMP0100:1]].\n"
+    result = batch_mod._generate_module_doc_from_brief(
+        indexed_db, "MMP0100", brief, out_path, caller, "cite everything", "module template",
+    )
+    assert result.ok, result.problems
+    assert calls["n"] == 2
+    assert result.attempts == 2
+    assert "Previous attempt failed validation" in prompts[1]
+    assert "Flagged findings (locate the matching sentence; fix only these)" not in prompts[1]
 
 
 def test_run_batch_tracks_duration_and_retries_for_a_mixed_run(monkeypatch, indexed_db, tmp_path):
