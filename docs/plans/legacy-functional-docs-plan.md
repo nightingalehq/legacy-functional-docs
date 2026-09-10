@@ -12,6 +12,25 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-10):**
+- Fixed issue #158: `validate.py`'s `ASSERTIVE` regex matches a unit's
+  opening words ("When ", "If ", "The system", etc.) to decide whether it
+  needs a citation or hedge, with no exemption for a unit that is itself a
+  genuine question rather than a declarative claim. A legitimate open SME/
+  gap-register question phrased in the same idiom ("When X occurs, is Y the
+  correct outcome?") was flagged as an uncited assertive statement, forcing
+  a fragile hand-placed hedge before the `?` as the only workaround.
+  - Added `QUESTION_UNIT` (a unit ending in `?`, optionally followed only by
+    closing punctuation/quotes and whitespace) and a short-circuit in
+    `_uncited_assertions` right after the existing `ASSERTIVE`/`CITATION`/
+    `HEDGE` check. Deliberately anchored on the *whole* unit ending in `?`
+    so a declarative sentence that merely contains an embedded `?` elsewhere
+    (e.g. quoting a literal screen prompt) is still checked normally --
+    covered by both a positive and a negative test in `tests/test_validate.py`.
+  - Dialect-neutral: this operates on `_logical_units`' plain-text output
+    after markdown unwrapping, the same layer `ASSERTIVE`/`HEDGE`/`CITATION`
+    already operate on, with nothing dialect-specific to vary per project.
+
 **Progress (2026-09-09):**
 - Fixed issue #151: real SME review feedback asked, across several
   independent examples, for two framing changes to the module-doc

@@ -135,6 +135,16 @@ ASSERTIVE = re.compile(
 HEDGE = re.compile(r"\b(?:unresolved|not determined|could not be determined|needs confirmation|"
                    r"SME|to be confirmed|unknown|inferred)\b", re.I)
 
+# A unit that is itself phrased as a question (a genuine open SME/gap-register
+# question, e.g. "When X occurs, is Y the correct outcome?") is not an
+# assertion of behaviour and doesn't need a citation or hedge the way a
+# declarative claim does -- even though it can open with the same words
+# ASSERTIVE matches ("When ", "If ", ...). Anchored on the *whole* unit
+# ending in `?` (only trailing whitespace/closing punctuation allowed after
+# it) so a declarative sentence that merely contains an embedded `?`
+# elsewhere (e.g. quoting a literal screen prompt) is not exempted.
+QUESTION_UNIT = re.compile(r"\?[\"'”’)]*\s*$")
+
 
 # Sentence boundary: a terminator followed by whitespace and something that starts a
 # new sentence. Citations legitimately sit before the full stop, so `]].` must end a
@@ -180,7 +190,8 @@ def _logical_units(body: str) -> list[str]:
 def _uncited_assertions(body: str) -> list[str]:
     """Every logical unit (see `_logical_units`) that asserts a claim with no
     citation and no hedge -- except when the *next* unit opens with a
-    citation.
+    citation, or the unit is itself phrased as a genuine question (see
+    `QUESTION_UNIT`) rather than a declarative claim.
 
     `SENTENCE_SPLIT` treats `[[MEMBER:LINE]]` as a valid sentence-starter (so
     a sentence that deliberately opens with a citation isn't itself
@@ -197,6 +208,8 @@ def _uncited_assertions(body: str) -> list[str]:
     out = []
     for i, u in enumerate(units):
         if not (ASSERTIVE.match(u) and not CITATION.search(u) and not HEDGE.search(u)):
+            continue
+        if QUESTION_UNIT.search(u):
             continue
         nxt = units[i + 1] if i + 1 < len(units) else ""
         if nxt.lstrip().startswith("[["):
