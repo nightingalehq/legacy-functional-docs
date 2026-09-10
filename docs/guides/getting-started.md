@@ -71,6 +71,104 @@ You do **not** need an Anthropic/Claude API key or account to run the core
 pipeline. That's only needed for the optional `mfdoc batch` command, covered
 below.
 
+**On a fresh Ubuntu VM with none of this installed yet?** See "Setting up a
+fresh Ubuntu VM, step by step" immediately below before continuing — it
+covers everything in this section plus the exact commands to install it,
+assuming no prior Ubuntu experience.
+
+## Setting up a fresh Ubuntu VM, step by step
+
+Skip this section if you're on Mac/Windows, or if `python3 --version`, `git
+--version`, and `pip3 --version` already all work in your terminal. This
+section is for someone handed a brand-new Ubuntu virtual machine (or a fresh
+Ubuntu install) with nothing set up on it yet.
+
+A few terms used below: **the terminal** is the black/white text-only window
+you type commands into (search for "Terminal" in the applications menu, or
+it may already be open if you connected to the VM over SSH). **`sudo`**
+prefixes a command that needs administrator permission — Ubuntu will prompt
+for your account password (typing it shows nothing on screen, that's
+normal, just type it and press Enter). **`apt`** is Ubuntu's package
+manager — the tool that downloads and installs software from Ubuntu's own
+servers, similar in spirit to an app store but command-line only. Every
+command below is typed into the terminal followed by Enter, one at a time.
+
+1. **Confirm you're on Ubuntu, and which version.**
+
+   ```bash
+   cat /etc/os-release
+   ```
+
+   Look for `VERSION_ID` in the output (e.g. `"22.04"` or `"24.04"`). You'll
+   need this in step 3 only if the default Python turns out to be too old.
+
+2. **Update the package lists, then install the essentials** — a terminal
+   text editor isn't included here since steps below use `nano` only if you
+   choose to; everything else needed is:
+
+   ```bash
+   sudo apt update
+   sudo apt install -y python3 python3-venv python3-pip git
+   ```
+
+   `sudo apt update` refreshes Ubuntu's list of what software versions are
+   currently available (it doesn't install or change anything itself — always
+   safe to (re-)run). The `install -y` line then installs Python 3, the
+   `venv` module (for isolated project environments, step further down),
+   `pip` (Python's own package installer), and `git` (needed to download this
+   repository via `git clone`, see the next section). This step needs
+   internet access and takes a minute or two the first time.
+
+3. **Check the Python version is 3.10 or newer:**
+
+   ```bash
+   python3 --version
+   ```
+
+   Ubuntu 22.04 and 24.04 both ship a new-enough Python 3 by default (3.10
+   and 3.12 respectively) — if you're on one of those, this passes and you
+   can skip straight to "Getting the code onto your machine" below. If
+   you're on an older Ubuntu (e.g. 20.04, which ships Python 3.8) and the
+   version reported is below 3.10, install a newer Python alongside the
+   system one via the community-maintained deadsnakes PPA (a "PPA" is an
+   additional, non-default package source you can add to `apt`):
+
+   ```bash
+   sudo apt install -y software-properties-common
+   sudo add-apt-repository -y ppa:deadsnakes/ppa
+   sudo apt update
+   sudo apt install -y python3.10 python3.10-venv python3.10-distutils
+   ```
+
+   From here on, wherever this guide says `python3`, use `python3.10`
+   instead (e.g. `python3.10 -m venv .venv`) so you get the version you just
+   installed rather than the older system default.
+
+4. **If you'll be running `mfdoc batch` or `mfdoc test-batch`** (the
+   commands that call the Anthropic API — see "The one command that needs an
+   API key" below), set your API key now so it's available in every future
+   terminal session, not just this one:
+
+   ```bash
+   echo 'export ANTHROPIC_API_KEY="paste-your-key-here"' >> ~/.bashrc
+   source ~/.bashrc
+   ```
+
+   Replace `paste-your-key-here` with the actual key (from
+   [console.anthropic.com](https://console.anthropic.com/) or whoever
+   provisioned the VM/key for you) — keep the quotes. The first line appends
+   that `export` line to `~/.bashrc`, a file Ubuntu's terminal runs every
+   time it starts, so the key stays set across reboots and new terminal
+   windows without you re-typing it; `source ~/.bashrc` applies it to the
+   *current* terminal immediately, so you don't have to close and reopen it.
+   Check it worked with `echo $ANTHROPIC_API_KEY` — it should print the key
+   back. Treat this key like a password: don't paste it into a shared
+   document, a `project.yml`, or anything that might get committed to git.
+
+That's the machine ready. Continue with "Getting the code onto your
+machine" below, using `git clone` (Option B) since `git` is now installed —
+no need for the ZIP download option.
+
 ## Getting the code onto your machine
 
 This project lives on GitHub, a website that hosts code. "Git" is the
