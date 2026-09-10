@@ -63,3 +63,30 @@ def test_batch_command_reports_per_member_duration_and_retries(cli_args, tmp_pat
     assert "retries=" in out
     assert "call time:" in out
     assert "transient retries" in out
+
+
+def test_batch_command_dry_run_reports_a_plan_and_makes_no_model_calls(
+    derive_result, cli_args, tmp_path, capsys, monkeypatch,
+):
+    """--dry-run must never reach _build_model_caller (no --model/--provider/
+    API key needed) and must print a plan, not run a real batch."""
+    project_dir = Path(cli_args.config).parent
+    if not (project_dir / "reference").exists():
+        shutil.copytree(REPO_ROOT / "reference", project_dir / "reference")
+        shutil.copytree(REPO_ROOT / "templates", project_dir / "templates")
+
+    def exploding_build_caller(args):
+        raise AssertionError("--dry-run must never build a real model caller")
+
+    monkeypatch.setattr(cli, "_build_model_caller", exploding_build_caller)
+
+    args = SimpleNamespace(
+        config=cli_args.config, out=str(tmp_path / "out"), members="MMP0100",
+        state="", dry_run=True,
+    )
+    rc = cli.cmd_batch(args)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "corpus signature:" in out
+    assert "MMP0100" in out
+    assert not (tmp_path / "out").exists(), "--dry-run must not write any output"

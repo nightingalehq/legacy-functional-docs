@@ -90,6 +90,63 @@ GitHub org.
     sees only its own declared themes take effect. Full suite (887 tests)
     and the fixture pipeline (`ingest`/`derive`/`coverage`/`validate --docs
     examples`) both pass with no regressions.
+- Investigated and partly addressed issue #160 (batch.py's per-chunk resume
+  cache key is fragile to unrelated upstream fact-store changes, with no
+  up-front regeneration-scope estimate).
+  - **Renumbering-cascade hypothesis: confirmed.** `citations.py`'s
+    `_rule_id` numbers a rule's `BR-nnn` id by its position in
+    `enumerate(rules, start=1)` over that member's whole `rule_candidate`
+    row set, ordered by `line_no` -- every consumer (`brief.py`'s
+    `module_brief`, `structural.py`'s `thematic_rules_register`,
+    `testplan.py`, `validate.py`'s missing-range reporting) recomputes this
+    same positional numbering fresh each time, none of it persisted as a
+    stored id. So a single rule added or removed anywhere earlier in a
+    member does renumber every later rule, which does appear in every
+    later chunk's own rendered brief text (via `module_brief`'s "Each
+    carries a stable `BR-nnn` ID" listing) even when that chunk's own
+    routine's facts are otherwise unchanged -- exactly the false-
+    invalidation mechanism the issue describes. `routine_aware_chunk_ranges`
+    compounds this: it recomputes chunk boundaries from the current rule
+    count too, so an upstream rule-count change can also reshuffle which
+    rules land in which chunk, on top of renumbering them.
+  - **Not fixed, on purpose -- documented as a legitimate non-fix.** The
+    same global rule ordinal `_rule_id` numbers from is also the exact unit
+    `_generate_module_doc_chunked`'s chunk ranges are expressed in (a
+    `(start, end)` 1-based ordinal pair over that same rule list), and the
+    chunk-boundary summary (`- BR-nnn..BR-nnn -- label`) assumes those
+    ordinals are contiguous. Any per-routine or line-anchored renumbering
+    scheme would have to change that contiguous-ordinal chunking model too,
+    plus `rules-register`, `testplan.py`'s scenario naming, and
+    `validate.py`'s missing-range citation logic -- all of which currently
+    stay mutually consistent for the boring reason that they all recompute
+    the same ordinal from the same query, at generation and validation
+    time alike. Changing the scheme is a system-wide id-semantics change
+    with a real risk of new, harder-to-spot correctness bugs (e.g. gaps in
+    a "reusable in bulk" contiguous ordinal range), for a benefit
+    (narrower resume invalidation) already substantially covered by the
+    dry-run preview below. Left as-is; `citations.py`'s `_rule_id` docstring
+    already documented this exact trade-off before this issue.
+  - **Built regardless (independent of the above): a no-model-call resume
+    preview.** `batch.plan_batch` mirrors `run_batch`'s own resume decision
+    (corpus-signature fast path, per-member brief-hash check, and -- for an
+    over-threshold member -- each chunk's own brief hash via a new shared
+    `_chunk_reuse_ok` helper, factored out of
+    `_generate_module_doc_chunked` so the preview can never drift from what
+    a real run actually does) without ever calling the model or writing a
+    file. `mfdoc batch --dry-run` (cli.py's `_print_batch_plan`) prints it:
+    how many members would skip (cache hit) vs. render, and for each
+    chunked member, how many of its chunks are actually reusable vs. would
+    re-render -- plus a warning line when every chunk of every chunked
+    member would render (a resume that's actually a full regeneration).
+    Needs no `--model`/`--provider`/API key, since it returns before
+    `_build_model_caller` is ever reached.
+  - Tests: `tests/test_batch.py` (`plan_batch` matching a real chunked
+    run's actual reuse count, corpus-signature vs. per-member-hash skip
+    paths, a fresh member reported as `render`) and
+    `tests/test_cli_batch.py` (the `--dry-run` CLI flag never builds a real
+    model caller and writes nothing).
+  - Docs: `CLAUDE.md`/`README.md`'s `mfdoc batch` command listings now show
+    `--dry-run`.
 
 **Progress (2026-09-10):**
 - Fixed issue #171: `batch.py`'s near-miss retry path (issue #131,

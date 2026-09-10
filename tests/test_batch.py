@@ -2130,6 +2130,131 @@ def test_run_batch_persists_chunk_state_and_reuses_it_across_calls(indexed_db, t
     assert chunk_count_first_run > 0
 
 
+def test_plan_batch_reports_a_member_with_no_prior_state_as_render(indexed_db, tmp_path):
+    """No --state file at all (or an empty one) -- every member is a fresh
+    render, never chunked here (MMP0100's rule count is under any
+    reasonable default threshold)."""
+    plan = batch_mod.plan_batch(indexed_db, ["MMP0100"], tmp_path / "out")
+    assert plan.corpus_unchanged is False
+    assert len(plan.members) == 1
+    assert plan.members[0].status == "render"
+    assert plan.members_render == 1 and plan.members_skip == 0 and plan.members_chunked == 0
+
+
+def test_plan_batch_reports_skip_after_a_real_run_with_unchanged_facts(indexed_db, tmp_path):
+    members = ["MMP0100"]
+    state_path = tmp_path / "state.json"
+    caller = FakeCaller()
+    first = batch_mod.run_batch(
+        indexed_db, members, tmp_path / "out", caller, "rules", "template",
+        state_path=state_path,
+    )
+    assert first.ok == 1
+
+    plan = batch_mod.plan_batch(indexed_db, members, tmp_path / "out", state_path=state_path)
+    assert plan.corpus_unchanged is True
+    assert plan.members[0].status == "skip"
+    assert plan.members_skip == 1 and plan.members_render == 0
+
+
+def test_plan_batch_falls_back_to_member_level_skip_when_only_the_corpus_signature_changed(
+    indexed_db, tmp_path,
+):
+    """A sha256 bump with no actual fact-table change (nothing module_brief
+    reads changed) invalidates the cheap corpus-level fast path, but the
+    per-member brief-hash fallback still finds the same brief text and
+    reports skip -- matching test_batch_recomputes_briefs_when_a_source_file_
+    changes's real run_batch behavior (the model is not re-called either)."""
+    row = indexed_db.execute(
+        "SELECT source_file_id AS id FROM member WHERE name = 'MMP0100'"
+    ).fetchone()
+    file_id = row["id"]
+    original_sha = indexed_db.execute(
+        "SELECT sha256 FROM source_file WHERE id = ?", (file_id,)
+    ).fetchone()["sha256"]
+
+    members = ["MMP0100"]
+    state_path = tmp_path / "state.json"
+    caller = FakeCaller()
+    try:
+        first = batch_mod.run_batch(
+            indexed_db, members, tmp_path / "out", caller, "rules", "template",
+            state_path=state_path,
+        )
+        assert first.ok == 1
+
+        indexed_db.execute(
+            "UPDATE source_file SET sha256 = ? WHERE id = ?",
+            ("deadbeef" + original_sha, file_id),
+        )
+        indexed_db.commit()
+
+        plan = batch_mod.plan_batch(indexed_db, members, tmp_path / "out", state_path=state_path)
+        assert plan.corpus_unchanged is False, "corpus-level fast path must not apply here"
+        assert plan.members[0].status == "skip", "per-member brief hash is still unchanged"
+    finally:
+        indexed_db.execute("UPDATE source_file SET sha256 = ? WHERE id = ?", (original_sha, file_id))
+        indexed_db.commit()
+
+
+def test_plan_batch_matches_generate_module_doc_chunk_reuse(tmp_path):
+    """The core promise of the dry-run preview: its chunk-level reuse count
+    for a chunked member must match what a real generate_module_doc call
+    would actually do -- computed via the same _chunk_reuse_ok, not a
+    second, potentially-drifting copy of the reuse rule."""
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_rules(conn, 5)
+
+    # Match plan_batch's own out_path/state_key computation exactly
+    # (out_dir / _output_subdir / "<member>.md") rather than assume a flat
+    # layout -- plan_batch always nests by dialect/library, same as
+    # run_batch itself.
+    out_dir = tmp_path / "out"
+    subdir = batch_mod._output_subdir(conn, "FAKEMOD")
+    out_path = out_dir / subdir / "FAKEMOD.md"
+    first = batch_mod.generate_module_doc(
+        conn, "FAKEMOD", out_path, _chunk_aware_module_caller(),
+        "writing rules text", "template text", max_rules_per_call=2,
+    )
+    assert first.ok is True
+    assert first.attempts == 3  # chunks rendered, per DocResult.attempts' chunked meaning
+
+    state_key = f"{subdir.as_posix()}/FAKEMOD"
+    state = {state_key: {"ok": True, "chunks": first.chunk_state}}
+    state_path = tmp_path / "state.json"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    # Change rule 3's condition -- same perturbation as
+    # test_chunk_resume_only_regenerates_the_chunk_whose_own_brief_changed --
+    # only chunk 2 (rules 3-4) should need a re-render.
+    conn.execute("UPDATE rule_candidate SET condition='COND-3-CHANGED' WHERE line_no=3")
+    conn.commit()
+
+    plan = batch_mod.plan_batch(
+        conn, ["FAKEMOD"], out_dir, state_path=state_path, max_rules_per_call=2,
+    )
+    assert plan.members[0].status == "chunked"
+    assert plan.members[0].chunk_count == 3
+    assert plan.members[0].chunks_reusable == 2
+    assert plan.members[0].chunks_to_render == 1
+
+    second = batch_mod.generate_module_doc(
+        conn, "FAKEMOD", out_path, _chunk_aware_module_caller(),
+        "writing rules text", "template text", max_rules_per_call=2,
+        prior_chunks=first.chunk_state,
+    )
+    actually_reused = sum(
+        1 for i in range(1, 4)
+        if second.chunk_state[str(i)]["brief_sha256"] == first.chunk_state[str(i)]["brief_sha256"]
+    )
+    assert actually_reused == plan.members[0].chunks_reusable
+
+
 def test_chunk_processing_labels_names_routines_and_falls_back_to_main_body():
     """One label per (start, end) range, naming the routine(s) whose rules
     fall in it (first-seen order, backtick-quoted), or the plain
