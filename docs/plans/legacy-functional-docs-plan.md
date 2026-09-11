@@ -569,6 +569,40 @@ GitHub org.
   `test_write_test_doc_with_sidecar_omits_fingerprint_for_empty_sources`.
   Full suite: 1016 passed, 2 skipped; bundled fixture pipeline unchanged.
 
+  An eighteenth review round found two more real gaps (a fourth repeat of
+  the leftover-sidecar `unlink()` best-effort point was left as already
+  documented, per the previous three rounds). First: the growing-into-
+  chunked cleanup fixed two rounds ago had no symmetric counterpart for a
+  member *shrinking* back under the threshold -- that case goes straight
+  to the single-document path, which never revisits old `.chunk<N>.md`/
+  sidecar pairs from a prior chunked render, leaving them to be found and
+  misvalidated independently by a later full tree walk. Factored a new
+  `_prune_stale_test_chunk_files` (like `batch._prune_stale_chunk_files`,
+  but also removes each stale chunk's own sidecar, which that shared
+  helper has no concept of) and called it from *three* places: the
+  existing growing-into-chunked path (replacing the old `batch.
+  _prune_stale_chunk_files` call there, now unused and removed from the
+  import), `generate_member_test_doc`'s own single-document fallthrough,
+  and -- found only by tracing the actual call graph --
+  `run_test_batch`'s *separate* inline dispatch loop, which builds its
+  `to_run`/`to_run_chunked` lists directly and never calls
+  `generate_member_test_doc` at all, so fixing only that function's own
+  fallthrough left `run_test_batch` (the ordinary `mfdoc test-batch`
+  path) still exposed; confirmed by a first attempt at the regression
+  test failing until this third call site was added too. Second:
+  `_prior_fingerprint_for` could raise on a previous failed render's
+  malformed front matter -- `split_frontmatter`'s `yaml.safe_load(...)
+  or {}` only substitutes `{}` for a *falsy* parse result, not a truthy
+  non-dict one (a bare YAML scalar or list is valid YAML, just not a
+  mapping), so `.get()` on that would crash instead of returning `None`
+  and letting the render recover, exactly the "invalid prior candidate
+  on disk" case this function's own docstring already described but
+  didn't actually guard against. Added
+  `test_shrinking_back_below_threshold_removes_leftover_chunk_files_and_
+  sidecars` and
+  `test_prior_fingerprint_for_does_not_crash_on_malformed_front_matter`.
+  Full suite: 1018 passed, 2 skipped; bundled fixture pipeline unchanged.
+
 **Progress (2026-09-11):**
 - Fixed issue #199: `mfdoc doc-drift`'s existing checks (issue #161) caught
   system-wide/module-scoped drift but nothing keyed on a single dialect --

@@ -32,7 +32,6 @@ from .batch import (
     _load_state,
     _localized_findings,
     _output_subdir,
-    _prune_stale_chunk_files,
     _save_state,
     _skip_result,
 )
@@ -276,7 +275,62 @@ def _prior_fingerprint_for(out_path: Path) -> str | None:
     if not out_path.exists():
         return None
     fm, _body, _err = split_frontmatter(out_path.read_text(encoding="utf-8"))
-    return fm.get("test_case_fingerprint") if fm is not None else None
+    # A previous failed render can leave arbitrary YAML on disk between
+    # the `---` markers -- a bare scalar or list is valid YAML but not a
+    # mapping (`yaml.safe_load`'s `or {}` in `split_frontmatter` only
+    # substitutes for a *falsy* result, e.g. `None`/`""`/`[]`, not a
+    # truthy non-dict one like a non-empty string or list) -- and `.get`
+    # on anything but a dict raises. This is exactly the "invalid prior
+    # candidate on disk" case this function's own docstring already
+    # expects to see; must return `None` (nothing usable to recover), not
+    # crash the render this function is trying to help succeed.
+    if not isinstance(fm, dict):
+        return None
+    return fm.get("test_case_fingerprint")
+
+
+def _prune_stale_test_chunk_files(out_path: Path, expected_names: set[str], language: str) -> None:
+    """`batch._prune_stale_chunk_files`, extended for test-batch's own
+    chunk sidecars: a stale `{stem}.chunk<N>{suffix}` file gets its
+    matching `.chunk<N>.py`/`.nsp`/... sidecar removed alongside it,
+    since that shared helper only knows about the `.md`-shaped chunk
+    index files module docs use and has no concept of a sidecar at all.
+
+    Used two ways (Copilot review, issue #195): the normal chunked path
+    (`expected_names` names this run's real chunk files, same as before)
+    *and* the single-document path a member falls back to once its
+    `test_case` count drops back under the chunking threshold
+    (`expected_names=set()`, since a single-document render has no
+    chunks of its own at all) -- without the second call, a member that
+    shrinks below the threshold between runs would leave every one of its
+    old `.chunk<N>.md`/sidecar pairs on disk indefinitely: nothing in the
+    single-document path ever revisits them, but a full tree walk
+    (`mfdoc test-validate`, `validate_tests_tree`) still finds and
+    validates them independently, where their now-orphaned manifests/
+    sidecars can still produce the exact false staleness failures this
+    whole mechanism exists to prevent -- just for files nothing renders
+    into any more, rather than ones actively being resumed."""
+    if not out_path.parent.is_dir():
+        return
+    pattern = re.compile(rf"^{re.escape(out_path.stem)}\.chunk\d+{re.escape(out_path.suffix)}$")
+    for candidate in list(out_path.parent.iterdir()):
+        if not candidate.is_file() or candidate.name in expected_names:
+            continue
+        if not pattern.match(candidate.name):
+            continue
+        sidecar = sidecar_path_for(candidate, language)
+        try:
+            candidate.unlink()
+        except OSError:
+            # Best-effort, same as batch._prune_stale_chunk_files -- a
+            # file some other process is holding open must not abort an
+            # otherwise-successful run over cosmetic cleanup.
+            continue
+        if sidecar is not None and sidecar.exists():
+            try:
+                sidecar.unlink()
+            except OSError:
+                pass
 
 
 def select_test_batch_members(conn) -> list[str]:
@@ -843,7 +897,7 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
     expected_chunk_names = {
         f"{out_path.stem}.chunk{n:0{chunk_width}d}{out_path.suffix}" for n in range(1, chunk_count + 1)
     }
-    _prune_stale_chunk_files(out_path, expected_chunk_names)
+    _prune_stale_test_chunk_files(out_path, expected_chunk_names, language)
     # A leftover sidecar from a *prior single-document* render of this same
     # member (issue #195 review): the index document at `out_path` never
     # gets its own sidecar -- each chunk gets its own
@@ -961,7 +1015,17 @@ def generate_member_test_doc(conn, member_name: str, language: str, framework: s
     through to the original single-call path unchanged (test_case_brief
     already reports both as prose in the brief itself, which the model then
     fails to turn into a valid document -- existing, unchanged behaviour,
-    not something this change alters)."""
+    not something this change alters).
+
+    A member that *shrinks* back under the chunking threshold between
+    runs (issue #195 review) is cleaned up here symmetrically to the
+    chunked path's own cleanup: any `.chunk<N>{suffix}` file (and its
+    sidecar) left over from a prior chunked render of this same member is
+    now orphaned -- this single-document path never revisits or
+    overwrites them, but a full tree walk (`mfdoc test-validate`) still
+    finds and validates them independently, where their stale manifests/
+    sidecars can produce the exact false staleness failures this whole
+    mechanism exists to prevent."""
     system, rows, ambiguous_libs = fetch_test_case_rows(conn, member_name)
     threshold = _resolve_max_scenarios_per_call(max_scenarios_per_call)
     if not ambiguous_libs and rows and len(rows) > threshold:
@@ -971,6 +1035,7 @@ def generate_member_test_doc(conn, member_name: str, language: str, framework: s
             prior_chunks=prior_chunks, sme_notes=sme_notes,
         )
 
+    _prune_stale_test_chunk_files(out_path, set(), language)
     brief = test_case_brief(conn, member_name, redact=redact, sme_notes=sme_notes)
     return _generate_test_doc_from_brief(
         conn, member_name, brief, language, framework, out_path, caller, writing_rules,
@@ -1233,6 +1298,15 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
         if not ambiguous_libs and rows and len(rows) > threshold:
             to_run_chunked.append((name, brief_hash, out_path))
         else:
+            # This member is going through the single-document pool loop
+            # below, not _generate_member_test_doc_chunked -- a member
+            # that shrunk back under the threshold since a prior chunked
+            # render (issue #195 review) needs the identical leftover-
+            # chunk-file cleanup that path already gets, since this
+            # dispatch loop (run_test_batch's own, not
+            # generate_member_test_doc's) never calls that function at
+            # all for a non-chunked member.
+            _prune_stale_test_chunk_files(out_path, set(), language)
             briefs[name] = brief
             to_run.append((name, brief_hash, out_path))
 

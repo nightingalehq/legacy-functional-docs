@@ -712,6 +712,24 @@ def test_generate_member_test_doc_writes_sidecar_and_slims_md(tmp_path):
     assert revalidated["ok"], revalidated["problems"]
 
 
+def test_prior_fingerprint_for_does_not_crash_on_malformed_front_matter(tmp_path):
+    """Copilot review follow-up on issue #195: a previous failed render
+    can leave arbitrary YAML between the `---` markers on `out_path` --
+    `split_frontmatter`'s `yaml.safe_load(...) or {}` only substitutes an
+    empty dict for a *falsy* parse result (`None`/`""`/`[]`), not a
+    truthy non-dict one like a bare scalar or a non-empty list, so
+    `_prior_fingerprint_for` calling `.get()` on that would raise instead
+    of returning `None` and letting the next render attempt recover."""
+    from mfdoc.testbatch import _prior_fingerprint_for
+
+    out_path = tmp_path / "FAKEMOD.md"
+    out_path.write_text("---\njust a bare string, not a mapping\n---\nbody\n", encoding="utf-8")
+    assert _prior_fingerprint_for(out_path) is None  # must not raise
+
+    out_path.write_text("---\n- a\n- b\n---\nbody\n", encoding="utf-8")
+    assert _prior_fingerprint_for(out_path) is None  # must not raise
+
+
 def test_generate_member_test_doc_stamps_fingerprint_and_detects_a_later_insertion(tmp_path):
     """Copilot review follow-up on issue #195: an end-to-end guard through
     the *real* render path (`generate_member_test_doc` ->
@@ -2097,6 +2115,52 @@ def test_run_test_batch_threshold_change_is_not_masked_by_resume_state(tmp_path)
     assert summary2.ok == 1
     assert (out_dir / "natural" / "python" / "pytest" / "FAKEMOD.chunk1.md").exists()
     assert "chunked" in single_path.read_text(encoding="utf-8")
+
+
+def test_shrinking_back_below_threshold_removes_leftover_chunk_files_and_sidecars(tmp_path):
+    """Copilot review follow-up on issue #195: the symmetric direction of
+    the threshold-change test above. A member that *shrinks* back under
+    the chunking threshold goes straight to the single-document path,
+    which never revisits its old `.chunk<N>.md`/sidecar pairs -- left
+    alone, a full tree walk (`mfdoc test-validate`) would still find and
+    validate those orphaned files independently, where their stale
+    manifests/sidecars can produce false staleness failures for
+    documents nothing renders into any more."""
+    from mfdoc import testbatch
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_scenarios(conn, 4)
+
+    caller = _chunk_aware_caller("python", "pytest")
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+    docs_dir = out_dir / "natural" / "python" / "pytest"
+
+    # First run: chunked.
+    summary1 = testbatch.run_test_batch(
+        conn, ["FAKEMOD"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path,
+        max_scenarios_per_call=2,
+    )
+    assert summary1.ok == 1
+    chunk_md = docs_dir / "FAKEMOD.chunk1.md"
+    chunk_sidecar = docs_dir / "FAKEMOD.chunk1.py"
+    assert chunk_md.exists()
+    assert chunk_sidecar.exists()
+
+    # Second run: higher threshold -- shrinks back to a single document.
+    summary2 = testbatch.run_test_batch(
+        conn, ["FAKEMOD"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path,
+        max_scenarios_per_call=10,
+    )
+    assert summary2.ok == 1, summary2.results[0].problems
+    assert not chunk_md.exists(), "leftover chunk index file must be removed"
+    assert not chunk_sidecar.exists(), "leftover chunk sidecar must be removed"
 
 
 def test_chunked_index_removes_a_leftover_single_doc_sidecar(tmp_path):
