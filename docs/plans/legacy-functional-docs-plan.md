@@ -12,6 +12,54 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-11):**
+- Fixed issue #199: `mfdoc doc-drift`'s existing checks (issue #161) caught
+  system-wide/module-scoped drift but nothing keyed on a single dialect --
+  a document naming one dialect's own unparsed-line count or
+  line-recognition rate (the language-guide doc type's `dialect:`
+  front-matter field, per `templates/language-guide.md`) could drift out
+  of sync with the fact store with no check to notice it, exactly the gap
+  the issue's real-world example described (a reference doc found, by
+  chance, still quoting a materially worse recognition rate than the fact
+  store computed, after an earlier parser fix had moved the number with no
+  narrative regen for every doc quoting the old figure). Folded into
+  `docdrift.py` rather than a new subcommand, per the issue's own
+  preference and the module's existing per-check-function shape: added
+  `graph.dialect_coverage(conn, dialect)` (the same `unparsed_lines`/
+  `line_recognition_rate` pair `coverage()` computes, scoped to one
+  dialect via `member.dialect` instead of the whole store) and
+  `docdrift._dialect_stats_drift`, restricted to `doc_type: language-guide`
+  specifically (not any doc bearing a `dialect:` field -- `templates/
+  module.md` also emits one, member-scoped, and comparing a module's own
+  claim against the whole dialect's totals would misreport drift) and two
+  new regexes matching "N unparsed lines" / "X.XXXX line-recognition rate"
+  prose, each independently skipped when its own pattern isn't present
+  (checked before `dialect_coverage` is ever queried, so a tree of module
+  docs that never state these figures pays no extra query cost). The rate
+  comparison rounds the fact store's current rate to the same number of
+  decimal places the document actually claimed rather than a fixed
+  tolerance, so a stale claim can't slip through merely by being within a
+  fixed absolute delta of the true value. Also exempted `doc_type:
+  language-guide` from `_sources_drift` (mirroring `validate.py`'s
+  existing `sources` exclusion for the same doc type, issue #91): its
+  canonical front matter states a descriptive `["{DIALECT} source
+  files"]` placeholder, not a member name, which `_sources_drift` would
+  otherwise always flag as unresolved. Two rounds of Copilot PR review
+  caught all of the above (the language-guide `sources` false-positive,
+  the fixed-tolerance precision gap, the module-doc false-scope risk, the
+  avoidable query cost, and a test gap around dialect scoping) and are
+  fixed here. Added `test_dialect_stats_drift_detected_when_unparsed_count_is_stale`,
+  `test_dialect_stats_no_drift_when_freshly_regenerated` (both now also
+  seeding a second dialect with different totals, to prove scoping),
+  `test_dialect_coverage_is_scoped_to_one_dialect` (graph.py's own
+  regression), `test_dialect_stats_drift_ignores_non_language_guide_doc_with_dialect_field`,
+  and `test_language_guide_sources_placeholder_is_not_flagged`
+  (tests/test_docdrift.py); full suite (916 passed, 2 skipped) and the
+  bundled fixture pipeline (`ingest`/`derive`/`coverage`/`validate --docs
+  examples`, `doc-drift --docs examples` unchanged from before this
+  change: the one pre-existing system-overview drift is unrelated to this
+  check) both pass.
+
 **Progress (2026-09-10e):**
 - Fixed issue #188: ported `batch.py`'s near-miss/targeted-patch mechanism
   (issue #131, generalized by #170) to `testbatch.py`'s test-generation
