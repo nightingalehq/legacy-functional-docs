@@ -12,6 +12,31 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-11p):**
+- Addressed the twenty-seventh Copilot review round on PR #209 (issue
+  #195):
+  1. `write_test_doc_with_sidecar`'s sidecar/document pair is now written
+     to `.tmp` siblings first, then renamed into place, instead of two
+     plain sequential `write_text` calls: if the sidecar write succeeded
+     but the document's own write then failed (disk-full, a permissions
+     change mid-run), the old pair was left mismatched -- a freshly
+     written sidecar paired with the *old* document -- which
+     `validate_test_doc` would cross-check as a genuine drift. Content is
+     now fully written to temp files (the only place that failure mode
+     can occur) before either final path is touched at all.
+  2. `_prune_stale_test_chunk_files` (round 25's logging fix) now returns
+     its removal-failure messages instead of only logging them, and every
+     call site folds them into that member's own render/skip result
+     (marking it `ok=False`) -- a leftover obsolete `.chunk<N>` document
+     is exactly the kind of artifact `validate_tests_tree` still walks
+     and validates independently, so reporting the render as clean while
+     one remains was misleading.
+- Three new regression tests (the atomic-write failure mode leaving both
+  original files untouched, and cleanup-failure surfacing on both the
+  chunked-index and single-document shrink-back paths). Full suite green
+  (1040 passed, 2 skipped) plus a clean `mfdoc validate` pass against
+  `examples/` (71/71 documents, 0 invalid citations of 750).
+
 **Progress (2026-09-11o):**
 - Addressed the twenty-sixth Copilot review round on PR #209 (issue
   #195):

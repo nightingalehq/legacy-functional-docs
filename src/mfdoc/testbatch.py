@@ -254,9 +254,31 @@ def write_test_doc_with_sidecar(conn, member_name: str, out_path: Path, doc_text
     # on disk while `out_path` itself was never rewritten to reference it
     # (e.g. because a later step raised), a mismatched pair no different
     # in effect from the staleness this whole mechanism exists to prevent.
+    #
+    # Written to `.tmp` siblings first, then atomically renamed into place
+    # (Copilot review) -- two plain `write_text` calls in sequence leaves a
+    # window where the sidecar write has already succeeded and `out_path`'s
+    # own write then fails (disk-full, a permissions change mid-run): the
+    # new sidecar would be left paired with the *old* document, which
+    # `validate_test_doc` would then cross-check as a genuine mismatch
+    # (the exact class of false drift this whole mechanism exists to
+    # prevent) rather than recognise as an incomplete write. Content is
+    # fully written to the temp files -- the only place a disk-full/
+    # permissions failure can still occur -- *before* either final path is
+    # touched at all, so that failure mode now leaves both original files
+    # completely untouched instead of a mismatched pair. `Path.rename`
+    # (same filesystem, no cross-device copy) is atomic at the OS level
+    # and only needs a directory-entry update with content already
+    # allocated, narrowing (though on most filesystems not perfectly
+    # eliminating) the remaining window to something far less likely to
+    # fail than the original two-file content write ever was.
     sidecar_path.parent.mkdir(parents=True, exist_ok=True)
-    sidecar_path.write_text(code, encoding="utf-8")
-    out_path.write_text(f"---{front_matter_block}---{prose}{manifest}", encoding="utf-8")
+    sidecar_tmp = sidecar_path.with_name(sidecar_path.name + ".tmp")
+    out_tmp = out_path.with_name(out_path.name + ".tmp")
+    sidecar_tmp.write_text(code, encoding="utf-8")
+    out_tmp.write_text(f"---{front_matter_block}---{prose}{manifest}", encoding="utf-8")
+    sidecar_tmp.rename(sidecar_path)
+    out_tmp.rename(out_path)
     return sidecar_path
 
 
@@ -339,7 +361,7 @@ def _prior_fingerprint_for(out_path: Path) -> str | None:
     return fm.get("test_case_fingerprint")
 
 
-def _prune_stale_test_chunk_files(out_path: Path, expected_names: set[str], language: str) -> None:
+def _prune_stale_test_chunk_files(out_path: Path, expected_names: set[str], language: str) -> list[str]:
     """`batch._prune_stale_chunk_files`, extended for test-batch's own
     chunk sidecars: a stale `{stem}.chunk<N>{suffix}` file gets its
     matching `.chunk<N>.py`/`.nsp`/... sidecar removed alongside it,
@@ -359,9 +381,21 @@ def _prune_stale_test_chunk_files(out_path: Path, expected_names: set[str], lang
     validates them independently, where their now-orphaned manifests/
     sidecars can still produce the exact false staleness failures this
     whole mechanism exists to prevent -- just for files nothing renders
-    into any more, rather than ones actively being resumed."""
+    into any more, rather than ones actively being resumed.
+
+    Returns any removal-failure messages, logged here and also handed back
+    to the caller (Copilot review) -- a leftover obsolete chunk document
+    is exactly the kind of artifact `validate_tests_tree` still walks and
+    validates independently, so a caller reporting this render/skip as a
+    clean `ok=True` while one remains would be misleading; every call site
+    folds this into its own result's `problems` instead of only logging
+    and moving on. Still best-effort in the sense that a removal failure
+    here never aborts the loop early or blocks this member's own
+    render/skip outcome -- only whether that outcome gets reported as
+    fully clean."""
     if not out_path.parent.is_dir():
-        return
+        return []
+    problems: list[str] = []
     pattern = re.compile(rf"^{re.escape(out_path.stem)}\.chunk\d+{re.escape(out_path.suffix)}$")
     for candidate in list(out_path.parent.iterdir()):
         if not candidate.is_file() or candidate.name in expected_names:
@@ -372,21 +406,26 @@ def _prune_stale_test_chunk_files(out_path: Path, expected_names: set[str], lang
         try:
             candidate.unlink()
         except OSError as exc:
-            # Best-effort, same as batch._prune_stale_chunk_files -- a
-            # file some other process is holding open must not abort an
-            # otherwise-successful run over cosmetic cleanup. Logged, not
-            # silent (Copilot review): a leftover orphan here can still
-            # surface as a confusing stale-manifest failure the next time
-            # something walks the output tree (`mfdoc test-validate`), so
-            # a human debugging that later has a trail back to why it's
-            # still there.
-            logger.warning("could not remove orphaned chunk file %s: %s", candidate, exc)
+            # Best-effort in the sense described above -- a file some
+            # other process is holding open must not abort an otherwise-
+            # successful run. Logged *and* returned (Copilot review): a
+            # leftover orphan here can still surface as a confusing
+            # stale-manifest failure the next time something walks the
+            # output tree, so both a human reading logs and this render's
+            # own reported outcome get a trail back to why it's still
+            # there.
+            msg = f"could not remove orphaned chunk file {candidate}: {exc}"
+            logger.warning(msg)
+            problems.append(msg)
             continue
         if sidecar is not None and sidecar.exists():
             try:
                 sidecar.unlink()
             except OSError as exc:
-                logger.warning("could not remove orphaned chunk sidecar %s: %s", sidecar, exc)
+                msg = f"could not remove orphaned chunk sidecar {sidecar}: {exc}"
+                logger.warning(msg)
+                problems.append(msg)
+    return problems
 
 
 def _invalidate_sidecar_if_range_changed(chunk_path: Path, language: str, expected_ids: set[str]) -> None:
@@ -1099,7 +1138,7 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
     expected_chunk_names = {
         f"{out_path.stem}.chunk{n:0{chunk_width}d}{out_path.suffix}" for n in range(1, chunk_count + 1)
     }
-    _prune_stale_test_chunk_files(out_path, expected_chunk_names, language)
+    problems.extend(_prune_stale_test_chunk_files(out_path, expected_chunk_names, language))
     # A leftover sidecar from a *prior single-document* render of this same
     # member (issue #195 review): the index document at `out_path` never
     # gets its own sidecar -- each chunk gets its own
@@ -1267,12 +1306,20 @@ def generate_member_test_doc(conn, member_name: str, language: str, framework: s
             prior_chunks=prior_chunks, sme_notes=sme_notes,
         )
 
-    _prune_stale_test_chunk_files(out_path, set(), language)
+    cleanup_problems = _prune_stale_test_chunk_files(out_path, set(), language)
     brief = test_case_brief(conn, member_name, redact=redact, sme_notes=sme_notes)
-    return _generate_test_doc_from_brief(
+    result = _generate_test_doc_from_brief(
         conn, member_name, brief, language, framework, out_path, caller, writing_rules,
         template, max_attempts=max_attempts,
     )
+    if cleanup_problems:
+        # A leftover obsolete `.chunk<N>` document/sidecar this render
+        # never revisits -- `validate_tests_tree` still walks and
+        # validates it independently (Copilot review), so this render
+        # must not report `ok=True` while one remains.
+        result.problems = result.problems + cleanup_problems
+        result.ok = False
+    return result
 
 
 @dataclass
@@ -1476,6 +1523,16 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
     briefs: dict[str, str] = {}
     to_run: list[tuple[str, str, Path]] = []
     to_run_chunked: list[tuple[str, str, Path]] = []
+    # Populated at dispatch time below (single-document members only --
+    # `to_run_chunked` members get identical cleanup, and identical
+    # problem-folding, inside generate_member_test_doc/_generate_member_
+    # test_doc_chunked itself) and folded into that member's own final
+    # DocResult once it's built further down (Copilot review): a leftover
+    # obsolete `.chunk<N>` document/sidecar this dispatch-time cleanup
+    # couldn't remove is exactly the kind of artifact `validate_tests_tree`
+    # still walks and validates independently, so this member's own result
+    # must not report `ok=True` while one remains.
+    cleanup_problems_by_name: dict[str, list[str]] = {}
 
     state_keys: dict[str, str] = {}
     for name in members:
@@ -1545,8 +1602,12 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
             # chunk-file cleanup that path already gets, since this
             # dispatch loop (run_test_batch's own, not
             # generate_member_test_doc's) never calls that function at
-            # all for a non-chunked member.
-            _prune_stale_test_chunk_files(out_path, set(), language)
+            # all for a non-chunked member. Recorded here, folded into
+            # this member's own DocResult once it's built below (Copilot
+            # review) -- see cleanup_problems_by_name's own comment above.
+            cleanup_problems = _prune_stale_test_chunk_files(out_path, set(), language)
+            if cleanup_problems:
+                cleanup_problems_by_name[name] = cleanup_problems
             briefs[name] = brief
             to_run.append((name, brief_hash, out_path))
 
@@ -1596,7 +1657,8 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
                     )
                     result = DocResult(
                         name, str(out_path), False, 2, 0, 0,
-                        [initial_exc_problem, f"retry model call raised {exc2.__class__.__name__}: {exc2}"],
+                        [initial_exc_problem, f"retry model call raised {exc2.__class__.__name__}: {exc2}"]
+                        + cleanup_problems_by_name.get(name, []),
                     )
                     results.append(result)
                     state[state_keys[name]] = {
@@ -1775,9 +1837,10 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
             if validation["ok"]:
                 write_test_doc_with_sidecar(conn, name, out_path, final_text, language)
 
+            member_cleanup_problems = cleanup_problems_by_name.get(name, [])
             result = DocResult(
-                name, str(out_path), validation["ok"], attempts, input_tokens, output_tokens,
-                validation.get("problems", []),
+                name, str(out_path), validation["ok"] and not member_cleanup_problems, attempts,
+                input_tokens, output_tokens, list(validation.get("problems", [])) + member_cleanup_problems,
             )
             results.append(result)
             state[state_keys[name]] = {

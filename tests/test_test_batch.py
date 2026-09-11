@@ -2700,6 +2700,56 @@ def test_chunked_render_surfaces_a_failed_stale_index_sidecar_removal(tmp_path, 
     assert stale_sidecar.exists()
 
 
+def test_single_doc_render_surfaces_a_failed_orphaned_chunk_file_removal(tmp_path, monkeypatch):
+    """Copilot review follow-up on issue #195's fix: a member that shrinks
+    back under the chunking threshold leaves its old `.chunk<N>.md` files
+    orphaned -- `generate_member_test_doc`'s single-document path cleans
+    those up, but if a removal fails (a transient filesystem lock),
+    `validate_tests_tree` still walks and validates the leftover chunk
+    document independently, where it can fail on stale content nothing
+    renders into any more. Must be recorded as a problem (`ok=False`)
+    instead of reported as a clean render while the orphan remains."""
+    from pathlib import Path
+
+    from mfdoc import testbatch
+
+    conn = _sqlite_conn()
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    rc1 = _insert_rc(conn, 1, 10)
+    from mfdoc.db import insert
+    insert(
+        conn, "test_case", member_id=1, kind="unit", rule_candidate_id=rc1,
+        scenario_name="FAKEMOD:BR-001",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "COND", "citation": "[[FAKEMOD:10]]"}',
+        then_json='{"citation": "[[FAKEMOD:10]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:10", confidence="verified",
+    )
+    conn.commit()
+
+    out_path = tmp_path / "FAKEMOD.md"
+    orphaned_chunk = tmp_path / "FAKEMOD.chunk1.md"
+    orphaned_chunk.write_text("# leftover from a prior chunked render\n", encoding="utf-8")
+
+    real_unlink = Path.unlink
+
+    def exploding_unlink(self, *args, **kwargs):
+        if self == orphaned_chunk:
+            raise OSError("simulated: file is locked by another process")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", exploding_unlink)
+
+    caller = _chunk_aware_caller("python", "pytest")
+    result = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, caller,
+        "writing rules text", "template text", max_scenarios_per_call=10,
+    )
+    assert result.ok is False
+    assert any("could not remove orphaned chunk file" in p for p in result.problems)
+    assert orphaned_chunk.exists()
+
+
 def test_chunk_reuse_forces_a_re_render_for_a_legacy_chunk_with_no_fingerprint(tmp_path):
     """Copilot review follow-up on issue #195: a *legacy* chunk file (no
     `test_case_fingerprint` anywhere -- written before this fix existed)
@@ -4142,6 +4192,58 @@ def test_write_test_doc_with_sidecar_tolerates_non_mapping_front_matter(tmp_path
     written = out_path.read_text(encoding="utf-8")
     assert "test_case_fingerprint" not in written
     assert "FAKEMOD:BR-001" in result.read_text(encoding="utf-8")
+
+
+def test_write_test_doc_with_sidecar_leaves_both_files_untouched_if_doc_write_fails(tmp_path, monkeypatch):
+    """Copilot review follow-up on issue #195's fix: if the sidecar content
+    write succeeds but the document's own write then fails (disk-full, a
+    permissions change mid-run), the *old* pair of files must remain
+    exactly as they were -- not a freshly-written sidecar paired with the
+    stale document, which `validate_test_doc` would cross-check as a
+    genuine mismatch. Writing to `.tmp` siblings first means the failure
+    this test simulates (the second temp-file write) never touches either
+    final path at all."""
+    import pytest
+
+    from mfdoc import testbatch
+    from mfdoc.db import insert
+
+    conn = _sqlite_conn()
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    rc1 = _insert_rc(conn, 1, 10)
+    insert(
+        conn, "test_case", member_id=1, kind="unit", rule_candidate_id=rc1,
+        scenario_name="FAKEMOD:BR-001",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "COND", "citation": "[[FAKEMOD:10]]"}',
+        then_json='{"citation": "[[FAKEMOD:10]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:10", confidence="verified",
+    )
+    conn.commit()
+
+    doc_text = (
+        "---\nsources: [\"FAKEMOD\"]\n---\n\n"
+        "# FAKEMOD tests\n\n"
+        "```python\ndef test_one():\n    # FAKEMOD:BR-001\n    ...\n```\n"
+    )
+    out_path = tmp_path / "FAKEMOD.md"
+    old_text = "old document content, must survive untouched"
+    out_path.write_text(old_text, encoding="utf-8")
+
+    real_write_text = Path.write_text
+
+    def exploding_write_text(self, content, *args, **kwargs):
+        if self.name == "FAKEMOD.md.tmp":
+            raise OSError("simulated: disk full")
+        return real_write_text(self, content, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", exploding_write_text)
+
+    with pytest.raises(OSError):
+        testbatch.write_test_doc_with_sidecar(conn, "FAKEMOD", out_path, doc_text, "python")
+
+    assert out_path.read_text(encoding="utf-8") == old_text, "the old document must be untouched"
+    assert not (tmp_path / "FAKEMOD.py").exists(), "no sidecar should be left behind at its final path"
 
 
 def test_write_test_doc_with_sidecar_writes_sidecar_and_doc_together(tmp_path):
