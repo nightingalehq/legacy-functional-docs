@@ -879,7 +879,8 @@ _DOC_CLAIM_COLUMNS = (
 
 
 def _readonly_validate_test_doc(conn, path: Path, _render_time: bool = False,
-                                 _fingerprint_cache: dict | None = None) -> dict:
+                                 _fingerprint_cache: dict | None = None,
+                                 _valid_scenarios=None) -> dict:
     """The same result `validate_test_doc(conn, path)` returns, but leaves
     the `doc_claim` table exactly as it was before the call.
     `validate_test_doc` (via `validate.validate_doc`) deletes and
@@ -902,7 +903,10 @@ def _readonly_validate_test_doc(conn, path: Path, _render_time: bool = False,
         (path_str,),
     ).fetchall()
     try:
-        return validate_test_doc(conn, path, _render_time=_render_time, _fingerprint_cache=_fingerprint_cache)
+        return validate_test_doc(
+            conn, path, _render_time=_render_time, _fingerprint_cache=_fingerprint_cache,
+            _valid_scenarios=_valid_scenarios,
+        )
     finally:
         conn.execute("DELETE FROM doc_claim WHERE doc_path=?", (path_str,))
         if before:
@@ -914,9 +918,31 @@ def _readonly_validate_test_doc(conn, path: Path, _render_time: bool = False,
         conn.commit()
 
 
+def _lazy_valid_scenarios(conn):
+    """A zero-arg, lazily-memoized callable for `validate_test_doc`'s
+    `_valid_scenarios` parameter -- the same one-scan-per-caller sharing
+    `validate_tests_tree` already does, extended to chunk-reuse callers
+    (Copilot review): every reusable chunk's revalidation can force
+    `valid_scenarios()`'s full `test_case` scan (the legacy-sidecar
+    id-overlap fallback needs it before reuse can even be decided), so a
+    chunked member's own resume/dry-run pass without this shares nothing
+    across its chunks -- O(chunk_count * corpus_size) for exactly the
+    reuse path meant to be cheap. Memoized here, not just passed as a bare
+    lambda, so the scan itself still only runs once regardless of how many
+    chunks call it."""
+    cache: list[set[str]] = []
+
+    def get() -> set[str]:
+        if not cache:
+            cache.append({row["scenario_name"].upper() for row in conn.execute("SELECT scenario_name FROM test_case")})
+        return cache[0]
+
+    return get
+
+
 def _test_chunk_reuse_ok(conn, prior_chunks: dict | None, i: int, brief_hash: str,
                           chunk_path: Path, readonly: bool = False,
-                          _fingerprint_cache: dict | None = None) -> bool:
+                          _fingerprint_cache: dict | None = None, _valid_scenarios=None) -> bool:
     """Whether chunk `i` can be reused verbatim -- no model call -- given a
     prior run's chunk_state and this chunk's freshly-computed brief hash:
     the prior run must have recorded this exact chunk as clean (`ok` True)
@@ -982,7 +1008,18 @@ def _test_chunk_reuse_ok(conn, prior_chunks: dict | None, i: int, brief_hash: st
     chunk's revalidation here recomputes this member's fingerprint from
     scratch without it, making the intended cache-hit path itself cost
     O(chunks * rules) -- exactly the redundant work this cache exists to
-    eliminate everywhere else it's threaded through."""
+    eliminate everywhere else it's threaded through.
+
+    `_valid_scenarios`, the same idea applied to `validate_test_doc`'s own
+    `test_case` scenario-name scan (Copilot review): the legacy-sidecar
+    id-overlap fallback (no fingerprint at all -- see above) forces that
+    scan before this function can even decide reuse is unavailable, and
+    without a shared provider every chunk pays for its own full-corpus
+    `SELECT` -- the exact O(document_count * corpus_size) cost
+    `validate_tests_tree` already avoids by sharing one, just not yet
+    reaching this reuse path. A caller with nothing to share (a single,
+    unchunked member) leaves this unset and keeps the prior per-call
+    cost."""
     prior_chunk = (prior_chunks or {}).get(str(i))
     reusable = (
         isinstance(prior_chunk, dict) and prior_chunk.get("ok") is True
@@ -992,7 +1029,10 @@ def _test_chunk_reuse_ok(conn, prior_chunks: dict | None, i: int, brief_hash: st
     if not reusable:
         return False
     validator = _readonly_validate_test_doc if readonly else validate_test_doc
-    result = validator(conn, chunk_path, _render_time=True, _fingerprint_cache=_fingerprint_cache)
+    result = validator(
+        conn, chunk_path, _render_time=True, _fingerprint_cache=_fingerprint_cache,
+        _valid_scenarios=_valid_scenarios,
+    )
     return result["ok"] and not result.get("sidecar_stale")
 
 
@@ -1049,6 +1089,11 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
     # via `validate_test_doc`'s own fingerprint check (Copilot review on
     # issue #195's fix; see that function's `_fingerprint_cache` docstring).
     fingerprint_cache: dict = {}
+    # Same sharing, for validate_test_doc's own test_case scenario scan
+    # (Copilot review; see _lazy_valid_scenarios's docstring) -- the
+    # legacy-sidecar id-overlap fallback in _test_chunk_reuse_ok's own
+    # revalidation can force that scan per chunk without this.
+    valid_scenarios = _lazy_valid_scenarios(conn)
 
     chunk_width = len(str(chunk_count))
     expected_chunk_names = {
@@ -1073,22 +1118,22 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
     if stale_index_sidecar is not None and stale_index_sidecar.exists():
         try:
             stale_index_sidecar.unlink()
-        except OSError:
-            # Best-effort, same as _prune_stale_chunk_files above -- a file
-            # some other process is holding open must not abort the batch.
-            # Accepted residual risk (Copilot review): if this unlink
-            # genuinely fails (a lock, a permission-restricted directory),
-            # `_render_time=True` on the index's own validation below only
-            # protects *this* run's in-process check -- a later standalone
-            # `mfdoc test-validate` sweep (not render-time) would still
-            # find the leftover file and could cross-check against it.
-            # Not escalated to a hard failure here for the same reason
-            # `_prune_stale_chunk_files` doesn't: a filesystem-level lock
-            # is exactly the kind of transient condition that shouldn't
-            # abort an otherwise-successful chunked render over cosmetic
-            # cleanup, and the next successful cleanup attempt (any
-            # future chunked render of this member) removes it then.
-            pass
+        except OSError as exc:
+            # Not merely cosmetic (Copilot review): unlike a leftover
+            # `.chunk<N>` file (nothing currently authoritative reads it
+            # again), this exact path is what `sidecar_path_for(out_path,
+            # language)` resolves to for the index document too -- if it's
+            # still here, a later standalone `mfdoc test-validate` sweep
+            # (not this render's own `_render_time=True` in-process check)
+            # would cross-check the index's aggregate manifest against
+            # this unrelated leftover content, reproducing the exact
+            # false missing-id failures this whole mechanism exists to
+            # prevent. Recorded as a problem (marks this render `ok=False`
+            # rather than reporting clean while the stale sidecar remains)
+            # instead of aborting the batch outright -- a filesystem-level
+            # lock is still the kind of transient condition that shouldn't
+            # stop every other member/chunk in this run from completing.
+            problems.append(f"could not remove stale single-document sidecar {stale_index_sidecar}: {exc}")
     for i, (start, end) in enumerate(ranges, start=1):
         chunk_rows = rows[start - 1:end]
         chunk_path = out_path.with_name(f"{out_path.stem}.chunk{i:0{chunk_width}d}{out_path.suffix}")
@@ -1100,6 +1145,7 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
         result = None
         if _test_chunk_reuse_ok(
             conn, prior_chunks, i, brief_hash, chunk_path, _fingerprint_cache=fingerprint_cache,
+            _valid_scenarios=valid_scenarios,
         ):
             result = DocResult(member_name, str(chunk_path), True, 0, 0, 0, [])
             logger.debug("%s: chunk %d/%d reused (unchanged)", member_name, i, chunk_count)
@@ -1172,6 +1218,7 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
     # exists to bypass at render time.
     index_validation = validate_test_doc(
         conn, out_path, _render_time=True, _fingerprint_cache=fingerprint_cache,
+        _valid_scenarios=valid_scenarios,
     )
     if not index_validation["ok"]:
         problems = problems + [f"index document: {p}" for p in index_validation["problems"]]
@@ -1304,11 +1351,19 @@ def _corpus_signature(conn, language: str, framework: str, threshold: int,
       what a chunk renders even when nothing else this function already
       hashes would show it.
     """
+    # `tc.member_id, tc.id` (Copilot review): `scenario_name` alone isn't
+    # unique -- a bare member name can collide across libraries
+    # (`member` is unique on `(name, library, dialect)`, not name alone),
+    # and `test_case.scenario_name` is built from that bare name. Without
+    # a deterministic tie-break, two equal `scenario_name` values leave
+    # their relative order to SQLite's unspecified tie behaviour, changing
+    # this digest -- and forcing an unnecessary full rerender on the next
+    # resume -- even when nothing in the corpus actually moved.
     rows = conn.execute(
         "SELECT tc.scenario_name, tc.status, tc.citation, tc.given_json, tc.when_json, "
         "       tc.then_json, tc.rule_candidate_id, m.system "
         "FROM test_case tc JOIN member m ON m.id = tc.member_id "
-        "ORDER BY tc.scenario_name"
+        "ORDER BY tc.scenario_name, tc.member_id, tc.id"
     ).fetchall()
     extra = [language, framework, str(threshold)]
     for r in rows:
@@ -1881,6 +1936,11 @@ def plan_test_batch(conn, members: list[str], language: str, framework: str, out
         _corpus_signature(conn, language, framework, threshold, redact, sme_notes) if state_path else None
     )
     corpus_unchanged = bool(state_path) and state.get("_corpus_sha256") == corpus_sig
+    # Shared across every member's chunk-reuse check below, not just within
+    # one member (Copilot review; see _lazy_valid_scenarios's docstring) --
+    # a --matrix dry-run over many chunked members would otherwise pay for
+    # this scan once per member instead of once for the whole preview.
+    valid_scenarios = _lazy_valid_scenarios(conn)
 
     plans: list[TestMemberPlan] = []
     for name in members:
@@ -1932,7 +1992,7 @@ def plan_test_batch(conn, members: list[str], language: str, framework: str, out
             chunk_hash = hashlib.sha256(chunk_brief.encode("utf-8")).hexdigest()
             if _test_chunk_reuse_ok(
                 conn, prior_chunks, i, chunk_hash, chunk_path, readonly=True,
-                _fingerprint_cache=fingerprint_cache,
+                _fingerprint_cache=fingerprint_cache, _valid_scenarios=valid_scenarios,
             ):
                 chunks_reusable += 1
 

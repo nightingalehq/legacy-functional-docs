@@ -176,6 +176,56 @@ def test_corpus_signature_changes_when_member_system_changes(tmp_path):
     assert sig_before != sig_after
 
 
+def test_corpus_signature_is_deterministic_across_scenario_name_collisions(tmp_path):
+    """Copilot review follow-up on issue #195's fix: `test_case.
+    scenario_name` isn't unique on its own -- a bare member name can
+    collide across libraries (`member` is unique on `(name, library,
+    dialect)`, not name alone), and `scenario_name` is built from that
+    bare name. `_corpus_signature`'s query must break ties on
+    `tc.member_id, tc.id`, or two equal `scenario_name` values leave their
+    relative order to SQLite's unspecified tie behaviour -- changing this
+    digest, and forcing an unnecessary full rerender on the next resume,
+    even when nothing in the corpus actually moved. Exercised here by
+    comparing two connections whose two colliding test_case rows are
+    inserted in opposite order -- a real corpus is never guaranteed to
+    insert them in any particular order relative to each other either."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA, insert
+    from mfdoc.testbatch import _corpus_signature
+
+    def seed(insert_lib1_first: bool) -> sqlite3.Connection:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(SCHEMA)
+        conn.execute("INSERT INTO member (id, name, library, dialect) VALUES (1, 'FAKEMOD', 'LIB1', 'natural')")
+        conn.execute("INSERT INTO member (id, name, library, dialect) VALUES (2, 'FAKEMOD', 'LIB2', 'natural')")
+        conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'x')")
+        conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (2, 1, 'x')")
+
+        def tc(member_id):
+            insert(
+                conn, "test_case", member_id=member_id, kind="unit", scenario_name="FAKEMOD:BR-001",
+                given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+                when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+                then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+                status="characterization", citation="FAKEMOD:1", confidence="verified",
+            )
+
+        if insert_lib1_first:
+            tc(1)
+            tc(2)
+        else:
+            tc(2)
+            tc(1)
+        conn.commit()
+        return conn
+
+    sig_a = _corpus_signature(seed(True), "python", "pytest", 50)
+    sig_b = _corpus_signature(seed(False), "python", "pytest", 50)
+    assert sig_a == sig_b, "insertion order alone must not change the corpus signature"
+
+
 def test_corpus_signature_changes_when_rule_candidate_ordering_shifts_but_test_case_does_not(tmp_path):
     """Copilot review follow-up on issue #195: a `derive` rebuild can
     insert/reorder `rule_candidate` rows (and shift `routine` boundaries)
@@ -2516,25 +2566,26 @@ def test_chunk_reuse_treats_a_stale_sidecar_as_a_cache_miss(tmp_path, monkeypatc
 
     monkeypatch.setattr(
         testbatch, "validate_test_doc",
-        lambda conn, path, _text=None, _prior_fingerprint=None, _render_time=False, _fingerprint_cache=None: {"ok": True, "sidecar_stale": True, "problems": []},
+        lambda conn, path, _text=None, _prior_fingerprint=None, _render_time=False, _fingerprint_cache=None, _valid_scenarios=None: {"ok": True, "sidecar_stale": True, "problems": []},
     )
     assert testbatch._test_chunk_reuse_ok(None, prior_chunks, 1, "same-hash", chunk_path) is False
 
     monkeypatch.setattr(
         testbatch, "validate_test_doc",
-        lambda conn, path, _text=None, _prior_fingerprint=None, _render_time=False, _fingerprint_cache=None: {"ok": True, "sidecar_stale": False, "problems": []},
+        lambda conn, path, _text=None, _prior_fingerprint=None, _render_time=False, _fingerprint_cache=None, _valid_scenarios=None: {"ok": True, "sidecar_stale": False, "problems": []},
     )
     assert testbatch._test_chunk_reuse_ok(None, prior_chunks, 1, "same-hash", chunk_path) is True
 
 
 def test_chunk_reuse_ok_passes_its_fingerprint_cache_through_to_validation(tmp_path, monkeypatch):
     """Copilot review follow-up on issue #195's fix: `_test_chunk_reuse_ok`'s
-    own `_fingerprint_cache` parameter must actually reach
-    `validate_test_doc`/`_readonly_validate_test_doc` -- a prior round
-    added the parameter to both validators and to the chunk loop/dry-run
-    callers that create the shared dict, but `_test_chunk_reuse_ok` itself
-    dropped it on the floor instead of forwarding it, leaving the intended
-    cache-hit path just as expensive as no cache at all."""
+    own `_fingerprint_cache`/`_valid_scenarios` parameters must actually
+    reach `validate_test_doc`/`_readonly_validate_test_doc` -- earlier
+    rounds added each parameter to both validators and to the chunk loop/
+    dry-run callers that create the shared dict/provider, but
+    `_test_chunk_reuse_ok` itself dropped them on the floor instead of
+    forwarding them, leaving the intended cache-hit path just as expensive
+    as no cache at all."""
     from mfdoc import testbatch
 
     chunk_path = tmp_path / "FAKEMOD.chunk1.md"
@@ -2542,28 +2593,32 @@ def test_chunk_reuse_ok_passes_its_fingerprint_cache_through_to_validation(tmp_p
     prior_chunks = {"1": {"ok": True, "brief_sha256": "same-hash"}}
     received = []
 
-    def fake_validate(conn, path, _text=None, _prior_fingerprint=None, _render_time=False, _fingerprint_cache=None):
-        received.append(_fingerprint_cache)
+    def fake_validate(conn, path, _text=None, _prior_fingerprint=None, _render_time=False, _fingerprint_cache=None, _valid_scenarios=None):
+        received.append((_fingerprint_cache, _valid_scenarios))
         return {"ok": True, "sidecar_stale": False, "problems": []}
 
     monkeypatch.setattr(testbatch, "validate_test_doc", fake_validate)
     sentinel: dict = {"marker": "shared"}
+    scenarios_sentinel = object()
     testbatch._test_chunk_reuse_ok(
-        None, prior_chunks, 1, "same-hash", chunk_path, _fingerprint_cache=sentinel,
+        None, prior_chunks, 1, "same-hash", chunk_path,
+        _fingerprint_cache=sentinel, _valid_scenarios=scenarios_sentinel,
     )
-    assert received == [sentinel]
+    assert received == [(sentinel, scenarios_sentinel)]
 
     received.clear()
     monkeypatch.setattr(
         testbatch, "_readonly_validate_test_doc",
-        lambda conn, path, _render_time=False, _fingerprint_cache=None: (
-            received.append(_fingerprint_cache) or {"ok": True, "sidecar_stale": False, "problems": []}
+        lambda conn, path, _render_time=False, _fingerprint_cache=None, _valid_scenarios=None: (
+            received.append((_fingerprint_cache, _valid_scenarios))
+            or {"ok": True, "sidecar_stale": False, "problems": []}
         ),
     )
     testbatch._test_chunk_reuse_ok(
-        None, prior_chunks, 1, "same-hash", chunk_path, readonly=True, _fingerprint_cache=sentinel,
+        None, prior_chunks, 1, "same-hash", chunk_path, readonly=True,
+        _fingerprint_cache=sentinel, _valid_scenarios=scenarios_sentinel,
     )
-    assert received == [sentinel]
+    assert received == [(sentinel, scenarios_sentinel)]
 
 
 def test_chunk_render_surfaces_a_failed_sidecar_invalidation_as_a_chunk_failure(tmp_path, monkeypatch):
@@ -2596,6 +2651,53 @@ def test_chunk_render_surfaces_a_failed_sidecar_invalidation_as_a_chunk_failure(
     )
     assert result.ok is False
     assert any("could not invalidate stale chunk sidecar" in p for p in result.problems)
+
+
+def test_chunked_render_surfaces_a_failed_stale_index_sidecar_removal(tmp_path, monkeypatch):
+    """Copilot review follow-up on issue #195's fix: if the leftover
+    single-document sidecar a member leaves behind after growing past the
+    chunking threshold can't be removed (a transient filesystem lock), a
+    later standalone `mfdoc test-validate` sweep would still find it at
+    the exact path the index document's own sidecar lookup resolves to,
+    and could cross-check the index's aggregate manifest against that
+    unrelated leftover content -- the same false missing-id failure this
+    whole mechanism exists to prevent. Must be recorded as a problem
+    (`ok=False`) instead of reported as a clean render while the stale
+    sidecar remains."""
+    import sqlite3
+    from pathlib import Path
+
+    from mfdoc import testbatch
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_scenarios(conn, 5)
+
+    out_path = tmp_path / "FAKEMOD.md"
+    # A leftover single-document sidecar at the exact path sidecar_path_for
+    # would resolve for the index document itself.
+    stale_sidecar = out_path.with_suffix(".py")
+    stale_sidecar.write_text("# leftover from a prior single-document render\n", encoding="utf-8")
+
+    real_unlink = Path.unlink
+
+    def exploding_unlink(self, *args, **kwargs):
+        if self == stale_sidecar:
+            raise OSError("simulated: file is locked by another process")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", exploding_unlink)
+
+    caller = _chunk_aware_caller("python", "pytest")
+    result = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, caller,
+        "writing rules text", "template text", max_scenarios_per_call=2,
+    )
+    assert result.ok is False
+    assert any("could not remove stale single-document sidecar" in p for p in result.problems)
+    assert stale_sidecar.exists()
 
 
 def test_chunk_reuse_forces_a_re_render_for_a_legacy_chunk_with_no_fingerprint(tmp_path):

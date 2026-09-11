@@ -1015,21 +1015,25 @@ def validate_test_doc(conn, path: Path, _text: str | None = None,
        `test_case_fingerprint` at all (an older document written before
        this field existed, or a hand-written/test fixture) falls back to
        one of two things, depending on `_render_time`:
-       - **`_render_time=False`** (a standalone check -- `mfdoc
-         test-validate`, a dry-run reuse check): checks whether *every*
-         one of the sidecar's own BR-ids resolves against `test_case`; if
-         it has BR-ids and *any* of them don't, the sidecar is treated as
-         though it weren't there. Deliberately `all(...)`, not `any(...)`:
-         a partial positional shift (old `{BR-001, BR-002, BR-003}`
-         renumbered to `{BR-002, BR-003, BR-004}`) still has two
-         overlapping ids by coincidence, which `any(...)` would wrongly
-         call "still current". This still can't catch the
-         insertion-after-range case (1) handles for a document with no
-         fingerprint context at all.
+       - **`_render_time=False`** (a standalone check -- a bare `mfdoc
+         test-validate` sweep over already-written documents, not a
+         reuse/resume decision about to render one): checks whether
+         *every* one of the sidecar's own BR-ids resolves against
+         `test_case`; if it has BR-ids and *any* of them don't, the
+         sidecar is treated as though it weren't there. Deliberately
+         `all(...)`, not `any(...)`: a partial positional shift (old
+         `{BR-001, BR-002, BR-003}` renumbered to `{BR-002, BR-003,
+         BR-004}`) still has two overlapping ids by coincidence, which
+         `any(...)` would wrongly call "still current". This still can't
+         catch the insertion-after-range case (1) handles for a document
+         with no fingerprint context at all.
        - **`_render_time=True`** (`_generate_test_doc_from_brief`/
          `run_test_batch`'s retry loops, validating a freshly-generated
          candidate that's about to replace this sidecar's pairing if it
-         validates clean): the sidecar is treated as though it weren't
+         validates clean -- and `testbatch._test_chunk_reuse_ok`'s own
+         revalidation of a *reusable* chunk, on both its real and
+         `readonly=True` dry-run branches, which pass this unconditionally
+         rather than `False`): the sidecar is treated as though it weren't
          there outright, with no id-overlap check at all. A legacy
          document's sidecar predating this fingerprint entirely can
          otherwise **deadlock**: on the very next `test-plan` re-run that

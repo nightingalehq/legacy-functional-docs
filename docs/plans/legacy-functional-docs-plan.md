@@ -12,6 +12,42 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-11o):**
+- Addressed the twenty-sixth Copilot review round on PR #209 (issue
+  #195):
+  1. `_generate_member_test_doc_chunked`'s leftover single-document
+     sidecar cleanup (issue #195 review, an earlier round) swallowed a
+     failed removal as merely cosmetic -- but that exact path is what
+     `sidecar_path_for` also resolves for the index document, so a later
+     standalone `mfdoc test-validate` sweep would still cross-check the
+     index's aggregate manifest against the unrelated leftover content.
+     Now recorded as a problem (this render reports `ok=False`) instead
+     of reporting clean while the stale sidecar remains.
+  2. `_test_chunk_reuse_ok`'s revalidation threaded through
+     `_fingerprint_cache` (previous round) but not an equivalent shared
+     `_valid_scenarios` provider -- new `_lazy_valid_scenarios` helper,
+     threaded through both the real chunk loop (per member) and
+     `plan_test_batch`'s dry-run (shared across the whole `--matrix`
+     preview, not just one member), the same sharing
+     `validate_tests_tree` already does for a tree walk.
+  3. `_corpus_signature`'s `ORDER BY tc.scenario_name` had no tie-break --
+     `scenario_name` isn't unique across libraries (a bare member name can
+     collide; `member` is unique on `(name, library, dialect)`), so two
+     equal names could change this digest based on SQLite's unspecified
+     tie order alone, forcing an unnecessary full rerender on resume for
+     no real corpus change. Added `tc.member_id, tc.id`.
+  4. `validate_test_doc`'s docstring claimed the `_render_time=False`
+     legacy-sidecar branch covers "a dry-run reuse check" -- `_test_chunk_
+     reuse_ok`'s dry-run (`readonly=True`) branch actually passes
+     `_render_time=True` unconditionally, same as its real-render path.
+     Corrected.
+- Four new regression tests (a scenario-name-collision corpus-signature
+  determinism check, the fingerprint-cache-forwarding test extended to
+  also cover `_valid_scenarios`, and the stale-index-sidecar removal
+  failure surfaced as a chunk failure). Full suite green (1038 passed, 2
+  skipped) plus a clean `mfdoc validate` pass against `examples/` (71/71
+  documents, 0 invalid citations of 750).
+
 **Progress (2026-09-11n):**
 - Addressed the twenty-fifth Copilot review round on PR #209 (issue
   #195):
