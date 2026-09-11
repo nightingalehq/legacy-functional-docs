@@ -540,6 +540,83 @@ def test_generate_member_test_doc_writes_sidecar_and_slims_md(tmp_path):
     assert revalidated["ok"], revalidated["problems"]
 
 
+def test_generate_member_test_doc_stamps_fingerprint_and_detects_a_later_insertion(tmp_path):
+    """Copilot review follow-up on issue #195: an end-to-end guard through
+    the *real* render path (`generate_member_test_doc` ->
+    `write_test_doc_with_sidecar`), not just a hand-constructed
+    `test_case_fingerprint` in a test fixture. If the fingerprint stamping
+    in `write_test_doc_with_sidecar` were ever accidentally removed, this
+    is what would catch it: a document rendered today, then a rule
+    inserted into `rule_candidate` afterward (before `mfdoc test-plan`
+    re-runs), must be re-detected as stale on the very next validation,
+    exactly the insertion-after-range case
+    `test_stale_sidecar_whose_old_ids_remain_a_subset_after_an_insertion`
+    proves at the unit level -- this proves the same thing is actually
+    wired up through the real write path."""
+    from mfdoc import testbatch
+    from mfdoc.validate import validate_test_doc
+    import sqlite3
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 40, 'irrelevant')")
+    rc_id = insert(
+        conn, "rule_candidate", member_id=1, line_no=10, construct="IF",
+        condition="COND-1", raw="IF COND-1",
+    )
+    insert(
+        conn, "test_case", member_id=1, kind="unit", rule_candidate_id=rc_id,
+        scenario_name="FAKEMOD:BR-001",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+        then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:1", confidence="verified",
+    )
+    conn.commit()
+
+    doc_text = _valid_test_doc_text("python", "pytest")
+
+    def caller(prompt):
+        return ModelResponse(text=doc_text, input_tokens=1, output_tokens=2)
+
+    out_path = tmp_path / "FAKEMOD.md"
+    result = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, caller, "writing rules text", "template text",
+    )
+    assert result.ok is True
+
+    md_text = out_path.read_text(encoding="utf-8")
+    assert "test_case_fingerprint:" in md_text, (
+        "write_test_doc_with_sidecar must stamp a fingerprint into the "
+        "document's front matter -- if this assertion ever fails, every "
+        "document produced from here on falls back to the weaker "
+        "id-overlap heuristic and the insertion-after-range case "
+        "regresses silently"
+    )
+
+    fresh = validate_test_doc(conn, out_path)
+    assert fresh["sidecar_stale"] is False, "a freshly written document must not look stale"
+
+    # Now insert a second rule_candidate row *after* this document's own
+    # BR-range -- FAKEMOD:BR-001 stays a literal subset of the new valid
+    # set, the exact shape an id-overlap-only check cannot catch.
+    insert(
+        conn, "rule_candidate", member_id=1, line_no=20, construct="IF",
+        condition="COND-2", raw="IF COND-2",
+    )
+    conn.commit()
+
+    revalidated = validate_test_doc(conn, out_path)
+    assert revalidated["sidecar_stale"] is True, (
+        "the real write path's stamped fingerprint must detect this "
+        "insertion the same way the unit-level test does"
+    )
+    assert revalidated["ok"], revalidated["problems"]
+
+
 def test_sidecar_present_cross_checks_manifest_against_real_code(tmp_path):
     from mfdoc.validate import validate_test_doc
     import sqlite3

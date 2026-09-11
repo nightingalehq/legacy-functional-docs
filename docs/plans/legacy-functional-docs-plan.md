@@ -307,7 +307,15 @@ GitHub org.
   `test_hand_edited_sidecar_with_a_fingerprint_still_flags_an_invented_id`
   (`tests/test_test_validate.py`) and
   `test_corpus_signature_changes_when_rule_candidate_ordering_shifts_but_test_case_does_not`
-  (`tests/test_test_batch.py`). Full suite: 966 passed, 2 skipped; bundled
+  (`tests/test_test_batch.py`). A further review round asked for an
+  end-to-end guard through the real write path, not just a
+  hand-constructed `test_case_fingerprint` fixture -- added
+  `test_generate_member_test_doc_stamps_fingerprint_and_detects_a_later_insertion`
+  (`tests/test_test_batch.py`), which renders through
+  `generate_member_test_doc` -> `write_test_doc_with_sidecar`, asserts the
+  field actually landed in front matter, then inserts a `rule_candidate`
+  row after the document's own range and confirms the very next
+  validation reports it stale. Full suite: 979 passed, 2 skipped; bundled
   fixture pipeline (`ingest`/`derive`/`coverage`/`validate --docs
   examples`) unchanged from before this change.
 
