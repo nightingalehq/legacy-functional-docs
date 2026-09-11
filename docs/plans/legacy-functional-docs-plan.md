@@ -12,6 +12,24 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-11k):**
+- Addressed the twenty-second Copilot review round on PR #209 (issue
+  #195): the prior round's shared `_fingerprint_cache` never reached
+  `_test_chunk_reuse_ok`'s own revalidation -- both the real chunk loop's
+  reuse check and `plan_test_batch`'s dry-run mirror called
+  `validate_test_doc`/`_readonly_validate_test_doc` with no cache at all,
+  so the intended cache-*hit* path (a chunk being reused verbatim) still
+  cost O(chunks * rules) recomputing the same member's fingerprint on
+  every chunk. `_test_chunk_reuse_ok` and `_readonly_validate_test_doc`
+  both gained the same `_fingerprint_cache` parameter and now forward it;
+  the real chunk loop passes its existing shared dict through, and the
+  dry-run loop gained one scoped to each member's own chunks (mirroring
+  the real path's scope). One new regression test asserting the
+  parameter is actually forwarded on both the real and read-only
+  validator branches. Full suite green (1029 passed, 2 skipped) plus a
+  clean `mfdoc validate` pass against `examples/` (71/71 documents, 0
+  invalid citations of 750).
+
 **Progress (2026-09-11j):**
 - Addressed the twenty-first Copilot review round on PR #209 (issue #195):
   1. `split_frontmatter` now rejects syntactically valid but non-mapping

@@ -2452,15 +2452,54 @@ def test_chunk_reuse_treats_a_stale_sidecar_as_a_cache_miss(tmp_path, monkeypatc
 
     monkeypatch.setattr(
         testbatch, "validate_test_doc",
-        lambda conn, path, _text=None, _prior_fingerprint=None, _render_time=False: {"ok": True, "sidecar_stale": True, "problems": []},
+        lambda conn, path, _text=None, _prior_fingerprint=None, _render_time=False, _fingerprint_cache=None: {"ok": True, "sidecar_stale": True, "problems": []},
     )
     assert testbatch._test_chunk_reuse_ok(None, prior_chunks, 1, "same-hash", chunk_path) is False
 
     monkeypatch.setattr(
         testbatch, "validate_test_doc",
-        lambda conn, path, _text=None, _prior_fingerprint=None, _render_time=False: {"ok": True, "sidecar_stale": False, "problems": []},
+        lambda conn, path, _text=None, _prior_fingerprint=None, _render_time=False, _fingerprint_cache=None: {"ok": True, "sidecar_stale": False, "problems": []},
     )
     assert testbatch._test_chunk_reuse_ok(None, prior_chunks, 1, "same-hash", chunk_path) is True
+
+
+def test_chunk_reuse_ok_passes_its_fingerprint_cache_through_to_validation(tmp_path, monkeypatch):
+    """Copilot review follow-up on issue #195's fix: `_test_chunk_reuse_ok`'s
+    own `_fingerprint_cache` parameter must actually reach
+    `validate_test_doc`/`_readonly_validate_test_doc` -- a prior round
+    added the parameter to both validators and to the chunk loop/dry-run
+    callers that create the shared dict, but `_test_chunk_reuse_ok` itself
+    dropped it on the floor instead of forwarding it, leaving the intended
+    cache-hit path just as expensive as no cache at all."""
+    from mfdoc import testbatch
+
+    chunk_path = tmp_path / "FAKEMOD.chunk1.md"
+    chunk_path.write_text("irrelevant -- validate_test_doc is faked below", encoding="utf-8")
+    prior_chunks = {"1": {"ok": True, "brief_sha256": "same-hash"}}
+    received = []
+
+    def fake_validate(conn, path, _text=None, _prior_fingerprint=None, _render_time=False, _fingerprint_cache=None):
+        received.append(_fingerprint_cache)
+        return {"ok": True, "sidecar_stale": False, "problems": []}
+
+    monkeypatch.setattr(testbatch, "validate_test_doc", fake_validate)
+    sentinel: dict = {"marker": "shared"}
+    testbatch._test_chunk_reuse_ok(
+        None, prior_chunks, 1, "same-hash", chunk_path, _fingerprint_cache=sentinel,
+    )
+    assert received == [sentinel]
+
+    received.clear()
+    monkeypatch.setattr(
+        testbatch, "_readonly_validate_test_doc",
+        lambda conn, path, _render_time=False, _fingerprint_cache=None: (
+            received.append(_fingerprint_cache) or {"ok": True, "sidecar_stale": False, "problems": []}
+        ),
+    )
+    testbatch._test_chunk_reuse_ok(
+        None, prior_chunks, 1, "same-hash", chunk_path, readonly=True, _fingerprint_cache=sentinel,
+    )
+    assert received == [sentinel]
 
 
 def test_chunk_reuse_forces_a_re_render_for_a_legacy_chunk_with_no_fingerprint(tmp_path):

@@ -835,7 +835,8 @@ _DOC_CLAIM_COLUMNS = (
 )
 
 
-def _readonly_validate_test_doc(conn, path: Path, _render_time: bool = False) -> dict:
+def _readonly_validate_test_doc(conn, path: Path, _render_time: bool = False,
+                                 _fingerprint_cache: dict | None = None) -> dict:
     """The same result `validate_test_doc(conn, path)` returns, but leaves
     the `doc_claim` table exactly as it was before the call.
     `validate_test_doc` (via `validate.validate_doc`) deletes and
@@ -858,7 +859,7 @@ def _readonly_validate_test_doc(conn, path: Path, _render_time: bool = False) ->
         (path_str,),
     ).fetchall()
     try:
-        return validate_test_doc(conn, path, _render_time=_render_time)
+        return validate_test_doc(conn, path, _render_time=_render_time, _fingerprint_cache=_fingerprint_cache)
     finally:
         conn.execute("DELETE FROM doc_claim WHERE doc_path=?", (path_str,))
         if before:
@@ -871,7 +872,8 @@ def _readonly_validate_test_doc(conn, path: Path, _render_time: bool = False) ->
 
 
 def _test_chunk_reuse_ok(conn, prior_chunks: dict | None, i: int, brief_hash: str,
-                          chunk_path: Path, readonly: bool = False) -> bool:
+                          chunk_path: Path, readonly: bool = False,
+                          _fingerprint_cache: dict | None = None) -> bool:
     """Whether chunk `i` can be reused verbatim -- no model call -- given a
     prior run's chunk_state and this chunk's freshly-computed brief hash:
     the prior run must have recorded this exact chunk as clean (`ok` True)
@@ -930,7 +932,14 @@ def _test_chunk_reuse_ok(conn, prior_chunks: dict | None, i: int, brief_hash: st
     other legacy document goes through, rather than being reused forever
     with a sidecar that can never earn a fingerprint because nothing ever
     calls `write_test_doc_with_sidecar` on a chunk this function keeps
-    calling reusable."""
+    calling reusable.
+
+    `_fingerprint_cache`, from the caller (the chunk loop's own shared
+    dict, or a dry-run's per-member one -- Copilot review): every reusable
+    chunk's revalidation here recomputes this member's fingerprint from
+    scratch without it, making the intended cache-hit path itself cost
+    O(chunks * rules) -- exactly the redundant work this cache exists to
+    eliminate everywhere else it's threaded through."""
     prior_chunk = (prior_chunks or {}).get(str(i))
     reusable = (
         isinstance(prior_chunk, dict) and prior_chunk.get("ok") is True
@@ -940,7 +949,7 @@ def _test_chunk_reuse_ok(conn, prior_chunks: dict | None, i: int, brief_hash: st
     if not reusable:
         return False
     validator = _readonly_validate_test_doc if readonly else validate_test_doc
-    result = validator(conn, chunk_path, _render_time=True)
+    result = validator(conn, chunk_path, _render_time=True, _fingerprint_cache=_fingerprint_cache)
     return result["ok"] and not result.get("sidecar_stale")
 
 
@@ -1046,7 +1055,9 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
         )
         brief_hash = hashlib.sha256(brief.encode("utf-8")).hexdigest()
         result = None
-        if _test_chunk_reuse_ok(conn, prior_chunks, i, brief_hash, chunk_path):
+        if _test_chunk_reuse_ok(
+            conn, prior_chunks, i, brief_hash, chunk_path, _fingerprint_cache=fingerprint_cache,
+        ):
             result = DocResult(member_name, str(chunk_path), True, 0, 0, 0, [])
             logger.debug("%s: chunk %d/%d reused (unchanged)", member_name, i, chunk_count)
         if result is None:
@@ -1851,6 +1862,11 @@ def plan_test_batch(conn, members: list[str], language: str, framework: str, out
         chunk_width = len(str(chunk_count))
         prior_chunks = prior.get("chunks") if isinstance(prior, dict) else None
         chunks_reusable = 0
+        # Shared across every chunk of this one member below, the same
+        # reason `_generate_member_test_doc_chunked` shares one (Copilot
+        # review): every chunk's reuse check revalidates against the same
+        # member's fingerprint.
+        fingerprint_cache: dict = {}
         for i, (start, end) in enumerate(ranges, start=1):
             chunk_path = out_path.with_name(f"{out_path.stem}.chunk{i:0{chunk_width}d}{out_path.suffix}")
             chunk_rows = rows[start - 1:end]
@@ -1859,7 +1875,10 @@ def plan_test_batch(conn, members: list[str], language: str, framework: str, out
                 sme_notes=sme_notes,
             )
             chunk_hash = hashlib.sha256(chunk_brief.encode("utf-8")).hexdigest()
-            if _test_chunk_reuse_ok(conn, prior_chunks, i, chunk_hash, chunk_path, readonly=True):
+            if _test_chunk_reuse_ok(
+                conn, prior_chunks, i, chunk_hash, chunk_path, readonly=True,
+                _fingerprint_cache=fingerprint_cache,
+            ):
                 chunks_reusable += 1
 
         plans.append(TestMemberPlan(
