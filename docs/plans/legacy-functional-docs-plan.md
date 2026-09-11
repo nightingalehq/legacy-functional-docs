@@ -12,6 +12,84 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-11d):**
+- Implemented issue #214 (#207/#183 Part 2 follow-up): a second, member-
+  level `cache_control` breakpoint for a chunked member's chunk loop, using
+  the narrower approach #207's own closing note flagged -- render a
+  purpose-built, chunk-invariant "shared prefix" directly from
+  `MemberFacts`, bypassing `module_brief`'s own rendering (which #207 found
+  has no contiguous chunk-invariant prefix worth caching) for the cached
+  block, while `module_brief` keeps rendering the full per-chunk document
+  body exactly as before. Three real changes, matching #210's own
+  future-work inventory:
+  1. `brief.py`'s new `member_shared_prefix(facts, redact)` renders every
+     whole-member section `module_brief` itself renders except "Candidate
+     business rules" (rule_range-sliced) -- with no `chunk_map` at all (so
+     "Internal routines" never gets a `[documented in chunk N]`
+     annotation), no "Business vocabulary" section (a lexicon hit depends
+     on a specific chunk's own rendered text), and no "SME notes" section
+     (an uncited add-on `module_brief` appends itself, not a `MemberFacts`
+     field) -- redacted through the calling `module_brief` call's own
+     `redact`, same as every other `MemberFacts` field. Headed "# Shared
+     member context: ..." rather than reusing module_brief's own
+     "# Fact brief: NAME" heading, deliberately -- more than one existing
+     test (and, in principle, any real caller) locates a member's name by
+     finding the *first* "# Fact brief:" occurrence in a prompt.
+  2. `anthropic_caller.py`'s `AnthropicCaller`/`vertex_caller.py`'s
+     `VertexCaller` gained `set_member_cache_prefixes` (same contract as
+     the existing `set_cache_prefixes`) and `_content` now emits a second
+     `cache_control`-marked block -- matched against the text left after
+     the project-level prefix is stripped, not the whole prompt, since a
+     member-level prefix is never itself a literal prefix of the full
+     request. Confirmed against the bundled Claude API skill's caching
+     reference: stacked breakpoints should go most-stable-first, so
+     project-level (shared by the whole run) precedes member-level (shared
+     only by one member's own chunks) -- 2 breakpoints used, well within
+     the documented 4/request budget.
+  3. `batch.py`'s new `build_member_prompt_cache_prefix(shared_prefix)`
+     builds the exact `"# Fact brief\n\n" + shared_prefix + "\n\n---\n\n"`
+     leading substring a chunk's own `build_prompt()` call will produce;
+     `_generate_module_doc_chunked` computes this member's `shared_prefix`
+     once (before its chunk loop, not per chunk) and registers it via
+     `set_member_cache_prefixes` when `caller` exposes that hook, then
+     prepends `shared_prefix` ahead of every chunk's own `module_brief()`
+     text when building that chunk's `brief` -- deliberately redundant
+     with what `module_brief` still renders in full (per #214's "out of
+     scope" note not restructuring `module_brief`'s own section order): the
+     saving comes from the cache *hit* on the leading copy across a
+     member's chunks, not from removing these facts from `module_brief`'s
+     own uncached per-chunk text. `plan_batch`'s dry-run preview now hashes
+     the same `shared_prefix + chunk_brief` string a real chunked render
+     would, not `chunk_brief` alone, so its `chunks_reusable` count doesn't
+     silently drift from what a real run would do (the exact class of bug
+     that function's own docstring exists to prevent).
+  Tests: `member_shared_prefix`'s output is byte-identical across every
+  chunk of the same member and omits every chunk-dependent section
+  (`tests/test_brief.py`); `AnthropicCaller`/`VertexCaller` emit exactly
+  two `cache_control` breakpoints (right order) when both prefixes match, one
+  when only the project-level prefix matches or no member prefix is
+  registered (`tests/test_anthropic_caller.py`, `tests/test_vertex_caller.py`);
+  `build_member_prompt_cache_prefix` lines up exactly with where a chunk's
+  own `build_prompt()` output puts it, and `generate_module_doc`'s chunked
+  path registers exactly one member-level prefix before its chunk loop,
+  matching every per-chunk prompt (`tests/test_prompt_caching.py`).
+  Bundled fixture pipeline (`ingest`/`derive`/`coverage`/`validate --docs
+  examples`) re-run clean, 71/71 documents, 0 invalid citations, no
+  `examples/` content changed -- this is a caching-only change to the
+  narrate stage's prompt assembly, not to any generated document.
+  `mfdoc batch` itself (the only path that would actually exercise the new
+  cache breakpoint against a real model) was not re-run against the
+  bundled fixtures -- no `ANTHROPIC_API_KEY` in this environment, and it
+  wouldn't demonstrate a token/cost delta cheaply anyway (a live API call
+  bills for both the control and treatment side, and none of this repo's
+  bundled fixtures currently need chunking under the default
+  `max_rules_per_call`, so demonstrating the saving would need a
+  synthetic, artificially-lowered threshold, not a real before/after on
+  real engagement-scale content) -- covered instead by the deterministic
+  unit tests above, which pin the exact prompt bytes/breakpoint count a
+  real call would send. Full suite: 967 passed, 2 skipped (up from 955
+  passed, 2 skipped per #210's own progress entry).
+
 **Progress (2026-09-11):**
 - Fixed issue #199: `mfdoc doc-drift`'s existing checks (issue #161) caught
   system-wide/module-scoped drift but nothing keyed on a single dialect --

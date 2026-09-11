@@ -352,6 +352,112 @@ def test_call_uses_the_longest_matching_prefix_when_more_than_one_matches(monkey
     assert seen["content"][1]["text"] == "rest"
 
 
+def test_call_emits_two_cache_breakpoints_for_a_chunked_member_with_a_member_prefix(monkeypatch):
+    """Issue #214: once both a project-level prefix (set_cache_prefixes) and
+    a member-level prefix (set_member_cache_prefixes) are registered, and the
+    prompt shares both, `_content` must emit exactly two cache_control-marked
+    blocks, in order -- project-level first, member-level second -- plus one
+    unmarked variable-suffix block."""
+    seen = {}
+
+    def create(**kwargs):
+        seen["content"] = kwargs["messages"][0]["content"]
+        return _fake_message()
+
+    module, _ = _fake_anthropic_module(create)
+    monkeypatch.setitem(sys.modules, "anthropic", module)
+
+    caller = AnthropicCaller()
+    caller.set_cache_prefixes(["project prefix\n\n---\n\n"])
+    caller.set_member_cache_prefixes(["# Fact brief\n\nmember shared context\n\n---\n\n"])
+    caller(
+        "project prefix\n\n---\n\n# Fact brief\n\nmember shared context\n\n---\n\nchunk-specific brief"
+    )
+
+    breakpoints = [b for b in seen["content"] if "cache_control" in b]
+    assert len(breakpoints) == 2
+    assert seen["content"] == [
+        {"type": "text", "text": "project prefix\n\n---\n\n",
+         "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": "# Fact brief\n\nmember shared context\n\n---\n\n",
+         "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": "chunk-specific brief"},
+    ]
+
+
+def test_call_emits_one_cache_breakpoint_when_no_member_prefix_matches(monkeypatch):
+    """A non-chunked member (or a caller nobody ever told about a member-
+    level prefix) must keep emitting exactly the one project-level
+    breakpoint -- adding set_member_cache_prefixes support must not change
+    behavior for every call site that never registers one."""
+    seen = {}
+
+    def create(**kwargs):
+        seen["content"] = kwargs["messages"][0]["content"]
+        return _fake_message()
+
+    module, _ = _fake_anthropic_module(create)
+    monkeypatch.setitem(sys.modules, "anthropic", module)
+
+    caller = AnthropicCaller()
+    caller.set_cache_prefixes(["project prefix\n\n---\n\n"])
+    caller("project prefix\n\n---\n\n# Fact brief\n\na whole, unchunked member's brief")
+
+    breakpoints = [b for b in seen["content"] if "cache_control" in b]
+    assert len(breakpoints) == 1
+    assert seen["content"] == [
+        {"type": "text", "text": "project prefix\n\n---\n\n",
+         "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": "# Fact brief\n\na whole, unchunked member's brief"},
+    ]
+
+
+def test_call_emits_one_cache_breakpoint_when_a_member_prefix_is_registered_but_does_not_match(monkeypatch):
+    """A member-level prefix registered for a *different* member (or chunk)
+    must not be forced onto a prompt it doesn't actually share -- falls back
+    to just the project-level breakpoint, exactly like an unmatched
+    project-level prefix already does."""
+    seen = {}
+
+    def create(**kwargs):
+        seen["content"] = kwargs["messages"][0]["content"]
+        return _fake_message()
+
+    module, _ = _fake_anthropic_module(create)
+    monkeypatch.setitem(sys.modules, "anthropic", module)
+
+    caller = AnthropicCaller()
+    caller.set_cache_prefixes(["project prefix\n\n---\n\n"])
+    caller.set_member_cache_prefixes(["# Fact brief\n\na different member's shared context\n\n---\n\n"])
+    caller("project prefix\n\n---\n\n# Fact brief\n\nthis member's own brief")
+
+    assert seen["content"] == [
+        {"type": "text", "text": "project prefix\n\n---\n\n",
+         "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": "# Fact brief\n\nthis member's own brief"},
+    ]
+
+
+def test_set_member_cache_prefixes_accepts_none_as_clear(monkeypatch):
+    seen = {}
+
+    def create(**kwargs):
+        seen["content"] = kwargs["messages"][0]["content"]
+        return _fake_message()
+
+    module, _ = _fake_anthropic_module(create)
+    monkeypatch.setitem(sys.modules, "anthropic", module)
+
+    caller = AnthropicCaller()
+    caller.set_cache_prefixes(["project prefix\n\n---\n\n"])
+    caller.set_member_cache_prefixes(["# Fact brief\n\nmember shared context\n\n---\n\n"])
+    caller.set_member_cache_prefixes(None)
+    caller("project prefix\n\n---\n\n# Fact brief\n\nmember shared context\n\n---\n\nchunk-specific brief")
+
+    breakpoints = [b for b in seen["content"] if "cache_control" in b]
+    assert len(breakpoints) == 1
+
+
 def test_set_cache_prefixes_treats_a_single_string_as_one_prefix_not_chars(monkeypatch):
     """A caller passing a bare string (an easy mistake -- `str` is iterable)
     must not have it silently exploded into one-character prefixes, which

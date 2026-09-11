@@ -8,15 +8,24 @@ that actually consume it.
 
 from __future__ import annotations
 
+import re
+import sqlite3
+import tempfile
+from pathlib import Path
+
 from mfdoc.batch import (
     _apply_cache_prefixes,
+    build_member_prompt_cache_prefix,
     build_prompt,
     build_prompt_cache_prefix,
     build_prompt_parts,
     build_reconciliation_prompt,
     build_reconciliation_prompt_cache_prefix,
     build_reconciliation_prompt_parts,
+    generate_module_doc,
 )
+from mfdoc.brief import MemberFacts, build_member_facts, member_shared_prefix
+from mfdoc.redact import NULL_REDACTOR
 
 
 def test_build_prompt_is_exactly_its_own_parts_joined():
@@ -144,3 +153,159 @@ def test_apply_cache_prefixes_is_a_no_op_for_a_caller_without_the_hook():
 
     _apply_cache_prefixes(plain_caller, "rules", "template", None)
     assert not hasattr(plain_caller, "set_cache_prefixes")
+
+
+# --- issue #214: member-level shared-prefix cache tier ---------------------
+
+def test_build_member_prompt_cache_prefix_is_a_true_prefix_of_the_fact_brief_section():
+    """build_member_prompt_cache_prefix's output must line up exactly with
+    where build_prompt_parts's own '# Fact brief\\n\\n' heading puts a
+    member's shared_prefix + separator, ahead of that chunk's own
+    module_brief() text -- the same contract build_prompt_cache_prefix has
+    for the project-level tier."""
+    shared_prefix = "some member-level shared context"
+    member_prefix = build_member_prompt_cache_prefix(shared_prefix)
+    brief = shared_prefix + "\n\n---\n\nchunk-specific brief text"
+    prompt = build_prompt(brief, "some writing rules", "a template")
+    project_prefix = build_prompt_cache_prefix("some writing rules", "a template")
+    assert prompt[len(project_prefix):].startswith(member_prefix)
+    assert prompt[len(project_prefix) + len(member_prefix):] == "chunk-specific brief text"
+
+
+def test_build_member_prompt_cache_prefix_differs_for_different_shared_prefixes():
+    assert build_member_prompt_cache_prefix("member A's context") != build_member_prompt_cache_prefix(
+        "member B's context"
+    )
+
+
+class _MemberCacheAwareFakeCaller:
+    """Records both tiers a chunked member's run registers, and every
+    prompt it's actually called with -- proves run_batch/generate_module_doc
+    wire the member-level tier (issue #214) the same way _apply_cache_
+    prefixes already wires the project-level one."""
+
+    def __init__(self):
+        self.member_registered: list[list[str]] = []
+        self.prompts_seen: list[str] = []
+
+    def set_member_cache_prefixes(self, prefixes) -> None:
+        self.member_registered.append(list(prefixes))
+
+    def __call__(self, prompt):
+        self.prompts_seen.append(prompt)
+        ids_re = re.compile(r"FAKEMOD:BR-\d+")
+        if "# Fact brief:" not in prompt:
+            # The one narrative-reconciliation call -- give it a minimal
+            # valid five-section response, same shape test_batch.py's
+            # _chunk_aware_module_caller uses.
+            from mfdoc.batch import NARRATIVE_SECTIONS
+
+            sections = "\n\n".join(
+                f"## {h}\n\nCovers the module as a whole [[FAKEMOD:1]]." for h in NARRATIVE_SECTIONS
+            )
+            return _fake_response(
+                f"{sections}\n", input_tokens=1, output_tokens=1,
+            )
+        ids = sorted(set(ids_re.findall(prompt)))
+        rule_lines = "\n".join(f"1. **{i}** [[FAKEMOD:1]] rule text." for i in ids)
+        text = f"""---
+title: "FAKEMOD — module documentation"
+doc_type: module
+system: MOM
+module: FAKEMOD
+dialect: natural
+library: MILLPROD
+generated_by: legacy-functional-docs 0.1.0
+generated_at: "2026-01-01"
+review_status: draft
+reviewers: []
+confidence_summary:
+  verified: {len(ids)}
+sources: ["FAKEMOD"]
+sme_questions: []
+---
+
+# FAKEMOD
+
+## Purpose
+
+Does something [[FAKEMOD:1]].
+
+## How it is invoked
+
+Something invokes it [[FAKEMOD:1]].
+
+## Inputs
+
+Nothing beyond what's cited above [[FAKEMOD:1]].
+
+## Data used
+
+Nothing beyond what's cited above [[FAKEMOD:1]].
+
+## Business rules
+
+{rule_lines}
+
+## Outputs and effects
+
+Nothing beyond what's cited above [[FAKEMOD:1]].
+"""
+        return _fake_response(text, input_tokens=1, output_tokens=2)
+
+
+def _fake_response(text, input_tokens, output_tokens):
+    from mfdoc.batch import ModelResponse
+
+    return ModelResponse(text=text, input_tokens=input_tokens, output_tokens=output_tokens)
+
+
+def _seed_fakemod_rules(conn, count: int):
+    from mfdoc.db import insert
+
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
+    for n in range(1, count + 1):
+        insert(
+            conn, "rule_candidate", member_id=1, line_no=n, construct="IF",
+            condition=f"COND-{n}", raw=f"IF COND-{n}",
+        )
+    conn.commit()
+
+
+def test_generate_module_doc_chunked_registers_one_member_prefix_before_the_chunk_loop():
+    """Issue #214: a chunked member must register its own member-level
+    shared-prefix exactly once, before any of its chunks are rendered --
+    not once per chunk (that would defeat the point: the whole reason to
+    register it once is so every chunk's build_prompt() call shares the
+    exact same registered text)."""
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_rules(conn, 5)  # -> 3 chunks with max_rules_per_call=2
+
+    caller = _MemberCacheAwareFakeCaller()
+    facts = build_member_facts(conn, "FAKEMOD")
+    assert isinstance(facts, MemberFacts)
+    expected_prefix = build_member_prompt_cache_prefix(member_shared_prefix(facts, NULL_REDACTOR))
+
+    result = generate_module_doc(
+        conn, "FAKEMOD", _tmp_out_path(), caller, "writing rules text", "template text",
+        max_rules_per_call=2,
+    )
+    assert result.chunked is True
+    assert caller.member_registered == [[expected_prefix]]
+
+    # And every per-chunk prompt (not the narrative-reconciliation call)
+    # actually starts with the registered member-level prefix, right after
+    # the "# Fact brief\n\n" heading build_prompt_parts always adds.
+    chunk_prompts = [p for p in caller.prompts_seen if "# Fact brief:" in p]
+    assert chunk_prompts, "expected at least one per-chunk prompt"
+    for prompt in chunk_prompts:
+        assert expected_prefix in prompt
+
+
+def _tmp_out_path():
+    return Path(tempfile.mkdtemp()) / "FAKEMOD.md"

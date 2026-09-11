@@ -31,8 +31,8 @@ from typing import Callable
 from . import __version__
 from .brief import (
     MemberFacts, _unescape_cell, build_member_facts, chunk_density_metrics, fetch_routines,
-    fetch_rule_candidate_rows, flag_density_outliers, format_density_note, module_brief,
-    routine_aware_chunk_ranges, routine_for_line,
+    fetch_rule_candidate_rows, flag_density_outliers, format_density_note, member_shared_prefix,
+    module_brief, routine_aware_chunk_ranges, routine_for_line,
 )
 from .citations import _cite, _rule_id, numbered_rule_candidates
 from .db import GAP_SEVERITY_ORDER_SQL
@@ -401,6 +401,27 @@ def build_prompt_cache_prefix(writing_rules: str, template: str) -> str:
     `set_cache_prefixes`."""
     stable = build_prompt_parts("", writing_rules, template)[:3]
     return "\n\n---\n\n".join(stable) + "\n\n---\n\n"
+
+
+def build_member_prompt_cache_prefix(shared_prefix: str) -> str:
+    """The exact leading substring of a chunked member's own per-chunk
+    `brief` text (issue #214, following up on #207/#183) that stays byte-
+    identical across every one of that member's chunks: the `"# Fact
+    brief\\n\\n"` heading `build_prompt_parts` always puts ahead of a brief,
+    plus `shared_prefix` itself (`member_shared_prefix(member_facts,
+    redact)` -- see that function's docstring for exactly what it does and
+    doesn't include), plus the same `"\\n\\n---\\n\\n"` section separator
+    `_generate_module_doc_chunked` puts between `shared_prefix` and that
+    chunk's own `module_brief()` text.
+
+    Registered via `AnthropicCaller`/`VertexCaller`'s `set_member_cache_
+    prefixes` -- *not* against the whole prompt like `build_prompt_cache_
+    prefix` above, since `shared_prefix` alone (unlike that function's
+    output) is never a literal prefix of the full request: the existing
+    project-level prefix always precedes it. `_content` matches this
+    against the text left over after the project-level prefix is already
+    stripped -- see its own docstring."""
+    return "# Fact brief\n\n" + shared_prefix + "\n\n---\n\n"
 
 
 # Corrective hints keyed by a substring of a validate_doc problem -- appended
@@ -1656,6 +1677,25 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
         f"{out_path.stem}.chunk{n:0{chunk_width}d}{out_path.suffix}" for n in range(1, chunk_count + 1)
     }
     _prune_stale_chunk_files(out_path, expected_chunk_names)
+    # Issue #214: this member's own chunk-invariant shared prefix,
+    # registered as a second, member-level cache_control breakpoint
+    # (see build_member_prompt_cache_prefix/AnthropicCaller.set_member_
+    # cache_prefixes) *before* the chunk loop below runs -- every chunk's
+    # own build_prompt() call shares this exact leading text, so it's
+    # computed once per member here, not once per chunk. Only meaningful
+    # when `member_facts` actually resolved (a MemberFacts, not the
+    # ambiguous/not-found `str` module_brief itself would render) and only
+    # applied when `caller` opts in by exposing `set_member_cache_prefixes`
+    # (AnthropicCaller, VertexCaller) -- getattr(..., None) leaves every
+    # other caller (ClaudeCLICaller, the fake-echo test caller) untouched,
+    # same as _apply_cache_prefixes does for the project-level tier.
+    shared_prefix = (
+        member_shared_prefix(member_facts, redact) if isinstance(member_facts, MemberFacts) else None
+    )
+    if shared_prefix is not None:
+        set_member_cache_prefixes = getattr(caller, "set_member_cache_prefixes", None)
+        if set_member_cache_prefixes is not None:
+            set_member_cache_prefixes([build_member_prompt_cache_prefix(shared_prefix)])
     # `member_facts` was already resolved above (before `routines`) --
     # every whole-member section module_brief() renders (interface, data
     # access, calls, inbound callers, gaps, ...) is identical across this
@@ -1665,10 +1705,25 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
     # point of this loop no longer calling module_brief() with facts=None.
     for i, (start, end) in enumerate(ranges, start=1):
         chunk_path = out_path.with_name(f"{out_path.stem}.chunk{i:0{chunk_width}d}{out_path.suffix}")
-        brief = module_brief(
+        chunk_brief = module_brief(
             conn, member_name, redact=redact, lexicon=lexicon,
             rule_range=(start, end), chunk_info=(i, chunk_count), chunk_map=chunk_map,
             sme_notes=sme_notes, facts=member_facts,
+        )
+        # `shared_prefix` (when this member resolved to a real MemberFacts)
+        # is prepended ahead of every chunk's own module_brief() text, with
+        # the same separator build_member_prompt_cache_prefix expects to
+        # find -- this is what makes the registered member-level cache
+        # prefix above an actual literal prefix of this brief, on every
+        # chunk, not just a string that happens to be byte-identical
+        # somewhere inside it. Deliberately redundant with what
+        # module_brief() itself still renders in full below (issue #214's
+        # "out of scope" note): the caching win comes from the cache *hit*
+        # on this leading copy across chunks, not from removing these facts
+        # from module_brief()'s own per-chunk text.
+        brief = (
+            shared_prefix + "\n\n---\n\n" + chunk_brief if shared_prefix is not None
+            else chunk_brief
         )
         brief_hash = hashlib.sha256(brief.encode("utf-8")).hexdigest()
         result = None
@@ -2500,6 +2555,16 @@ def plan_batch(conn, members: list[str], out_dir: Path,
         prior_chunks = prior.get("chunks") if isinstance(prior, dict) else None
         chunks_reusable = 0
         chunk_bodies: list[tuple[int, str]] = []
+        # Issue #214: a real chunked render's own brief_hash (see
+        # _generate_module_doc_chunked) is computed over `shared_prefix +
+        # "\n\n---\n\n" + chunk_brief`, not `chunk_brief` alone -- this
+        # preview must hash the identical string, or its chunks_reusable
+        # count silently drifts from what a real run would actually do
+        # (exactly the class of bug this function's own docstring exists to
+        # prevent). Computed once per member, same as the real render.
+        shared_prefix = (
+            member_shared_prefix(member_facts, redact) if isinstance(member_facts, MemberFacts) else None
+        )
         for i, (start, end) in enumerate(ranges, start=1):
             chunk_path = out_path.with_name(f"{out_path.stem}.chunk{i:0{chunk_width}d}{out_path.suffix}")
             chunk_brief = module_brief(
@@ -2507,7 +2572,10 @@ def plan_batch(conn, members: list[str], out_dir: Path,
                 rule_range=(start, end), chunk_info=(i, chunk_count), sme_notes=sme_notes,
                 facts=member_facts,
             )
-            chunk_hash = hashlib.sha256(chunk_brief.encode("utf-8")).hexdigest()
+            preview_brief = (
+                shared_prefix + "\n\n---\n\n" + chunk_brief if shared_prefix is not None else chunk_brief
+            )
+            chunk_hash = hashlib.sha256(preview_brief.encode("utf-8")).hexdigest()
             if _chunk_reuse_ok(conn, prior_chunks, i, chunk_hash, chunk_path):
                 chunks_reusable += 1
                 if writing_rules is not None and chunk_path.exists():

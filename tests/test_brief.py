@@ -10,6 +10,7 @@ from mfdoc.brief import (
     entity_brief,
     flag_density_outliers,
     format_density_note,
+    member_shared_prefix,
     module_brief,
     routine_aware_chunk_ranges,
     routine_for_line,
@@ -175,6 +176,74 @@ def test_module_brief_tags_rules_and_data_access_with_their_routine(indexed_db):
     brief = module_brief(indexed_db, "MMP0100", redact=NULL_REDACTOR)
     assert "## Internal routines" in brief
     assert "`WRITE-AUDIT` (natural_subroutine)" in brief
+
+
+# --- member_shared_prefix (issue #214) --------------------------------
+
+def test_member_shared_prefix_is_byte_identical_across_every_chunk_of_the_same_member(indexed_db):
+    """The exact property #207 found missing from any slice of module_brief's
+    own rendered output: build_member_facts() once, then member_shared_prefix
+    must return the identical string no matter what rule_range/chunk_info/
+    chunk_map a caller's per-chunk module_brief() calls use alongside it --
+    it never looks at any of those at all."""
+    facts = build_member_facts(indexed_db, "MMP0100")
+    assert isinstance(facts, MemberFacts)
+    routines = facts.routines
+    chunk_map = {r["name"].upper(): 1 for r in routines} if routines else {}
+
+    prefix_a = member_shared_prefix(facts, NULL_REDACTOR)
+    # Simulate three different "chunks" of the same member calling
+    # module_brief with different rule_range/chunk_info/chunk_map/lexicon --
+    # none of that should ever reach member_shared_prefix's own output.
+    module_brief(
+        indexed_db, "MMP0100", redact=NULL_REDACTOR, rule_range=(1, 1),
+        chunk_info=(1, 3), chunk_map=chunk_map, facts=facts,
+    )
+    prefix_b = member_shared_prefix(facts, NULL_REDACTOR)
+    module_brief(
+        indexed_db, "MMP0100", redact=NULL_REDACTOR, rule_range=(2, 2),
+        chunk_info=(2, 3), chunk_map=chunk_map, facts=facts,
+    )
+    prefix_c = member_shared_prefix(facts, NULL_REDACTOR)
+
+    assert prefix_a == prefix_b == prefix_c
+
+
+def test_member_shared_prefix_omits_chunk_dependent_content(indexed_db):
+    """member_shared_prefix must never carry the PARTIAL BRIEF note, a
+    chunk-annotated "Internal routines" entry, the "Candidate business
+    rules" section, or a "Business vocabulary" section -- everything #207
+    found chunk-dependent, or explicitly rule_range-sliced, in module_brief's
+    own rendering."""
+    facts = build_member_facts(indexed_db, "MMP0100")
+    assert isinstance(facts, MemberFacts)
+    prefix = member_shared_prefix(facts, NULL_REDACTOR)
+    assert "PARTIAL BRIEF" not in prefix
+    assert "documented in chunk" not in prefix
+    assert "## Candidate business rules" not in prefix
+    assert "## Business vocabulary" not in prefix
+    assert "## SME notes" not in prefix
+    # But every whole-member section module_brief also renders must still
+    # be present -- this is a rendering of those facts, not an empty shell.
+    assert "## Internal routines" in prefix
+    assert "`WRITE-AUDIT` (natural_subroutine)" in prefix
+
+
+def test_member_shared_prefix_is_redacted_with_the_callers_own_redactor(indexed_db):
+    """Every MemberFacts field is raw/unredacted (see MemberFacts's own
+    docstring) -- member_shared_prefix must redact through the given
+    `redact`, the same as module_brief does for every other field, not
+    silently leak unredacted text through this block instead."""
+    facts = build_member_facts(indexed_db, "MMP0100")
+    assert isinstance(facts, MemberFacts)
+
+    def redact_all(text):
+        return "[REDACTED]" if text else text
+
+    prefix = member_shared_prefix(facts, redact_all)
+    unredacted = member_shared_prefix(facts, NULL_REDACTOR)
+    assert prefix != unredacted
+    assert "[REDACTED]" in prefix
 
 
 # --- routine_for_line / routine_aware_chunk_ranges -------------------------
