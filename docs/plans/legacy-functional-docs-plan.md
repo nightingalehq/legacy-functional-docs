@@ -145,8 +145,21 @@ GitHub org.
   module_doc_chunked_does_not_use_member_cache_for_a_single_chunk_member`
   and `test_plan_batch_does_not_hash_a_member_prefix_for_a_single_chunk_
   member`, seeding a member whose one routine spans its entire rule range
-  (`tests/test_prompt_caching.py`). Full suite: 973 passed, 2 skipped (up
-  from 955 passed, 2 skipped per #210's own progress entry).
+  (`tests/test_prompt_caching.py`).
+  Rebasing onto #213 (merged concurrently: `module_brief`'s Interface/Data
+  views/Program variables/Data areas included/Outbound calls/copycode-
+  rules sections switched to a compact `_tbl` pipe-table rendering) needed
+  a real follow-up, not just a mechanical conflict resolution:
+  `member_shared_prefix` had copied those same sections' *pre-#213* bullet-
+  per-row rendering, since it was written before #213 landed -- left as-is,
+  a chunked member's prompt would have shown the same facts twice, in two
+  different formats, and lost #213's density saving for the cached copy.
+  Updated `member_shared_prefix`'s matching sections to use `_tbl` too, per
+  this function's own docstring note that a future edit to one side should
+  check the other. New test `test_member_shared_prefix_matches_module_
+  briefs_table_rendering` pins the compact format so this can't silently
+  drift again (`tests/test_brief.py`). Full suite: 986 passed, 2 skipped
+  (up from 955 passed, 2 skipped per #210's own progress entry).
 
 **Progress (2026-09-11):**
 - Fixed issue #199: `mfdoc doc-drift`'s existing checks (issue #161) caught

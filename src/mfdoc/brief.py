@@ -1026,19 +1026,32 @@ def member_shared_prefix(facts: "MemberFacts", redact: Redactor = NULL_REDACTOR)
             add(f"- {_cite(name, r['line_no'])} `{redact(r['text'][:160])}`")
         add("")
 
+    # These four sections match module_brief's own compact `_tbl` rendering
+    # (issue #185/#213) -- kept in sync deliberately (see this function's
+    # own docstring): this block duplicates what module_brief still renders
+    # in full for every chunk, so rendering it in a stale, pre-#213 bullet
+    # style here would put two different formats for the same facts in
+    # front of the model at once, and forfeit #213's density saving for
+    # the cached copy.
     params = facts.params
     if params:
         add("## Interface (parameters)")
+        add("")
+        rows = []
         for r in params:
-            spec = f" ({r['format'] or ''}{r['length'] or ''})" if (r["format"] or r["length"]) else ""
-            add(f"- {_cite(name, r['line_no'])} level {r['level'] or '-'} `{r['name']}`{spec}")
+            spec = f"{r['format'] or ''}{r['length'] or ''}"
+            rows.append([_cite(name, r["line_no"]), str(r["level"] or "-"), f"`{r['name']}`", spec])
+        out.extend(_tbl(["citation", "level", "name", "spec"], rows))
         add("")
 
     views = facts.views
     if views:
         add("## Data views declared")
-        for r in views:
-            add(f"- {_cite(name, r['line_no'])} view `{r['name']}` over `{r['view_of']}`")
+        add("")
+        rows = [
+            [_cite(name, r["line_no"]), f"`{r['name']}`", f"`{r['view_of']}`"] for r in views
+        ]
+        out.extend(_tbl(["citation", "view", "view_of"], rows))
         add("")
 
     screen_field_names = facts.screen_field_names
@@ -1053,11 +1066,14 @@ def member_shared_prefix(facts: "MemberFacts", redact: Redactor = NULL_REDACTOR)
             "runs). Don't conflate the two just because a field name alone "
             "doesn't make the distinction obvious."
         )
+        add("")
+        rows = []
         for r in other_vars:
             kind = _variable_kind(r, screen_field_names)
-            spec = f" ({r['format'] or ''}{r['length'] or ''})" if (r["format"] or r["length"]) else ""
-            bound = f" bound to `{r['view_of']}`" if r["view_of"] else ""
-            add(f"- {_cite(name, r['line_no'])} {kind} `{r['name']}`{spec}{bound}")
+            spec = f"{r['format'] or ''}{r['length'] or ''}"
+            bound = f"`{r['view_of']}`" if r["view_of"] else ""
+            rows.append([_cite(name, r["line_no"]), kind, f"`{r['name']}`", spec, bound])
+        out.extend(_tbl(["citation", "kind", "name", "spec", "bound_to"], rows))
         add("")
     if data_area_includes:
         add("## Data areas included")
@@ -1067,8 +1083,11 @@ def member_shared_prefix(facts: "MemberFacts", redact: Redactor = NULL_REDACTOR)
             "not here; this is only the include itself, not a program "
             "variable."
         )
-        for r in data_area_includes:
-            add(f"- {_cite(name, r['line_no'])} data area include `{r['name'][len('USING '):]}`")
+        add("")
+        rows = [
+            [_cite(name, r["line_no"]), f"`{r['name'][len('USING '):]}`"] for r in data_area_includes
+        ]
+        out.extend(_tbl(["citation", "data_area"], rows))
         add("")
 
     routines = facts.routines
@@ -1140,17 +1159,20 @@ def member_shared_prefix(facts: "MemberFacts", redact: Redactor = NULL_REDACTOR)
     calls = facts.calls
     if calls:
         add("## Outbound calls")
+        add("")
+        rows = []
         for r in calls:
             if r["dynamic"]:
-                tag = " **[dynamic target — callee set unknown]**"
+                tag = "**[dynamic target — callee set unknown]**"
             elif r["call_kind"] == "PERFORM_INTERNAL":
-                tag = " *(internal subroutine in this member)*"
+                tag = "*(internal subroutine in this member)*"
             elif r["resolved"]:
                 tag = ""
             else:
-                tag = " **[source not supplied]**"
-            add(f"- {_cite(name, r['line_no'])} `{r['call_kind']}` -> `{r['callee_name']}`{tag}"
-                + (f" args: `{redact(r['args'])}`" if r["args"] else ""))
+                tag = "**[source not supplied]**"
+            args = f"`{redact(r['args'])}`" if r["args"] else ""
+            rows.append([_cite(name, r["line_no"]), f"`{r['call_kind']}`", f"`{r['callee_name']}`", tag, args])
+        out.extend(_tbl(["citation", "call_kind", "callee", "flag", "args"], rows))
         add("")
 
     inbound = facts.inbound
@@ -1190,13 +1212,16 @@ def member_shared_prefix(facts: "MemberFacts", redact: Redactor = NULL_REDACTOR)
 
     for cc_id, cc_name, cc_rules in facts.copycode_rules:
         add(f"## Business rules from included copycode `{cc_name}`")
+        add("")
+        cc_rows = []
         for n, r in numbered_rule_candidates(cc_rules):
-            bits = [f"**{_rule_id(cc_name, n)}** {_cite(cc_name, r['line_no'])} depth {r['depth']} `{r['construct']}`"]
-            if r["condition"]:
-                bits.append(f"condition: `{redact(r['condition'])}`")
-            if r["literals"]:
-                bits.append(f"literals: `{redact(r['literals'])}`")
-            add("- " + " — ".join(bits))
+            cond_cell = f"`{redact(r['condition'])}`" if r["condition"] else ""
+            lit_cell = f"`{redact(r['literals'])}`" if r["literals"] else ""
+            cc_rows.append([
+                f"**{_rule_id(cc_name, n)}**", _cite(cc_name, r["line_no"]), str(r["depth"]),
+                f"`{r['construct']}`", cond_cell, lit_cell,
+            ])
+        out.extend(_tbl(["id", "citation", "depth", "construct", "condition", "literals"], cc_rows))
         add("")
 
     gaps = facts.gaps

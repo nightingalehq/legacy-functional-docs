@@ -229,6 +229,22 @@ def test_member_shared_prefix_omits_chunk_dependent_content(indexed_db):
     assert "`WRITE-AUDIT` (natural_subroutine)" in prefix
 
 
+def test_member_shared_prefix_matches_module_briefs_table_rendering(indexed_db):
+    """Issue #185/#213 switched module_brief's Interface/Data views/
+    Program variables/Data areas included/Outbound calls/copycode-rules
+    sections to a compact `_tbl` pipe-table rendering -- member_shared_
+    prefix's own copies of those same sections must stay in that same
+    format (not the old, pre-#213 bullet-per-row prose), or a chunked
+    member's prompt ends up showing the same facts twice in two different
+    styles, and forfeits #213's density saving for the cached copy."""
+    facts = build_member_facts(indexed_db, "MMP0100")
+    assert isinstance(facts, MemberFacts)
+    prefix = member_shared_prefix(facts, NULL_REDACTOR)
+    assert "citation|level|name|spec" in prefix, "Interface section must use _tbl's header row"
+    # The old bullet format ("- [[MMP0100:N]] level ... `NAME`") must be gone.
+    assert "- [[MMP0100:" not in prefix.split("## Interface")[1].split("##")[0]
+
+
 def test_member_shared_prefix_redacts_gap_detail(indexed_db):
     """Copilot review on PR #215: a gap's `detail` is free text that can
     carry the same sensitive values `redact` exists to strip everywhere
