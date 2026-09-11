@@ -175,8 +175,17 @@ class VertexCaller:
             # quota-exhaustion pattern `ClaudeCLICaller` detects from
             # `claude -p`'s output, just via Vertex's transport instead.
             if is_quota_exhaustion_error(exc):
+                # See AnthropicCaller's identical comment -- `retries` tells
+                # us whether this actually survived the backoff budget or
+                # failed non-retryably on the first attempt (e.g. a
+                # `billing_error`), so the message doesn't misreport the
+                # latter as "after retries" (Copilot review on PR #204).
+                attempt_note = (
+                    f"after {retries} retr{'y' if retries == 1 else 'ies'}" if retries
+                    else "on the first attempt (not retryable)"
+                )
                 raise QuotaExhaustedError(
-                    f"Vertex AI call failed after retries, looks like usage-limit/quota "
+                    f"Vertex AI call failed {attempt_note}, looks like usage-limit/quota "
                     f"exhaustion: {exc.__class__.__name__}: {exc}",
                     detail=str(exc),
                 ) from exc

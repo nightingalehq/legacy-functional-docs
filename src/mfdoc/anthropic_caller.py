@@ -121,8 +121,18 @@ class AnthropicCaller:
             # this generic API exception propagate indistinguishably from
             # any other final failure.
             if is_quota_exhaustion_error(exc):
+                # `retries` (updated by `on_retry` above) tells us whether
+                # this actually survived the backoff budget or failed
+                # non-retryably on the first attempt (e.g. a `billing_error`,
+                # which isn't in `_retryable_errors` at all) -- "after
+                # retries" would misreport the latter as having been retried
+                # when it never was (see the Copilot review on PR #204).
+                attempt_note = (
+                    f"after {retries} retr{'y' if retries == 1 else 'ies'}" if retries
+                    else "on the first attempt (not retryable)"
+                )
                 raise QuotaExhaustedError(
-                    f"Anthropic API call failed after retries, looks like usage-limit/quota "
+                    f"Anthropic API call failed {attempt_note}, looks like usage-limit/quota "
                     f"exhaustion: {exc.__class__.__name__}: {exc}",
                     detail=str(exc),
                 ) from exc

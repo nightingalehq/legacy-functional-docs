@@ -39,6 +39,18 @@ from .model_errors import QuotaExhaustedError, is_quota_exhaustion_text
 DEFAULT_TIMEOUT_S = 600
 
 
+def _combine_streams(*texts: str | None) -> str:
+    """Join whichever of `texts` (a `claude -p` JSON `result` string,
+    subprocess stderr, ...) is actually non-empty, so a `QuotaExhaustedError`
+    raised because the usage-limit marker showed up in *either* stream still
+    carries both in its message/`detail` -- never just the one a caller
+    happened to check first (see the Copilot review on PR #198/#204: the
+    marker can land on stdout/`result` while `detail` only looked at
+    stderr, silently dropping the matched evidence)."""
+    parts = [str(t).strip() for t in texts if t and str(t).strip()]
+    return " | ".join(parts) if parts else "(no output captured)"
+
+
 class ClaudeCLICaller:
     def __init__(self, model: str | None = None, timeout: int | None = None,
                  max_budget_usd: float | None = None):
@@ -78,10 +90,14 @@ class ClaudeCLICaller:
             # substrings Claude Code itself uses to recognize this condition
             # before falling back to the generic failure below.
             if is_quota_exhaustion_text(proc.stderr, proc.stdout):
+                # Build `detail` from whichever stream(s) actually carried the
+                # matched marker -- it may be stdout, not stderr, so stderr
+                # alone would silently drop the evidence that triggered this
+                # classification (see the Copilot review on PR #204).
+                detail = _combine_streams(proc.stderr, proc.stdout)
                 raise QuotaExhaustedError(
-                    f"`claude -p` usage limit/quota exhausted (exit {proc.returncode}): "
-                    f"{proc.stderr.strip()}",
-                    detail=proc.stderr.strip(),
+                    f"`claude -p` usage limit/quota exhausted (exit {proc.returncode}): {detail}",
+                    detail=detail,
                 )
             raise RuntimeError(f"`claude -p` exited {proc.returncode}: {proc.stderr.strip()}")
 
@@ -97,9 +113,10 @@ class ClaudeCLICaller:
             # and the usage-limit message in `result` rather than a nonzero
             # exit at all.
             if is_quota_exhaustion_text(result_text, proc.stderr):
+                detail = _combine_streams(result_text, proc.stderr)
                 raise QuotaExhaustedError(
-                    f"`claude -p` usage limit/quota exhausted: {result_text!r}",
-                    detail=str(result_text) if result_text is not None else None,
+                    f"`claude -p` usage limit/quota exhausted: {detail}",
+                    detail=detail,
                 )
             raise RuntimeError(f"`claude -p` reported an error: {result_text!r}")
 
