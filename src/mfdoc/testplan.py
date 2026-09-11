@@ -245,13 +245,24 @@ def member_test_case_aligned_with_rule_candidate(conn, member_name: str) -> bool
     the write side instead of the read side.
 
     Deliberately a subset check (every current-rule_candidate id already
-    has a `test_case` row), not set equality: the failure mode above is
-    specifically a *missing* id (a rule_candidate row nothing in
+    has a matching `test_case` row), not set equality: the failure mode
+    above is specifically a *missing* id (a rule_candidate row nothing in
     `test_case` reflects yet) becoming reachable through a fingerprint
     that looks authoritative. A `test_case` row with no current
     rule_candidate counterpart (an overlay-sourced scenario, or a rule
     since removed but not yet re-planned) doesn't reintroduce that
     specific false positive and isn't this function's concern.
+
+    "Matching" means the expected id's `test_case` row must still be
+    `rule_candidate_id`-linked to the *same* row `numbered_rule_
+    candidates` currently assigns that ordinal to (Copilot review) -- a
+    same-name-set check alone misses a `rule_candidate` rebuild that
+    reorders existing rows (their `line_no`s shift, none inserted or
+    removed) without changing which BR-nnn *names* exist at all: the id
+    set matches by coincidence, but `test_case`'s row for that id is still
+    linked to whatever row previously held that ordinal, not the row that
+    holds it now. Stamping a fingerprint in that state has the exact same
+    consequence as the missing-id case this function otherwise guards.
 
     Only `unit`-kind test_case rows are compared -- the only kind
     `build_member_test_cases` derives one-for-one from a branch
@@ -274,15 +285,19 @@ def member_test_case_aligned_with_rule_candidate(conn, member_name: str) -> bool
         "SELECT * FROM rule_candidate WHERE member_id=? ORDER BY line_no, id", (mid,)
     ).fetchall()
     expected = {
-        _rule_id(canonical_name, n) for n, r in numbered_rule_candidates(rc_rows) if _is_branch_row(r)
+        _rule_id(canonical_name, n): r["id"]
+        for n, r in numbered_rule_candidates(rc_rows) if _is_branch_row(r)
     }
     current = {
-        row["scenario_name"]
+        row["scenario_name"]: row["rule_candidate_id"]
         for row in conn.execute(
-            "SELECT scenario_name FROM test_case WHERE member_id=? AND kind='unit'", (mid,)
+            "SELECT scenario_name, rule_candidate_id FROM test_case WHERE member_id=? AND kind='unit'", (mid,)
         ).fetchall()
     }
-    return expected <= current
+    return all(
+        scenario_name in current and current[scenario_name] == rc_id
+        for scenario_name, rc_id in expected.items()
+    )
 
 
 def build_member_test_cases(conn, mid: int, name: str, overlay: dict | None = None) -> list[dict]:

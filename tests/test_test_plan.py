@@ -293,6 +293,48 @@ def test_member_test_case_aligned_with_rule_candidate():
     assert testplan.member_test_case_aligned_with_rule_candidate(conn, "NOSUCHMEMBER") is False
 
 
+def test_member_test_case_aligned_with_rule_candidate_catches_a_reorder_with_same_names():
+    """Copilot review follow-up: a `rule_candidate` rebuild that reorders
+    existing rows (their `line_no`s shift, none inserted or removed) can
+    leave the *set* of expected BR-nnn names completely unchanged even
+    though each one is now supposed to map to a different underlying
+    rule_candidate row -- a same-name-set check alone would call this
+    aligned. `test_case`'s `rule_candidate_id` linkage (still pointing at
+    the row that used to hold that ordinal) is what catches it."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'x')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 2, 'y')")
+    rc_a = insert(conn, "rule_candidate", member_id=1, line_no=1, construct="IF", raw="a")
+    rc_b = insert(conn, "rule_candidate", member_id=1, line_no=2, construct="IF", raw="b")
+    insert(
+        conn, "test_case", member_id=1, kind="unit", rule_candidate_id=rc_a, scenario_name="FAKEMOD:BR-001",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "A", "citation": "[[FAKEMOD:1]]"}',
+        then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:1", confidence="verified",
+    )
+    insert(
+        conn, "test_case", member_id=1, kind="unit", rule_candidate_id=rc_b, scenario_name="FAKEMOD:BR-002",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "B", "citation": "[[FAKEMOD:2]]"}',
+        then_json='{"citation": "[[FAKEMOD:2]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:2", confidence="verified",
+    )
+    conn.commit()
+    assert testplan.member_test_case_aligned_with_rule_candidate(conn, "FAKEMOD") is True
+
+    # Swap the two rows' line_no -- rc_b now numbers first (BR-001), rc_a
+    # second (BR-002). The name *set* {BR-001, BR-002} is unchanged, but
+    # test_case's BR-001 row is still linked to rc_a, not rc_b.
+    conn.execute("UPDATE rule_candidate SET line_no=2 WHERE id=?", (rc_a,))
+    conn.execute("UPDATE rule_candidate SET line_no=1 WHERE id=?", (rc_b,))
+    conn.commit()
+    assert testplan.member_test_case_aligned_with_rule_candidate(conn, "FAKEMOD") is False
+
+
 def test_register_lists_scenarios_with_resolvable_citations(indexed_db):
     conn = indexed_db
     testplan.run_all(conn)

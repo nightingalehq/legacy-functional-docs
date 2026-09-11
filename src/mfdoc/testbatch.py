@@ -371,16 +371,22 @@ def _prune_stale_test_chunk_files(out_path: Path, expected_names: set[str], lang
         sidecar = sidecar_path_for(candidate, language)
         try:
             candidate.unlink()
-        except OSError:
+        except OSError as exc:
             # Best-effort, same as batch._prune_stale_chunk_files -- a
             # file some other process is holding open must not abort an
-            # otherwise-successful run over cosmetic cleanup.
+            # otherwise-successful run over cosmetic cleanup. Logged, not
+            # silent (Copilot review): a leftover orphan here can still
+            # surface as a confusing stale-manifest failure the next time
+            # something walks the output tree (`mfdoc test-validate`), so
+            # a human debugging that later has a trail back to why it's
+            # still there.
+            logger.warning("could not remove orphaned chunk file %s: %s", candidate, exc)
             continue
         if sidecar is not None and sidecar.exists():
             try:
                 sidecar.unlink()
-            except OSError:
-                pass
+            except OSError as exc:
+                logger.warning("could not remove orphaned chunk sidecar %s: %s", sidecar, exc)
 
 
 def _invalidate_sidecar_if_range_changed(chunk_path: Path, language: str, expected_ids: set[str]) -> None:
@@ -426,12 +432,22 @@ def _invalidate_sidecar_if_range_changed(chunk_path: Path, language: str, expect
 
     No-op if this chunk has no sidecar yet (a fresh render, nothing to
     invalidate) or if its content already matches `expected_ids` (nothing
-    changed for this index -- the common case). Best-effort on removal,
-    same as `_prune_stale_test_chunk_files`: a transient filesystem lock
-    here must not abort an otherwise-successful chunked render; leaving a
-    wrong-range sidecar in place in that rare case reproduces the same
-    (already-documented, already-accepted) residual risk as this
-    function's sibling cleanup helpers, not a new one."""
+    changed for this index -- the common case).
+
+    Raises `OSError` if removal fails, unlike this module's other
+    best-effort cleanup helpers (`_prune_stale_test_chunk_files`'s own
+    swallowed `OSError`s): those only ever risk leaving an orphaned file
+    an unrelated future tree validation might flag, cosmetic in the sense
+    that nothing currently *authoritative* is left behind. Here, a
+    wrong-range sidecar left in place is worse than that: its member-wide
+    `test_case_fingerprint` still matches (`rule_candidate` itself hasn't
+    changed, only chunk boundaries have), so `validate_test_doc`'s exact-
+    fingerprint check treats it as authoritative regardless of its actual
+    (wrong-range) content -- cross-checking the fresh candidate about to
+    be rendered against the wrong sidecar and failing on every retry, not
+    a one-time cosmetic leftover (Copilot review). The caller catches this
+    and reports it as this chunk's own failure instead of silently
+    rendering into a validation it cannot pass."""
     sidecar = sidecar_path_for(chunk_path, language)
     if sidecar is None or not sidecar.exists():
         return
@@ -441,10 +457,7 @@ def _invalidate_sidecar_if_range_changed(chunk_path: Path, language: str, expect
     }
     if on_disk_ids == expected_ids:
         return
-    try:
-        sidecar.unlink()
-    except OSError:
-        pass
+    sidecar.unlink()
 
 
 def select_test_batch_members(conn) -> list[str]:
@@ -1101,13 +1114,25 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
             # wrong-range sidecar as authoritative just because the
             # member-wide fingerprint still happens to match.
             expected_ids = {r["scenario_name"].upper() for r in chunk_rows}
-            _invalidate_sidecar_if_range_changed(chunk_path, language, expected_ids)
-            logger.info("%s: chunk %d/%d generating", member_name, i, chunk_count)
-            result = _generate_test_doc_from_brief(
-                conn, member_name, brief, language, framework, chunk_path, caller,
-                writing_rules, template, max_attempts=max_attempts,
-                _fingerprint_cache=fingerprint_cache,
-            )
+            try:
+                _invalidate_sidecar_if_range_changed(chunk_path, language, expected_ids)
+            except OSError as exc:
+                # Surfaced as this chunk's own failure (Copilot review),
+                # not swallowed: rendering ahead with a wrong-range sidecar
+                # still on disk would fail validation on every retry
+                # anyway (see that function's docstring), just less
+                # legibly than reporting the actual removal failure here.
+                result = DocResult(
+                    member_name, str(chunk_path), False, 0, 0, 0,
+                    [f"could not invalidate stale chunk sidecar: {exc.__class__.__name__}: {exc}"],
+                )
+            if result is None:
+                logger.info("%s: chunk %d/%d generating", member_name, i, chunk_count)
+                result = _generate_test_doc_from_brief(
+                    conn, member_name, brief, language, framework, chunk_path, caller,
+                    writing_rules, template, max_attempts=max_attempts,
+                    _fingerprint_cache=fingerprint_cache,
+                )
         input_tokens += result.input_tokens
         output_tokens += result.output_tokens
         chunk_entries.append((i, chunk_path, result))

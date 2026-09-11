@@ -12,6 +12,37 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-11n):**
+- Addressed the twenty-fifth Copilot review round on PR #209 (issue
+  #195):
+  1. `member_test_case_aligned_with_rule_candidate` (previous round)
+     compared only the *set* of expected BR-nnn names, which a
+     `rule_candidate` rebuild that reorders existing rows (line_nos shift,
+     none inserted/removed) can leave unchanged even though each name is
+     now supposed to map to a different row. Now also compares each
+     expected id's `test_case.rule_candidate_id` against the row that
+     `numbered_rule_candidates` currently assigns that ordinal to, so a
+     silent reorder is caught the same way a missing id already was.
+  2. `_invalidate_sidecar_if_range_changed` (previous round) swallowed a
+     failed sidecar removal -- worse than this module's other
+     best-effort cleanup, since the *wrong-range* sidecar left behind
+     still carries a member-wide fingerprint that matches, making
+     `validate_test_doc` treat it as authoritative and fail the
+     about-to-be-rendered candidate's cross-check on every retry. Now
+     raises; the chunk loop catches it and reports it as that chunk's own
+     failure instead of pressing on into a render doomed to fail less
+     legibly.
+  3. `_prune_stale_test_chunk_files`'s own (separately) swallowed
+     `OSError`s now log a warning instead of failing silently -- a
+     leftover orphan here is lower-stakes (nothing currently authoritative
+     is affected) but can still surface as a confusing stale-manifest
+     failure whenever something later walks the output tree.
+- Three new regression tests (a same-name-set reorder the alignment check
+  must still catch, and the chunk loop surfacing a failed sidecar
+  invalidation instead of swallowing it). Full suite green (1036 passed, 2
+  skipped) plus a clean `mfdoc validate` pass against `examples/` (71/71
+  documents, 0 invalid citations of 750).
+
 **Progress (2026-09-11m):**
 - Addressed the twenty-fourth Copilot review round on PR #209 (issue
   #195):

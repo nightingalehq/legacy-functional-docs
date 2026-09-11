@@ -2566,6 +2566,38 @@ def test_chunk_reuse_ok_passes_its_fingerprint_cache_through_to_validation(tmp_p
     assert received == [sentinel]
 
 
+def test_chunk_render_surfaces_a_failed_sidecar_invalidation_as_a_chunk_failure(tmp_path, monkeypatch):
+    """Copilot review follow-up on issue #195's fix: if
+    `_invalidate_sidecar_if_range_changed` can't remove a wrong-range
+    sidecar (a transient filesystem lock -- it now raises `OSError`
+    instead of swallowing it), the chunked render loop must report that as
+    this chunk's own failure rather than pressing on into a render that
+    would fail validation on every retry anyway, less legibly."""
+    import sqlite3
+
+    from mfdoc import testbatch
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_scenarios(conn, 5)
+
+    def exploding_invalidate(chunk_path, language, expected_ids):
+        raise OSError("simulated: file is locked by another process")
+
+    monkeypatch.setattr(testbatch, "_invalidate_sidecar_if_range_changed", exploding_invalidate)
+
+    caller = _chunk_aware_caller("python", "pytest")
+    out_path = tmp_path / "FAKEMOD.md"
+    result = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, caller,
+        "writing rules text", "template text", max_scenarios_per_call=2,
+    )
+    assert result.ok is False
+    assert any("could not invalidate stale chunk sidecar" in p for p in result.problems)
+
+
 def test_chunk_reuse_forces_a_re_render_for_a_legacy_chunk_with_no_fingerprint(tmp_path):
     """Copilot review follow-up on issue #195: a *legacy* chunk file (no
     `test_case_fingerprint` anywhere -- written before this fix existed)
