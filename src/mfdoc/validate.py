@@ -973,11 +973,13 @@ def validate_test_doc(conn, path: Path, _text: str | None = None) -> dict:
     and *any* of them don't, the sidecar is treated as though it weren't
     there (same as no sidecar on disk) rather than authoritative;
     `result["sidecar_stale"]` reports this without it counting toward
-    `problems`/`ok`. Requiring *all* (not just one) to fail to resolve
-    would under-detect a partial positional shift -- e.g. old
-    `{BR-001, BR-002, BR-003}` renumbered to `{BR-002, BR-003, BR-004}`
-    still has two overlapping ids by coincidence, which is still exactly
-    the same staleness this guard exists to catch. The trade-off: a
+    `problems`/`ok`. Requiring *every* id to resolve (rather than just one
+    of them, i.e. `all(...)` and not `any(...)`) matters for a partial
+    positional shift -- e.g. old `{BR-001, BR-002, BR-003}` renumbered to
+    `{BR-002, BR-003, BR-004}` still has two overlapping ids by
+    coincidence; an `any(...)` check would call that "still current" and
+    miss the shift, which is exactly the same staleness this guard exists
+    to catch. The trade-off: a
     sidecar with one genuinely invented/malformed id mixed in among
     otherwise-current ones is also treated as stale rather than flagged
     directly in `problems` -- accepted here since `test-batch`'s retry loop

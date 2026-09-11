@@ -17,6 +17,61 @@ from mfdoc.db import connect  # noqa: E402
 from mfdoc.validate import validate_tree  # noqa: E402
 
 
+def test_cmd_test_validate_surfaces_a_tolerated_stale_sidecar(indexed_db, cli_args, tmp_path, capsys):
+    """Issue #195 review follow-up: `sidecar_stale`/`sidecar_unresolved_ids`
+    are computed by `validate_test_doc` but never blocked from `mfdoc
+    test-validate`'s own exit code -- confirm `cmd_test_validate` actually
+    prints them (a caller reading the CLI report, not just the Python
+    dict, must be able to see a tolerated staleness happened), and that it
+    still exits 0 since a stale sidecar isn't a defect in the document."""
+    from mfdoc import testplan
+
+    conn = indexed_db
+    testplan.run_all(conn, member_name="MMP0100")
+
+    (tmp_path / "MMP0100.md").write_text(
+        """---
+title: "MMP0100 -- generated tests (python)"
+doc_type: generated_test
+system: MOM
+module: MMP0100
+language: python
+framework: pytest
+generated_by: legacy-functional-docs 0.1.0
+generated_at: "2026-01-01"
+review_status: draft
+reviewers: []
+confidence_summary:
+  verified: 1
+  inferred: 0
+  unresolved: 0
+sources: ["MMP0100"]
+---
+
+# MMP0100 -- generated tests
+
+See [`MMP0100.py`](./MMP0100.py) for the generated test source.
+
+## Scenarios covered
+
+- MMP0100:BR-004
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "MMP0100.py").write_text(
+        "def test_rejects_unconfirmed_order():\n    # MMP0100:BR-999\n    ...\n",
+        encoding="utf-8",
+    )
+
+    args = SimpleNamespace(config=cli_args.config, docs=str(tmp_path))
+    exit_code = cli.cmd_test_validate(args)
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "sidecar looks stale" in captured.out
+    assert "MMP0100:BR-999" in captured.out
+
+
 def test_cmd_validate_reports_omitted_statement_targets_without_failing(indexed_db, cli_args, capsys):
     """The advisory section must print if and only if there is something to
     report, and must never affect the exit code either way.

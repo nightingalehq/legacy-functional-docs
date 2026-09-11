@@ -759,11 +759,22 @@ GitHub org.
   (`_test_chunk_reuse_ok`), so the normal render-validate-retry cycle
   already regenerates and re-splits the sidecar via
   `write_test_doc_with_sidecar` on the very next attempt, the same as any
-  other validation failure -- no different handling needed. Stopping the
-  review-response cycle here (five rounds, CI green, `mergeStateStatus:
-  CLEAN`): further rounds were finding progressively narrower, lower-
-  probability edge cases already covered by pre-existing machinery rather
-  than gaps in this fix itself.
+  other validation failure -- no different handling needed. A sixth round
+  repeated that same scenario-addition point (not actioned, per the above)
+  plus three real, quick fixes, made here: `validate_test_doc`'s own
+  docstring had the `all(...)`-vs-`any(...)` rationale backwards ("Requiring
+  *all* ... to fail to resolve would under-detect..." when the code
+  requires all to *succeed*) -- reworded so the docstring actually matches
+  `sidecar_usable = code_ids <= valid_scenarios()`; `mfdoc test-validate`'s
+  CLI output (`cmd_test_validate`) never printed `sidecar_stale`/
+  `sidecar_unresolved_ids` at all, so a human reading the report (as
+  opposed to a caller reading the Python dict) had no way to see a
+  tolerated staleness happened -- added a `! sidecar looks stale (...)`
+  advisory line, never affecting the exit code; and this progress log's
+  test count (957) had drifted from the PR description's (956) again as
+  the fix iterated -- both now read 962. Added
+  `test_cmd_test_validate_surfaces_a_tolerated_stale_sidecar`
+  (`tests/test_cli.py`). Full suite: 962 passed, 2 skipped.
 
 **Progress (2026-09-10e):**
 - Fixed issue #188: ported `batch.py`'s near-miss/targeted-patch mechanism
