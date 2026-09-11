@@ -309,3 +309,135 @@ def test_generate_module_doc_chunked_registers_one_member_prefix_before_the_chun
 
 def _tmp_out_path():
     return Path(tempfile.mkdtemp()) / "FAKEMOD.md"
+
+
+class _PlainFakeCaller(_MemberCacheAwareFakeCaller):
+    """Same __call__ behavior as _MemberCacheAwareFakeCaller, but with no
+    set_member_cache_prefixes hook at all (matches ClaudeCLICaller and the
+    fake-echo test caller) -- so a chunked run against it exercises the
+    caching-capability gate (issue #214, Copilot review on PR #215)."""
+
+    set_member_cache_prefixes = None
+
+
+def test_generate_module_doc_chunked_does_not_prepend_shared_prefix_for_a_non_cache_capable_caller():
+    """A caller without set_member_cache_prefixes (ClaudeCLICaller, the
+    fake-echo test caller) must never receive shared_prefix prepended into
+    its own per-chunk brief -- with no cache breakpoint to make it a
+    saving, that prepend would be a pure duplicate-context/token-cost
+    regression, and for a caller that actually generates real narrative
+    text, a genuine (uncached) change to model input -- not the caching-
+    only change issue #214 is scoped to (Copilot review on PR #215)."""
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_rules(conn, 5)  # -> 3 chunks with max_rules_per_call=2
+
+    caller = _PlainFakeCaller()
+    facts = build_member_facts(conn, "FAKEMOD")
+    assert isinstance(facts, MemberFacts)
+    shared_prefix = member_shared_prefix(facts, NULL_REDACTOR)
+
+    result = generate_module_doc(
+        conn, "FAKEMOD", _tmp_out_path(), caller, "writing rules text", "template text",
+        max_rules_per_call=2,
+    )
+    assert result.chunked is True
+    chunk_prompts = [p for p in caller.prompts_seen if "# Fact brief:" in p]
+    assert chunk_prompts, "expected at least one per-chunk prompt"
+    for prompt in chunk_prompts:
+        assert shared_prefix not in prompt
+
+
+def test_plan_batch_chunk_hash_matches_a_real_run_with_a_non_cache_capable_caller():
+    """plan_batch's default (member_cache_capable=False) must match a real
+    generate_module_doc call against a caller with no member-level caching
+    hook -- the common case (--provider claude-code, or a caller nobody
+    told about member-level caching)."""
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_rules(conn, 5)
+
+    out_dir_first = _tmp_out_path().parent
+    first = generate_module_doc(
+        conn, "FAKEMOD", out_dir_first / "FAKEMOD.md", _PlainFakeCaller(),
+        "writing rules text", "template text", max_rules_per_call=2,
+    )
+    assert first.ok
+
+    from mfdoc.batch import _output_subdir, plan_batch
+
+    out_dir = Path(tempfile.mkdtemp())
+    subdir = _output_subdir(conn, "FAKEMOD")
+    out_path = out_dir / subdir / "FAKEMOD.md"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    # Reuse the same chunk files/state a real (non-cache-capable) run just
+    # produced, at the path plan_batch itself expects.
+    for src in Path(str(first.path)).parent.glob("FAKEMOD.chunk*.md"):
+        (out_path.parent / src.name).write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+    state_key = f"{subdir.as_posix()}/FAKEMOD"
+    state = {state_key: {"ok": True, "chunks": first.chunk_state}}
+    state_path = out_dir / "state.json"
+    import json as _json
+
+    state_path.write_text(_json.dumps(state), encoding="utf-8")
+
+    plan = plan_batch(conn, ["FAKEMOD"], out_dir, state_path=state_path, max_rules_per_call=2)
+    assert plan.members[0].status == "chunked"
+    assert plan.members[0].chunks_reusable == 3, (
+        "every chunk should be reusable -- plan_batch's default "
+        "member_cache_capable=False must hash the same string a real run "
+        "against a non-cache-capable caller just produced"
+    )
+
+
+def test_plan_batch_chunk_hash_matches_a_real_run_with_a_cache_capable_caller():
+    """The mirror image: member_cache_capable=True must match a real
+    generate_module_doc call against a caller that *does* expose
+    set_member_cache_prefixes -- and must disagree with the plain-caller
+    state from the sibling test above (proving the flag actually changes
+    the computed hash, not just a no-op parameter)."""
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_rules(conn, 5)
+
+    first = generate_module_doc(
+        conn, "FAKEMOD", _tmp_out_path(), _MemberCacheAwareFakeCaller(),
+        "writing rules text", "template text", max_rules_per_call=2,
+    )
+    assert first.ok
+
+    from mfdoc.batch import _output_subdir, plan_batch
+
+    out_dir = Path(tempfile.mkdtemp())
+    subdir = _output_subdir(conn, "FAKEMOD")
+    out_path = out_dir / subdir / "FAKEMOD.md"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    for src in Path(str(first.path)).parent.glob("FAKEMOD.chunk*.md"):
+        (out_path.parent / src.name).write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+    state_key = f"{subdir.as_posix()}/FAKEMOD"
+    state = {state_key: {"ok": True, "chunks": first.chunk_state}}
+    state_path = out_dir / "state.json"
+    import json as _json
+
+    state_path.write_text(_json.dumps(state), encoding="utf-8")
+
+    # member_cache_capable=False (the default) must now see every chunk as
+    # needing a re-render -- its hash no longer matches a state file that
+    # was actually produced with the member-level prefix prepended.
+    plan_mismatched = plan_batch(conn, ["FAKEMOD"], out_dir, state_path=state_path, max_rules_per_call=2)
+    assert plan_mismatched.members[0].chunks_reusable == 0
+
+    plan_matched = plan_batch(
+        conn, ["FAKEMOD"], out_dir, state_path=state_path, max_rules_per_call=2,
+        member_cache_capable=True,
+    )
+    assert plan_matched.members[0].chunks_reusable == 3

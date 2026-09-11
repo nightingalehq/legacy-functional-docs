@@ -229,6 +229,25 @@ def test_member_shared_prefix_omits_chunk_dependent_content(indexed_db):
     assert "`WRITE-AUDIT` (natural_subroutine)" in prefix
 
 
+def test_member_shared_prefix_redacts_gap_detail(indexed_db):
+    """Copilot review on PR #215: a gap's `detail` is free text that can
+    carry the same sensitive values `redact` exists to strip everywhere
+    else in this renderer -- must not slip through unredacted just because
+    module_brief's own matching line doesn't redact it either."""
+    facts = build_member_facts(indexed_db, "MMP0100")
+    assert isinstance(facts, MemberFacts)
+    assert facts.gaps, "fixture must have at least one gap to exercise this"
+
+    def redact_all(text):
+        return "[REDACTED]" if text else text
+
+    prefix = member_shared_prefix(facts, redact_all)
+    gaps_section = prefix.split("## Known gaps for this module")[1]
+    for r in facts.gaps:
+        if r["detail"]:
+            assert r["detail"] not in gaps_section
+
+
 def test_member_shared_prefix_is_redacted_with_the_callers_own_redactor(indexed_db):
     """Every MemberFacts field is raw/unredacted (see MemberFacts's own
     docstring) -- member_shared_prefix must redact through the given

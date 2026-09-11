@@ -1204,7 +1204,14 @@ def member_shared_prefix(facts: "MemberFacts", redact: Redactor = NULL_REDACTOR)
         add("## Known gaps for this module")
         for r in gaps:
             loc = _cite(name, r["line_no"]) if r["line_no"] else _cite(name, None)
-            add(f"- [{r['severity']}] {loc} {r['gap_kind']}: {r['detail']}")
+            # redact()'d here even though module_brief's own matching line
+            # (below) isn't -- a gap's `detail` is free text pulled straight
+            # from source/config and can carry the same sensitive values
+            # `redact` exists to strip everywhere else in this function
+            # (Copilot review on PR #215); this new, additional cached block
+            # is exactly the place to not let that slip through unredacted,
+            # independent of whether module_brief's own copy already does.
+            add(f"- [{r['severity']}] {loc} {r['gap_kind']}: {redact(r['detail'])}")
         add("")
 
     return "\n".join(out) + "\n"
