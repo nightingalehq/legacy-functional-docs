@@ -1001,14 +1001,24 @@ def validate_test_doc(conn, path: Path, _text: str | None = None) -> dict:
             if key not in fm:
                 problems.append(f"front matter missing required key: {key}")
 
-    # Fetched once and reused below for both the sidecar staleness decision
-    # and the final `bad_refs` check -- a per-id `SELECT ... WHERE
-    # UPPER(scenario_name)=UPPER(?)` query (no index on that expression)
-    # would otherwise scan `test_case` twice per id: once for staleness,
-    # once for validity (Copilot PR review on issue #195's fix).
-    valid_scenarios = {
-        row["scenario_name"].upper() for row in conn.execute("SELECT scenario_name FROM test_case")
-    }
+    # Fetched at most once, lazily, and reused for both the sidecar
+    # staleness decision and the final `bad_refs` check -- a per-id
+    # `SELECT ... WHERE UPPER(scenario_name)=UPPER(?)` query (no index on
+    # that expression) would otherwise scan `test_case` twice per id: once
+    # for staleness, once for validity (Copilot PR review on issue #195's
+    # fix). Lazy rather than unconditional: a document with no sidecar and
+    # no `MEMBER:BR-nnn` references at all (an edge case `validate_tests_
+    # tree` can still walk into) has no need for this and shouldn't pay a
+    # full `test_case` scan on every single document it validates.
+    _valid_scenarios_cache: set[str] | None = None
+
+    def valid_scenarios() -> set[str]:
+        nonlocal _valid_scenarios_cache
+        if _valid_scenarios_cache is None:
+            _valid_scenarios_cache = {
+                row["scenario_name"].upper() for row in conn.execute("SELECT scenario_name FROM test_case")
+            }
+        return _valid_scenarios_cache
 
     sidecar = sidecar_path_for(path, fm.get("language")) if fm is not None else None
     sidecar_usable = False
@@ -1039,7 +1049,7 @@ def validate_test_doc(conn, path: Path, _text: str | None = None) -> dict:
         # wrongly read as "still current" and cross-check anyway --
         # producing the exact false "not found" this guard exists to
         # prevent, just for a subset of ids instead of all of them.
-        sidecar_usable = not code_ids or code_ids <= valid_scenarios
+        sidecar_usable = not code_ids or code_ids <= valid_scenarios()
         if not sidecar_usable:
             # Diagnostic only, deliberately not appended to `problems`/`ok`:
             # a stale sidecar isn't a defect in *this* document -- it's
@@ -1056,7 +1066,7 @@ def validate_test_doc(conn, path: Path, _text: str | None = None) -> dict:
             # (and can't reliably be, without a persisted per-run
             # generation signature `test_case` doesn't currently carry)
             # cross-checked against the manifest here.
-            sidecar_unresolved_ids = sorted(code_ids - valid_scenarios)
+            sidecar_unresolved_ids = sorted(code_ids - valid_scenarios())
     if sidecar is not None and sidecar.exists() and sidecar_usable:
         manifest_ids = {
             f"{m.group('member').upper()}:BR-{m.group('n')}" for m in BR_REF.finditer(body)
@@ -1073,7 +1083,7 @@ def validate_test_doc(conn, path: Path, _text: str | None = None) -> dict:
 
     bad_refs = 0
     for scenario in scan_ids:
-        if scenario.upper() not in valid_scenarios:
+        if scenario.upper() not in valid_scenarios():
             bad_refs += 1
             problems.append(f"'{scenario}' is not a known test_case scenario -- run `mfdoc test-plan`, "
                              f"or this id was invented/renumbered")

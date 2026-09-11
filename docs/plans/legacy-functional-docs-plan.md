@@ -734,7 +734,20 @@ GitHub org.
   persisted per-run generation signature `test_case` carries today that
   would let `validate_test_doc` make the stale-vs-invented call on its own
   with certainty, so this stays a visible diagnostic rather than a
-  disguised fix. Full suite: 956 passed, 2 skipped.
+  disguised fix. Full suite: 956 passed, 2 skipped. A fourth Copilot review
+  round found two more narrow gaps: `_corpus_signature`'s new
+  citation/JSON-blob hashing still missed the member's `system` field --
+  `test_case_brief()` renders it into the document header
+  (`testplan.render_test_case_brief`), so relabelling a source's
+  configured `system` and re-ingesting (no `test_case` row itself changes)
+  would leave the signature unchanged and skip re-rendering a document
+  whose header text actually changed; now joined in and hashed alongside
+  the rest. And the new `valid_scenarios` lookup in `validate_test_doc`
+  ran unconditionally on every call, including documents with no sidecar
+  and no `MEMBER:BR-nnn` references at all -- made lazy (computed at most
+  once, only if a sidecar-id or `bad_refs` check actually needs it).
+  Added `test_corpus_signature_changes_when_member_system_changes`. Full
+  suite: 957 passed, 2 skipped.
 
 **Progress (2026-09-10e):**
 - Fixed issue #188: ported `batch.py`'s near-miss/targeted-patch mechanism

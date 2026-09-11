@@ -138,6 +138,44 @@ def test_corpus_signature_changes_when_scenario_content_changes_but_name_and_sta
     assert sig_before != sig_after
 
 
+def test_corpus_signature_changes_when_member_system_changes(tmp_path):
+    """Copilot review follow-up on issue #195: `test_case_brief()` includes
+    the member's `system` in its rendered header, but `_corpus_signature`
+    only hashed `test_case` columns -- relabelling a source's configured
+    `system` and re-ingesting (no `test_case` row itself changes) would
+    leave the signature unchanged and wrongly skip re-rendering a document
+    whose header text has actually changed."""
+    import sqlite3
+
+    from mfdoc import testbatch
+    from mfdoc.db import SCHEMA, insert
+
+    def seed(system: str | None) -> sqlite3.Connection:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(SCHEMA)
+        conn.execute(
+            "INSERT INTO member (id, name, dialect, system) VALUES (1, 'FAKEMOD', 'natural', ?)",
+            (system,),
+        )
+        conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
+        insert(
+            conn, "test_case", member_id=1, kind="unit", scenario_name="FAKEMOD:BR-001",
+            given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+            when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+            then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+            status="characterization", citation="FAKEMOD:1", confidence="verified",
+        )
+        conn.commit()
+        return conn
+
+    conn_before = seed("OLDSYS")
+    conn_after = seed("NEWSYS")
+    sig_before = testbatch._corpus_signature(conn_before, "python", "pytest", 999)
+    sig_after = testbatch._corpus_signature(conn_after, "python", "pytest", 999)
+    assert sig_before != sig_after
+
+
 def test_run_test_batch_does_not_reuse_state_or_file_across_frameworks(tmp_path):
     """Running the same member/language for two different frameworks must
     produce two separate output files and two separate resume-state

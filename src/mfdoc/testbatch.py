@@ -800,6 +800,11 @@ def _corpus_signature(conn, language: str, framework: str, threshold: int,
       Including `citation` and the three JSON blobs closes that gap: any
       change to what a scenario actually asserts moves this signature,
       regardless of whether its `scenario_name` also moved;
+    - each test_case's member's `system` (`test_case_brief()` includes it
+      in the rendered header per `testplan.render_test_case_brief`), since
+      re-ingesting after only a `project.yml`/source `system:` relabel
+      changes what the brief -- and therefore the rendered document --
+      says without touching any `test_case` row itself;
     - the effective max_scenarios_per_call threshold, since raising or
       lowering it can flip a member between the single-doc and chunked
       output shapes without any test_case row or status changing at all --
@@ -808,13 +813,15 @@ def _corpus_signature(conn, language: str, framework: str, threshold: int,
       (or count of chunk files) in place.
     """
     rows = conn.execute(
-        "SELECT scenario_name, status, citation, given_json, when_json, then_json "
-        "FROM test_case ORDER BY scenario_name"
+        "SELECT tc.scenario_name, tc.status, tc.citation, tc.given_json, tc.when_json, "
+        "       tc.then_json, m.system "
+        "FROM test_case tc JOIN member m ON m.id = tc.member_id "
+        "ORDER BY tc.scenario_name"
     ).fetchall()
     extra = [language, framework, str(threshold)]
     for r in rows:
         extra.extend((r["scenario_name"], r["status"], r["citation"],
-                      r["given_json"], r["when_json"], r["then_json"]))
+                      r["given_json"], r["when_json"], r["then_json"], r["system"] or ""))
     return _base_corpus_signature(conn, redact=redact, sme_notes=sme_notes, extra=extra)
 
 
