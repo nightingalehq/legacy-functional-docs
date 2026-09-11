@@ -145,6 +145,15 @@ Write from the brief. Read `reference/writing-rules.md` before the first
 document — it defines the citation format, the confidence taxonomy, and the
 specific prose failures to avoid. Use the templates in `templates/`.
 
+After writing each document in this section, run `mfdoc clean-doc --file
+PATH` on it before moving on. These documents are written directly here
+(not through `mfdoc batch`/`test-batch`'s write site), so they never get
+that machinery's automatic strip of a leaked lead-in sentence ("I'll
+write..."/"Here is the corrected document:") or wrapping code fence ahead
+of the YAML front matter (issue #150/#152) — `clean-doc` is the same fix,
+run explicitly. Cheap and a no-op when the file is already clean, so it's
+safe to run on every document from this section as a matter of course.
+
 Check whether this project has an SME notes file (`options.sme_notes` in
 `project.yml`, `sme-notes.md` by default — see `README.md`'s "SME notes"
 section). `mfdoc brief --entity`/`--module`/`--executive` already fold a

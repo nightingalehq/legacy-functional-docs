@@ -60,6 +60,62 @@ GitHub org.
   change: the one pre-existing system-overview drift is unrelated to this
   check) both pass.
 
+**Progress (2026-09-11, later):**
+- Fixed issue #197 (two parts):
+  1. Investigated why #150/#152's `_strip_response_preamble` still let a
+     preamble leak through on live `batch` runs this session: the root
+     cause was `_PREAMBLE_SEARCH_WINDOW` (300 chars) being too small for a
+     realistic multi-sentence stated-intent preamble under Claude Code's
+     agent framing (e.g. "I'll review the fact brief and existing rule
+     candidates ... then write the corrected document ..."), so the real
+     leading `---` fell entirely outside the searched slice and
+     `_strip_response_preamble` returned the text untouched -- confirmed
+     by constructing a ~400-char preamble of this shape and reproducing
+     the leak against the pre-fix code before changing anything. The other
+     two candidates named in the issue (a preamble shape the pattern
+     doesn't cover, and an interaction with the fenced-code-wrapping case)
+     were checked and ruled out: both a fence-then-preamble and a
+     preamble-then-fence response already normalize correctly once the
+     real `---` is within the search window. Fixed by raising
+     `_PREAMBLE_SEARCH_WINDOW` to 900 (comfortably covers a multi-sentence
+     preamble while staying well short of where a quoted front-matter
+     example would appear in a real prompt). Added
+     `test_strip_response_preamble_removes_a_longer_stated_intent_preamble`
+     (`tests/test_batch.py`) reproducing the failing shape (invented
+     wording, not the real observed text) at a length past the old window
+     but within the fixed one; updated
+     `test_strip_response_preamble_ignores_a_frontmatter_example_beyond_the_search_window`'s
+     filler to size itself off `_PREAMBLE_SEARCH_WINDOW` so it can't go
+     stale against a future window change the same way.
+  2. Extended the same protection to documents written directly by the
+     interactive Claude Code path (`system-overview.md`, an entity/process
+     doc, `interface-matrix.md`, `gap-register.md`, `executive-summary.md`,
+     `reference/language-guide.md`'s narrative tier) per SKILL.md's "Write
+     from the brief" step -- these follow from `mfdoc brief
+     --system`/`--interface-matrix`/`--executive` but are written straight
+     to disk by the session itself, never through `generate_module_doc`'s
+     write site, so `_fix_generated_by_version` never ran against them at
+     all. Added `mfdoc clean-doc --file PATH`, a new CLI command reusing
+     `batch.py`'s `_fix_generated_by_version` unchanged against an
+     arbitrary file on disk (strip + `generated_by:` version correction,
+     in place, a no-op when already clean); wired into SKILL.md's "Write
+     from the brief" step, to be run against each such document right
+     after writing it and before `mfdoc validate`, and added to
+     `README.md`'s Quick start. Added
+     `test_clean_doc_strips_leaked_preamble_from_an_interactively_written_document`/
+     `test_clean_doc_is_a_no_op_and_says_so_when_already_clean`
+     (`tests/test_cli.py`). Copilot PR review caught that this initial
+     version could falsely report "already clean" for a document
+     `_fix_generated_by_version` couldn't actually rescue (a preamble
+     still longer than the search window, or no front matter at all) --
+     `mfdoc validate` would then still reject the same file `clean-doc`
+     just reported clean. Fixed by checking `split_frontmatter` on the
+     result before declaring success, and failing loudly (non-zero exit)
+     instead when it still can't find valid front matter; added
+     `test_clean_doc_fails_loudly_instead_of_reporting_already_clean_when_uncleanable`.
+     Full suite (rebased onto main post-#199): 953 passed, 2 skipped (four
+     new tests total from this fix).
+
 **Progress (2026-09-10e):**
 - Fixed issue #188: ported `batch.py`'s near-miss/targeted-patch mechanism
   (issue #131, generalized by #170) to `testbatch.py`'s test-generation

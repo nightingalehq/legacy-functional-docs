@@ -143,19 +143,27 @@ def _strip_trailing_fence(candidate: str) -> str:
 
 
 # Only look for a rescuable "---" within this many leading characters.
-# A genuine preamble ("Here's the requested document:") is a line or two;
-# bounding the search keeps this from reaching into the rest of a long
-# response and mistaking something else for the real front matter start.
-# Two different things live out there and both need excluding: build_
-# prompt's own "\n\n---\n\n" section separators (excluded by
-# `_looks_like_real_frontmatter`'s YAML-mapping check, regardless of
-# position) and a worked front-matter *example* quoted verbatim inside
-# the prompt's own writing-rules/template text (which -- being a fully
-# formed example -- *does* parse as a real YAML mapping, so only the
-# window keeps that one from being mistaken for the actual response). A
-# fake-echo caller's response is its whole prompt echoed back, so both
-# can appear in the same text this function has to handle correctly.
-_PREAMBLE_SEARCH_WINDOW = 300
+# A genuine preamble ("Here's the requested document:") is usually a line
+# or two, but under Claude Code's own agent framing it can run to several
+# sentences of stated intent ("I'll review the fact brief and existing
+# rule candidates ... then write the corrected document ...") before the
+# actual lead-in line -- issue #197 found a live leak this size (~400
+# chars) sailing straight through the original 300-char window untouched,
+# because the real "---" simply wasn't in the searched slice at all.
+# Bounding the search at all still matters: two different things live out
+# there and both need excluding: build_prompt's own "\n\n---\n\n" section
+# separators (excluded by `_looks_like_real_frontmatter`'s YAML-mapping
+# check, regardless of position) and a worked front-matter *example*
+# quoted verbatim inside the prompt's own writing-rules/template text
+# (which -- being a fully formed example -- *does* parse as a real YAML
+# mapping, so only the window keeps that one from being mistaken for the
+# actual response). A fake-echo caller's response is its whole prompt
+# echoed back, so both can appear in the same text this function has to
+# handle correctly. 900 chars comfortably covers a multi-sentence stated-
+# intent preamble while still landing well short of where a quoted
+# front-matter example would appear in a real prompt (brief + rules +
+# template, each many lines long).
+_PREAMBLE_SEARCH_WINDOW = 900
 
 
 def _strip_response_preamble(text: str) -> str:

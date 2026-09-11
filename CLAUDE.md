@@ -97,6 +97,15 @@ mfdoc coverage  --config project.yml --history  # trend of past coverage/gate ru
 mfdoc gate      --config project.yml     # pass/fail vs options.quality_gates
 mfdoc calibrate --config project.yml --dialect mantis   # Mantis/Supra usually need this
 mfdoc brief     --config project.yml --system|--module NAME|--entity NAME
+mfdoc clean-doc --file docs/functional/system-overview.md
+# strips a leaked model preamble/wrapping fence ahead of the YAML front
+# matter and corrects the generated_by: version -- the same fix mfdoc
+# batch/test-batch apply automatically at their own write site (issue
+# #150/#152), for a document written directly by an interactive session
+# instead (system-overview.md, an entity/process doc, interface-matrix.md,
+# gap-register.md, executive-summary.md, reference/language-guide.md's
+# narrative tier -- see SKILL.md's "Write from the brief" step). No-op if
+# the file is already clean (issue #197).
 mfdoc batch     --config project.yml --out docs/functional/modules  # needs mfdoc[batch] + ANTHROPIC_API_KEY
 mfdoc batch     --config project.yml --out docs/functional/modules --dry-run
 # --dry-run: cheap, local, no-model-call preview of what a resumed run would

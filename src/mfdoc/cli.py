@@ -7,6 +7,7 @@
     mfdoc gate     --config project.yml
     mfdoc calibrate --config project.yml --dialect mantis
     mfdoc brief    --config project.yml [--module NAME | --entity NAME | --system]
+    mfdoc clean-doc --file docs/functional/system-overview.md
     mfdoc rules-register --config project.yml --out docs/functional/rules-register.md
     mfdoc complexity --config project.yml --out docs/functional/complexity-heatmap.md
     mfdoc classify-rules --config project.yml [--llm-fallback]
@@ -511,6 +512,55 @@ def cmd_brief(args) -> int:
         print("specify --module, --entity, --system, --executive or --interface-matrix", file=sys.stderr)
         return 2
     _write_or_print(out, args.out)
+    return 0
+
+
+def cmd_clean_doc(args) -> int:
+    """Apply `batch.py`'s `_fix_generated_by_version` (preamble/wrapping-
+    fence strip, per issue #150/#152, plus the `generated_by:` version
+    correction) to a document that was written directly by an interactive
+    session rather than through `generate_module_doc`'s write site --
+    `system-overview.md`, `data/<entity>.md`, `processes/<process>.md`,
+    `interface-matrix.md`, `gap-register.md`, `executive-summary.md`, and
+    the narrative tier of `reference/language-guide.md`, per SKILL.md's
+    "Write from the brief" step. Those documents follow from `mfdoc brief
+    --system`/`--interface-matrix`/`--executive`, but the writing itself is
+    the interactive Claude Code path, not `batch.py`/`testbatch.py` -- so
+    the same leaked-preamble-before-frontmatter defect (issue #197) can
+    happen there too, with nothing in the write path to catch it. This is
+    the equivalent protection for that path: run it against the file right
+    after writing it, before `mfdoc validate`.
+
+    `_fix_generated_by_version`/`_strip_response_preamble` deliberately
+    return their input unchanged when no `---` opening a real YAML mapping
+    is found near the start at all (a preamble longer than
+    `_PREAMBLE_SEARCH_WINDOW`, or a response with no front matter
+    whatsoever) -- by design, since there's nothing there to safely
+    rescue. Left unchecked, that would make this command print "already
+    clean" and exit 0 for exactly the uncleanable case it exists to catch,
+    with `mfdoc validate` then failing on the very same file. So this
+    checks `split_frontmatter` on the result before declaring success:
+    if it still can't find valid front matter, that's reported as a
+    failure (non-zero exit) instead."""
+    from .batch import _fix_generated_by_version
+    from .validate import split_frontmatter
+
+    path = Path(args.file)
+    original = path.read_text(encoding="utf-8")
+    cleaned = _fix_generated_by_version(original)
+    _, _, err = split_frontmatter(cleaned)
+    if err:
+        print(f"{args.file}: {err} even after cleaning -- inspect it by hand; "
+              f"`mfdoc validate` will reject this file as-is", file=sys.stderr)
+        if cleaned != original:
+            path.write_text(cleaned, encoding="utf-8")
+        return 1
+    if cleaned == original:
+        print(f"{args.file}: already clean")
+        return 0
+    path.write_text(cleaned, encoding="utf-8")
+    print(f"{args.file}: cleaned (stripped leaked preamble/wrapping fence "
+          f"and/or corrected generated_by: version)")
     return 0
 
 
@@ -1773,6 +1823,17 @@ def main(argv=None) -> int:
                          "matrix narrative template (templates/interface-matrix.md)")
     p.add_argument("--out")
     p.set_defaults(func=cmd_brief)
+
+    p = sub.add_parser("clean-doc", help="strip a leaked model preamble/wrapping fence "
+                                          "before front matter (issue #150/#197) and correct "
+                                          "generated_by: version, in a document written "
+                                          "directly by an interactive session (not via "
+                                          "`mfdoc batch`/`test-batch`) -- run after writing "
+                                          "system-overview.md, an entity/process doc, "
+                                          "interface-matrix.md, gap-register.md, "
+                                          "executive-summary.md, or reference/language-guide.md")
+    p.add_argument("--file", required=True, help="path to the document to clean, in place")
+    p.set_defaults(func=cmd_clean_doc)
 
     p = sub.add_parser("rules-register")
     p.add_argument("--config", required=True)

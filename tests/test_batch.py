@@ -272,12 +272,36 @@ def test_strip_response_preamble_ignores_a_frontmatter_example_beyond_the_search
     somewhere in a long fake-echo "response". Bounding the search to near
     the start (where a genuine preamble always is) keeps this safe without
     needing to tell the two cases apart any other way."""
-    filler = "x" * 500
+    filler = "x" * (batch_mod._PREAMBLE_SEARCH_WINDOW + 200)
     text = (
         f"# Instructions\n\n{filler}\n\n"
         '---\ntitle: "example"\ndoc_type: module\n---\nexample body\n'
     )
     assert batch_mod._strip_response_preamble(text) == text
+
+
+def test_strip_response_preamble_removes_a_longer_stated_intent_preamble():
+    """Regression for issue #197: a live `batch` run (via ClaudeCLICaller)
+    leaked a multi-sentence stated-intent preamble ("I'll review ... then
+    write ...") ahead of the front matter -- longer than the original
+    300-char `_PREAMBLE_SEARCH_WINDOW`, so the real leading `---` fell
+    outside the searched slice entirely and the preamble sailed through
+    _strip_response_preamble untouched. This reproduces that shape (text
+    invented, not the real observed wording) at a length past the old
+    window but within the fixed one."""
+    text = "---\ntitle: X\n---\nbody\n"
+    preamble = (
+        "I'll review the module's fact brief and existing rule candidates in "
+        "detail, cross-checking each business rule against its cited source "
+        "line, then write the corrected functional document, making sure "
+        "every business rule carries its [[MEMBER:LINE]] citation back to "
+        "source and the front matter fields match the template exactly, "
+        "with no invented content anywhere.\n\n"
+        "Here is the corrected document:\n\n"
+    )
+    assert len(preamble) > 300  # would have escaped the pre-#197 window
+    preambled = preamble + text
+    assert batch_mod._strip_response_preamble(preambled) == text
 
 
 def test_written_doc_survives_a_wrapped_and_prefaced_claude_cli_response(indexed_db, tmp_path):

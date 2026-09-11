@@ -223,6 +223,14 @@ mfdoc brief --config project.yml --interface-matrix
 # use instead of (or alongside) a distinct subroutine call per PF-key branch.
 
 # ... write documents from the briefs, per reference/writing-rules.md ...
+# after writing each one (system-overview.md, an entity/process doc,
+# interface-matrix.md, gap-register.md, executive-summary.md), run:
+mfdoc clean-doc --file docs/functional/system-overview.md
+# these are written directly here, not through `mfdoc batch`/`test-batch`'s
+# write site -- clean-doc applies the same strip those apply automatically,
+# for a leaked model preamble/wrapping fence ahead of the front matter
+# (issue #150/#197). A no-op when the file's already clean.
+
 # module docs are high-volume and formulaic; batch them instead of writing
 # one at a time (needs `pip install 'mfdoc[batch]'` and ANTHROPIC_API_KEY):
 mfdoc batch --config project.yml --out docs/functional/modules
