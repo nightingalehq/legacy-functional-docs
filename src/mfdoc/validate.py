@@ -942,7 +942,8 @@ def validate_doc(conn, path: Path, outcome_field=OUTCOME_FIELD, _text: str | Non
 
 
 def validate_test_doc(conn, path: Path, _text: str | None = None,
-                       _prior_fingerprint: str | None = None) -> dict:
+                       _prior_fingerprint: str | None = None,
+                       _render_time: bool = False) -> dict:
     """`validate_doc` plus the checks specific to a generated test file:
     `language`/`framework` front matter, and that every bare `MEMBER:BR-nnn`
     reference names a scenario that actually exists in test_case -- the
@@ -998,31 +999,48 @@ def validate_test_doc(conn, path: Path, _text: str | None = None,
     2. **ID-overlap fallback (legacy documents only).** No stored
        `test_case_fingerprint` at all (an older document written before
        this field existed, or a hand-written/test fixture) falls back to
-       checking whether *every* one of the sidecar's own BR-ids resolves
-       against `test_case`: if it has BR-ids and *any* of them don't, the
-       sidecar is treated as though it weren't there. Deliberately
-       `all(...)`, not `any(...)`: a partial positional shift (old
-       `{BR-001, BR-002, BR-003}` renumbered to `{BR-002, BR-003, BR-004}`)
-       still has two overlapping ids by coincidence, which `any(...)` would
-       wrongly call "still current". This fallback cannot catch the
-       insertion-after-range case (1) handles -- accepted here because it
-       only applies to a document that predates the fingerprint field
-       existing at all; every document `write_test_doc_with_sidecar`
-       writes from here on gets the exact check instead.
+       one of two things, depending on `_render_time`:
+       - **`_render_time=False`** (a standalone check -- `mfdoc
+         test-validate`, a dry-run reuse check): checks whether *every*
+         one of the sidecar's own BR-ids resolves against `test_case`; if
+         it has BR-ids and *any* of them don't, the sidecar is treated as
+         though it weren't there. Deliberately `all(...)`, not `any(...)`:
+         a partial positional shift (old `{BR-001, BR-002, BR-003}`
+         renumbered to `{BR-002, BR-003, BR-004}`) still has two
+         overlapping ids by coincidence, which `any(...)` would wrongly
+         call "still current". This still can't catch the
+         insertion-after-range case (1) handles for a document with no
+         fingerprint context at all.
+       - **`_render_time=True`** (`_generate_test_doc_from_brief`/
+         `run_test_batch`'s retry loops, validating a freshly-generated
+         candidate that's about to replace this sidecar's pairing if it
+         validates clean): the sidecar is treated as though it weren't
+         there outright, with no id-overlap check at all. A legacy
+         document's sidecar predating this fingerprint entirely can
+         otherwise **deadlock**: on the very next `test-plan` re-run that
+         adds a new scenario after the old sidecar's range, the fresh
+         candidate's manifest legitimately names that new id, the old
+         sidecar's ids remain a coincidental subset of the current valid
+         set (`all(...)` reads that as "still current"), the cross-check
+         reports the new id as "missing from sidecar", validation fails
+         on *every* retry (the corpus hasn't changed between them), and
+         because `write_test_doc_with_sidecar` only runs after a
+         *successful* validation, the sidecar is never refreshed and
+         never gets its own fingerprint either -- reproducing indefinitely
+         on every future invocation, not self-resolving the way a
+         `_render_time=True` bypass instead makes it. Safe specifically
+         because this validation's own outcome determines whether the
+         sidecar is about to be rewritten anyway: a candidate this bypass
+         lets through still has to actually resolve against `test_case`
+         (the ordinary `bad_refs` check below still runs against `body`,
+         unaffected by this), so nothing invented slips through -- this
+         bypass only ever removes a *stale-or-legacy* sidecar's veto
+         power over an otherwise-correct fresh candidate, never weakens
+         what "correct" means.
 
-    No migration path exists (or is algorithmically possible) for a
-    document/sidecar pair written before this field existed: there is
-    nothing to reconstruct the `rule_candidate` ordering *as it was* at
-    that earlier write time from today's fact store alone, which is
-    exactly what a fingerprint would need to be computed retroactively.
-    A pre-existing document therefore stays on the weaker fallback (2)
-    until its *next* successful render -- at which point
-    `write_test_doc_with_sidecar` stamps a real fingerprint and every
-    validation from then on gets the exact check. This is a one-time,
-    self-resolving transition, not a persistent gap: `testbatch.
-    _prior_fingerprint_for` (the render loop's own reuse of a prior
-    fingerprint before overwriting the file) has nothing to read for
-    such a document either, for the identical reason.
+    A document with a real fingerprint of its own (case 1 above) is
+    unaffected by `_render_time` either way -- the exact check is always
+    preferred when it's available, at any call site.
 
     Either way, `result["sidecar_stale"]` reports the outcome without it
     counting toward `problems`/`ok` -- a stale sidecar isn't a defect in
@@ -1152,18 +1170,38 @@ def validate_test_doc(conn, path: Path, _text: str | None = None,
         fp = current_fingerprint() if stored_fingerprint else None
         if stored_fingerprint and fp is not None:
             sidecar_usable = fp == stored_fingerprint
+        elif _render_time:
+            # No fingerprint context at all (a legacy sidecar predating
+            # this field), validating a freshly-generated candidate about
+            # to replace it if this succeeds: treat the sidecar as absent
+            # rather than falling to the id-overlap heuristic below. That
+            # heuristic can otherwise deadlock a legacy document
+            # indefinitely -- see this function's own docstring -- because
+            # `write_test_doc_with_sidecar` (the only thing that would
+            # ever stamp a real fingerprint) only runs after a successful
+            # validation, and the id-overlap check is exactly what would
+            # keep failing it. Safe here specifically because this is a
+            # render/retry-loop call: the ordinary `bad_refs` check below
+            # still runs against `body` regardless, so an invented id in
+            # the candidate is still caught -- this bypass only removes a
+            # stale sidecar's veto power, not the underlying correctness
+            # check itself.
+            sidecar_usable = False
         else:
-            # Fallback (legacy documents with no stored fingerprint, or a
-            # `sources` that doesn't resolve cleanly to fingerprint): the
-            # same id-overlap heuristic this guard originally shipped with.
-            # Deliberately `all(...)`, not `any(...)`: a partial positional
-            # shift (old {BR-001, BR-002, BR-003} renumbered to {BR-002,
-            # BR-003, BR-004}) still leaves some ids coincidentally
-            # overlapping with `test_case`'s current numbering, which
-            # `any(...)` would wrongly read as "still current". This
-            # fallback still can't see an insertion after the sidecar's own
-            # range the way the fingerprint check above can -- accepted
-            # only because it's limited to documents predating that field.
+            # Fallback (a standalone check -- mfdoc test-validate, a
+            # dry-run reuse check -- on a document with no fingerprint
+            # context): the same id-overlap heuristic this guard
+            # originally shipped with. Deliberately `all(...)`, not
+            # `any(...)`: a partial positional shift (old {BR-001,
+            # BR-002, BR-003} renumbered to {BR-002, BR-003, BR-004})
+            # still leaves some ids coincidentally overlapping with
+            # `test_case`'s current numbering, which `any(...)` would
+            # wrongly read as "still current". This fallback still can't
+            # see an insertion after the sidecar's own range the way the
+            # fingerprint check above can -- accepted only because it's
+            # limited to documents predating that field, and only reached
+            # outside the render loop (where `_render_time` above already
+            # closes the gap that matters most).
             sidecar_usable = not code_ids or code_ids <= valid_scenarios()
         if not sidecar_usable:
             # Diagnostic only, deliberately not appended to `problems`/`ok`:

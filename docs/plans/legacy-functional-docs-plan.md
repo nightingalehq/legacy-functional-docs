@@ -446,6 +446,45 @@ GitHub org.
   (3), and pass with it). Full suite: 1011 passed, 2 skipped; bundled
   fixture pipeline unchanged.
 
+  A fourteenth review round caught that the previous round's "self-
+  resolving transition" framing for a legacy (no-fingerprint) document
+  was actually wrong -- and correctly identified this as the *exact*
+  scenario issue #195 itself describes, not a minor residual case. For a
+  legacy document, `test-plan` adding a scenario after the old sidecar's
+  range makes the old ids a coincidental subset of the new valid set; the
+  id-overlap fallback reads that as "still current"; the fresh
+  candidate's manifest legitimately listing the new id gets rejected as
+  "missing from sidecar" on *every* retry (nothing about the corpus
+  changes between them, so retrying changes nothing); and because
+  `write_test_doc_with_sidecar` only stamps a fingerprint after a
+  *successful* validation, the sidecar is never refreshed and this
+  deadlocks indefinitely across every future invocation -- not a one-time
+  transition at all. Fixed by adding `_render_time: bool = False` to
+  `validate_test_doc`: when true (set only by the two render/retry loops'
+  own `validate_test_doc` calls -- `_generate_test_doc_from_brief` and
+  `run_test_batch`'s separate inline pool-loop path, all 7 call sites), a
+  sidecar with no fingerprint context at all (neither its own nor a
+  recovered prior one) is treated as absent outright, skipping the
+  id-overlap heuristic entirely, rather than risking exactly this
+  deadlock. Safe specifically because a render-time validation's own
+  outcome determines whether the sidecar is about to be rewritten anyway,
+  and the ordinary `bad_refs` check against `body` still runs regardless
+  -- an invented id in the candidate is still caught; this bypass only
+  removes a stale-or-legacy sidecar's veto power over an otherwise-
+  correct fresh candidate. The id-overlap fallback remains for
+  `_render_time=False` callers (`mfdoc test-validate`, dry-run reuse
+  checks) validating a document that isn't about to be rewritten this
+  call. Confirmed by hand: a temporary change disabling the
+  `_render_time` branch reproduced the exact deadlock (`ok=False` on both
+  attempts, the "missing from sidecar" problem) before re-enabling it.
+  Added `test_legacy_sidecar_with_no_fingerprint_does_not_deadlock_
+  after_an_insertion`, reproducing the real issue #195 scenario end to
+  end: a document/sidecar pair written exactly as every pre-this-fix
+  document looks (no fingerprint anywhere), an insertion via a real
+  `test-plan` re-run, then a rerender that must succeed on the first
+  attempt and leave a real fingerprint stamped going forward. Full suite:
+  1012 passed, 2 skipped; bundled fixture pipeline unchanged.
+
 **Progress (2026-09-11):**
 - Fixed issue #199: `mfdoc doc-drift`'s existing checks (issue #161) caught
   system-wide/module-scoped drift but nothing keyed on a single dialect --

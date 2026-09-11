@@ -426,7 +426,9 @@ def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: 
         text = _fix_generated_by_version(response.text)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(text, encoding="utf-8")
-        result = validate_test_doc(conn, out_path, _prior_fingerprint=prior_fingerprint)
+        result = validate_test_doc(
+            conn, out_path, _prior_fingerprint=prior_fingerprint, _render_time=True,
+        )
         if result["ok"]:
             write_test_doc_with_sidecar(conn, member_name, out_path, text, language)
             return DocResult(member_name, str(out_path), True, attempt, input_tokens, output_tokens, [])
@@ -444,6 +446,7 @@ def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: 
                     candidate_text, remaining_uncited = auto
                     candidate_result = validate_test_doc(
                         conn, out_path, _text=candidate_text, _prior_fingerprint=prior_fingerprint,
+                        _render_time=True,
                     )
                     if candidate_result["ok"]:
                         logger.info(
@@ -502,7 +505,9 @@ def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: 
                 output_tokens += patch_response.output_tokens
                 text = _fix_generated_by_version(patch_response.text)
                 out_path.write_text(text, encoding="utf-8")
-                result = validate_test_doc(conn, out_path, _prior_fingerprint=prior_fingerprint)
+                result = validate_test_doc(
+                    conn, out_path, _prior_fingerprint=prior_fingerprint, _render_time=True,
+                )
                 if result["ok"]:
                     write_test_doc_with_sidecar(conn, member_name, out_path, text, language)
                     return DocResult(
@@ -1179,7 +1184,9 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
             prior_fingerprint = _prior_fingerprint_for(out_path)
             final_text = _fix_generated_by_version(response.text)
             out_path.write_text(final_text, encoding="utf-8")
-            validation = validate_test_doc(conn, out_path, _prior_fingerprint=prior_fingerprint)
+            validation = validate_test_doc(
+                conn, out_path, _prior_fingerprint=prior_fingerprint, _render_time=True,
+            )
 
             # Issue #188 review: this pool loop is the ordinary `mfdoc
             # test-batch` path for every non-chunked member -- the common
@@ -1203,6 +1210,7 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
                         candidate_text, remaining_uncited = auto
                         candidate_result = validate_test_doc(
                             conn, out_path, _text=candidate_text, _prior_fingerprint=prior_fingerprint,
+                            _render_time=True,
                         )
                         if candidate_result["ok"]:
                             logger.info(
@@ -1259,7 +1267,9 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
                         output_tokens += patch_response.output_tokens
                         final_text = _fix_generated_by_version(patch_response.text)
                         out_path.write_text(final_text, encoding="utf-8")
-                        validation = validate_test_doc(conn, out_path, _prior_fingerprint=prior_fingerprint)
+                        validation = validate_test_doc(
+                            conn, out_path, _prior_fingerprint=prior_fingerprint, _render_time=True,
+                        )
                         if validation["ok"]:
                             patched = True
                         else:
@@ -1303,7 +1313,9 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
                     output_tokens += retry_response.output_tokens
                     final_text = _fix_generated_by_version(retry_response.text)
                     out_path.write_text(final_text, encoding="utf-8")
-                    validation = validate_test_doc(conn, out_path, _prior_fingerprint=prior_fingerprint)
+                    validation = validate_test_doc(
+                        conn, out_path, _prior_fingerprint=prior_fingerprint, _render_time=True,
+                    )
                     attempts = 2
             elif not validation["ok"] and initial_exc_problem is not None:
                 # This response already came from the exception-triggered

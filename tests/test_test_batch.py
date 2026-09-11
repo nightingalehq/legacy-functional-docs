@@ -865,6 +865,142 @@ Covers the module as a whole [[FAKEMOD:1]].
     )
 
 
+def test_legacy_sidecar_with_no_fingerprint_does_not_deadlock_after_an_insertion(tmp_path):
+    """Copilot review follow-up on issue #195 -- the actual scenario the
+    issue itself describes: a document/sidecar pair written *before* this
+    fix ever shipped (no `test_case_fingerprint` anywhere, on either the
+    document or `_prior_fingerprint_for`'s recovery attempt). Without
+    `_render_time` bypassing the id-overlap fallback for exactly this
+    case, this deadlocks rather than self-resolving: `test-plan` adding a
+    new scenario after the old sidecar's range makes the old ids a
+    coincidental subset of the new valid set, the id-overlap check reads
+    that as "still current", the fresh candidate's manifest listing the
+    new id gets rejected as "missing from sidecar" on *every* retry
+    (nothing about the corpus changes between them), and because
+    `write_test_doc_with_sidecar` only runs after a successful validation,
+    the sidecar is never refreshed and never gets a fingerprint either --
+    reproducing indefinitely on every future invocation, not just once."""
+    from mfdoc import testbatch
+    import sqlite3
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 40, 'irrelevant')")
+    rc1 = insert(
+        conn, "rule_candidate", member_id=1, line_no=10, construct="IF",
+        condition="COND-1", raw="IF COND-1",
+    )
+    insert(
+        conn, "test_case", member_id=1, kind="unit", rule_candidate_id=rc1,
+        scenario_name="FAKEMOD:BR-001",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+        then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:1", confidence="verified",
+    )
+    conn.commit()
+
+    # Simulates pre-upgrade output: written directly to disk, never
+    # through write_test_doc_with_sidecar, so no test_case_fingerprint
+    # anywhere -- exactly what every real document looked like before
+    # this fix existed.
+    out_path = tmp_path / "FAKEMOD.md"
+    out_path.write_text(
+        """---
+title: "FAKEMOD -- generated tests (python)"
+doc_type: generated_test
+system: MOM
+module: FAKEMOD
+language: python
+framework: pytest
+generated_by: legacy-functional-docs 0.1.0
+generated_at: "2026-01-01"
+review_status: draft
+reviewers: []
+confidence_summary:
+  verified: 1
+  inferred: 0
+  unresolved: 0
+sources: ["FAKEMOD"]
+---
+
+# FAKEMOD -- generated tests
+
+See [`FAKEMOD.py`](./FAKEMOD.py) for the generated test source.
+
+## Scenarios covered
+
+- FAKEMOD:BR-001
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "FAKEMOD.py").write_text(
+        "def test_one():\n    # FAKEMOD:BR-001\n    ...\n", encoding="utf-8",
+    )
+
+    # A real mfdoc test-plan re-run: a new rule (and its test_case row)
+    # exist now, but the legacy sidecar/document haven't been refreshed.
+    rc2 = insert(
+        conn, "rule_candidate", member_id=1, line_no=20, construct="IF",
+        condition="COND-2", raw="IF COND-2",
+    )
+    insert(
+        conn, "test_case", member_id=1, kind="unit", rule_candidate_id=rc2,
+        scenario_name="FAKEMOD:BR-002",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+        then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:1", confidence="verified",
+    )
+    conn.commit()
+
+    def doc_text(ids: list[str]) -> str:
+        fence = "\n".join(
+            f"def test_{i.split('-')[-1]}():\n    # FAKEMOD:{i} [[FAKEMOD:1]]\n    pass" for i in ids
+        )
+        return f"""---
+title: "FAKEMOD -- generated tests"
+doc_type: generated_test
+system: "MOM"
+generated_by: mfdoc
+generated_at: "2026-01-01"
+review_status: draft
+confidence_summary:
+  verified: {len(ids)}
+language: python
+framework: pytest
+sources: ["FAKEMOD"]
+---
+
+# FAKEMOD tests
+
+Covers the module as a whole [[FAKEMOD:1]].
+
+```python
+{fence}
+```
+"""
+
+    result = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path,
+        lambda prompt: ModelResponse(
+            text=doc_text(["BR-001", "BR-002"]), input_tokens=1, output_tokens=2,
+        ),
+        "writing rules text", "template text",
+    )
+    assert result.ok is True, result.problems
+    assert result.attempts == 1, (
+        "a legacy sidecar with no fingerprint context must not deadlock a "
+        "genuinely correct rerender after an insertion"
+    )
+    # And the deadlock is now actually broken going forward: the freshly
+    # written document has a real fingerprint stamped.
+    assert "test_case_fingerprint:" in out_path.read_text(encoding="utf-8")
+
+
 def test_sidecar_present_cross_checks_manifest_against_real_code(tmp_path):
     from mfdoc.validate import validate_test_doc
     import sqlite3
