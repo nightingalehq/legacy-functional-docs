@@ -1707,10 +1707,20 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
     # exactly those callers, and for ClaudeCLICaller specifically, a real
     # (uncached) change to what gets sent to the model on every chunk --
     # not the caching-only change this issue is scoped to.
+    #
+    # Also gated on `chunk_count > 1` (Copilot review, second pass):
+    # routine_aware_chunk_ranges never splits a single oversized routine
+    # (see its own docstring/tests), so a member that reached this function
+    # because its rule count exceeds the threshold can still collapse to
+    # exactly one chunk. With only one chunk (and, short of a retry, one
+    # call), there is no second call left to ever read the cache entry this
+    # breakpoint would write -- prepending shared_prefix there is a pure
+    # cache-write cost with no matching read, not a saving.
     set_member_cache_prefixes = getattr(caller, "set_member_cache_prefixes", None)
     shared_prefix = (
         member_shared_prefix(member_facts, redact)
         if isinstance(member_facts, MemberFacts) and set_member_cache_prefixes is not None
+        and chunk_count > 1
         else None
     )
     if shared_prefix is not None:
@@ -2611,9 +2621,15 @@ def plan_batch(conn, members: list[str], out_dir: Path,
         # set_member_cache_prefixes capability gate; a caller with no such
         # hook never gets this prepended in a real run, so this preview
         # must not hash as if it would (see `member_cache_capable` above).
+        # Also mirrors that function's `chunk_count > 1` gate (Copilot
+        # review, second pass on PR #215): a member whose routine-aware
+        # chunking still collapses to one chunk never gets a member-level
+        # prefix registered in a real run either (no second call left to
+        # read the cache entry), so this preview must not hash as if it
+        # would.
         shared_prefix = (
             member_shared_prefix(member_facts, redact)
-            if isinstance(member_facts, MemberFacts) and member_cache_capable
+            if isinstance(member_facts, MemberFacts) and member_cache_capable and chunk_count > 1
             else None
         )
         for i, (start, end) in enumerate(ranges, start=1):

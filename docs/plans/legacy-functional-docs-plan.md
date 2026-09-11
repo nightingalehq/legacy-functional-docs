@@ -131,7 +131,21 @@ GitHub org.
   `test_plan_batch_chunk_hash_matches_a_real_run_with_a_non_cache_capable_
   caller`, and its mirror-image `..._with_a_cache_capable_caller` proving
   the `member_cache_capable` flag actually changes the computed hash
-  (`tests/test_prompt_caching.py`). Full suite: 971 passed, 2 skipped (up
+  (`tests/test_prompt_caching.py`).
+  Copilot's second review pass on PR #215 caught one more real issue:
+  `routine_aware_chunk_ranges` never splits a single oversized routine (see
+  its own docstring/tests), so a member whose rule count exceeds
+  `max_rules_per_call` can still collapse to exactly one chunk -- with only
+  one chunk (and, short of a retry, one call), there is no second call left
+  to ever read the member-level cache entry a registered/prepended
+  `shared_prefix` would write, making it a pure cache-write cost with no
+  matching read. Fixed by adding a `chunk_count > 1` condition alongside
+  the existing capability gate, in both `_generate_module_doc_chunked` and
+  `plan_batch` (so the preview stays aligned). New tests: `test_generate_
+  module_doc_chunked_does_not_use_member_cache_for_a_single_chunk_member`
+  and `test_plan_batch_does_not_hash_a_member_prefix_for_a_single_chunk_
+  member`, seeding a member whose one routine spans its entire rule range
+  (`tests/test_prompt_caching.py`). Full suite: 973 passed, 2 skipped (up
   from 955 passed, 2 skipped per #210's own progress entry).
 
 **Progress (2026-09-11):**

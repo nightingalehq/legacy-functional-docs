@@ -396,6 +396,96 @@ def test_plan_batch_chunk_hash_matches_a_real_run_with_a_non_cache_capable_calle
     )
 
 
+def _seed_fakemod_single_oversized_routine(conn, count: int):
+    """Like _seed_fakemod_rules, but every rule falls inside one routine
+    spanning the whole member -- routine_aware_chunk_ranges never splits a
+    routine even when it's bigger than chunk_size (see
+    test_chunk_ranges_never_splits_a_routine_even_when_oversized), so a
+    member seeded this way still takes the chunked path (its rule count
+    exceeds max_rules_per_call) but collapses to exactly one chunk."""
+    from mfdoc.db import insert
+
+    _seed_fakemod_rules(conn, count)
+    insert(
+        conn, "routine", member_id=1, name="BIGROUTINE", kind="natural_subroutine",
+        start_line=1, end_line=count,
+    )
+    conn.commit()
+
+
+def test_generate_module_doc_chunked_does_not_use_member_cache_for_a_single_chunk_member():
+    """Copilot review, second pass on PR #215: a member whose routine-aware
+    chunking collapses to exactly one chunk has no second call left to ever
+    read a member-level cache entry -- registering/prepending shared_prefix
+    there is a pure cache-write cost with no matching read, not a saving.
+    Must behave like a non-cache-capable caller for this one member, even
+    though the caller itself supports set_member_cache_prefixes."""
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_single_oversized_routine(conn, 5)  # exceeds max_rules_per_call=2, but one chunk
+
+    caller = _MemberCacheAwareFakeCaller()
+    result = generate_module_doc(
+        conn, "FAKEMOD", _tmp_out_path(), caller, "writing rules text", "template text",
+        max_rules_per_call=2,
+    )
+    assert result.chunked is True
+    assert caller.member_registered == [], "no second chunk exists to ever read this cache entry"
+
+    facts = build_member_facts(conn, "FAKEMOD")
+    assert isinstance(facts, MemberFacts)
+    shared_prefix = member_shared_prefix(facts, NULL_REDACTOR)
+    chunk_prompts = [p for p in caller.prompts_seen if "# Fact brief:" in p]
+    assert chunk_prompts, "expected at least one per-chunk prompt"
+    for prompt in chunk_prompts:
+        assert shared_prefix not in prompt
+
+
+def test_plan_batch_does_not_hash_a_member_prefix_for_a_single_chunk_member():
+    """Mirror of the above for plan_batch's preview: even with
+    member_cache_capable=True, a member that collapses to one chunk must
+    hash the same as a real run against a cache-capable caller (chunks_
+    reusable stays aligned with what that caller was actually given)."""
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_single_oversized_routine(conn, 5)
+
+    first = generate_module_doc(
+        conn, "FAKEMOD", _tmp_out_path(), _MemberCacheAwareFakeCaller(),
+        "writing rules text", "template text", max_rules_per_call=2,
+    )
+    assert first.ok
+    assert first.chunk_state is not None and len(first.chunk_state) - 1 == 1  # 1 chunk + "_narrative"
+
+    from mfdoc.batch import _output_subdir, plan_batch
+
+    out_dir = Path(tempfile.mkdtemp())
+    subdir = _output_subdir(conn, "FAKEMOD")
+    out_path = out_dir / subdir / "FAKEMOD.md"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    for src in Path(str(first.path)).parent.glob("FAKEMOD.chunk*.md"):
+        (out_path.parent / src.name).write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+    state_key = f"{subdir.as_posix()}/FAKEMOD"
+    state = {state_key: {"ok": True, "chunks": first.chunk_state}}
+    state_path = out_dir / "state.json"
+    import json as _json
+
+    state_path.write_text(_json.dumps(state), encoding="utf-8")
+
+    plan = plan_batch(
+        conn, ["FAKEMOD"], out_dir, state_path=state_path, max_rules_per_call=2,
+        member_cache_capable=True,
+    )
+    assert plan.members[0].chunk_count == 1
+    assert plan.members[0].chunks_reusable == 1
+
+
 def test_plan_batch_chunk_hash_matches_a_real_run_with_a_cache_capable_caller():
     """The mirror image: member_cache_capable=True must match a real
     generate_module_doc call against a caller that *does* expose
