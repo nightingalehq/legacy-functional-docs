@@ -3777,3 +3777,175 @@ def test_plan_test_batch_chunk_reuse_check_does_not_mutate_doc_claim(tmp_path):
         "plan_test_batch must not change doc_claim, even though its chunk-reuse "
         "check calls validate_test_doc under the hood"
     )
+
+
+def test_invalidate_sidecar_if_range_changed_removes_a_wrong_range_sidecar(tmp_path):
+    """Direct unit test of `_invalidate_sidecar_if_range_changed` (Copilot
+    review, issue #195): a chunk's on-disk sidecar whose own BR-nnn ids no
+    longer match this run's freshly-computed row range for that same chunk
+    index must be removed -- so a subsequent render/validate of that chunk
+    can't wrongly cross-check against content scoped to a range this index
+    no longer covers."""
+    from mfdoc import testbatch
+
+    chunk_path = tmp_path / "FAKEMOD.chunk1.md"
+    sidecar = tmp_path / "FAKEMOD.chunk1.py"
+    sidecar.write_text(
+        "def test_one():\n    # FAKEMOD:BR-001\n    ...\n"
+        "def test_two():\n    # FAKEMOD:BR-002\n    ...\n",
+        encoding="utf-8",
+    )
+
+    # Unchanged range: same ids, sidecar must survive.
+    testbatch._invalidate_sidecar_if_range_changed(
+        chunk_path, "python", {"FAKEMOD:BR-001", "FAKEMOD:BR-002"},
+    )
+    assert sidecar.exists()
+
+    # Range shifted (this chunk index now only covers BR-001): sidecar must
+    # be removed rather than left to be read as authoritative for the wrong
+    # range.
+    testbatch._invalidate_sidecar_if_range_changed(chunk_path, "python", {"FAKEMOD:BR-001"})
+    assert not sidecar.exists()
+
+    # No sidecar at all: a no-op, not an error.
+    testbatch._invalidate_sidecar_if_range_changed(chunk_path, "python", {"FAKEMOD:BR-001"})
+
+
+def test_chunk_boundary_shift_does_not_deadlock_on_a_stale_wrong_range_sidecar(tmp_path):
+    """End-to-end regression for the chunk-boundary case Copilot review
+    flagged on issue #195: lowering `max_scenarios_per_call` between runs
+    (with the member's own `rule_candidate` ordering completely unchanged)
+    moves which scenarios chunk index 1 covers, even though the member-wide
+    `test_case_fingerprint` `write_test_doc_with_sidecar` stamped for the
+    *old* chunk 1 still matches today's fingerprint exactly (nothing about
+    `rule_candidate` itself changed). Before the fix, `validate_test_doc`
+    would read that match as "the old sidecar is still authoritative" and
+    cross-check the freshly-rendered (narrower) candidate against the old,
+    wider-range sidecar -- reporting the scenario that moved to a different
+    chunk as "missing from the manifest" and failing validation on every
+    retry, since a failed validation never lets `write_test_doc_with_sidecar`
+    refresh the stale sidecar. This must now succeed cleanly instead."""
+    from mfdoc import testbatch
+
+    conn = _sqlite_conn()
+    _seed_fakemod_scenarios(conn, 4)
+
+    out_path = tmp_path / "FAKEMOD.md"
+    first = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, _chunk_aware_caller("python", "pytest"),
+        "writing rules text", "template text", max_scenarios_per_call=2,
+    )
+    assert first.ok is True
+    assert first.chunk_state is not None and set(first.chunk_state) == {"1", "2"}
+    old_chunk1_sidecar_ids = {
+        line.strip() for line in
+        (tmp_path / "FAKEMOD.chunk1.py").read_text(encoding="utf-8").splitlines()
+        if "FAKEMOD:BR" in line
+    }
+    assert any("BR-002" in i for i in old_chunk1_sidecar_ids), (
+        "sanity check: chunk 1 originally covered BR-001 and BR-002"
+    )
+
+    # Shrink the threshold to 1 -- chunk boundaries move (4 single-scenario
+    # chunks instead of 2 pairs) even though no rule_candidate row changed
+    # at all, so the member-wide fingerprint is identical to the first run's.
+    second = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, _chunk_aware_caller("python", "pytest"),
+        "writing rules text", "template text", max_scenarios_per_call=1,
+        prior_chunks=first.chunk_state,
+    )
+    assert second.ok is True, second.problems
+    assert (tmp_path / "FAKEMOD.chunk1.py").read_text(encoding="utf-8").count("FAKEMOD:BR-002") == 0, (
+        "chunk 1's sidecar must now only cover its own (narrower) range"
+    )
+
+
+def _sqlite_conn():
+    import sqlite3
+
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    return conn
+
+
+def test_write_test_doc_with_sidecar_tolerates_non_mapping_front_matter(tmp_path):
+    """Copilot review, issue #195: `split_frontmatter` can come back with a
+    truthy scalar or list for syntactically-valid-but-non-mapping YAML
+    between the `---` markers (e.g. a bare string with no `key:` at all) --
+    `.get` on that raises `AttributeError` instead of just leaving the
+    fingerprint unstamped. Must not crash; must still perform the sidecar
+    split itself (the code fence is valid regardless of the front matter
+    shape) and simply omit `test_case_fingerprint`."""
+    from mfdoc import testbatch
+
+    conn = _sqlite_conn()
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.commit()
+
+    # Front matter that parses as a bare YAML string, not a mapping.
+    doc_text = (
+        "---\n"
+        "this is not a mapping, just a scalar string\n"
+        "---\n\n"
+        "# FAKEMOD tests\n\n"
+        "```python\n"
+        "def test_one():\n"
+        "    # FAKEMOD:BR-001\n"
+        "    ...\n"
+        "```\n"
+    )
+    out_path = tmp_path / "FAKEMOD.md"
+    result = testbatch.write_test_doc_with_sidecar(conn, "FAKEMOD", out_path, doc_text, "python")
+    assert result is not None
+    assert result.exists()
+    written = out_path.read_text(encoding="utf-8")
+    assert "test_case_fingerprint" not in written
+    assert "FAKEMOD:BR-001" in result.read_text(encoding="utf-8")
+
+
+def test_write_test_doc_with_sidecar_writes_sidecar_and_doc_together(tmp_path):
+    """The sidecar file and the rewritten `out_path` must be written as the
+    last two steps, after every step that can still bail out early (a
+    missing/malformed front matter shape) -- so a document that doesn't
+    make it all the way through never ends up with a freshly-written
+    sidecar paired with an `out_path` nobody rewrote to reference it."""
+    from mfdoc import testbatch
+
+    conn = _sqlite_conn()
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    rc1 = _insert_rc(conn, 1, 10)
+    conn.commit()
+
+    doc_text = (
+        "---\n"
+        "sources: [\"FAKEMOD\"]\n"
+        "---\n\n"
+        "# FAKEMOD tests\n\n"
+        "```python\n"
+        "def test_one():\n"
+        "    # FAKEMOD:BR-001\n"
+        "    ...\n"
+        "```\n"
+    )
+    out_path = tmp_path / "FAKEMOD.md"
+    assert not out_path.exists()
+    result = testbatch.write_test_doc_with_sidecar(conn, "FAKEMOD", out_path, doc_text, "python")
+    assert result is not None
+    assert result.exists()
+    assert out_path.exists()
+    written = out_path.read_text(encoding="utf-8")
+    assert "test_case_fingerprint" in written
+    assert "## Scenarios covered" in written
+
+
+def _insert_rc(conn, member_id, line_no):
+    from mfdoc.db import insert
+
+    return insert(
+        conn, "rule_candidate", member_id=member_id, line_no=line_no, construct="IF",
+        condition="COND", raw="IF COND",
+    )

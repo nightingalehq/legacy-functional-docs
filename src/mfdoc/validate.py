@@ -1143,6 +1143,19 @@ def validate_test_doc(conn, path: Path, _text: str | None = None,
     sidecar_usable = False
     sidecar_unresolved_ids: list[str] = []
     sidecar_had_ids = False
+    # Populated only by the `_render_time` legacy-sidecar bypass below, with
+    # exactly the old sidecar's ids that are *still* real `test_case`
+    # scenarios today (Copilot review): that bypass drops the stale
+    # sidecar's veto power over a fresh candidate entirely, which is right
+    # for the *new*-id deadlock it exists to fix (see this function's
+    # docstring) but was also silently dropping the other direction --
+    # `bad_refs` below only ever checks that a candidate's *own* ids are
+    # valid, never that it didn't just quietly stop mentioning a scenario
+    # the old sidecar did. Restricted to still-valid ids on purpose: an old
+    # id the corpus has since retired is exactly what the bypass exists to
+    # stop vetoing, and demanding a candidate still reference it would
+    # reintroduce the same deadlock this bypass closes.
+    legacy_bypass_still_valid_ids: set[str] = set()
     if sidecar is not None and sidecar.exists():
         code_ids = {
             f"{m.group('member').upper()}:BR-{m.group('n')}"
@@ -1187,6 +1200,7 @@ def validate_test_doc(conn, path: Path, _text: str | None = None,
             # stale sidecar's veto power, not the underlying correctness
             # check itself.
             sidecar_usable = False
+            legacy_bypass_still_valid_ids = code_ids & valid_scenarios()
         else:
             # Fallback (a standalone check -- mfdoc test-validate, a
             # dry-run reuse check -- on a document with no fingerprint
@@ -1242,6 +1256,25 @@ def validate_test_doc(conn, path: Path, _text: str | None = None,
             problems.append(
                 f"{sidecar.name} is stale and {path.name}'s body has no MEMBER:BR-nnn "
                 f"references to fall back on -- this document cannot be verified at all"
+            )
+        # Completeness check preserved across the `_render_time` legacy-
+        # sidecar bypass (Copilot review): that bypass only ever removes
+        # the *stale* sidecar's veto power over ids the candidate newly
+        # introduces (the deadlock case its docstring describes) -- it was
+        # never meant to also waive whether the candidate still covers
+        # every scenario the old sidecar did. Scoped to ids that are still
+        # genuinely valid `test_case` scenarios today
+        # (`legacy_bypass_still_valid_ids`), so a scenario the corpus has
+        # since retired can't reintroduce the exact deadlock this bypass
+        # exists to close. The fully-empty-`scan_ids` case above already
+        # reports the more severe "untraceable" problem; this covers the
+        # narrower, easier-to-miss partial-omission case that check alone
+        # doesn't catch.
+        for sid in sorted(legacy_bypass_still_valid_ids - scan_ids):
+            problems.append(
+                f"'{sid}' was referenced in {sidecar.name if sidecar is not None else 'the previous sidecar'} "
+                f"and is still a valid test_case scenario, but is no longer referenced anywhere in "
+                f"{path.name} -- confirm this scenario was intentionally dropped, not silently omitted"
             )
 
     bad_refs = 0

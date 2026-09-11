@@ -518,6 +518,96 @@ def test_current_sidecar_still_cross_checked_against_manifest(indexed_db, tmp_pa
     assert result["sidecar_unresolved_ids"] == []
 
 
+RENDER_TIME_CANDIDATE_MISSING_A_SCENARIO = """---
+title: "MMP0100 -- generated tests (python)"
+doc_type: generated_test
+system: MOM
+module: MMP0100
+language: python
+framework: pytest
+generated_by: legacy-functional-docs 0.1.0
+generated_at: "2026-01-01"
+review_status: draft
+reviewers: []
+confidence_summary:
+  verified: 1
+  inferred: 0
+  unresolved: 0
+sources: ["MMP0100"]
+---
+
+# MMP0100 -- generated tests
+
+```python
+def test_rejects_unconfirmed_order():
+    # MMP0100:BR-004 [[MMP0100:38-40]]
+    ...
+```
+"""
+
+
+def test_render_time_legacy_sidecar_bypass_still_catches_a_dropped_scenario(indexed_db, tmp_path):
+    """Copilot review follow-up on issue #195: `_render_time=True`'s legacy-
+    sidecar bypass (no `test_case_fingerprint` anywhere -- a sidecar
+    predating that field) treats the old sidecar as absent entirely, to
+    avoid the id-overlap heuristic's deadlock (see `validate_test_doc`'s
+    own docstring). That bypass must only waive the veto over *newly
+    introduced* ids -- not the completeness direction: a freshly-generated
+    candidate that silently drops a scenario the old (legacy) sidecar
+    covered, while that scenario is still a real, current `test_case` row,
+    must still be flagged. `MMP0100:BR-001` is real and current; the old
+    sidecar covers it and `BR-004`, but the new candidate's body only
+    references `BR-004`."""
+    conn = indexed_db
+    testplan.run_all(conn, member_name="MMP0100")
+    path = tmp_path / "MMP0100.md"
+    sidecar = tmp_path / "MMP0100.py"
+    path.write_text(RENDER_TIME_CANDIDATE_MISSING_A_SCENARIO, encoding="utf-8")
+    # A legacy sidecar (no fingerprint field ever stamped) that covered both
+    # scenarios -- the new candidate above only re-renders BR-004.
+    sidecar.write_text(
+        "def test_rejects_unconfirmed_order():\n"
+        "    # MMP0100:BR-004\n"
+        "    ...\n"
+        "def test_something_else():\n"
+        "    # MMP0100:BR-001\n"
+        "    ...\n",
+        encoding="utf-8",
+    )
+    result = validate_test_doc(conn, path, _render_time=True)
+    assert not result["ok"], "a candidate that silently drops a still-valid scenario must not validate clean"
+    assert any(
+        "BR-001" in p and "no longer referenced" in p for p in result["problems"]
+    ), result["problems"]
+    # The bypass itself must still be in effect: BR-004 alone must not be
+    # reported as "missing from the sidecar" or similar -- only the
+    # completeness direction is preserved, not the original veto.
+    assert not any("not found in" in p for p in result["problems"])
+
+
+def test_render_time_legacy_sidecar_bypass_does_not_flag_a_legitimately_new_scenario(indexed_db, tmp_path):
+    """The other half of the same fix: a *new* scenario the candidate
+    introduces that the old legacy sidecar never had must still pass --
+    this is exactly the deadlock case `_render_time=True`'s bypass exists
+    to prevent (see `validate_test_doc`'s docstring), and the completeness
+    check added alongside it must not reintroduce that deadlock."""
+    conn = indexed_db
+    testplan.run_all(conn, member_name="MMP0100")
+    path = tmp_path / "MMP0100.md"
+    sidecar = tmp_path / "MMP0100.py"
+    path.write_text(RENDER_TIME_CANDIDATE_MISSING_A_SCENARIO, encoding="utf-8")
+    # Legacy sidecar covers only BR-004 (a strict subset of the candidate,
+    # which also only has BR-004 here) -- nothing dropped, nothing new.
+    sidecar.write_text(
+        "def test_rejects_unconfirmed_order():\n"
+        "    # MMP0100:BR-004\n"
+        "    ...\n",
+        encoding="utf-8",
+    )
+    result = validate_test_doc(conn, path, _render_time=True)
+    assert result["ok"], result["problems"]
+
+
 def test_missing_language_or_framework_front_matter_is_flagged(indexed_db, tmp_path):
     conn = indexed_db
     testplan.run_all(conn, member_name="MMP0100")

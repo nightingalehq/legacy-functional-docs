@@ -12,6 +12,65 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-11h):**
+- Addressed the remaining Copilot review findings on PR #209 (issue #195,
+  stale test-batch sidecar detection):
+  1. `testbatch.py`'s new `_invalidate_sidecar_if_range_changed` closes a
+     narrower gap than the full chunk-scoped-fingerprint redesign
+     `_prior_fingerprint_for`'s docstring already declines to take on:
+     `write_test_doc_with_sidecar` stamps a *member*-wide
+     `test_case_fingerprint`, not one scoped to which scenario range a
+     given chunk *index* covers, so if that member-wide `rule_candidate`
+     ordering is unchanged but chunk boundaries move on their own (a
+     `max_scenarios_per_call` change, or a `routine` boundary shifting),
+     the stamped fingerprint still matches and `validate_test_doc`'s
+     authoritative fingerprint check would read the old, now-wrong-range
+     sidecar as still current -- failing validation on every retry since
+     the corpus hasn't actually changed. `_generate_member_test_doc_
+     chunked` now calls this before re-rendering any cache-miss chunk,
+     dropping that chunk's on-disk sidecar outright when its own BR-nnn
+     ids no longer match this run's freshly-computed row range for that
+     index -- the same effect `validate_test_doc`'s existing legacy-
+     sidecar bypass has, triggered here for a range-shifted sidecar
+     instead of a fingerprint-less one.
+  2. `validate.py`'s `_render_time=True` legacy-sidecar bypass (no stored
+     `test_case_fingerprint` anywhere) was dropping the old sidecar from
+     validation entirely in both directions -- right for the *new*-id
+     deadlock it exists to prevent (see the function's own docstring), but
+     it also silently waived whether a fresh candidate still covers every
+     scenario the old sidecar did. `bad_refs` alone only checks a
+     candidate's own ids are valid, never that it didn't quietly stop
+     referencing one. Added a completeness check scoped to old-sidecar ids
+     that are still genuinely valid `test_case` scenarios today
+     (`legacy_bypass_still_valid_ids`) -- a candidate silently dropping one
+     of those now fails validation, while a legitimately new id the old
+     sidecar never had (the deadlock case) still passes.
+  3. `write_test_doc_with_sidecar` guarded `doc_fm.get("sources")` with
+     `isinstance(doc_fm, dict)`, not just `is not None`:
+     `split_frontmatter` can return a truthy scalar or list for
+     syntactically-valid-but-non-mapping YAML, which `.get` raises on.
+     Also reordered the function so both on-disk writes (the sidecar file,
+     then the rewritten document) happen only after every step that can
+     still bail out early, so a document that doesn't make it all the way
+     through can never end up with a freshly-written sidecar paired with a
+     document nobody rewrote to reference it.
+  4. Verified (no code change needed) that two other reported findings are
+     already resolved by earlier rounds on this same issue: `_corpus_
+     signature` already folds in `rule_candidate` `(id, line_no)` and
+     `routine` boundary/name rows (since the third review round), and
+     `run_test_batch`'s per-member `brief_sha256` already folds in
+     `member_rule_fingerprint` (since a later round) -- both a routine
+     rename/boundary shift and a `rule_candidate` reorder already defeat
+     the corpus-level and per-member resume fast paths, so `test_case_
+     brief`'s own routine-derived rendering can't go stale undetected at
+     either layer. `write_test_doc_with_sidecar`'s docstring already
+     matched its actual fallback-to-`None` behaviour on unparseable
+     `sources` (no fabricated fallback fingerprint).
+- Six new regression tests added across `tests/test_test_batch.py` and
+  `tests/test_test_validate.py` for the above; full suite green
+  (1024 passed, 2 skipped) plus a clean `mfdoc validate` pass against
+  `examples/` (71/71 documents, 0 invalid citations).
+
 **Progress (2026-09-11d):**
 - Implemented issue #214 (#207/#183 Part 2 follow-up): a second, member-
   level `cache_control` breakpoint for a chunked member's chunk loop, using

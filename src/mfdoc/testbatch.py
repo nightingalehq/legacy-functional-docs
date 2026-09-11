@@ -157,9 +157,6 @@ def write_test_doc_with_sidecar(conn, member_name: str, out_path: Path, doc_text
     if not scenario_ids:
         return None
 
-    sidecar_path.parent.mkdir(parents=True, exist_ok=True)
-    sidecar_path.write_text(code, encoding="utf-8")
-
     fence_pattern = re.compile(r"```" + re.escape(language) + r"\n.*?```", re.S)
     prose = fence_pattern.sub(
         f"See [`{sidecar_path.name}`](./{sidecar_path.name}) for the generated test source.",
@@ -179,8 +176,20 @@ def write_test_doc_with_sidecar(conn, member_name: str, out_path: Path, doc_text
     # parsed as a non-empty list of strings (front matter missing/
     # malformed -- the same "leave it out" trade-off as an unresolvable
     # fingerprint below, not a case worth failing this write over).
+    #
+    # `isinstance(doc_fm, dict)`, not just `is not None` (Copilot review):
+    # `split_frontmatter` can return a truthy scalar or list for
+    # syntactically-valid-but-non-mapping YAML between the `---` markers
+    # (e.g. a bare `sources` string with no `key:` at all) -- `yaml.
+    # safe_load`'s `or {}` only substitutes for a *falsy* parse (`None`/
+    # `""`/`[]`), not a truthy non-dict one, so `.get` on it would raise
+    # instead of just leaving `fingerprint` unset. This is computed --
+    # and can raise, absent this guard -- before either on-disk file
+    # below is written, so a malformed-YAML crash here can never leave a
+    # freshly split sidecar paired with an `out_path` that was never
+    # rewritten to reference it (see this function's write order below).
     doc_fm, _doc_body, _doc_err = split_frontmatter(doc_text)
-    doc_sources = doc_fm.get("sources") if doc_fm is not None else None
+    doc_sources = doc_fm.get("sources") if isinstance(doc_fm, dict) else None
     fingerprint = None
     if isinstance(doc_sources, list) and doc_sources and all(isinstance(s, str) for s in doc_sources):
         # Stripped, matching validate.py's read-side handling of the same
@@ -206,6 +215,15 @@ def write_test_doc_with_sidecar(conn, member_name: str, out_path: Path, doc_text
         fingerprint = doc_rule_fingerprint(conn, doc_sources)
     if fingerprint is not None:
         front_matter_block = front_matter_block.rstrip("\n") + f'\ntest_case_fingerprint: "{fingerprint}"\n'
+
+    # Both on-disk writes deferred to here, after every step above that
+    # can still bail out (None) or -- pre-Copilot-review -- raise: writing
+    # the sidecar before this point risked leaving a freshly-split sidecar
+    # on disk while `out_path` itself was never rewritten to reference it
+    # (e.g. because a later step raised), a mismatched pair no different
+    # in effect from the staleness this whole mechanism exists to prevent.
+    sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+    sidecar_path.write_text(code, encoding="utf-8")
     out_path.write_text(f"---{front_matter_block}---{prose}{manifest}", encoding="utf-8")
     return sidecar_path
 
@@ -331,6 +349,70 @@ def _prune_stale_test_chunk_files(out_path: Path, expected_names: set[str], lang
                 sidecar.unlink()
             except OSError:
                 pass
+
+
+def _invalidate_sidecar_if_range_changed(chunk_path: Path, language: str, expected_ids: set[str]) -> None:
+    """Remove `chunk_path`'s existing sidecar if its own `MEMBER:BR-nnn`
+    content no longer matches `expected_ids` -- this chunk index's current
+    row range, from this run's freshly recomputed `routine_aware_chunk_
+    ranges` -- before this chunk is (re)rendered.
+
+    Closes a narrower gap than the full chunk-scoped-fingerprint redesign
+    `_prior_fingerprint_for`'s docstring already declines to do (Copilot
+    review, issue #195): `write_test_doc_with_sidecar` stamps a
+    *member*-wide `test_case_fingerprint` (the whole member's
+    `rule_candidate` `(id, line_no)` ordering), not one scoped to which
+    scenario range a given chunk *index* covers. If that member-wide
+    ordering is unchanged but chunk boundaries move on their own (a
+    `max_scenarios_per_call` change, or a `routine` boundary shifting) --
+    so `chunk1` at this same path now covers a different range of
+    scenarios than it did before -- the stamped fingerprint still matches
+    a freshly computed one, and `validate_test_doc`'s authoritative
+    fingerprint check (case 1: an exact match short-circuits everything
+    else) would otherwise read the *old*, now-differently-scoped sidecar
+    as still current -- cross-checking a freshly-generated candidate's
+    ids against a sidecar for the wrong range, which can fail validation
+    on every retry (the corpus hasn't actually changed) since
+    `write_test_doc_with_sidecar` only ever refreshes the sidecar after a
+    *successful* validation.
+
+    Doesn't require re-deriving what chunk boundaries *should* be at
+    validation time the way a real chunk-scoped fingerprint would (the
+    "real design change...out of scope" `_prior_fingerprint_for` already
+    flags): this call site already has this run's authoritative range for
+    chunk `i` in hand (`chunk_rows`, from the very `ranges` this render
+    loop just computed), so it can compare that directly against what's
+    already on disk and drop the sidecar outright when they disagree --
+    the same effect `validate_test_doc`'s own bypass has for a *legacy*
+    sidecar with no fingerprint context at all (see its docstring), just
+    triggered here for a *range-shifted* sidecar instead of a fingerprint-
+    less one. A dropped sidecar is unconditionally correct to discard: it
+    is about to be re-rendered as a cache miss regardless (a caller only
+    reaches here when `_test_chunk_reuse_ok` already said no), and
+    `write_test_doc_with_sidecar` recreates a fresh, correctly-scoped one
+    the moment that render validates.
+
+    No-op if this chunk has no sidecar yet (a fresh render, nothing to
+    invalidate) or if its content already matches `expected_ids` (nothing
+    changed for this index -- the common case). Best-effort on removal,
+    same as `_prune_stale_test_chunk_files`: a transient filesystem lock
+    here must not abort an otherwise-successful chunked render; leaving a
+    wrong-range sidecar in place in that rare case reproduces the same
+    (already-documented, already-accepted) residual risk as this
+    function's sibling cleanup helpers, not a new one."""
+    sidecar = sidecar_path_for(chunk_path, language)
+    if sidecar is None or not sidecar.exists():
+        return
+    on_disk_ids = {
+        f"{m.group('member').upper()}:BR-{m.group('n')}"
+        for m in BR_REF.finditer(sidecar.read_text(encoding="utf-8"))
+    }
+    if on_disk_ids == expected_ids:
+        return
+    try:
+        sidecar.unlink()
+    except OSError:
+        pass
 
 
 def select_test_batch_members(conn) -> list[str]:
@@ -945,6 +1027,17 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
             result = DocResult(member_name, str(chunk_path), True, 0, 0, 0, [])
             logger.debug("%s: chunk %d/%d reused (unchanged)", member_name, i, chunk_count)
         if result is None:
+            # See _invalidate_sidecar_if_range_changed's docstring (issue
+            # #195 review): about to regenerate this chunk index as a
+            # cache miss regardless -- if it still has an on-disk sidecar
+            # from a *prior* run whose range no longer matches this run's
+            # `chunk_rows` (boundaries moved even though the member-wide
+            # rule_candidate ordering didn't), drop it now so the
+            # about-to-run validation can't wrongly treat that
+            # wrong-range sidecar as authoritative just because the
+            # member-wide fingerprint still happens to match.
+            expected_ids = {r["scenario_name"].upper() for r in chunk_rows}
+            _invalidate_sidecar_if_range_changed(chunk_path, language, expected_ids)
             logger.info("%s: chunk %d/%d generating", member_name, i, chunk_count)
             result = _generate_test_doc_from_brief(
                 conn, member_name, brief, language, framework, chunk_path, caller,
