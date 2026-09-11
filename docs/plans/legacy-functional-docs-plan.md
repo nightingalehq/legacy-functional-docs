@@ -116,6 +116,36 @@ GitHub org.
      Full suite (rebased onto main post-#199): 953 passed, 2 skipped (four
      new tests total from this fix).
 
+**Progress (2026-09-11b):**
+- Investigated issue #191 (part of the #187 epic): confirmed #183's
+  per-chunk whole-member-context re-query problem does **not** apply to
+  `testplan.py`'s `test_case_brief`/`test_case_brief_chunk` -- no code
+  change made. #183 (PR #206) found that pre-fix `module_brief(conn,
+  member_name, rule_range=...)` re-ran ~15 whole-member fact-store queries
+  itself, inline, on every one of a chunked member's chunk calls, because
+  it always took `conn` and always queried regardless of `rule_range`.
+  `test_case_brief_chunk`, by contrast, takes no `conn` parameter at all --
+  it only ever renders from `rows`/`system`/`routines` passed in by its
+  caller, and its own chunk loop (in both `_generate_member_test_doc_chunked`
+  and `plan_test_batch`'s dry-run preview) calls
+  `fetch_test_case_rows`/`fetch_routines` once per member, before the `for
+  i, (start, end) in enumerate(ranges, ...)` loop, then passes the same
+  `rows`/`system`/`routines` into every `test_case_brief_chunk` call across
+  it -- the loop body itself performs zero fact-store access, which is the
+  property #183 was restoring for `module_brief`. (`plan_test_batch` does
+  fetch both twice per member overall -- once inside its earlier
+  `test_case_brief()` call, used only to fingerprint the member's full
+  brief for skip/resume, and again directly before the chunk loop -- but
+  that duplication is at most one extra fetch per *member*, not one per
+  *chunk*, so it isn't the pathology #191 is asking about.) This is an
+  architectural difference from `module_brief`'s pre-#183 shape, not an
+  oversight sharing the same bug: `testplan.py`'s chunk-brief builder was
+  written as a pure function over pre-fetched data from the start, so there
+  was never a `MemberFacts`-shaped gap to port #183's fix into. No
+  behaviour or performance change; full suite unaffected (944 passed, 2
+  skipped, same as before this investigation). Closing #191 as
+  confirmed-not-applicable.
+
 **Progress (2026-09-10e):**
 - Fixed issue #188: ported `batch.py`'s near-miss/targeted-patch mechanism
   (issue #131, generalized by #170) to `testbatch.py`'s test-generation
