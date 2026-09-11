@@ -1101,8 +1101,27 @@ def cmd_test_batch(args) -> int:
         return 0
 
     if getattr(args, "dry_run", False):
+        # Mirror the real loop's template-existence check below (rather than
+        # skip straight to planning) -- otherwise a missing/misconfigured
+        # template would report every member as RENDER and exit 0 here, while
+        # the real run for the same invocation exits 2 (single target) or
+        # skips/fails that target (matrix mode). A dry-run whose own preview
+        # can't happen for a target must say so the same way the real run
+        # would, not silently report a plan for an invocation that can't
+        # actually run (issue #190 review).
+        any_target_failed = False
         for target in targets:
             language, framework = target["language"], target["framework"]
+            template_override = target.get("template") or args.template
+            template_path = _test_template_path(base, language, framework, template_override)
+            if not template_path.exists():
+                print(f"no template at {template_path} -- pass --template, or add one for "
+                      f"--language {language} --framework {framework}; skipping this target",
+                      file=sys.stderr)
+                if not args.matrix:
+                    return 2
+                any_target_failed = True
+                continue
             plan = testbatch_mod.plan_test_batch(
                 conn, members, language, framework, base / out_dir, redact=redact,
                 state_path=(base / state_rel) if state_rel else None,
@@ -1112,7 +1131,7 @@ def cmd_test_batch(args) -> int:
             if len(targets) > 1:
                 print(f"\n=== {language}/{framework} ===")
             _print_test_batch_plan(plan)
-        return 0
+        return 1 if any_target_failed else 0
 
     writing_rules = (base / "reference" / "test-writing-rules.md").read_text(encoding="utf-8")
     caller = _build_model_caller(args)

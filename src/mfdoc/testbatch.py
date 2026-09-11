@@ -515,8 +515,55 @@ def _render_chunk_index(member_name: str, system: str | None, language: str, fra
     return fm + body
 
 
+# Every column `validate.validate_doc` writes into `doc_claim` for one
+# document path -- see db.SCHEMA's `doc_claim` table. `id` is deliberately
+# excluded: it's an autoincrement surrogate key nothing else in the schema
+# references (see db.py/validate.py), so `_readonly_validate_test_doc`'s
+# restore doesn't need to reproduce the exact prior id values, only the
+# same content under the same doc_path.
+_DOC_CLAIM_COLUMNS = (
+    "doc_path", "claim_id", "confidence", "citation", "member_name",
+    "line_from", "line_to", "valid", "note",
+)
+
+
+def _readonly_validate_test_doc(conn, path: Path) -> dict:
+    """The same result `validate_test_doc(conn, path)` returns, but leaves
+    the `doc_claim` table exactly as it was before the call.
+    `validate_test_doc` (via `validate.validate_doc`) deletes and
+    reinserts every `doc_claim` row for `path` and commits as a side
+    effect -- correct, and the point, for a real render (it's what keeps
+    `doc_claim` in sync with what a document currently cites, for `mfdoc
+    sample-citations` to read later), but not acceptable for
+    `plan_test_batch`'s dry-run: its whole documented contract (like
+    `mfdoc batch --dry-run`'s) is that it writes nothing, anywhere (issue
+    #190 review flagged this: `_test_chunk_reuse_ok`'s revalidation of a
+    cached chunk was mutating the index database even though it never
+    touches the filesystem). Snapshots this one path's rows first and
+    restores them verbatim afterward in a `finally` (so a raised exception
+    still restores before propagating), rather than skip the revalidation
+    -- the reuse check still needs today's real `ok` verdict, just without
+    the persistent side effect."""
+    path_str = str(path)
+    before = conn.execute(
+        f"SELECT {', '.join(_DOC_CLAIM_COLUMNS)} FROM doc_claim WHERE doc_path=?",
+        (path_str,),
+    ).fetchall()
+    try:
+        return validate_test_doc(conn, path)
+    finally:
+        conn.execute("DELETE FROM doc_claim WHERE doc_path=?", (path_str,))
+        if before:
+            placeholders = ", ".join("?" * len(_DOC_CLAIM_COLUMNS))
+            conn.executemany(
+                f"INSERT INTO doc_claim ({', '.join(_DOC_CLAIM_COLUMNS)}) VALUES ({placeholders})",
+                [tuple(row[c] for c in _DOC_CLAIM_COLUMNS) for row in before],
+            )
+        conn.commit()
+
+
 def _test_chunk_reuse_ok(conn, prior_chunks: dict | None, i: int, brief_hash: str,
-                          chunk_path: Path) -> bool:
+                          chunk_path: Path, readonly: bool = False) -> bool:
     """Whether chunk `i` can be reused verbatim -- no model call -- given a
     prior run's chunk_state and this chunk's freshly-computed brief hash:
     the prior run must have recorded this exact chunk as clean (`ok` True)
@@ -538,7 +585,14 @@ def _test_chunk_reuse_ok(conn, prior_chunks: dict | None, i: int, brief_hash: st
     function's real reuse path and `plan_test_batch`'s dry-run estimate
     (issue #190) so both apply exactly the same reuse rule -- a preview
     that used a second, slightly different copy of this logic could drift
-    from what a real run actually does."""
+    from what a real run actually does.
+
+    `readonly` (only ever set by `plan_test_batch`) routes the
+    revalidation through `_readonly_validate_test_doc` instead of
+    `validate_test_doc` directly, so a dry-run's reuse check can't leave
+    the `doc_claim` table changed even though it makes no model call and
+    writes no file -- the real chunked-render path leaves this False, so
+    its own revalidation keeps refreshing `doc_claim` exactly as before."""
     prior_chunk = (prior_chunks or {}).get(str(i))
     reusable = (
         isinstance(prior_chunk, dict) and prior_chunk.get("ok") is True
@@ -547,7 +601,8 @@ def _test_chunk_reuse_ok(conn, prior_chunks: dict | None, i: int, brief_hash: st
     )
     if not reusable:
         return False
-    return validate_test_doc(conn, chunk_path)["ok"]
+    validator = _readonly_validate_test_doc if readonly else validate_test_doc
+    return validator(conn, chunk_path)["ok"]
 
 
 def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None, rows: list,
@@ -1258,7 +1313,7 @@ def plan_test_batch(conn, members: list[str], language: str, framework: str, out
                 sme_notes=sme_notes,
             )
             chunk_hash = hashlib.sha256(chunk_brief.encode("utf-8")).hexdigest()
-            if _test_chunk_reuse_ok(conn, prior_chunks, i, chunk_hash, chunk_path):
+            if _test_chunk_reuse_ok(conn, prior_chunks, i, chunk_hash, chunk_path, readonly=True):
                 chunks_reusable += 1
 
         plans.append(TestMemberPlan(
