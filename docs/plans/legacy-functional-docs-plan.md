@@ -12,6 +12,38 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-12d):**
+- Addressed the thirty-fifth Copilot review round on PR #209 (issue
+  #195):
+  1. The chunk index document (`_render_chunk_index`'s output) was
+     written with a direct `write_text` onto `out_path`, unlike every
+     other write in this module -- a failed/truncated write there (disk-
+     full mid-write) would still hit the `finally` block that restores
+     the moved-aside `index_sidecar_backup` (since `index_written` is
+     only set *after* a successful write), pairing that restored old
+     sidecar with a *broken* new index instead of the fully-intact old
+     pair the rollback is meant to leave behind. Now written to a `.tmp`
+     sibling and replaced atomically, same as every other write here.
+  2. `_test_chunk_reuse_ok` treated `result["ok"] and not result.get(
+     "sidecar_stale")` as sufficient for reuse, but a *split* chunk
+     document (one already turned into prose + a `## Scenarios covered`
+     manifest, its actual test source moved to the sidecar file) whose
+     sidecar has since gone missing on disk still validates `ok=True` --
+     `validate_test_doc` falls back to scanning the body, and the
+     manifest's ids still resolve against `test_case` regardless of
+     whether the sidecar file exists. Reusing it would carry the missing-
+     source problem forward indefinitely. Now checks the real sidecar
+     path directly whenever the document's own `## Scenarios covered`
+     manifest marks it as split, while still allowing a genuinely
+     embedded-fence document (no manifest, nothing moved out) with no
+     sidecar of its own.
+- Three new regression tests (the atomic index write not leaving a
+  truncated index behind, and both directions of the missing-sidecar
+  reuse check -- reject a split chunk with no sidecar, still allow an
+  embedded-fence one). Full suite green (1057 passed, 2 skipped) plus a
+  clean `mfdoc validate` pass against `examples/` (71/71 documents, 0
+  invalid citations of 750).
+
 **Progress (2026-09-12c):**
 - Addressed the thirty-fourth Copilot review round on PR #209 (issue
   #195): `write_test_doc_with_sidecar`'s rollback (when the document's

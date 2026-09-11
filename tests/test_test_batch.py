@@ -2721,13 +2721,13 @@ def test_chunk_reuse_treats_a_stale_sidecar_as_a_cache_miss(tmp_path, monkeypatc
         testbatch, "validate_test_doc",
         lambda conn, path, _text=None, _prior_fingerprint=None, _render_time=False, _fingerprint_cache=None, _valid_scenarios=None: {"ok": True, "sidecar_stale": True, "problems": []},
     )
-    assert testbatch._test_chunk_reuse_ok(None, prior_chunks, 1, "same-hash", chunk_path) is False
+    assert testbatch._test_chunk_reuse_ok(None, prior_chunks, 1, "same-hash", chunk_path, "python") is False
 
     monkeypatch.setattr(
         testbatch, "validate_test_doc",
         lambda conn, path, _text=None, _prior_fingerprint=None, _render_time=False, _fingerprint_cache=None, _valid_scenarios=None: {"ok": True, "sidecar_stale": False, "problems": []},
     )
-    assert testbatch._test_chunk_reuse_ok(None, prior_chunks, 1, "same-hash", chunk_path) is True
+    assert testbatch._test_chunk_reuse_ok(None, prior_chunks, 1, "same-hash", chunk_path, "python") is True
 
 
 def test_chunk_reuse_ok_passes_its_fingerprint_cache_through_to_validation(tmp_path, monkeypatch):
@@ -2754,7 +2754,7 @@ def test_chunk_reuse_ok_passes_its_fingerprint_cache_through_to_validation(tmp_p
     sentinel: dict = {"marker": "shared"}
     scenarios_sentinel = object()
     testbatch._test_chunk_reuse_ok(
-        None, prior_chunks, 1, "same-hash", chunk_path,
+        None, prior_chunks, 1, "same-hash", chunk_path, "python",
         _fingerprint_cache=sentinel, _valid_scenarios=scenarios_sentinel,
     )
     assert received == [(sentinel, scenarios_sentinel)]
@@ -2768,7 +2768,7 @@ def test_chunk_reuse_ok_passes_its_fingerprint_cache_through_to_validation(tmp_p
         ),
     )
     testbatch._test_chunk_reuse_ok(
-        None, prior_chunks, 1, "same-hash", chunk_path, readonly=True,
+        None, prior_chunks, 1, "same-hash", chunk_path, "python", readonly=True,
         _fingerprint_cache=sentinel, _valid_scenarios=scenarios_sentinel,
     )
     assert received == [(sentinel, scenarios_sentinel)]
@@ -2851,6 +2851,58 @@ def test_chunked_render_surfaces_a_failed_stale_index_sidecar_removal(tmp_path, 
     assert result.ok is False
     assert any("could not remove stale single-document sidecar" in p for p in result.problems)
     assert stale_sidecar.exists()
+
+
+def test_chunked_render_index_write_failure_does_not_leave_a_truncated_index(tmp_path, monkeypatch):
+    """Copilot review follow-up: the chunk index document is written to a
+    `.tmp` sibling and replaced atomically, not a direct `write_text` onto
+    `out_path` -- if that write failed straight into `out_path` (disk-full
+    mid-write), the `finally` block that restores `index_sidecar_backup`
+    (since `index_written` is only set *after* a successful write) would
+    still fire, but `out_path` itself would be left holding a partial/
+    truncated new index instead of its old, still-intact content --
+    pairing the restored old sidecar with a broken new index rather than
+    the fully-old pair this rollback is meant to leave behind."""
+    import sqlite3
+    from pathlib import Path
+
+    import pytest
+
+    from mfdoc import testbatch
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_scenarios(conn, 5)
+
+    out_path = tmp_path / "FAKEMOD.md"
+    stale_sidecar = out_path.with_suffix(".py")
+    old_stale_sidecar_text = "# leftover from a prior single-document render\n"
+    stale_sidecar.write_text(old_stale_sidecar_text, encoding="utf-8")
+
+    real_write_text = Path.write_text
+
+    def exploding_write_text(self, content, *args, **kwargs):
+        if self.name == "FAKEMOD.md.tmp":
+            raise OSError("simulated: disk full while writing the chunk index")
+        return real_write_text(self, content, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", exploding_write_text)
+
+    caller = _chunk_aware_caller("python", "pytest")
+    with pytest.raises(OSError):
+        testbatch.generate_member_test_doc(
+            conn, "FAKEMOD", "python", "pytest", out_path, caller,
+            "writing rules text", "template text", max_scenarios_per_call=2,
+        )
+
+    assert not out_path.exists(), "out_path must never be touched by a failed index write"
+    assert stale_sidecar.exists()
+    assert stale_sidecar.read_text(encoding="utf-8") == old_stale_sidecar_text, (
+        "the old single-document sidecar must be restored, not left as a partial replacement"
+    )
+    assert not out_path.with_name("FAKEMOD.md.tmp").exists(), "no leftover index temp file should remain"
 
 
 def test_single_doc_render_leaves_old_chunk_output_untouched_when_the_new_render_fails(tmp_path):
@@ -2950,6 +3002,61 @@ def test_single_doc_render_surfaces_a_failed_orphaned_chunk_file_removal(tmp_pat
     assert orphaned_chunk.exists()
 
 
+def test_chunk_reuse_ok_rejects_a_split_chunk_whose_sidecar_is_missing(tmp_path, monkeypatch):
+    """Copilot review follow-up: a *split* chunk document (one that already
+    references its sidecar by name in a `## Scenarios covered` manifest,
+    its actual test source moved out) whose sidecar has since gone
+    missing on disk must never be treated as reusable, even when
+    `validate_test_doc` itself reports `ok=True` (it falls back to
+    scanning the document's own body, and the manifest's ids still
+    resolve against `test_case` regardless of whether the sidecar file
+    exists) -- reusing it would carry the missing-source problem forward
+    indefinitely, since nothing would ever call `write_test_doc_with_
+    sidecar` again to recreate it."""
+    from mfdoc import testbatch
+
+    chunk_path = tmp_path / "FAKEMOD.chunk1.md"
+    chunk_path.write_text(
+        "---\nsources: [\"FAKEMOD\"]\nlanguage: python\n---\n\n"
+        "# FAKEMOD tests\n\n"
+        "See [`FAKEMOD.chunk1.py`](./FAKEMOD.chunk1.py) for the generated test source.\n\n"
+        "## Scenarios covered\n\n- FAKEMOD:BR-001\n",
+        encoding="utf-8",
+    )
+    # No FAKEMOD.chunk1.py written -- the sidecar this document's own
+    # manifest points at is missing.
+    prior_chunks = {"1": {"ok": True, "brief_sha256": "same-hash"}}
+
+    monkeypatch.setattr(
+        testbatch, "validate_test_doc",
+        lambda conn, path, _text=None, _prior_fingerprint=None, _render_time=False, _fingerprint_cache=None, _valid_scenarios=None: {"ok": True, "sidecar_stale": False, "problems": []},
+    )
+    assert testbatch._test_chunk_reuse_ok(None, prior_chunks, 1, "same-hash", chunk_path, "python") is False
+
+
+def test_chunk_reuse_ok_still_allows_an_embedded_fence_chunk_with_no_sidecar(tmp_path, monkeypatch):
+    """The other half: a document that was *never* split (still embeds its
+    own code fence, or has no `MEMBER:BR-nnn` references to split out at
+    all) legitimately has no sidecar -- that must not be confused with
+    the missing-artifact case above."""
+    from mfdoc import testbatch
+
+    chunk_path = tmp_path / "FAKEMOD.chunk1.md"
+    chunk_path.write_text(
+        "---\nsources: [\"FAKEMOD\"]\nlanguage: python\n---\n\n"
+        "# FAKEMOD tests\n\n"
+        "```python\ndef test_one():\n    # FAKEMOD:BR-001\n    ...\n```\n",
+        encoding="utf-8",
+    )
+    prior_chunks = {"1": {"ok": True, "brief_sha256": "same-hash"}}
+
+    monkeypatch.setattr(
+        testbatch, "validate_test_doc",
+        lambda conn, path, _text=None, _prior_fingerprint=None, _render_time=False, _fingerprint_cache=None, _valid_scenarios=None: {"ok": True, "sidecar_stale": False, "problems": []},
+    )
+    assert testbatch._test_chunk_reuse_ok(None, prior_chunks, 1, "same-hash", chunk_path, "python") is True
+
+
 def test_chunk_reuse_forces_a_re_render_for_a_legacy_chunk_with_no_fingerprint(tmp_path):
     """Copilot review follow-up on issue #195: a *legacy* chunk file (no
     `test_case_fingerprint` anywhere -- written before this fix existed)
@@ -3038,7 +3145,7 @@ See [`FAKEMOD.chunk1.py`](./FAKEMOD.chunk1.py) for the generated test source.
     conn.commit()
 
     prior_chunks = {"1": {"ok": True, "brief_sha256": "unchanged-hash"}}
-    assert testbatch._test_chunk_reuse_ok(conn, prior_chunks, 1, "unchanged-hash", chunk_path) is False, (
+    assert testbatch._test_chunk_reuse_ok(conn, prior_chunks, 1, "unchanged-hash", chunk_path, "python") is False, (
         "a legacy chunk with no fingerprint must not be reused once the "
         "corpus has shifted, even if its own cached brief hash matches"
     )

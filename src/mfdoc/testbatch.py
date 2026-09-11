@@ -1101,7 +1101,7 @@ def _lazy_valid_scenarios(conn):
 
 
 def _test_chunk_reuse_ok(conn, prior_chunks: dict | None, i: int, brief_hash: str,
-                          chunk_path: Path, readonly: bool = False,
+                          chunk_path: Path, language: str, readonly: bool = False,
                           _fingerprint_cache: dict | None = None, _valid_scenarios=None) -> bool:
     """Whether chunk `i` can be reused verbatim -- no model call -- given a
     prior run's chunk_state and this chunk's freshly-computed brief hash:
@@ -1179,7 +1179,25 @@ def _test_chunk_reuse_ok(conn, prior_chunks: dict | None, i: int, brief_hash: st
     `validate_tests_tree` already avoids by sharing one, just not yet
     reaching this reuse path. A caller with nothing to share (a single,
     unchunked member) leaves this unset and keeps the prior per-call
-    cost."""
+    cost.
+
+    `result["ok"] and not result.get("sidecar_stale")` alone isn't enough
+    (Copilot review): a *split* document (one `write_test_doc_with_
+    sidecar` has already turned into prose + a `## Scenarios covered`
+    manifest, its actual test source moved out to the sidecar file) whose
+    sidecar has since gone missing on disk (deleted out from under this
+    tool, or lost to some other bug) still validates `ok=True` --
+    `validate_test_doc` falls back to scanning `chunk_path`'s own body,
+    and the manifest's ids still resolve against `test_case` just fine
+    even though the file that actually contains the generated test code
+    doesn't exist at all. Reusing that chunk verbatim would carry the
+    missing-source problem forward indefinitely, since nothing would ever
+    call `write_test_doc_with_sidecar` again to recreate it. Checked
+    directly here rather than inferred from validation, which has no way
+    to tell "never had a sidecar" (a genuinely embedded-fence document,
+    or an unrecognised `language` -- both fine, nothing missing) apart
+    from "had one and it's now gone" (not fine) once the file is already
+    absent either way."""
     prior_chunk = (prior_chunks or {}).get(str(i))
     reusable = (
         isinstance(prior_chunk, dict) and prior_chunk.get("ok") is True
@@ -1193,7 +1211,22 @@ def _test_chunk_reuse_ok(conn, prior_chunks: dict | None, i: int, brief_hash: st
         conn, chunk_path, _render_time=True, _fingerprint_cache=_fingerprint_cache,
         _valid_scenarios=_valid_scenarios,
     )
-    return result["ok"] and not result.get("sidecar_stale")
+    if not (result["ok"] and not result.get("sidecar_stale")):
+        return False
+    sidecar = sidecar_path_for(chunk_path, language)
+    if sidecar is not None and not sidecar.exists():
+        # `## Scenarios covered` (write_test_doc_with_sidecar's own
+        # manifest heading) is what tells a *split* document -- its actual
+        # test source moved out to the sidecar, this body only pointing at
+        # it by name -- apart from a still-embedded one: an embedded-fence
+        # document (still carrying its own code fence directly, whether
+        # because it has no BR references at all or because `language`
+        # isn't one `sidecar_path_for` recognises) legitimately has no
+        # sidecar and is a completely normal, still-current state, not a
+        # missing artifact.
+        if "## Scenarios covered" in chunk_path.read_text(encoding="utf-8"):
+            return False
+    return True
 
 
 def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None, rows: list,
@@ -1318,8 +1351,8 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
             brief_hash = hashlib.sha256(brief.encode("utf-8")).hexdigest()
             result = None
             if _test_chunk_reuse_ok(
-                conn, prior_chunks, i, brief_hash, chunk_path, _fingerprint_cache=fingerprint_cache,
-                _valid_scenarios=valid_scenarios,
+                conn, prior_chunks, i, brief_hash, chunk_path, language,
+                _fingerprint_cache=fingerprint_cache, _valid_scenarios=valid_scenarios,
             ):
                 result = DocResult(member_name, str(chunk_path), True, 0, 0, 0, [])
                 logger.debug("%s: chunk %d/%d reused (unchanged)", member_name, i, chunk_count)
@@ -1422,7 +1455,21 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
         confidence = _aggregate_chunk_confidence([p for _, p, r in chunk_entries if r.ok])
         index_text = _render_chunk_index(member_name, system, language, framework, chunk_entries, confidence)
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(index_text, encoding="utf-8")
+        # Written to a `.tmp` sibling first, then replaced atomically
+        # (Copilot review), not a direct `write_text` onto `out_path`: a
+        # failed/truncated write straight to `out_path` (disk-full mid-
+        # write) would leave a partial index there while the `finally`
+        # below still restores `index_sidecar_backup` (since
+        # `index_written` is only set after this line) -- pairing that
+        # restored old sidecar with a *broken* new index instead of the
+        # old, still-intact single-document render this rollback exists
+        # to get back to.
+        index_tmp = out_path.with_name(out_path.name + ".tmp")
+        try:
+            index_tmp.write_text(index_text, encoding="utf-8")
+            index_tmp.replace(out_path)
+        finally:
+            index_tmp.unlink(missing_ok=True)
         index_written = True
     finally:
         if index_sidecar_backup is not None:
@@ -2296,7 +2343,7 @@ def plan_test_batch(conn, members: list[str], language: str, framework: str, out
             )
             chunk_hash = hashlib.sha256(chunk_brief.encode("utf-8")).hexdigest()
             if _test_chunk_reuse_ok(
-                conn, prior_chunks, i, chunk_hash, chunk_path, readonly=True,
+                conn, prior_chunks, i, chunk_hash, chunk_path, language, readonly=True,
                 _fingerprint_cache=fingerprint_cache, _valid_scenarios=valid_scenarios,
             ):
                 chunks_reusable += 1
