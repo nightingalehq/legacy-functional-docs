@@ -1126,8 +1126,6 @@ def test_module_brief_renders_candidate_rules_as_a_table_with_all_columns(indexe
     id, citation, depth, construct, routine, condition, literals, and any
     branch/data-access notes -- must still be present, just as table
     columns instead of an em-dash-joined sentence."""
-    import re
-
     brief = module_brief(indexed_db, "MMP0100", redact=NULL_REDACTOR)
     rules_section = brief.split(
         "## Candidate business rules (exact conditions", 1
@@ -1139,14 +1137,40 @@ def test_module_brief_renders_candidate_rules_as_a_table_with_all_columns(indexe
     body_rows = rule_lines[1:]
     assert body_rows, "MMP0100 fixture must have at least one rule candidate"
     assert any("MMP0100:BR-001" in l for l in body_rows)
-    # Every surviving row has exactly as many *unescaped* pipes as the
-    # header does -- an escaped `\|` inside a condition/literal cell (see
-    # test_tbl_escapes_a_literal_pipe_in_cell_content) is real cell
-    # content, not a column boundary, and must not be counted as one (a
-    # naive `str.count("|")` would overcount and fail a perfectly valid row
-    # whose source text happens to contain a literal `|`).
-    expected_pipes = len(re.findall(r"(?<!\\)\|", rule_lines[0]))
-    assert all(len(re.findall(r"(?<!\\)\|", l)) == expected_pipes for l in body_rows)
+    # Every surviving row has exactly as many *real column-boundary* pipes
+    # as the header does -- see _count_unescaped_delimiters's own docstring
+    # for why a simple "preceded by one backslash" regex isn't enough here.
+    expected_pipes = _count_unescaped_delimiters(rule_lines[0])
+    assert all(_count_unescaped_delimiters(l) == expected_pipes for l in body_rows)
+
+
+def _count_unescaped_delimiters(line: str) -> int:
+    """How many `|` characters in `line` are real column boundaries, not
+    part of an escaped cell value (`_tbl`/`_esc_cell`, issue #185).
+
+    A `|` is escaped only when it's preceded by an *odd* number of `\\`
+    characters (each pair of backslashes is itself one escaped literal
+    backslash, per `_esc_cell`'s "escape `\\` before `|`" scheme -- see
+    `test_esc_cell_round_trips_a_literal_backslash_before_a_pipe`). A
+    simple `(?<!\\\\)\\|` regex gets this wrong whenever a cell's own
+    content ends in a run of backslashes: e.g. a raw trailing `\\`
+    encodes to `\\\\` immediately before the real column-separator `|`,
+    and a single-backslash lookbehind would misread that separator as
+    escaped and undercount -- exactly the failure mode Copilot review on
+    PR #213 caught in an earlier, regex-only version of this check."""
+    count = 0
+    i = 0
+    while i < len(line):
+        if line[i] == "|":
+            j = i - 1
+            backslashes = 0
+            while j >= 0 and line[j] == "\\":
+                backslashes += 1
+                j -= 1
+            if backslashes % 2 == 0:
+                count += 1
+        i += 1
+    return count
 
 
 def test_tbl_escapes_a_literal_pipe_in_cell_content():
@@ -1161,6 +1185,23 @@ def test_tbl_escapes_a_literal_pipe_in_cell_content():
     assert many_rows[0] == "citation|condition"
     assert many_rows[1] == "[[X:1]]|`A \\| B`"
     assert many_rows[2] == "[[X:2]]|`C`"
+
+
+def test_count_unescaped_delimiters_handles_a_trailing_encoded_backslash():
+    """Copilot review on PR #213 (round 3): a cell whose own raw content
+    ends in a backslash encodes to *two* backslashes immediately before
+    the real column-separator `|` -- a naive "preceded by one backslash
+    means escaped" check would misread that real separator as escaped and
+    undercount. Two backslashes (even) means the separator itself is not
+    escaped."""
+    from mfdoc.brief import _esc_cell
+
+    cell = _esc_cell("C:" + "\\")  # raw value ending in one literal backslash
+    line = f"[[X:1]]|{cell}|next"
+    # 3 real column boundaries: after the citation, after the backslash-
+    # ending cell, and none inside "next" -- i.e. 2 pipes total in this
+    # 3-field row.
+    assert _count_unescaped_delimiters(line) == 2
 
 
 def test_esc_cell_round_trips_a_literal_backslash_before_a_pipe():

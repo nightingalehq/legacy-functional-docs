@@ -330,6 +330,23 @@ GitHub org.
   `test_find_confident_citation_still_matches_when_source_already_has_a_backslash_pipe`/
   `test_key_tokens_does_not_alter_a_sentences_own_literal_backslash_pipe`
   (tests/test_batch.py). Full suite: 963 passed, 2 skipped.
+  Round 3 found two more gaps: (1) `reference/writing-rules.md`'s
+  "Describing only one branch of an IF/ELSE" rule still told the narrator
+  to look for the *old* prose markers ("has a paired ELSE at ...", "data
+  access on the true branch") that no longer exist in the brief after this
+  rewrite -- updated it to name the actual `paired-else@CITE`/`pairs-with-
+  if@CITE`/`branch-access:...` markers, and added a new rule explicitly
+  telling the narrator that a `\|`/`\\` in a table cell is this brief's own
+  escaping artifact, not part of the real source value, and must never be
+  reproduced verbatim in the generated document. (2) The test added in
+  round 2 to count "real" (unescaped) delimiter pipes used a
+  `(?<!\\)\|` regex, which misreads a real column-separator pipe as
+  escaped whenever the preceding cell's own content ends in an *even*
+  number of backslashes (e.g. a raw trailing `\` encodes to `\\` right
+  before the separator) -- replaced with `_count_unescaped_delimiters`, a
+  proper odd/even backslash-run counter, plus
+  `test_count_unescaped_delimiters_handles_a_trailing_encoded_backslash`
+  reproducing the exact failure shape. Full suite: 964 passed, 2 skipped.
 
 **Progress (2026-09-10e):**
 - Fixed issue #188: ported `batch.py`'s near-miss/targeted-patch mechanism
