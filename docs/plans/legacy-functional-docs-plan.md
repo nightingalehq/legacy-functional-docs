@@ -12,6 +12,46 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-12e):**
+- Addressed the thirty-sixth Copilot review round on PR #209 (issue
+  #195):
+  1. `run_test_batch`/`plan_test_batch`'s own member-level resume skip
+     (`corpus_unchanged and prior_ok`) never checked whether a previously
+     successful *split* single-document output had lost its sidecar --
+     unlike `_test_chunk_reuse_ok` on the chunked path, nothing there
+     would ever notice the executable source was gone, so `test-batch`
+     could keep reporting an incomplete output as reusable forever.
+     Factored the check `_test_chunk_reuse_ok` already had into a shared
+     `_split_doc_missing_its_sidecar` and applied it to both resume skips
+     too.
+  2. A chunked-to-chunked rerender that shrinks `chunk_count` pruned the
+     now-extra `.chunk<N>` files *before* the new index was committed --
+     those files were still referenced by the *old* index on disk, so an
+     exception anywhere in between (a bug in `_render_chunk_index`
+     itself, say) left that old, still-current index pointing at chunk
+     files that no longer existed. Deferred until right after the new
+     index write succeeds, mirroring the identical fix already made for
+     the single-document shrink-back path.
+  3. `validate_test_doc`'s "untraceable" guard (a stale sidecar with real
+     ids, next to a document body with none to fall back on) also fired
+     during `_render_time=True` -- rejecting a fresh, otherwise-valid
+     candidate that legitimately has zero `MEMBER:BR-nnn` references,
+     which is exactly the shape `_write_test_doc_with_sidecar_or_
+     invalidate` exists to clean up *after* acceptance. Rejecting it here
+     meant that cleanup path could never run, deadlocking a member that
+     legitimately drops to zero references forever. Scoped to the
+     standalone (`mfdoc test-validate`) path only -- the completeness
+     check just below it already covers the real risk (silently losing a
+     scenario the old sidecar still had) on a per-id basis.
+  4. `split_frontmatter`'s `yaml.safe_load(...) or {}` substituted `{}`
+     for *any* falsy parse -- `None` genuinely means "no front matter",
+     but a bare `false`, `0`, or `[]` between the markers is a real shape
+     mismatch that was being silently absorbed into empty front matter
+     instead of reported. Now only `None` gets the substitution.
+- Six new regression tests. Full suite green (1060 passed, 2 skipped)
+  plus a clean `mfdoc validate` pass against `examples/` (71/71
+  documents, 0 invalid citations of 750).
+
 **Progress (2026-09-12d):**
 - Addressed the thirty-fifth Copilot review round on PR #209 (issue
   #195):

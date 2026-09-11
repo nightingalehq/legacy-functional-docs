@@ -227,22 +227,30 @@ def split_frontmatter(text: str) -> tuple[dict | None, str, str | None]:
     if len(parts) < 3:
         return None, text, "malformed YAML front matter"
     try:
-        fm = yaml.safe_load(parts[1]) or {}
+        raw_fm = yaml.safe_load(parts[1])
     except yaml.YAMLError as exc:
         return None, parts[2], f"unparseable YAML front matter: {exc}"
     # `yaml.safe_load` happily parses syntactically valid YAML between the
-    # `---` markers into a truthy non-mapping (a bare scalar or a list, e.g.
-    # "- a\n- b") -- `or {}` above only substitutes for a *falsy* parse
-    # (`None`/`""`/`[]`), not a truthy non-dict one. Every caller of this
-    # function treats a non-`None` `fm` as a mapping (`fm.get(...)`,
+    # `---` markers into *any* shape a YAML scalar/sequence/mapping can
+    # take, not just a mapping -- an empty block (or one that's only
+    # whitespace/comments) parses to `None`, genuinely equivalent to "no
+    # front matter fields at all", but a non-`None` non-mapping (a bare
+    # list, `false`, `0`, a quoted string with no `key:` at all) is a real
+    # shape mismatch, not an empty-but-valid one. A naive `or {}` here
+    # would substitute `{}` for *every* falsy parse -- `None` and `""`
+    # alike, but also a bare `false`, `0`, or `[]` between the markers --
+    # silently treating those last three as empty front matter too instead
+    # of reporting them as malformed (Copilot review). Every caller of
+    # this function treats a non-`None` `fm` as a mapping (`fm.get(...)`,
     # `fm["sources"]`, `"key" in fm`) with no shape check of its own, so
-    # left unguarded this reaches `validate_doc` (and, through it, every
-    # `mfdoc test-validate`/`mfdoc validate` call) as an `AttributeError`/
-    # `TypeError` crash instead of the malformed-front-matter problem this
-    # function exists to report (Copilot review on issue #195's fix).
-    if not isinstance(fm, dict):
-        return None, parts[2], f"front matter is not a mapping, got {fm!r}"
-    return fm, parts[2], None
+    # left unguarded a truthy non-dict parse reaches `validate_doc` (and,
+    # through it, every `mfdoc test-validate`/`mfdoc validate` call) as an
+    # `AttributeError`/`TypeError` crash instead of this reported problem.
+    if raw_fm is None:
+        return {}, parts[2], None
+    if not isinstance(raw_fm, dict):
+        return None, parts[2], f"front matter is not a mapping, got {raw_fm!r}"
+    return raw_fm, parts[2], None
 
 
 _LEADING_CITATION_RUN = re.compile(r"^(?:\[\[[^\]]+\]\]\s*)+")
@@ -1300,7 +1308,7 @@ def validate_test_doc(conn, path: Path, _text: str | None = None,
                              f"{path.name}'s '## Scenarios covered' manifest")
     else:
         scan_ids = {f"{m.group('member').upper()}:BR-{m.group('n')}" for m in BR_REF.finditer(body)}
-        if sidecar_had_ids and not sidecar_usable and not scan_ids:
+        if sidecar_had_ids and not sidecar_usable and not scan_ids and not _render_time:
             # A stale sidecar that actually had BR-nnn content is being
             # ignored (see the staleness guard above), and the document
             # body has nothing to fall back on scanning either (an empty
@@ -1310,6 +1318,25 @@ def validate_test_doc(conn, path: Path, _text: str | None = None,
             # nothing left to check, and `ok=True` would silently report a
             # document that can no longer be verified against anything as
             # though it had passed genuine verification.
+            #
+            # `not _render_time` (Copilot review): during a render/retry
+            # loop's own validation, this exact shape -- a fresh, valid
+            # candidate that genuinely has no `MEMBER:BR-nnn` references at
+            # all, next to an old sidecar this bypass has already decided
+            # not to trust -- is not an error to reject; it's precisely
+            # the case `testbatch._write_test_doc_with_sidecar_or_
+            # invalidate` exists to clean up *after* this validation
+            # accepts it (discarding the stale sidecar once the render
+            # succeeds). Rejecting it here instead would mean that
+            # cleanup path can never actually run: the render would never
+            # reach `ok=True` in the first place, deadlocking a member
+            # that legitimately drops to zero BR references forever. The
+            # completeness check just below (`legacy_bypass_still_valid_
+            # ids - scan_ids`) already covers the real risk this guard
+            # exists for -- silently losing a scenario the old sidecar
+            # still had -- on a per-id basis, so nothing is actually left
+            # unchecked by scoping this one to the standalone
+            # (`mfdoc test-validate`) path alone.
             problems.append(
                 f"{sidecar.name} is stale and {path.name}'s body has no MEMBER:BR-nnn "
                 f"references to fall back on -- this document cannot be verified at all"

@@ -1100,6 +1100,44 @@ def _lazy_valid_scenarios(conn):
     return get
 
 
+def _split_doc_missing_its_sidecar(doc_path: Path, language: str) -> bool:
+    """Whether `doc_path` was previously *split* (its body already turned
+    into prose + a `## Scenarios covered` manifest by `write_test_doc_
+    with_sidecar`, its actual test source moved out to a sibling file) but
+    that sidecar has since gone missing on disk -- deleted out from under
+    this tool, or lost to some other bug.
+
+    Shared by `_test_chunk_reuse_ok` (a per-chunk reuse decision) and
+    `run_test_batch`/`plan_test_batch`'s own member-level resume skip
+    (Copilot review: the identical hole one layer up -- a previously
+    successful *single-document* split output losing its sidecar while
+    the database and resume state stay otherwise unchanged left `prior_ok`
+    true and the corpus-level fast path skipped without ever checking for
+    it): `validate_test_doc` falls back to scanning the document's own
+    body when a sidecar is missing, and a stale manifest's ids still
+    resolve against `test_case` just fine even though the file that
+    actually contains the generated test code doesn't exist at all.
+    Treating that as still "reusable"/"unchanged" would carry the
+    missing-source problem forward indefinitely, since nothing would ever
+    call `write_test_doc_with_sidecar` again to recreate it.
+
+    `## Scenarios covered` (the manifest heading that function writes) is
+    what tells a genuinely split document apart from one that's still
+    embedded (own code fence directly, whether because it has no BR
+    references at all or because `language` isn't one `sidecar_path_for`
+    recognises) -- an embedded document legitimately has no sidecar, and
+    that's a completely normal, still-current state, not a missing
+    artifact. `False` (nothing missing) whenever `doc_path` doesn't exist
+    at all -- a caller's own existence check is what decides whether that
+    counts as reusable in the first place, not this function."""
+    if not doc_path.exists():
+        return False
+    sidecar = sidecar_path_for(doc_path, language)
+    if sidecar is None or sidecar.exists():
+        return False
+    return "## Scenarios covered" in doc_path.read_text(encoding="utf-8")
+
+
 def _test_chunk_reuse_ok(conn, prior_chunks: dict | None, i: int, brief_hash: str,
                           chunk_path: Path, language: str, readonly: bool = False,
                           _fingerprint_cache: dict | None = None, _valid_scenarios=None) -> bool:
@@ -1182,22 +1220,11 @@ def _test_chunk_reuse_ok(conn, prior_chunks: dict | None, i: int, brief_hash: st
     cost.
 
     `result["ok"] and not result.get("sidecar_stale")` alone isn't enough
-    (Copilot review): a *split* document (one `write_test_doc_with_
-    sidecar` has already turned into prose + a `## Scenarios covered`
-    manifest, its actual test source moved out to the sidecar file) whose
-    sidecar has since gone missing on disk (deleted out from under this
-    tool, or lost to some other bug) still validates `ok=True` --
-    `validate_test_doc` falls back to scanning `chunk_path`'s own body,
-    and the manifest's ids still resolve against `test_case` just fine
-    even though the file that actually contains the generated test code
-    doesn't exist at all. Reusing that chunk verbatim would carry the
-    missing-source problem forward indefinitely, since nothing would ever
-    call `write_test_doc_with_sidecar` again to recreate it. Checked
-    directly here rather than inferred from validation, which has no way
-    to tell "never had a sidecar" (a genuinely embedded-fence document,
-    or an unrecognised `language` -- both fine, nothing missing) apart
-    from "had one and it's now gone" (not fine) once the file is already
-    absent either way."""
+    (Copilot review): see `_split_doc_missing_its_sidecar`'s own docstring
+    -- a split chunk document whose sidecar has since gone missing still
+    validates `ok=True` (`validate_test_doc` falls back to scanning the
+    body), so that's checked directly here too, not inferred from
+    validation."""
     prior_chunk = (prior_chunks or {}).get(str(i))
     reusable = (
         isinstance(prior_chunk, dict) and prior_chunk.get("ok") is True
@@ -1213,20 +1240,7 @@ def _test_chunk_reuse_ok(conn, prior_chunks: dict | None, i: int, brief_hash: st
     )
     if not (result["ok"] and not result.get("sidecar_stale")):
         return False
-    sidecar = sidecar_path_for(chunk_path, language)
-    if sidecar is not None and not sidecar.exists():
-        # `## Scenarios covered` (write_test_doc_with_sidecar's own
-        # manifest heading) is what tells a *split* document -- its actual
-        # test source moved out to the sidecar, this body only pointing at
-        # it by name -- apart from a still-embedded one: an embedded-fence
-        # document (still carrying its own code fence directly, whether
-        # because it has no BR references at all or because `language`
-        # isn't one `sidecar_path_for` recognises) legitimately has no
-        # sidecar and is a completely normal, still-current state, not a
-        # missing artifact.
-        if "## Scenarios covered" in chunk_path.read_text(encoding="utf-8"):
-            return False
-    return True
+    return not _split_doc_missing_its_sidecar(chunk_path, language)
 
 
 def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None, rows: list,
@@ -1292,7 +1306,16 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
     expected_chunk_names = {
         f"{out_path.stem}.chunk{n:0{chunk_width}d}{out_path.suffix}" for n in range(1, chunk_count + 1)
     }
-    problems.extend(_prune_stale_test_chunk_files(out_path, expected_chunk_names, language))
+    # Deferred until after the new index has actually been committed
+    # (Copilot review), not run here up front: if a chunked-to-chunked
+    # rerender shrinks `chunk_count` (e.g. the threshold was raised), the
+    # extra chunk files this prunes are still referenced by the *old*
+    # index currently on disk at `out_path` -- pruning them before that
+    # index is replaced would leave it (if anything later in this
+    # function raises uncaught) pointing at chunk files that no longer
+    # exist. See the `index_written` flag below for where this actually
+    # runs, mirroring the identical fix already made for the single-
+    # document shrink-back path in `generate_member_test_doc`.
     # A leftover sidecar from a *prior single-document* render of this same
     # member (issue #195 review): the index document at `out_path` never
     # gets its own sidecar -- each chunk gets its own
@@ -1471,6 +1494,13 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
         finally:
             index_tmp.unlink(missing_ok=True)
         index_written = True
+        # Only now, with the new (possibly smaller) index actually
+        # committed, is it safe to remove any `.chunk<N>` files this run
+        # no longer produces (Copilot review) -- see the comment where
+        # `expected_chunk_names` was computed above for why running this
+        # any earlier could leave a still-current index pointing at files
+        # that no longer exist.
+        problems.extend(_prune_stale_test_chunk_files(out_path, expected_chunk_names, language))
     finally:
         if index_sidecar_backup is not None:
             try:
@@ -1817,7 +1847,20 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
         state_keys[name] = key
         out_path = out_dir / subdir / language / framework / f"{name}.md"
         prior = state.get(key)
-        prior_ok = isinstance(prior, dict) and prior.get("ok") and out_path.exists()
+        prior_ok = (
+            isinstance(prior, dict) and prior.get("ok") and out_path.exists()
+            # Copilot review: a previously successful *split* single-
+            # document output (its actual test source moved to a sidecar)
+            # can lose that sidecar file while the database and this
+            # resume state stay otherwise unchanged -- `corpus_unchanged`
+            # alone can't see that, and unlike `_test_chunk_reuse_ok` on
+            # the chunked path, nothing else here would ever notice the
+            # executable source is gone. A chunked member's own `out_path`
+            # (the deterministic index, never itself split) trivially
+            # passes this check regardless -- each chunk's own sidecar is
+            # `_test_chunk_reuse_ok`'s concern, not this member-level one.
+            and not _split_doc_missing_its_sidecar(out_path, language)
+        )
 
         if corpus_unchanged and prior_ok:
             logger.debug("skip %s: unchanged (corpus signature match, resumed)", name)
@@ -2300,7 +2343,15 @@ def plan_test_batch(conn, members: list[str], language: str, framework: str, out
         key = f"{subdir.as_posix()}::{name}::{language}::{framework}"
         out_path = out_dir / subdir / language / framework / f"{name}.md"
         prior = state.get(key)
-        prior_ok = isinstance(prior, dict) and prior.get("ok") and out_path.exists()
+        # Mirrors run_test_batch's own prior_ok exactly, including the
+        # split-document sidecar existence check (Copilot review) -- a
+        # dry-run reporting "skip" for a member the real run would
+        # actually re-render (because its sidecar has gone missing) would
+        # be a preview that doesn't match reality.
+        prior_ok = (
+            isinstance(prior, dict) and prior.get("ok") and out_path.exists()
+            and not _split_doc_missing_its_sidecar(out_path, language)
+        )
 
         if corpus_unchanged and prior_ok:
             plans.append(TestMemberPlan(name, "skip"))

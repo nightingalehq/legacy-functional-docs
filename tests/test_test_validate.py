@@ -746,6 +746,65 @@ def test_render_time_legacy_sidecar_bypass_does_not_flag_a_legitimately_new_scen
     assert result["ok"], result["problems"]
 
 
+def test_render_time_legacy_sidecar_bypass_accepts_a_candidate_with_no_br_refs_at_all(indexed_db, tmp_path):
+    """Copilot review follow-up: a fresh, otherwise-valid candidate whose
+    code fence has *no* `MEMBER:BR-nnn` references at all -- next to an
+    old (legacy, no-fingerprint) sidecar this render-time bypass has
+    already decided not to trust -- must still be accepted, not rejected
+    as "untraceable". That "cannot be verified at all" guard exists for
+    the standalone `mfdoc test-validate` path; during a render/retry
+    loop's own validation, this exact shape is precisely what
+    `testbatch._write_test_doc_with_sidecar_or_invalidate` exists to
+    clean up *after* acceptance -- rejecting it here would mean that
+    cleanup path could never run at all, deadlocking a member that
+    legitimately drops to zero BR references forever."""
+    conn = indexed_db
+    testplan.run_all(conn, member_name="MMP0100")
+    path = tmp_path / "MMP0100.md"
+    sidecar = tmp_path / "MMP0100.py"
+    path.write_text(
+        """---
+title: "MMP0100 -- generated tests (python)"
+doc_type: generated_test
+system: MOM
+module: MMP0100
+language: python
+framework: pytest
+generated_by: legacy-functional-docs 0.1.0
+generated_at: "2026-01-01"
+review_status: draft
+reviewers: []
+confidence_summary:
+  verified: 0
+  inferred: 0
+  unresolved: 0
+sources: ["MMP0100"]
+---
+
+# MMP0100 -- generated tests
+
+```python
+def test_placeholder():
+    pass
+```
+""",
+        encoding="utf-8",
+    )
+    # A legacy sidecar (no fingerprint field ever stamped) whose own id no
+    # longer resolves as a current test_case scenario -- so this is the
+    # "sidecar had ids, but none of them are still valid" shape, not the
+    # "silently dropped a still-current scenario" one the completeness
+    # check (a different guard) exists to catch.
+    sidecar.write_text(
+        "def test_rejects_unconfirmed_order():\n"
+        "    # MMP0100:BR-999\n"
+        "    ...\n",
+        encoding="utf-8",
+    )
+    result = validate_test_doc(conn, path, _render_time=True)
+    assert result["ok"], result["problems"]
+
+
 def test_missing_language_or_framework_front_matter_is_flagged(indexed_db, tmp_path):
     conn = indexed_db
     testplan.run_all(conn, member_name="MMP0100")

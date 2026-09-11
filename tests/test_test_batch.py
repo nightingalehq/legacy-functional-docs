@@ -2381,7 +2381,51 @@ def test_run_test_batch_threshold_change_is_not_masked_by_resume_state(tmp_path)
     assert summary2.skipped == 0, "a threshold change must not be treated as a no-op by resume/skip"
     assert summary2.ok == 1
     assert (out_dir / "natural" / "python" / "pytest" / "FAKEMOD.chunk1.md").exists()
-    assert "chunked" in single_path.read_text(encoding="utf-8")
+
+
+def test_run_test_batch_member_level_resume_skip_sees_a_missing_sidecar(tmp_path):
+    """Copilot review follow-up: a previously successful *split* single-
+    document output can lose its `.py`/`.nsp` sidecar (deleted out from
+    under this tool, or lost to some other bug) while the database and
+    resume state stay otherwise unchanged -- `corpus_unchanged` alone
+    can't see that, and unlike `_test_chunk_reuse_ok` on the chunked path,
+    nothing else in the member-level resume skip would ever notice the
+    executable source is gone. Must force a real re-render, not keep
+    reporting the incomplete output as reusable indefinitely."""
+    from mfdoc import testbatch
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_scenarios(conn, 1)
+
+    caller = _chunk_aware_caller("python", "pytest")
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+
+    summary1 = testbatch.run_test_batch(
+        conn, ["FAKEMOD"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path,
+        max_scenarios_per_call=10,
+    )
+    assert summary1.skipped == 0 and summary1.ok == 1
+    out_path = out_dir / "natural" / "python" / "pytest" / "FAKEMOD.md"
+    sidecar_path = out_path.with_suffix(".py")
+    assert sidecar_path.exists()
+    sidecar_path.unlink()
+
+    # Nothing about the corpus or resume state changed -- only the
+    # sidecar file disappeared from disk.
+    summary2 = testbatch.run_test_batch(
+        conn, ["FAKEMOD"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path,
+        max_scenarios_per_call=10,
+    )
+    assert summary2.skipped == 0, "a missing sidecar must force a real re-render, not a resumed skip"
+    assert summary2.ok == 1
+    assert sidecar_path.exists(), "the re-render must recreate the missing sidecar"
 
 
 def test_shrinking_back_below_threshold_removes_leftover_chunk_files_and_sidecars(tmp_path):
@@ -2428,6 +2472,55 @@ def test_shrinking_back_below_threshold_removes_leftover_chunk_files_and_sidecar
     assert summary2.ok == 1, summary2.results[0].problems
     assert not chunk_md.exists(), "leftover chunk index file must be removed"
     assert not chunk_sidecar.exists(), "leftover chunk sidecar must be removed"
+
+
+def test_chunked_rerender_defers_pruning_extra_chunks_until_the_new_index_is_committed(
+    tmp_path, monkeypatch,
+):
+    """Copilot review follow-up: a chunked-to-chunked rerender that shrinks
+    `chunk_count` (e.g. the threshold was raised) must not prune the now-
+    extra `.chunk<N>` files until the *new*, smaller index has actually
+    been written -- those files are still referenced by the *old* index
+    still on disk. Pruning them first and only then attempting the new
+    index (which can still fail, here simulated as a bug in
+    `_render_chunk_index` itself) would leave that old, still-current
+    index pointing at chunk files that no longer exist."""
+    import pytest
+
+    from mfdoc import testbatch
+
+    conn = _sqlite_conn()
+    _seed_fakemod_scenarios(conn, 6)
+
+    out_path = tmp_path / "FAKEMOD.md"
+    first = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, _chunk_aware_caller("python", "pytest"),
+        "writing rules text", "template text", max_scenarios_per_call=2,
+    )
+    assert first.ok is True
+    assert first.chunk_state is not None and set(first.chunk_state) == {"1", "2", "3"}
+    chunk3_path = tmp_path / "FAKEMOD.chunk3.md"
+    chunk3_sidecar = tmp_path / "FAKEMOD.chunk3.py"
+    assert chunk3_path.exists() and chunk3_sidecar.exists()
+    old_index_text = out_path.read_text(encoding="utf-8")
+
+    def exploding_render_chunk_index(*args, **kwargs):
+        raise RuntimeError("simulated: a bug in _render_chunk_index itself")
+
+    monkeypatch.setattr(testbatch, "_render_chunk_index", exploding_render_chunk_index)
+
+    with pytest.raises(RuntimeError):
+        testbatch.generate_member_test_doc(
+            conn, "FAKEMOD", "python", "pytest", out_path, _chunk_aware_caller("python", "pytest"),
+            "writing rules text", "template text", max_scenarios_per_call=3,
+            prior_chunks=first.chunk_state,
+        )
+
+    assert chunk3_path.exists(), "the now-extra chunk 3 document must survive an index that never committed"
+    assert chunk3_sidecar.exists(), "the now-extra chunk 3 sidecar must survive too"
+    assert out_path.read_text(encoding="utf-8") == old_index_text, (
+        "out_path itself (the old index, still referencing chunk 3) must be untouched"
+    )
 
 
 def test_chunked_index_removes_a_leftover_single_doc_sidecar(tmp_path):
