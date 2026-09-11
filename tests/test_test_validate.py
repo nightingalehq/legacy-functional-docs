@@ -117,6 +117,8 @@ def test_stale_sidecar_from_renumbering_is_treated_as_absent(indexed_db, tmp_pat
     assert result["invalid_scenario_refs"] == 0
     assert not any("BR-999" in p for p in result["problems"])
     assert not any("not found in" in p for p in result["problems"])
+    # Not surfaced as a failure, but not silently dropped either.
+    assert result["sidecar_unresolved_ids"] == ["MMP0100:BR-999"]
 
 
 def test_partial_positional_shift_sidecar_is_still_treated_as_stale(tmp_path):
@@ -196,6 +198,9 @@ See [`FAKEMOD.py`](./FAKEMOD.py) for the generated test source.
     assert result["ok"], result["problems"]
     assert result["invalid_scenario_refs"] == 0
     assert not any("BR-001" in p or "BR-004" in p for p in result["problems"])
+    # BR-001 is the one id that didn't survive the (simulated) renumbering
+    # -- still visible here even though it isn't in `problems`.
+    assert result["sidecar_unresolved_ids"] == ["FAKEMOD:BR-001"]
 
 
 def test_current_sidecar_still_cross_checked_against_manifest(indexed_db, tmp_path):
@@ -227,6 +232,7 @@ def test_current_sidecar_still_cross_checked_against_manifest(indexed_db, tmp_pa
     assert any(
         "BR-001" in p and "missing from" in p for p in result["problems"]
     )
+    assert result["sidecar_unresolved_ids"] == []
 
 
 def test_missing_language_or_framework_front_matter_is_flagged(indexed_db, tmp_path):

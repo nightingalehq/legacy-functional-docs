@@ -980,11 +980,17 @@ def validate_test_doc(conn, path: Path, _text: str | None = None) -> dict:
     the same staleness this guard exists to catch. The trade-off: a
     sidecar with one genuinely invented/malformed id mixed in among
     otherwise-current ones is also treated as stale rather than flagged
-    directly -- accepted here since `test-batch`'s retry loop re-validates
-    a freshly rendered chunk against the (also freshly written) manifest
-    on every attempt regardless, so a real invented id still surfaces via
-    `body`'s own scenario references, just not via the sidecar cross-check
-    specifically.
+    directly in `problems` -- accepted here since `test-batch`'s retry loop
+    re-validates a freshly rendered chunk against the (also freshly
+    written) manifest on every attempt regardless, so a real invented id
+    still surfaces via `body`'s own scenario references, just not via the
+    sidecar cross-check specifically. It isn't silently lost, though:
+    `result["sidecar_unresolved_ids"]` lists exactly which of the
+    sidecar's ids didn't resolve whenever `sidecar_stale` is true, for a
+    caller or a human reading a `mfdoc test-validate` report who wants to
+    tell "genuine renumbering" apart from "one bad id" -- there's no
+    persisted per-run generation signature `test_case` carries today that
+    would let this function make that call on its own with certainty.
     """
     result = validate_doc(conn, path, _text=_text)
     fm, body = result.pop("_fm"), result.pop("_body")
@@ -1006,6 +1012,7 @@ def validate_test_doc(conn, path: Path, _text: str | None = None) -> dict:
 
     sidecar = sidecar_path_for(path, fm.get("language")) if fm is not None else None
     sidecar_usable = False
+    sidecar_unresolved_ids: list[str] = []
     if sidecar is not None and sidecar.exists():
         code_ids = {
             f"{m.group('member').upper()}:BR-{m.group('n')}"
@@ -1033,12 +1040,23 @@ def validate_test_doc(conn, path: Path, _text: str | None = None) -> dict:
         # producing the exact false "not found" this guard exists to
         # prevent, just for a subset of ids instead of all of them.
         sidecar_usable = not code_ids or code_ids <= valid_scenarios
-        # Deliberately not appended to `problems`/`ok`: a stale sidecar isn't
-        # a defect in *this* document -- it's leftover state from before an
-        # upstream renumbering, and `write_test_doc_with_sidecar` will
-        # overwrite it with fresh content the next time this validation
-        # actually succeeds. Reported separately so a caller that wants to
-        # know can, without it counting toward pass/fail.
+        if not sidecar_usable:
+            # Diagnostic only, deliberately not appended to `problems`/`ok`:
+            # a stale sidecar isn't a defect in *this* document -- it's
+            # leftover state from before an upstream renumbering, and
+            # `write_test_doc_with_sidecar` will overwrite it with fresh
+            # content the next time this validation actually succeeds.
+            # Recorded via `result["sidecar_unresolved_ids"]` so a caller
+            # (or a human reading a `mfdoc test-validate` report) can still
+            # see exactly which ids didn't resolve, rather than the
+            # all-or-nothing `all(...)` staleness decision silently
+            # discarding that detail -- one of them could genuinely be an
+            # invented/malformed id rather than a renumbering artifact, and
+            # this is what lets that still be noticed even though it isn't
+            # (and can't reliably be, without a persisted per-run
+            # generation signature `test_case` doesn't currently carry)
+            # cross-checked against the manifest here.
+            sidecar_unresolved_ids = sorted(code_ids - valid_scenarios)
     if sidecar is not None and sidecar.exists() and sidecar_usable:
         manifest_ids = {
             f"{m.group('member').upper()}:BR-{m.group('n')}" for m in BR_REF.finditer(body)
@@ -1063,6 +1081,7 @@ def validate_test_doc(conn, path: Path, _text: str | None = None) -> dict:
     result["problems"] = problems
     result["invalid_scenario_refs"] = bad_refs
     result["sidecar_stale"] = sidecar is not None and sidecar.exists() and not sidecar_usable
+    result["sidecar_unresolved_ids"] = sidecar_unresolved_ids
     result["ok"] = not problems
     return result
 

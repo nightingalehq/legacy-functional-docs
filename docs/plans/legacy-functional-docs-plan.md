@@ -707,7 +707,34 @@ GitHub org.
   stale` (an old `{BR-001, BR-002, BR-003}` sidecar against a current
   `{BR-002, BR-003, BR-004}` `test_case`/manifest, proving `any(...)` would
   have missed this and `all(...)` catches it). Full suite: 955 passed, 2
-  skipped.
+  skipped. A third Copilot review round flagged the PR description's test
+  count (`940 passed`) had drifted from this progress log's (`955 passed`)
+  as the fix iterated -- reconciled below and in the PR body -- plus two
+  more real gaps: `run_test_batch`/`plan_test_batch`'s `corpus_unchanged`
+  fast path (a *global* skip-everything check, ahead of and separate from
+  `_test_chunk_reuse_ok`'s per-chunk reuse check) hashed only each
+  `test_case`'s `(scenario_name, status)`, so a `classify-rules`/`derive`
+  rebuild that reassigns the same `scenario_name` strings (same count,
+  same positional BR-numbering) to *different* underlying rows -- a
+  different citation/condition/source excerpt behind each id -- would
+  leave every `(scenario_name, status)` pair unchanged and wrongly skip
+  every member, bypassing the sidecar-staleness check in this same fix
+  entirely; `testbatch._corpus_signature` now also hashes each row's
+  `citation` and given/when/then JSON blobs, so any such change moves the
+  signature regardless of whether `scenario_name` also moved. Added
+  `test_corpus_signature_changes_when_scenario_content_changes_but_name_
+  and_status_do_not` to `tests/test_test_batch.py`. Second: `all(...)`'s
+  own trade-off (a lone invented/malformed id mixed into an
+  otherwise-current sidecar is treated as stale rather than flagged
+  directly) was silently dropping that id from view entirely rather than
+  just from `problems`/`ok` -- added `result["sidecar_unresolved_ids"]`
+  (populated only when `sidecar_stale` is true) so a caller or a human
+  reading a `mfdoc test-validate` report can still see exactly which ids
+  didn't resolve, without it counting toward pass/fail; there's no
+  persisted per-run generation signature `test_case` carries today that
+  would let `validate_test_doc` make the stale-vs-invented call on its own
+  with certainty, so this stays a visible diagnostic rather than a
+  disguised fix. Full suite: 956 passed, 2 skipped.
 
 **Progress (2026-09-10e):**
 - Fixed issue #188: ported `batch.py`'s near-miss/targeted-patch mechanism

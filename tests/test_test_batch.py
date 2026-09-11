@@ -97,6 +97,47 @@ def test_x():
 """
 
 
+def test_corpus_signature_changes_when_scenario_content_changes_but_name_and_status_do_not(tmp_path):
+    """Copilot review follow-up on issue #195: `_corpus_signature` used to
+    hash only each test_case's (scenario_name, status). A `classify-rules`/
+    `derive` rebuild that reassigns the same `scenario_name` strings (same
+    count, same positional BR-numbering) to *different* underlying
+    `rule_candidate` rows -- different citation/condition/source excerpt
+    behind each id -- would leave every (scenario_name, status) pair
+    unchanged, so `run_test_batch`/`plan_test_batch`'s `corpus_unchanged`
+    fast path would wrongly skip every member, bypassing
+    `_test_chunk_reuse_ok`'s own per-chunk sidecar-staleness check
+    entirely. Hashing `citation` and the given/when/then JSON blobs too
+    means any such change moves the signature even when `scenario_name`/
+    `status` alone would not."""
+    import sqlite3
+
+    from mfdoc import testbatch
+    from mfdoc.db import SCHEMA, insert
+
+    def seed(citation: str) -> sqlite3.Connection:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(SCHEMA)
+        conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+        conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
+        insert(
+            conn, "test_case", member_id=1, kind="unit", scenario_name="FAKEMOD:BR-001",
+            given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+            when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+            then_json=f'{{"citation": "[[{citation}]]", "source_excerpt": []}}',
+            status="characterization", citation=citation, confidence="verified",
+        )
+        conn.commit()
+        return conn
+
+    conn_before = seed("FAKEMOD:1")
+    conn_after = seed("FAKEMOD:2")  # same scenario_name/status, different citation
+    sig_before = testbatch._corpus_signature(conn_before, "python", "pytest", 999)
+    sig_after = testbatch._corpus_signature(conn_after, "python", "pytest", 999)
+    assert sig_before != sig_after
+
+
 def test_run_test_batch_does_not_reuse_state_or_file_across_frameworks(tmp_path):
     """Running the same member/language for two different frameworks must
     produce two separate output files and two separate resume-state

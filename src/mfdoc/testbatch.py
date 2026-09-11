@@ -779,12 +779,27 @@ def _corpus_signature(conn, language: str, framework: str, threshold: int,
 
     - language/framework this run targets, since the same test_case rows
       render to a different file per target;
-    - every test_case's (scenario_name, status), since a human promoting a
+    - every test_case's full content (scenario_name, status, citation, and
+      the given/when/then JSON blobs), since a human promoting a
       test-overlay.yml entry past `draft` (which testplan.py folds into
       test_case.status on the next `mfdoc test-plan`) changes what
       test_case_brief() renders for that scenario without touching any
       source_file -- the source-only signature above can't see that on its
-      own, and this run's corpus-level skip must not treat it as unchanged;
+      own, and this run's corpus-level skip must not treat it as unchanged.
+      Hashing more than just (scenario_name, status) matters for issue
+      #195's staleness guard too: a `classify-rules`/`derive` rebuild that
+      happens to reassign the *same* `scenario_name` strings to
+      *different* underlying `rule_candidate` rows (same count, same
+      positional BR-numbering, different citation/condition/source
+      excerpt behind each id) would leave (scenario_name, status) pairs
+      unchanged even though the corpus genuinely changed underneath --
+      `corpus_unchanged` would then wrongly gate every member through the
+      fast skip path in `run_test_batch`/`plan_test_batch` below, bypassing
+      `_test_chunk_reuse_ok`'s own per-chunk sidecar-staleness check
+      entirely and never refreshing a sidecar that predates the rebuild.
+      Including `citation` and the three JSON blobs closes that gap: any
+      change to what a scenario actually asserts moves this signature,
+      regardless of whether its `scenario_name` also moved;
     - the effective max_scenarios_per_call threshold, since raising or
       lowering it can flip a member between the single-doc and chunked
       output shapes without any test_case row or status changing at all --
@@ -792,13 +807,14 @@ def _corpus_signature(conn, language: str, framework: str, threshold: int,
       changed" skip would leave the previous run's now-wrong-shaped output
       (or count of chunk files) in place.
     """
-    status_rows = conn.execute(
-        "SELECT scenario_name, status FROM test_case ORDER BY scenario_name"
+    rows = conn.execute(
+        "SELECT scenario_name, status, citation, given_json, when_json, then_json "
+        "FROM test_case ORDER BY scenario_name"
     ).fetchall()
     extra = [language, framework, str(threshold)]
-    for r in status_rows:
-        extra.append(r["scenario_name"])
-        extra.append(r["status"])
+    for r in rows:
+        extra.extend((r["scenario_name"], r["status"], r["citation"],
+                      r["given_json"], r["when_json"], r["then_json"]))
     return _base_corpus_signature(conn, redact=redact, sme_notes=sme_notes, extra=extra)
 
 
