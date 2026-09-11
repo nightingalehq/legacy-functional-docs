@@ -240,6 +240,163 @@ GitHub org.
   tests, not as something either of these bullets makes trivial.
   No code change; full suite unchanged at 955 passed, 2 skipped.
 
+**Progress (2026-09-11d):**
+- Fixed issue #185 (unblocked once #183 Part 1 merged, since both touch
+  `brief.py`'s rendering functions): `module_brief`'s naturally tabular
+  sections -- "Interface (parameters)", "Data views declared", "Program
+  variables and screen/MAP fields", "Data areas included", "Outbound
+  calls", "Candidate business rules", and the copycode-inherited rules
+  section -- now render as a compact, CSV-like `col|col|...` header line
+  plus one bare `val|val|...` line per fact, instead of a bullet-per-row
+  prose list that repeated each column's label ("level", "screen field"/
+  "program variable", "condition:", "literals:", ...) on every single row.
+  New `brief._tbl` helper builds this rendering: it escapes a literal `|`
+  in any source-derived cell (`_esc_cell`) so it can never be misread as a
+  column boundary, and drops a column entirely (header included) when it's
+  empty across every row in that table, rather than paying separator
+  characters for a column with nothing in it anywhere in this brief. The
+  "Candidate business rules" table keeps a `notes` column for the
+  IF/ELSE-branch facts that used to be full sentences ("has a paired ELSE
+  at ... -- document what happens on BOTH branches") -- shortened to a
+  `paired-else@CITE`/`pairs-with-if@CITE` marker plus a `branch-access:...`
+  summary, with the explanation of what those markers mean moved into the
+  section's own preamble (said once per chunk, not once per rule).
+  "Internal routines", "Inbound callers"' guard-chain summary, "Data
+  access", interactions/messages/gaps, `entity_brief`, `system_brief`, and
+  `executive_brief` are deliberately unchanged -- either already tabular
+  (entity_brief/system_brief), too heterogeneous per row to tabulate
+  losslessly (data access's optional key/descriptor/found-body-extent
+  facts, the guard chain's prose), or outside this issue's own scope
+  (`executive_brief`/`system_brief` are interactive-only, never part of
+  `mfdoc batch`'s per-chunk narration cost this issue targets).
+  Measured actual effect on the bundled `examples/` fixtures (17 program/
+  subroutine members, old vs. new `module_brief()` output, rough
+  chars/4 token estimate): a small net *increase* on this repo's tiny
+  synthetic single-purpose test fixtures (most under ~2KB, 1-2 facts per
+  section -- not enough rows to amortize a table's own overhead) but a net
+  reduction on the larger, more rule-dense members that stand in for a
+  real module's chunked brief (char-count reduction of 2.9% for MMP0100,
+  1.3% for MMP0400, 6.0% for ORDENQ, 1.1% for PRODSCHED -- all reported as
+  positive reduction magnitudes here, not signed deltas, to avoid the "+"
+  reading as growth), for a ~1.0% overall reduction across all 17 -- and, per
+  the design intent noted in `brief._tbl`'s own docstring, the saving
+  should grow with a chunk's rule/fact count on a real engagement's larger
+  briefs, which this bundled fixture set is too small to fully represent.
+  Confirmed that scaling claim directly (Copilot review on PR #213, since
+  CLAUDE.md's client-content rule rules out using any real engagement
+  brief for this): built one synthetic, invented-content-only member
+  sized like a real engagement's chunked brief (20 parameters, 15
+  variables, 25 outbound calls, 30 IF-conditioned rule candidates -- never
+  committed as a fixture, just an ad-hoc measurement) and compared old vs.
+  new `module_brief()` output on it: 19.3% fewer characters (1812 -> 1462
+  rough chars/4 tokens), consistent with the "saving grows with row
+  count" design rationale and a much closer stand-in for what a real
+  chunk actually looks like than this repo's tiny regression fixtures.
+  Every naturally-tabular section keeps every citation, condition,
+  literal, and branch/data-access fact the old prose rendering had --
+  this is a pure rendering-density change, not a content reduction (per
+  the issue's own explicit constraint). Updated the two `tests/test_
+  brief.py` tests that asserted the old prose wording verbatim (the
+  IF/ELSE branch test and the data-area-includes test), and added new
+  tests asserting the table headers/columns and `_tbl`'s pipe-escaping and
+  empty-column-dropping behavior. Full pipeline smoke check (`ingest`/
+  `derive`/`coverage`/`validate --docs examples`) against the bundled
+  fixtures re-run clean: 71/71 documents, 0 invalid citations -- no
+  regression (this checks generated docs, not briefs, since briefs aren't
+  committed, but confirms nothing else broke).
+  Several rounds of Copilot PR review caught real correctness gaps in the
+  pipe-escaping this rendering needed: round 1, `batch._key_tokens`'s
+  auto-citation token matcher compared a narrated sentence's tokens
+  against a brief line's verbatim, so a fact whose condition/literal
+  contains a real `|` never matched once `brief._esc_cell` started
+  escaping it -- silently costing this pass's whole "save a model call"
+  purpose for exactly those facts (also fixed a test that miscounted
+  escaped pipes as column boundaries, and softened `_tbl`'s "never
+  longer" docstring claim to the true amortized-over-row-count property).
+  Round 2 found the round-1 fix itself wasn't correct for the rarer case
+  where the *original* source text already contained its own literal
+  `\|` -- `_esc_cell` only escaped the pipe, which isn't a reversible
+  scheme once a pre-existing backslash is in play, so `batch._key_tokens`'s
+  naive `\|` -> `|` strip could decode the brief's token and the
+  sentence's token to two different strings. Fixed by making `_esc_cell`
+  escape `\` before `|` (a properly invertible scheme) and moving the
+  decode out of `_key_tokens` entirely into a new `batch._unescape_
+  brief_cell`, applied only to the brief-line side of the comparison in
+  `_find_confident_citation` -- `_key_tokens` itself no longer knows
+  anything about this rendering's escaping, so a narrated sentence's own
+  literal backslash/pipe is never altered. Added
+  `test_esc_cell_round_trips_a_literal_backslash_before_a_pipe`
+  (tests/test_brief.py) and
+  `test_find_confident_citation_still_matches_when_source_already_has_a_backslash_pipe`/
+  `test_key_tokens_does_not_alter_a_sentences_own_literal_backslash_pipe`
+  (tests/test_batch.py). Full suite: 963 passed, 2 skipped.
+  Round 3 found two more gaps: (1) `reference/writing-rules.md`'s
+  "Describing only one branch of an IF/ELSE" rule still told the narrator
+  to look for the *old* prose markers ("has a paired ELSE at ...", "data
+  access on the true branch") that no longer exist in the brief after this
+  rewrite -- updated it to name the actual `paired-else@CITE`/`pairs-with-
+  if@CITE`/`branch-access:...` markers, and added a new rule explicitly
+  telling the narrator that a `\|`/`\\` in a table cell is this brief's own
+  escaping artifact, not part of the real source value, and must never be
+  reproduced verbatim in the generated document. (2) The test added in
+  round 2 to count "real" (unescaped) delimiter pipes used a
+  `(?<!\\)\|` regex, which misreads a real column-separator pipe as
+  escaped whenever the preceding cell's own content ends in an *even*
+  number of backslashes (e.g. a raw trailing `\` encodes to `\\` right
+  before the separator) -- replaced with `_count_unescaped_delimiters`, a
+  proper odd/even backslash-run counter, plus
+  `test_count_unescaped_delimiters_handles_a_trailing_encoded_backslash`
+  reproducing the exact failure shape. Full suite: 964 passed, 2 skipped.
+  Round 4 found five more issues, all fixed: (1) `batch._find_confident_
+  citation` was decoding *every* cited brief line, not just `_tbl`'s own
+  rows -- an ordinary bullet line (header comments, data access, ...) that
+  happens to contain a real `\\`/`\|` unrelated to table-escaping would
+  get corrupted by that blind decode. Moved the decoder into `brief.py`
+  itself (`_unescape_cell`, paired with `_esc_cell`) and added `batch.
+  _maybe_unescape_table_row`, which only decodes a line that does *not*
+  start with the `"- "` bullet prefix every other cited section still
+  uses -- a purely structural, zero-metadata way to identify an actual
+  `_tbl` row. Added `test_find_confident_citation_never_decodes_a_bullet_
+  line`. (2) The same escaping silently broke `module_brief`'s lexicon-
+  relevance scan: a configured vocabulary term containing `|`/`\` would
+  appear in the built brief text only in its escaped form once it landed
+  inside a `_tbl` cell, so `k in haystack` stopped matching it. Fixed by
+  building that haystack with the same table-row-only decode. Added
+  `test_module_brief_surfaces_a_lexicon_term_that_contains_a_pipe`.
+  (3) `reference/writing-rules.md`'s new "undo the brief's escaping" rule
+  was itself incomplete -- it told the narrator to always write the raw,
+  unescaped character, but a generated document's *own* format (e.g. a
+  Markdown pipe-table in `templates/module.md`) may need its own escaping
+  of that same character; reworded to separate "undo this brief's
+  artifact" from "apply the destination format's own rules," which are
+  independent questions. (4) The "Candidate business rules" preamble
+  called every `branch-access` entry "verified", but `_branch_data_access`
+  (unchanged, pre-existing) never carried each row's own confidence flag
+  the way the main "Data access" section does -- reworded to point the
+  narrator at that section to check confidence, rather than asserting a
+  property the brief doesn't back. (5) A grammatically incomplete
+  docstring sentence in `batch._key_tokens`. Also reconciled the PR
+  description's test count, which had gone stale after round-1's fixes.
+  Full suite: 966 passed, 2 skipped.
+  Round 5 found the round-4 lexicon-haystack fix used the same "doesn't
+  start with `- `" shape guess `batch._maybe_unescape_table_row` uses --
+  correct there (that function only ever sees lines that already passed
+  `_brief_cited_lines`'s citation-regex pre-filter, which excludes every
+  `## ` heading and prose preamble in `module_brief`'s output), but wrong
+  for the lexicon scan, which runs over the *entire* `out` list, headings
+  and preambles included, and would "decode" any stray `\\`/`\|` inside
+  them too. Replaced the shape guess with `table_line_idxs`, a set of the
+  *exact* line indices `_tbl` produced -- recorded precisely by a new
+  `add_tbl` helper at the one place that actually knows (every
+  `out.extend(_tbl(...))` call site became `add_tbl(_tbl(...))`), so the
+  lexicon scan decodes only real table rows now, nothing else. Also fixed
+  an inconsistent test comment (said "3 real column boundaries" for a row
+  with 2) and reworded "Two rounds of Copilot PR review" (by then
+  actually five) to "Several rounds". Added
+  `test_module_brief_lexicon_scan_only_decodes_actual_table_rows`. Full
+  suite: 967 passed, 2 skipped. Fixture pipeline re-run clean: 71/71
+  documents, 0 invalid citations.
+
 **Progress (2026-09-10e):**
 - Fixed issue #188: ported `batch.py`'s near-miss/targeted-patch mechanism
   (issue #131, generalized by #170) to `testbatch.py`'s test-generation

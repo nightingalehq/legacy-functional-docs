@@ -223,14 +223,31 @@ without any commit, the brief flags it. Say that commit handling was not found i
 this module and needs confirmation; do not write "changes are then committed".
 
 **Describing only one branch of an IF/ELSE.** When a rule candidate is `IF`
-and the brief marks it with a paired ELSE (`has a paired ELSE at [[...]]`),
-document what happens on *both* branches, not just the one that reads as
-interesting. It is easy to write up the error/validation branch in detail and
-let the other branch's effects go unmentioned; when the brief lists "data
-access on the true branch" / "data access on this branch" against the IF or
-ELSE bullet, every one of those accesses belongs in the generated document,
-attributed to the branch that performs it -- not merged into the surrounding
-narrative as if unconditional, and not dropped.
+and the brief's "Candidate business rules" table marks its `notes` column
+with `paired-else@[[...]]` (or the paired ELSE row itself with
+`pairs-with-if@[[...]]`), document what happens on *both* branches, not just
+the one that reads as interesting. It is easy to write up the error/
+validation branch in detail and let the other branch's effects go
+unmentioned; when that same `notes` column carries a `branch-access:...`
+entry against the IF or ELSE row, every access it lists belongs in the
+generated document, attributed to the branch that performs it -- not merged
+into the surrounding narrative as if unconditional, and not dropped.
+
+**Reproducing this brief's own table-escaping artifacts.** The brief's
+tabular sections (Interface, Program variables, Outbound calls, Candidate
+business rules, ...) render one fact per `|`-delimited row. Where a
+condition, literal, or arg value itself contains a literal `\` or `|`
+character, the brief escapes it (`\` -> `\\`, `|` -> `\|`) so the column
+boundaries stay unambiguous -- that escaping is a rendering artifact of
+*this brief*, not part of the actual source value: undo it first, to
+recover the real character (`|` or `\`) the source actually contains.
+Whether that recovered character then needs *its own* escaping in the
+generated document is a separate question, governed by the document's own
+format, not by anything this brief does -- e.g. if the template you're
+filling in also uses a Markdown pipe-table for this value, apply that
+table's normal `|` escaping to the recovered character; if it's plain
+prose, write the recovered character as-is. Never carry the brief's
+backslash-escaped form through unexamined into the generated document.
 
 **Inventing a not-found branch for FIND/READ/HISTOGRAM.** Statements inside a
 `FIND`/`READ`/`HISTOGRAM` block run when a record is actually read or

@@ -748,6 +748,69 @@ def test_find_confident_citation_ambiguous_declines():
     assert batch_mod._find_confident_citation(sentence, brief_lines) is None
 
 
+def test_find_confident_citation_matches_through_briefs_escaped_pipe():
+    """Copilot review on PR #213 (issue #185): brief.py's compact table
+    rendering escapes a literal `|` inside a condition/literal cell as
+    `\\|` so it can't be misread as a column boundary -- but a narrated
+    sentence quoting that same condition has no reason to reproduce that
+    rendering artifact. `_find_confident_citation` must decode a table
+    row's own escaping (`_maybe_unescape_table_row`) before comparing
+    tokens, or a fact whose source text contains a literal `|` would never
+    get a confident-citation match here, silently costing this pass's
+    whole "save a model call" purpose for exactly those facts. The brief
+    line here has no leading "- " -- it's a `_tbl` row, not a bullet."""
+    brief_lines = [("[[MMP0100:12]]", "[[MMP0100:12]]|0|`IF`|`A \\| B`")]
+    sentence = "The module checks whether `A | B` holds."
+    assert batch_mod._find_confident_citation(sentence, brief_lines) == "[[MMP0100:12]]"
+
+
+def test_find_confident_citation_still_matches_when_source_already_has_a_backslash_pipe():
+    """Second-round Copilot review on PR #213: a naive `\\|` -> `|` decode
+    is not a correct inverse of `_esc_cell` when the *original* source text
+    already contained its own literal `\\|` (a backslash immediately
+    followed by a pipe) -- `_esc_cell` doubles that backslash too (issue
+    #185's `_esc_cell` docstring), so the decoder must undo escaping in the
+    same order `_esc_cell` applied it, not just strip every `\\|`
+    substring. A sentence quoting the *decoded* original text (with its
+    own single backslash-pipe intact) must still match."""
+    from mfdoc.brief import _esc_cell, _unescape_cell
+
+    raw = "A " + "\\" + "|" + " B"  # one literal backslash immediately followed by a pipe
+    encoded = _esc_cell(raw)
+    assert encoded == "A " + "\\" * 3 + "|" + " B"
+    assert _unescape_cell(encoded) == raw  # round-trips exactly
+
+    brief_lines = [("[[MMP0100:12]]", f"[[MMP0100:12]]|0|`IF`|`{encoded}`")]
+    sentence = f"The module checks whether `{raw}` holds."
+    assert batch_mod._find_confident_citation(sentence, brief_lines) == "[[MMP0100:12]]"
+
+
+def test_key_tokens_does_not_alter_a_sentences_own_literal_backslash_pipe():
+    """`_key_tokens` must never decode brief.py's table-escaping itself --
+    only `_find_confident_citation`, via `_maybe_unescape_table_row`, does
+    that, and only to the brief side. A narrated sentence that happens to
+    quote a literal `\\|` of its own must keep it exactly as written."""
+    assert batch_mod._key_tokens("checks `A \\| B`") == {"A \\| B"}
+
+
+def test_find_confident_citation_never_decodes_a_bullet_line():
+    """Copilot review round 4 on PR #213: only `brief._tbl` rows (no
+    leading `"- "`) get their escaping undone -- an ordinary cited bullet
+    line (header comments, data access, ...) that happens to contain its
+    own literal `\\|` must be compared as-is, not "decoded" as if it were
+    one of this rendering's table cells. Fixture: a bullet line whose
+    quoted text contains a literal `\\|` that must NOT collapse to `|`."""
+    raw_bullet = "- [[MMP0100:9]] header comment mentions a path `C:\\|TMP`"
+    brief_lines = [("[[MMP0100:9]]", raw_bullet)]
+    # A sentence naming the *decoded* form must NOT match -- the bullet
+    # line was never escaped, so its real content still has the backslash.
+    sentence_decoded = "The comment mentions a path `C:|TMP`."
+    assert batch_mod._find_confident_citation(sentence_decoded, brief_lines) is None
+    # A sentence naming the bullet's actual, undecoded content matches.
+    sentence_exact = "The comment mentions a path `C:\\|TMP`."
+    assert batch_mod._find_confident_citation(sentence_exact, brief_lines) == "[[MMP0100:9]]"
+
+
 def test_splice_citation_wrapped_sentence_declines():
     """A sentence that doesn't appear verbatim in the document text (e.g.
     because it was wrapped across source lines, so the joined single-line

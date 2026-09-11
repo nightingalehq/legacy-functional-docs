@@ -31,6 +31,72 @@ def test_module_brief_surfaces_only_lexicon_terms_actually_present(indexed_db, p
         assert f"`{absent}` ->" not in brief, f"{absent} doesn't appear in MMP0100 and should be filtered out"
 
 
+def test_module_brief_surfaces_a_lexicon_term_that_contains_a_pipe():
+    """Copilot review round 4 on PR #213: a lexicon key containing a `|`
+    (rare, but a business term could legitimately be e.g. a status-code
+    disjunction) that appears inside a rendered table cell must still be
+    found -- `_esc_cell` escapes it to `\\|` in that cell, and the lexicon
+    relevance scan must see through that rendering artifact rather than
+    silently dropping the term because `k in haystack` no longer matches
+    the escaped text."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA
+    from mfdoc.dialects import mantis
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'TESTMOD', 'mantis')")
+    src = (
+        'PROGRAM "TESTMOD"\n'
+        "ENTRY MAIN\n"
+        "  IF STATUS=A|B\n"
+        "    MSG=\"flagged\"\n"
+        "  END\n"
+        "EXIT\n"
+    )
+    lines = [(i + 1, None, t) for i, t in enumerate(src.splitlines())]
+    mantis.extract(conn, 1, lines, "TESTMOD")
+
+    lexicon = {"A|B": "combined status flag"}
+    brief = module_brief(conn, "TESTMOD", redact=NULL_REDACTOR, lexicon=lexicon)
+    assert "## Business vocabulary" in brief
+    assert "`A|B` -> combined status flag" in brief
+
+
+def test_module_brief_lexicon_scan_only_decodes_actual_table_rows():
+    """Copilot review round 5 on PR #213: the round-4 fix used a shape
+    guess ("doesn't start with `- `") to decide which lines to decode
+    before the lexicon scan -- wrong in principle, because `## ` headings
+    and prose preambles also don't start with `- ` but were never
+    `_esc_cell`-encoded, so decoding them is unsound even though none of
+    this brief's *own* static heading/preamble text happens to contain a
+    `\\` today. Replaced with `table_line_idxs`, recorded precisely by
+    `add_tbl` at the one place that actually knows which lines came from
+    `_tbl`. This is a narrower sanity check than reproducing the original
+    over-decoding bug (which needs heading/preamble text this brief
+    doesn't currently generate): a lexicon key genuinely absent from the
+    brief, escaped or not, must not spuriously surface via either
+    mechanism."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA
+    from mfdoc.dialects import mantis
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'TESTMOD', 'mantis')")
+    src = 'PROGRAM "TESTMOD"\nENTRY MAIN\nEXIT\n'
+    lines = [(i + 1, None, t) for i, t in enumerate(src.splitlines())]
+    mantis.extract(conn, 1, lines, "TESTMOD")
+
+    lexicon = {"A\\|B": "should not appear"}
+    brief = module_brief(conn, "TESTMOD", redact=NULL_REDACTOR, lexicon=lexicon)
+    assert "## Business vocabulary" not in brief
+
+
 def test_module_brief_omits_vocabulary_section_when_no_lexicon_given(indexed_db):
     """Default behaviour (no lexicon passed) must be unchanged -- this is
     additive, not a required section."""
@@ -337,10 +403,14 @@ def test_module_brief_surfaces_else_branch_data_access_next_to_the_rule():
     mantis.extract(conn, 1, lines, "TESTMOD")
 
     brief = module_brief(conn, "TESTMOD", redact=NULL_REDACTOR)
-    assert "has a paired ELSE at [[TESTMOD:5]]" in brief
-    assert "document what happens on BOTH branches" in brief
-    else_line = [l for l in brief.splitlines() if l.startswith("- **TESTMOD:BR-003**")][0]
-    assert "pairs with the IF at [[TESTMOD:3]]" in else_line
+    # Candidate business rules render as a table now (issue #185) -- the
+    # IF row's `notes` cell marks the paired ELSE compactly
+    # (`paired-else@CITE`), and the section preamble (said once, not
+    # per-row) is what instructs the narrator to document both branches.
+    assert "paired-else@[[TESTMOD:5]]" in brief
+    assert "document BOTH branches" in brief
+    else_line = [l for l in brief.splitlines() if l.startswith("**TESTMOD:BR-003**")][0]
+    assert "pairs-with-if@[[TESTMOD:3]]" in else_line
     assert "GET" in else_line and "WIDGETFILE01" in else_line and "[[TESTMOD:6]]" in else_line
     assert "DELETE" in else_line and "WIDGETFILE02" in else_line and "[[TESTMOD:7]]" in else_line
 
@@ -500,15 +570,18 @@ def test_natural_brief_keeps_using_data_area_includes_out_of_program_variables()
     tally_line = [l for l in var_section.splitlines() if "#TALLY" in l][0]
     assert "program variable" in tally_line
 
+    # "Data areas included" is its own table -- a data-area include row
+    # carries only a citation and the data-area name (no "program variable"/
+    # "data area include" label repeated per row; the section heading says
+    # that once for the whole table).
     assert "## Data areas included" in brief
     includes_section = brief.split("## Data areas included", 1)[1]
     include_line = [l for l in includes_section.splitlines() if "LDAWGT01" in l][0]
-    assert "data area include" in include_line
     assert "program variable" not in include_line
     parameter_include_line = [
         l for l in includes_section.splitlines() if "PDAWGT01" in l
     ][0]
-    assert "data area include" in parameter_include_line
+    assert "|" in parameter_include_line  # citation|data_area row, not a bullet
 
 
 # --- issue #148: FIND/READ/HISTOGRAM found-body extent must reach the brief
@@ -1078,6 +1151,141 @@ def test_build_member_facts_returns_not_found_markdown_string_like_module_brief_
     assert "No such member in the index" in facts
     # module_brief() itself must return the identical text for the same lookup.
     assert module_brief(indexed_db, "NO-SUCH-MEMBER-AT-ALL", redact=NULL_REDACTOR) == facts
+
+
+# --- issue #185: compact/tabular rendering of naturally-tabular sections ---
+
+
+def test_module_brief_renders_interface_and_variables_as_tables(indexed_db):
+    """"Interface (parameters)" and "Program variables and screen/MAP
+    fields" are naturally one-row-per-fact -- they must render as a
+    compact, CSV-like table (one `col|col|...` header line, then one bare
+    `val|val|...` line per fact) rather than a bullet-per-row prose list,
+    so the column labels ("level", "kind", ...) are stated once instead of
+    repeated on every row (issue #185)."""
+    brief = module_brief(indexed_db, "MMP0100", redact=NULL_REDACTOR)
+
+    iface_section = brief.split("## Interface (parameters)", 1)[1].split("## ", 1)[0]
+    iface_lines = [l for l in iface_section.splitlines() if l.strip()]
+    assert iface_lines[0] == "citation|level|name|spec"
+    assert any(l.startswith("[[") for l in iface_lines[1:])
+
+    var_section = brief.split("## Program variables and screen/MAP fields", 1)[1].split("## ", 1)[0]
+    var_lines = [l for l in var_section.splitlines() if "|" in l]
+    # bound_to is dropped when no row in this member's brief has one (see
+    # _tbl's "empty column dropped" behaviour) -- MMP0100 has no view-bound
+    # fields, so only the first four columns survive.
+    assert var_lines[0] == "citation|kind|name|spec"
+    assert any("program variable" in l for l in var_lines[1:])
+
+
+def test_module_brief_renders_outbound_calls_as_a_table(indexed_db):
+    brief = module_brief(indexed_db, "MMP0100", redact=NULL_REDACTOR)
+    calls_section = brief.split("## Outbound calls", 1)[1].split("## ", 1)[0]
+    calls_lines = [l for l in calls_section.splitlines() if "|" in l]
+    assert calls_lines[0] == "citation|call_kind|callee|flag|args"
+    assert len(calls_lines) > 1
+
+
+def test_module_brief_renders_candidate_rules_as_a_table_with_all_columns(indexed_db):
+    """Every fact the narration stage relied on in the old prose bullet --
+    id, citation, depth, construct, routine, condition, literals, and any
+    branch/data-access notes -- must still be present, just as table
+    columns instead of an em-dash-joined sentence."""
+    brief = module_brief(indexed_db, "MMP0100", redact=NULL_REDACTOR)
+    rules_section = brief.split(
+        "## Candidate business rules (exact conditions", 1
+    )[1].split("## ", 1)[0]
+    rule_lines = [l for l in rules_section.splitlines() if "|" in l]
+    # `routine` is dropped here because none of MMP0100's rule candidates
+    # fall inside a routine (see _tbl's "empty column dropped" behaviour).
+    assert rule_lines[0] == "id|citation|depth|construct|condition|literals|notes"
+    body_rows = rule_lines[1:]
+    assert body_rows, "MMP0100 fixture must have at least one rule candidate"
+    assert any("MMP0100:BR-001" in l for l in body_rows)
+    # Every surviving row has exactly as many *real column-boundary* pipes
+    # as the header does -- see _count_unescaped_delimiters's own docstring
+    # for why a simple "preceded by one backslash" regex isn't enough here.
+    expected_pipes = _count_unescaped_delimiters(rule_lines[0])
+    assert all(_count_unescaped_delimiters(l) == expected_pipes for l in body_rows)
+
+
+def _count_unescaped_delimiters(line: str) -> int:
+    """How many `|` characters in `line` are real column boundaries, not
+    part of an escaped cell value (`_tbl`/`_esc_cell`, issue #185).
+
+    A `|` is escaped only when it's preceded by an *odd* number of `\\`
+    characters (each pair of backslashes is itself one escaped literal
+    backslash, per `_esc_cell`'s "escape `\\` before `|`" scheme -- see
+    `test_esc_cell_round_trips_a_literal_backslash_before_a_pipe`). A
+    simple `(?<!\\\\)\\|` regex gets this wrong whenever a cell's own
+    content ends in a run of backslashes: e.g. a raw trailing `\\`
+    encodes to `\\\\` immediately before the real column-separator `|`,
+    and a single-backslash lookbehind would misread that separator as
+    escaped and undercount -- exactly the failure mode Copilot review on
+    PR #213 caught in an earlier, regex-only version of this check."""
+    count = 0
+    i = 0
+    while i < len(line):
+        if line[i] == "|":
+            j = i - 1
+            backslashes = 0
+            while j >= 0 and line[j] == "\\":
+                backslashes += 1
+                j -= 1
+            if backslashes % 2 == 0:
+                count += 1
+        i += 1
+    return count
+
+
+def test_tbl_escapes_a_literal_pipe_in_cell_content():
+    """A `|` inside source-derived text (a condition, a literal) must never
+    be misread as a column boundary -- it must come back escaped."""
+    from mfdoc.brief import _tbl
+
+    one_row = _tbl(["citation", "condition"], [["[[X:1]]", "`A | B`"]])
+    assert one_row == ["citation|condition", "[[X:1]]|`A \\| B`"]
+
+    many_rows = _tbl(["citation", "condition"], [["[[X:1]]", "`A | B`"], ["[[X:2]]", "`C`"]])
+    assert many_rows[0] == "citation|condition"
+    assert many_rows[1] == "[[X:1]]|`A \\| B`"
+    assert many_rows[2] == "[[X:2]]|`C`"
+
+
+def test_count_unescaped_delimiters_handles_a_trailing_encoded_backslash():
+    """Copilot review on PR #213 (round 3): a cell whose own raw content
+    ends in a backslash encodes to *two* backslashes immediately before
+    the real column-separator `|` -- a naive "preceded by one backslash
+    means escaped" check would misread that real separator as escaped and
+    undercount. Two backslashes (even) means the separator itself is not
+    escaped."""
+    from mfdoc.brief import _esc_cell
+
+    cell = _esc_cell("C:" + "\\")  # raw value ending in one literal backslash
+    line = f"[[X:1]]|{cell}|next"
+    # 2 real column boundaries in this 3-field row: after the citation,
+    # and after the backslash-ending cell (none inside "next").
+    assert _count_unescaped_delimiters(line) == 2
+
+
+def test_esc_cell_round_trips_a_literal_backslash_before_a_pipe():
+    """Second-round Copilot review on PR #213: a naive "escape the pipe
+    only" scheme is not reversible when the source text already contains
+    its own literal `\\|` (a backslash immediately followed by a pipe) --
+    escaping just the pipe leaves the original backslash and the new one
+    indistinguishable to a decoder. `_esc_cell` doubles backslashes first,
+    so the matching decoder (`_unescape_cell`) can tell them apart and
+    recover the exact original text."""
+    from mfdoc.brief import _esc_cell, _unescape_cell
+
+    raw = "A " + "\\" + "|" + " B"  # one literal backslash immediately followed by a pipe
+    encoded = _esc_cell(raw)
+    # The backslash is doubled first, then the (still-unescaped) pipe gets
+    # its own backslash prefix -- three backslashes in total ahead of the
+    # pipe, not two.
+    assert encoded == "A " + "\\" * 3 + "|" + " B"
+    assert _unescape_cell(encoded) == raw
 
 
 def test_build_member_facts_returns_ambiguous_markdown_string_like_module_brief_did():
