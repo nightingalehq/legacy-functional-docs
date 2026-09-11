@@ -54,12 +54,12 @@ GitHub org.
   `test_run_test_batch_near_miss_uncited_assertion_gets_a_targeted_patch_
   not_a_full_retry`/`test_run_test_batch_near_miss_patch_failure_falls_
   back_to_full_retry` (the pool-loop path) in `tests/test_test_batch.py`,
-  mirroring `test_batch.py`'s corresponding pair. Full suite: 913 passed
-  (up from 907 before this change; the four near-miss tests above plus the
-  prior 909 minus one already-counted overlap), 2 skipped; bundled fixture
-  pipeline (`ingest`/`derive`/`coverage`/`validate --docs examples`)
-  unaffected (this change touches no dialect/derive/validate code, only
-  the model-retry loops).
+  mirroring `test_batch.py`'s corresponding pair. Full suite (rebased onto
+  main post-#194): 915 passed, 2 skipped -- six new tests total from this
+  fix (the four above plus this branch's pre-existing pair); bundled
+  fixture pipeline (`ingest`/`derive`/`coverage`/`validate --docs
+  examples`) unaffected (this change touches no dialect/derive/validate
+  code, only the model-retry loops).
 
 **Progress (2026-09-10d):**
 - Fixed issue #194: `mfdoc ingest`'s incremental-ingest skip decision
