@@ -551,7 +551,8 @@ def build_localized_test_patch_prompt(
 
 def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: str, framework: str,
                                    out_path: Path, caller: ModelCaller, writing_rules: str,
-                                   template: str, max_attempts: int = 2) -> DocResult:
+                                   template: str, max_attempts: int = 2,
+                                   _fingerprint_cache: dict | None = None) -> DocResult:
     """Call -> validate -> retry-once loop, given an already-built brief --
     the part of generate_member_test_doc that doesn't care whether `brief`
     covers a member's whole test_case set or just one chunk of it, shared
@@ -594,7 +595,18 @@ def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: 
     review): every `validate_test_doc` call below passes it through, since
     a freshly-generated candidate's own front matter never carries
     `test_case_fingerprint` itself, and by the time validation runs
-    `out_path` has already been overwritten with that candidate."""
+    `out_path` has already been overwritten with that candidate.
+
+    `_fingerprint_cache`, from a chunked caller sharing one dict across
+    every chunk's own call to this function (Copilot review on issue
+    #195's fix): every attempt below validates the same `member_name`, so
+    without a cache this member's `rule_candidate` set would be re-queried
+    and re-hashed from scratch on every attempt and every chunk. Defaults
+    to a fresh dict scoped to just this call when the caller has nothing
+    to share, so this function's own retry attempts still benefit even
+    outside a chunked run."""
+    if _fingerprint_cache is None:
+        _fingerprint_cache = {}
     prior_fingerprint = _prior_fingerprint_for(out_path)
     retry_note = None
     input_tokens = output_tokens = 0
@@ -619,6 +631,7 @@ def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: 
         out_path.write_text(text, encoding="utf-8")
         result = validate_test_doc(
             conn, out_path, _prior_fingerprint=prior_fingerprint, _render_time=True,
+            _fingerprint_cache=_fingerprint_cache,
         )
         if result["ok"]:
             write_test_doc_with_sidecar(conn, member_name, out_path, text, language)
@@ -637,7 +650,7 @@ def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: 
                     candidate_text, remaining_uncited = auto
                     candidate_result = validate_test_doc(
                         conn, out_path, _text=candidate_text, _prior_fingerprint=prior_fingerprint,
-                        _render_time=True,
+                        _render_time=True, _fingerprint_cache=_fingerprint_cache,
                     )
                     if candidate_result["ok"]:
                         logger.info(
@@ -698,6 +711,7 @@ def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: 
                 out_path.write_text(text, encoding="utf-8")
                 result = validate_test_doc(
                     conn, out_path, _prior_fingerprint=prior_fingerprint, _render_time=True,
+                    _fingerprint_cache=_fingerprint_cache,
                 )
                 if result["ok"]:
                     write_test_doc_with_sidecar(conn, member_name, out_path, text, language)
@@ -976,6 +990,13 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
     chunk_entries: list[tuple[int, Path, DocResult]] = []
     problems: list[str] = []
     chunk_state: dict[str, dict] = {}
+    # Shared across every chunk's own call below (and the index doc's
+    # validation further down) -- every chunk validates the same
+    # `member_name`, so without this each one would independently re-query
+    # and re-hash this member's entire `rule_candidate` set from scratch
+    # via `validate_test_doc`'s own fingerprint check (Copilot review on
+    # issue #195's fix; see that function's `_fingerprint_cache` docstring).
+    fingerprint_cache: dict = {}
 
     chunk_width = len(str(chunk_count))
     expected_chunk_names = {
@@ -1044,6 +1065,7 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
             result = _generate_test_doc_from_brief(
                 conn, member_name, brief, language, framework, chunk_path, caller,
                 writing_rules, template, max_attempts=max_attempts,
+                _fingerprint_cache=fingerprint_cache,
             )
         input_tokens += result.input_tokens
         output_tokens += result.output_tokens
@@ -1082,7 +1104,9 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
     # deterministic rather than model-authored) would otherwise still be
     # exposed to the exact stale-sidecar cross-check this whole mechanism
     # exists to bypass at render time.
-    index_validation = validate_test_doc(conn, out_path, _render_time=True)
+    index_validation = validate_test_doc(
+        conn, out_path, _render_time=True, _fingerprint_cache=fingerprint_cache,
+    )
     if not index_validation["ok"]:
         problems = problems + [f"index document: {p}" for p in index_validation["problems"]]
 
@@ -1469,10 +1493,21 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
             # test_case_fingerprint itself, and out_path is about to be
             # overwritten with it.
             prior_fingerprint = _prior_fingerprint_for(out_path)
+            # Shared across every validate_test_doc call below for this one
+            # member (initial, auto-cite candidate, patch, retry) -- up to
+            # four independent re-queries/re-hashes of the same member's
+            # `rule_candidate` set otherwise (Copilot review on issue
+            # #195's fix; see validate_test_doc's `_fingerprint_cache`
+            # docstring). Scoped to this member alone: nothing else in this
+            # loop iteration needs a name it could collide with, and
+            # `as_completed`'s body runs on this one thread, so no
+            # concurrent access to guard against.
+            fingerprint_cache: dict = {}
             final_text = _fix_generated_by_version(response.text)
             out_path.write_text(final_text, encoding="utf-8")
             validation = validate_test_doc(
                 conn, out_path, _prior_fingerprint=prior_fingerprint, _render_time=True,
+                _fingerprint_cache=fingerprint_cache,
             )
 
             # Issue #188 review: this pool loop is the ordinary `mfdoc
@@ -1497,7 +1532,7 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
                         candidate_text, remaining_uncited = auto
                         candidate_result = validate_test_doc(
                             conn, out_path, _text=candidate_text, _prior_fingerprint=prior_fingerprint,
-                            _render_time=True,
+                            _render_time=True, _fingerprint_cache=fingerprint_cache,
                         )
                         if candidate_result["ok"]:
                             logger.info(
@@ -1556,6 +1591,7 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
                         out_path.write_text(final_text, encoding="utf-8")
                         validation = validate_test_doc(
                             conn, out_path, _prior_fingerprint=prior_fingerprint, _render_time=True,
+                            _fingerprint_cache=fingerprint_cache,
                         )
                         if validation["ok"]:
                             patched = True
@@ -1602,6 +1638,7 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
                     out_path.write_text(final_text, encoding="utf-8")
                     validation = validate_test_doc(
                         conn, out_path, _prior_fingerprint=prior_fingerprint, _render_time=True,
+                        _fingerprint_cache=fingerprint_cache,
                     )
                     attempts = 2
             elif not validation["ok"] and initial_exc_problem is not None:

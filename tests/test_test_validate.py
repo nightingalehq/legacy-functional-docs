@@ -44,6 +44,22 @@ def test_valid_doc_with_real_scenario_ref_passes(indexed_db, tmp_path):
     assert result["invalid_scenario_refs"] == 0
 
 
+def test_non_mapping_front_matter_is_flagged_not_crashed(indexed_db, tmp_path):
+    """Copilot review follow-up on issue #195's fix: `mfdoc test-validate`
+    reaches `validate_doc` (via `validate_test_doc`) before any of this
+    function's own fingerprint/sidecar logic runs, so a document whose
+    front matter parses as syntactically valid but non-mapping YAML must
+    be reported as malformed here too, not crash `AttributeError` out of
+    `doc_rule_fingerprint`/`fm.get`."""
+    conn = indexed_db
+    testplan.run_all(conn, member_name="MMP0100")
+    path = tmp_path / "MMP0100.md"
+    path.write_text("---\n- a\n- b\n---\n\n# MMP0100 -- generated tests\n", encoding="utf-8")
+    result = validate_test_doc(conn, path)  # must not raise
+    assert not result["ok"]
+    assert any("front matter is not a mapping" in p for p in result["problems"])
+
+
 def test_invented_scenario_id_is_flagged(indexed_db, tmp_path):
     """MMP0100:BR-999 doesn't exist -- a model inventing or renumbering a
     scenario id must be caught, the same way an invalid [[MEMBER:LINE]]
@@ -516,6 +532,75 @@ def test_current_sidecar_still_cross_checked_against_manifest(indexed_db, tmp_pa
         "BR-001" in p and "missing from" in p for p in result["problems"]
     )
     assert result["sidecar_unresolved_ids"] == []
+
+
+def test_validate_tests_tree_scans_test_case_at_most_once_for_the_whole_tree(indexed_db, tmp_path):
+    """Copilot review follow-up on issue #195's fix: `validate_tests_tree`
+    shares one lazily-memoized `test_case` scenario-name scan across every
+    document it validates, instead of each sidecar-bearing/BR-referencing
+    document re-running `SELECT scenario_name FROM test_case` on its own
+    (otherwise O(document_count * corpus_size) for a tree validation).
+    Two documents here each reference a real `MMP0100:BR-nnn` id, which is
+    exactly what makes `validate_test_doc`'s own lazy `valid_scenarios()`
+    fire at all -- the scan must still only run once between them."""
+    real_conn = indexed_db
+    testplan.run_all(real_conn, member_name="MMP0100")
+    (tmp_path / "a.md").write_text(VALID_DOC, encoding="utf-8")
+    (tmp_path / "b.md").write_text(VALID_DOC.replace("BR-004", "BR-001"), encoding="utf-8")
+
+    class _CountingConn:
+        """`sqlite3.Connection.execute` is a read-only attribute -- can't be
+        monkeypatched directly -- so this wraps the real connection and
+        forwards everything else through `__getattr__`."""
+
+        def __init__(self, real):
+            self._real = real
+            self.calls: list[str] = []
+
+        def execute(self, sql, *args):
+            if "test_case" in sql and "scenario_name" in sql:
+                self.calls.append(sql)
+            return self._real.execute(sql, *args)
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    conn = _CountingConn(real_conn)
+    result = validate_tests_tree(conn, tmp_path)
+    assert result["documents"] == 2
+    assert len(conn.calls) == 1, "two documents in the same tree must share one test_case scan, not one each"
+
+
+def test_fingerprint_cache_avoids_recomputing_the_same_members_fingerprint(indexed_db, tmp_path, monkeypatch):
+    """Copilot review follow-up on issue #195's fix: `_fingerprint_cache`
+    lets several `validate_test_doc` calls for the same document `sources`
+    (e.g. every chunk of one member) share one `doc_rule_fingerprint`
+    computation instead of each re-querying and re-hashing that member's
+    entire `rule_candidate` set from scratch. `_prior_fingerprint` (a
+    render/retry-loop stand-in, see that parameter's own docstring) is
+    what makes the fingerprint check run at all here -- `SIDECAR_DOC`
+    itself carries no stamped `test_case_fingerprint` of its own."""
+    conn = indexed_db
+    testplan.run_all(conn, member_name="MMP0100")
+    path = tmp_path / "MMP0100.md"
+    sidecar = tmp_path / "MMP0100.py"
+    path.write_text(SIDECAR_DOC, encoding="utf-8")
+    sidecar.write_text("def test_x():\n    # MMP0100:BR-004\n    ...\n", encoding="utf-8")
+
+    import mfdoc.validate as validate_module
+
+    calls = []
+    real_fingerprint = validate_module.doc_rule_fingerprint
+
+    def counting_fingerprint(conn, member_names):
+        calls.append(tuple(member_names))
+        return real_fingerprint(conn, member_names)
+
+    monkeypatch.setattr(validate_module, "doc_rule_fingerprint", counting_fingerprint)
+    shared: dict = {}
+    validate_test_doc(conn, path, _prior_fingerprint="dummy", _fingerprint_cache=shared)
+    validate_test_doc(conn, path, _prior_fingerprint="dummy", _fingerprint_cache=shared)
+    assert len(calls) == 1, "a shared cache must compute this member's fingerprint at most once"
 
 
 RENDER_TIME_CANDIDATE_MISSING_A_SCENARIO = """---

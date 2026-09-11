@@ -12,6 +12,41 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-11j):**
+- Addressed the twenty-first Copilot review round on PR #209 (issue #195):
+  1. `split_frontmatter` now rejects syntactically valid but non-mapping
+     YAML (a bare scalar or list between the `---` markers) as malformed
+     front matter, instead of returning it unguarded -- every caller
+     already treated a non-`None` result as a mapping with no shape check
+     of its own, so this used to reach `validate_doc`'s `fm.get(...)` as
+     an unhandled crash in every `mfdoc validate`/`mfdoc test-validate`
+     call, not just the test-doc path a prior round had already guarded
+     locally in `write_test_doc_with_sidecar`.
+  2. `validate_tests_tree`'s shared `test_case` scenario-name scan
+     (previous round) is now a lazily-memoized callable passed to
+     `validate_test_doc` as `_valid_scenarios`, not a value computed
+     unconditionally before any document's own need for it is known -- a
+     tree with no sidecar-bearing/BR-referencing documents at all now
+     never runs that scan.
+  3. `validate_test_doc` gained `_fingerprint_cache`, an optional shared
+     dict keyed by sorted `sources`: `doc_rule_fingerprint` re-queries and
+     re-hashes a member's entire `rule_candidate` set from scratch on
+     every call, which was repeated once per chunk in
+     `_generate_member_test_doc_chunked` and up to four times per member
+     across `run_test_batch`'s own initial/auto-cite/patch/retry
+     validations for the same document. Threaded through both of those
+     call sites (and `validate_tests_tree`, for a tree containing more
+     than one chunk of the same member) so each distinct member's
+     fingerprint is computed at most once per operation; every other call
+     site leaves it unset and keeps the prior per-call cost.
+- Four new regression tests: two crash-guard tests for the non-mapping
+  front-matter fix (`tests/test_validate.py`, `tests/test_test_validate.py`),
+  one confirming `validate_tests_tree` shares its scan across documents,
+  and one confirming the fingerprint cache is shared across calls for the
+  same member. Full suite green (1028 passed, 2 skipped) plus a clean
+  `mfdoc validate` pass against `examples/` (71/71 documents, 0 invalid
+  citations of 750).
+
 **Progress (2026-09-11i):**
 - Addressed the twentieth Copilot review round on PR #209 (issue #195):
   1. `validate_tests_tree` now computes its `valid test_case scenario names`

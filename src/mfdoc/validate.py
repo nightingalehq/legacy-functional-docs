@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
+from collections.abc import Callable
 from functools import lru_cache
 from pathlib import Path
 
@@ -229,6 +230,18 @@ def split_frontmatter(text: str) -> tuple[dict | None, str, str | None]:
         fm = yaml.safe_load(parts[1]) or {}
     except yaml.YAMLError as exc:
         return None, parts[2], f"unparseable YAML front matter: {exc}"
+    # `yaml.safe_load` happily parses syntactically valid YAML between the
+    # `---` markers into a truthy non-mapping (a bare scalar or a list, e.g.
+    # "- a\n- b") -- `or {}` above only substitutes for a *falsy* parse
+    # (`None`/`""`/`[]`), not a truthy non-dict one. Every caller of this
+    # function treats a non-`None` `fm` as a mapping (`fm.get(...)`,
+    # `fm["sources"]`, `"key" in fm`) with no shape check of its own, so
+    # left unguarded this reaches `validate_doc` (and, through it, every
+    # `mfdoc test-validate`/`mfdoc validate` call) as an `AttributeError`/
+    # `TypeError` crash instead of the malformed-front-matter problem this
+    # function exists to report (Copilot review on issue #195's fix).
+    if not isinstance(fm, dict):
+        return None, parts[2], f"front matter is not a mapping, got {fm!r}"
     return fm, parts[2], None
 
 
@@ -944,7 +957,8 @@ def validate_doc(conn, path: Path, outcome_field=OUTCOME_FIELD, _text: str | Non
 def validate_test_doc(conn, path: Path, _text: str | None = None,
                        _prior_fingerprint: str | None = None,
                        _render_time: bool = False,
-                       _valid_scenarios: set[str] | None = None) -> dict:
+                       _valid_scenarios: Callable[[], set[str]] | None = None,
+                       _fingerprint_cache: dict[tuple[str, ...], str | None] | None = None) -> dict:
     """`validate_doc` plus the checks specific to a generated test file:
     `language`/`framework` front matter, and that every bare `MEMBER:BR-nnn`
     reference names a scenario that actually exists in test_case -- the
@@ -1097,21 +1111,28 @@ def validate_test_doc(conn, path: Path, _text: str | None = None,
     # tree` can still walk into) has no need for this and shouldn't pay a
     # full `test_case` scan on every single document it validates.
     #
-    # `_valid_scenarios`, from `validate_tests_tree`: the same full-corpus
-    # scan computed once and shared across every document in the tree,
-    # instead of every sidecar-bearing document re-running its own
-    # `SELECT scenario_name FROM test_case` (Copilot review -- otherwise
-    # O(document_count * corpus_size) for a tree validation). A caller
-    # validating one document in isolation (`mfdoc test-gen`'s single-file
-    # path, the render/retry loops, every test in this suite) has no
-    # tree-wide set to share and leaves this unset, falling back to the
-    # same lazy per-call query as before.
-    _valid_scenarios_cache: set[str] | None = _valid_scenarios
+    # `_valid_scenarios`, from `validate_tests_tree`: a zero-arg callable
+    # that computes and memoizes the full-corpus scan *once*, shared across
+    # every document in the tree, instead of every sidecar-bearing document
+    # re-running its own `SELECT scenario_name FROM test_case` (Copilot
+    # review -- otherwise O(document_count * corpus_size) for a tree
+    # validation). Deliberately a callable, not a precomputed set: a tree
+    # walk with no sidecar-bearing/BR-referencing documents at all must
+    # still never run that scan (the same "don't pay for what nothing needs"
+    # contract this whole cache already had, just now shared across
+    # documents instead of scoped to one call -- a second review round
+    # after the first version of this fix computed the set unconditionally,
+    # before any document's own need for it was known). A caller validating
+    # one document in isolation (`mfdoc test-gen`'s single-file path, the
+    # render/retry loops, every test in this suite) has no tree-wide scan
+    # to share and leaves this unset, falling back to the same lazy
+    # per-call query as before.
+    _valid_scenarios_cache: set[str] | None = None
 
     def valid_scenarios() -> set[str]:
         nonlocal _valid_scenarios_cache
         if _valid_scenarios_cache is None:
-            _valid_scenarios_cache = {
+            _valid_scenarios_cache = _valid_scenarios() if _valid_scenarios is not None else {
                 row["scenario_name"].upper() for row in conn.execute("SELECT scenario_name FROM test_case")
             }
         return _valid_scenarios_cache
@@ -1146,7 +1167,28 @@ def validate_test_doc(conn, path: Path, _text: str | None = None,
                 # (stray whitespace, however it got there) would otherwise
                 # fail to resolve and silently fall back to the weaker
                 # id-overlap check instead of the exact fingerprint one.
-                fp = doc_rule_fingerprint(conn, [s.strip() for s in sources])
+                #
+                # `_fingerprint_cache`, from a caller re-validating several
+                # documents that share the same `sources` -- most commonly
+                # every chunk of one member in `_generate_member_test_doc_
+                # chunked`, or every retry attempt of one member's document
+                # in `run_test_batch` (Copilot review): each of those calls
+                # `doc_rule_fingerprint`, which re-queries and re-hashes
+                # that member's *entire* `rule_candidate` set from
+                # scratch, even though it's the same member and therefore
+                # the same fingerprint every time. Keyed by the sorted,
+                # stripped `sources` tuple so it's correct regardless of
+                # input ordering/whitespace; a caller with nothing to
+                # share (every other call site, including this suite)
+                # leaves it unset and pays the same per-call cost as
+                # before.
+                key = tuple(sorted((s.strip() for s in sources), key=str.upper))
+                if _fingerprint_cache is not None and key in _fingerprint_cache:
+                    fp = _fingerprint_cache[key]
+                else:
+                    fp = doc_rule_fingerprint(conn, list(key))
+                    if _fingerprint_cache is not None:
+                        _fingerprint_cache[key] = fp
             _current_fingerprint_cache.append(fp)
         return _current_fingerprint_cache[0]
 
@@ -1504,13 +1546,31 @@ def _partition_pipeline_docs(conn, root: Path) -> tuple[list[Path], list[str], d
 
 def validate_tests_tree(conn, root: Path) -> dict:
     paths, out_of_scope, text_cache = _partition_pipeline_docs(conn, root)
-    # Computed once and shared across every document below instead of each
-    # sidecar-bearing document re-scanning `test_case` on its own (Copilot
-    # review on issue #195's fix -- see `validate_test_doc`'s
-    # `_valid_scenarios` docstring).
-    valid_scenarios = {row["scenario_name"].upper() for row in conn.execute("SELECT scenario_name FROM test_case")}
+    # Computed at most once, lazily, and shared across every document below
+    # instead of each sidecar-bearing document re-scanning `test_case` on
+    # its own (Copilot review on issue #195's fix -- see
+    # `validate_test_doc`'s `_valid_scenarios` docstring). A `list`, not a
+    # plain variable, purely so the closure below can rebind it without a
+    # `nonlocal` declaration.
+    _valid_scenarios_cache: list[set[str]] = []
+
+    def shared_valid_scenarios() -> set[str]:
+        if not _valid_scenarios_cache:
+            _valid_scenarios_cache.append(
+                {row["scenario_name"].upper() for row in conn.execute("SELECT scenario_name FROM test_case")}
+            )
+        return _valid_scenarios_cache[0]
+
+    # Shared the same way, across every chunk of one member's several chunk
+    # documents in a tree (`MEMBER.chunk1.md`, `MEMBER.chunk2.md`, ...) --
+    # see `validate_test_doc`'s `_fingerprint_cache` docstring.
+    fingerprint_cache: dict[tuple[str, ...], str | None] = {}
     results = [
-        validate_test_doc(conn, p, _text=text_cache.get(p), _valid_scenarios=valid_scenarios) for p in paths
+        validate_test_doc(
+            conn, p, _text=text_cache.get(p),
+            _valid_scenarios=shared_valid_scenarios, _fingerprint_cache=fingerprint_cache,
+        )
+        for p in paths
     ]
     return {
         "documents": len(results),
