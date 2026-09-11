@@ -146,6 +146,100 @@ GitHub org.
   skipped, same as before this investigation). Closing #191 as
   confirmed-not-applicable.
 
+**Progress (2026-09-11c):**
+- Investigated issue #207 (#183 Part 2: a second prompt-cache breakpoint on
+  `MemberFacts`' precomputed shared context, layered on top of the existing
+  project-level breakpoint from #159/#168) and decided **not** to implement
+  it yet -- closing as "not currently safely implementable without a
+  section-reorder design change", per #207's own suggested next step.
+  Confirmed the budget question first: the Anthropic API's documented limit
+  is 4 `cache_control` breakpoints per request (per the bundled Claude API
+  skill's `shared/prompt-caching.md`; `anthropic_caller.py`'s own #159
+  comment documents today's one-leading-prefix implementation, not the
+  API's breakpoint ceiling, so it's cited below only for that, not as a
+  second source for the limit itself). The existing project-level
+  breakpoint uses 1, so a second, member-level one would use 2 --
+  comfortably inside budget for every code path that uses both
+  (`AnthropicCaller.__call__`/`_content` builds one `messages[0].content`
+  list per call, chunked or not). Budget was never the blocker.
+  The structural blocker #207 already named -- `module_brief`'s section
+  order renders "Business rules from included copycode" and "Known gaps"
+  *after* the rule_range-dependent "Candidate business rules" section, so
+  a chunked member's brief is `[shared A][chunk-specific][shared B]`, not
+  `[shared][chunk-specific]` -- turned out to have a second layer #207
+  didn't call out, found by tracing `module_brief` end to end. `module_brief`'s
+  own *section layout* puts "shared A" (header comments through "Messages
+  and error handling") ahead of every rule_range-dependent section, exactly
+  as #207 assumed -- but the *text* module_brief actually renders inside
+  and ahead of that span still varies per chunk, two different ways:
+  1. **What precedes "shared A" varies.** `module_brief` renders two things
+     *before* "shared A": the "PARTIAL BRIEF" note (`rule_range` branch:
+     "chunk `{this_chunk}` of `{chunk_count}`" -- different text on every
+     chunk) and, when a project configures `options.narrative.lexicon`,
+     the "Business vocabulary" section (spliced in at `vocab_insert_at`,
+     right after the intro -- *before* "shared A" starts -- but computed
+     by scanning everything rendered to `out` so far, which by that point
+     already includes the chunk-specific "Candidate business rules"
+     section (only the later "SME notes" section is excluded) -- so a
+     lexicon hit set, and thus this section's presence/content, can also
+     vary chunk to chunk whenever a chunk-specific term differs).
+     Anthropic's prompt cache matches on the *whole* byte prefix leading
+     up to a breakpoint, not just the text inside the block the
+     breakpoint marks -- so even placing the intro+vocab text in its own
+     uncached block ahead of a "shared A" cache breakpoint doesn't help: a
+     cache write from one chunk's request still can't be read by another
+     chunk's request, because everything preceding the breakpoint (intro
+     included) must match byte-for-byte first, and here it doesn't.
+  2. **"Shared A" itself also varies, independent of (1).** Its own
+     "Internal routines" section annotates a routine with
+     `**[documented in chunk N]**` only when that routine's chunk differs
+     from `chunk_info`'s current chunk -- so which routines get annotated (and
+     the section's exact text) changes chunk to chunk, via the same
+     `chunk_map`/`chunk_info` parameters `_generate_module_doc_chunked`
+     already passes per-chunk.
+  Net effect: with today's `module_brief` layout, there is no contiguous,
+  chunk-invariant *prefix* long enough to be worth a second
+  `cache_control` breakpoint without first (a) moving `rule_range`/
+  `chunk_info`/`chunk_map`-dependent text (the PARTIAL BRIEF note, the
+  vocabulary section's scan scope, and the routine chunk-annotations) out
+  of what would become the cached prefix, and (b) re-validating that this
+  doesn't change any generated document's actual content -- exactly the
+  "real output-shape change... needing its own design pass, tests, and a
+  fresh pipeline validation run" #207 flagged as more than a caching-only
+  change. Rather than force a narrower, riskier slice under time pressure,
+  leaving this closed pending that design pass. A narrower follow-up also
+  exists: render a purpose-built, `chunk_info`/`chunk_map`-free "shared prefix"
+  string from `MemberFacts` directly -- through the calling `module_brief`
+  call's own `redact`, same as every other `MemberFacts` field, since
+  `MemberFacts` itself is raw/unredacted -- bypassing `module_brief`
+  entirely for the cached block, and let `module_brief` keep doing what it
+  does for the rendered document body. Untried here, and incomplete as
+  stated -- real code in at least three places, not a drop-in:
+  1. Both `AnthropicCaller._content` and `VertexCaller`
+     (`anthropic_caller.py`/`vertex_caller.py`) currently only recognize a
+     single leading cache prefix and split a prompt into exactly one
+     cached block plus one uncached suffix -- a second, member-level tier
+     needs that prefix-matching/content-assembly logic extended to emit a
+     second cache-controlled block, not just a new string to feed it.
+  2. `batch.py`'s `_apply_cache_prefixes` -- the module-doc path's own
+     registration point (`testbatch.py`'s parallel test-generation path
+     already has its own, `_apply_test_cache_prefix`, unaffected by this)
+     -- is called once per `run_batch`, up front, with only the run-level
+     project/reconciliation prefixes
+     (`build_prompt_cache_prefix`/`build_reconciliation_prompt_cache_prefix`).
+     A member-level prefix is a new one per member, not a fixed run-level
+     set, so this also needs `run_batch`'s per-member orchestration
+     extended to register (or re-register) that member's own prefix
+     before its chunk loop runs -- and (1)'s content-assembly change needs
+     to keep picking the right prefix out of however many are now
+     registered, per call. (`plan_batch` itself is a no-model-call preview
+     with no caller to register anything with -- not in scope for this at
+     all, unless a future preview also wants to estimate the new
+     breakpoint's savings, which would be separate work again.)
+  Flagged as the least invasive option for a future attempt, with its own
+  tests, not as something either of these bullets makes trivial.
+  No code change; full suite unchanged at 955 passed, 2 skipped.
+
 **Progress (2026-09-10e):**
 - Fixed issue #188: ported `batch.py`'s near-miss/targeted-patch mechanism
   (issue #131, generalized by #170) to `testbatch.py`'s test-generation
