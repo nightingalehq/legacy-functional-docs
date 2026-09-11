@@ -248,6 +248,51 @@ def test_member_rule_fingerprint_breaks_line_no_ties_with_id():
     )
 
 
+def test_member_test_case_aligned_with_rule_candidate():
+    """Copilot review follow-up on issue #195's fix: aligned when every
+    current rule_candidate branch row already has a test_case row (the
+    normal, post-`mfdoc test-plan` state); misaligned the moment a new
+    rule_candidate row appears with no test_case row yet (a `derive`
+    rebuild `mfdoc test-plan` hasn't caught up to); unaffected by an
+    unrelated *extra* test_case row (an overlay-sourced scenario, or one a
+    since-removed rule_candidate row left behind) -- the concern here is
+    specifically a *missing* id, not an exact match."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'x')")
+    rc1 = insert(conn, "rule_candidate", member_id=1, line_no=1, construct="IF", raw="x")
+    insert(
+        conn, "test_case", member_id=1, kind="unit", rule_candidate_id=rc1, scenario_name="FAKEMOD:BR-001",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+        then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:1", confidence="verified",
+    )
+    conn.commit()
+    assert testplan.member_test_case_aligned_with_rule_candidate(conn, "FAKEMOD") is True
+
+    # An extra test_case row with no current rule_candidate counterpart --
+    # must not be reported as misaligned.
+    insert(
+        conn, "test_case", member_id=1, kind="unit", scenario_name="FAKEMOD:BR-999",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+        then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:1", confidence="verified",
+    )
+    conn.commit()
+    assert testplan.member_test_case_aligned_with_rule_candidate(conn, "FAKEMOD") is True
+
+    # A new rule_candidate row with no test_case row yet -- misaligned.
+    insert(conn, "rule_candidate", member_id=1, line_no=2, construct="IF", raw="y")
+    conn.commit()
+    assert testplan.member_test_case_aligned_with_rule_candidate(conn, "FAKEMOD") is False
+
+    assert testplan.member_test_case_aligned_with_rule_candidate(conn, "NOSUCHMEMBER") is False
+
+
 def test_register_lists_scenarios_with_resolvable_citations(indexed_db):
     conn = indexed_db
     testplan.run_all(conn)

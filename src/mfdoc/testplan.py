@@ -219,6 +219,72 @@ def doc_rule_fingerprint(conn, member_names: list[str]) -> str | None:
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
 
 
+def member_test_case_aligned_with_rule_candidate(conn, member_name: str) -> bool:
+    """Whether `member_name`'s current `test_case` rows already cover every
+    id its *current* `rule_candidate` rows imply -- False whenever a
+    `derive`/`classify-rules` rebuild has inserted a `rule_candidate` row
+    for this member since `mfdoc test-plan` last ran, and `test_case`
+    hasn't caught up yet (a currently-unresolvable member counts as
+    misaligned too: nothing to compare against).
+
+    Exists to guard `testbatch.write_test_doc_with_sidecar`'s fingerprint
+    stamp (Copilot review on issue #195's fix): that fingerprint is a pure
+    function of `rule_candidate`, computed *at write time* -- but the
+    document just rendered (and the sidecar this stamps it onto) was built
+    from whatever `test_case` rows `test_case_brief` fed the model, which
+    can predate a `rule_candidate` change test-plan hasn't caught up to
+    yet. Stamping the *current* rule_candidate fingerprint onto that
+    still-old-numbered content bakes in a fingerprint that describes a
+    corpus state the sidecar doesn't actually reflect; once `mfdoc
+    test-plan` does catch up and a later render produces a manifest with
+    the new/renumbered ids, that stamped fingerprint (unchanged, since
+    rule_candidate itself hasn't moved again) still matches the current
+    recomputation, making the stale sidecar look current and the new
+    manifest's ids get rejected as "missing from sidecar" -- the same
+    class of false positive issue #195 exists to close, reintroduced at
+    the write side instead of the read side.
+
+    Deliberately a subset check (every current-rule_candidate id already
+    has a `test_case` row), not set equality: the failure mode above is
+    specifically a *missing* id (a rule_candidate row nothing in
+    `test_case` reflects yet) becoming reachable through a fingerprint
+    that looks authoritative. A `test_case` row with no current
+    rule_candidate counterpart (an overlay-sourced scenario, or a rule
+    since removed but not yet re-planned) doesn't reintroduce that
+    specific false positive and isn't this function's concern.
+
+    Only `unit`-kind test_case rows are compared -- the only kind
+    `build_member_test_cases` derives one-for-one from a branch
+    `rule_candidate` row (`_is_branch_row`), via the same
+    `numbered_rule_candidates` ordinal every other BR-numbering consumer
+    uses; overlay-sourced/other kinds carry no such positional
+    relationship to `rule_candidate` and would only add noise here."""
+    rows, ambiguous = resolve_member_by_name(conn, member_name)
+    if ambiguous or not rows:
+        return False
+    mid = rows[0]["id"]
+    # `rows[0]["name"]`, not the raw `member_name` argument -- scenario_name
+    # is built from the member's own canonical (stored-case) name
+    # (`build_member_test_cases`'s own `name` param, always `m["name"]`
+    # from the resolved row), and `_rule_id` does no case normalization of
+    # its own -- comparing against a differently-cased `member_name` here
+    # would report every scenario as "misaligned" even when it isn't.
+    canonical_name = rows[0]["name"]
+    rc_rows = conn.execute(
+        "SELECT * FROM rule_candidate WHERE member_id=? ORDER BY line_no, id", (mid,)
+    ).fetchall()
+    expected = {
+        _rule_id(canonical_name, n) for n, r in numbered_rule_candidates(rc_rows) if _is_branch_row(r)
+    }
+    current = {
+        row["scenario_name"]
+        for row in conn.execute(
+            "SELECT scenario_name FROM test_case WHERE member_id=? AND kind='unit'", (mid,)
+        ).fetchall()
+    }
+    return expected <= current
+
+
 def build_member_test_cases(conn, mid: int, name: str, overlay: dict | None = None) -> list[dict]:
     """Deterministically derive test_case rows for one member. Returns the
     rows inserted (as dicts) for callers that want to report on this run

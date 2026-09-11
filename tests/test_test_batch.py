@@ -644,6 +644,51 @@ def test_write_test_doc_with_sidecar_strips_whitespace_in_sources_before_fingerp
     assert f'test_case_fingerprint: "{expected_fp}"' in written
 
 
+def test_write_test_doc_with_sidecar_omits_fingerprint_when_test_case_is_stale(tmp_path):
+    """Copilot review follow-up on issue #195's fix: a `rule_candidate` row
+    inserted (e.g. by a `derive` rebuild) with no corresponding `test_case`
+    row yet (`mfdoc test-plan` hasn't re-run) means this document's own
+    content -- rendered from whatever `test_case_brief` fed the model --
+    already predates the current `rule_candidate` state. Stamping the
+    *current* rule_candidate fingerprint onto it anyway would bake in a
+    fingerprint that keeps matching every later recomputation (rule_
+    candidate doesn't move again until the next derive run), making this
+    now-stale sidecar look current even after test-plan catches up and a
+    fresh render's manifest legitimately carries the new scenario --
+    reproducing the exact "missing from sidecar" false positive issue #195
+    exists to close, at the write side instead of the read side."""
+    from mfdoc import testbatch
+    import sqlite3
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
+    rc1 = insert(conn, "rule_candidate", member_id=1, line_no=1, construct="IF", condition="COND-1", raw="IF COND-1")
+    insert(
+        conn, "test_case", member_id=1, kind="unit", rule_candidate_id=rc1, scenario_name="FAKEMOD:BR-001",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+        then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:1", confidence="verified",
+    )
+    # A second rule_candidate row appears (a derive rebuild), but test-plan
+    # hasn't re-run to give it a test_case row yet -- test_case is now
+    # stale relative to rule_candidate.
+    insert(conn, "rule_candidate", member_id=1, line_no=2, construct="IF", condition="COND-2", raw="IF COND-2")
+    conn.commit()
+
+    doc_text = _valid_test_doc_text("python", "pytest")
+    out_path = tmp_path / "FAKEMOD.md"
+    out_path.write_text(doc_text, encoding="utf-8")
+    testbatch.write_test_doc_with_sidecar(conn, "FAKEMOD", out_path, doc_text, "python")
+
+    written = out_path.read_text(encoding="utf-8")
+    assert "test_case_fingerprint:" not in written
+
+
 def test_write_test_doc_with_sidecar_omits_fingerprint_for_empty_sources(tmp_path):
     """Copilot review follow-up on issue #195: `sources: []` is a
     syntactically valid list (so `validate_doc`'s own malformed-shape
@@ -3972,10 +4017,25 @@ def test_write_test_doc_with_sidecar_writes_sidecar_and_doc_together(tmp_path):
     make it all the way through never ends up with a freshly-written
     sidecar paired with an `out_path` nobody rewrote to reference it."""
     from mfdoc import testbatch
+    from mfdoc.db import insert
 
     conn = _sqlite_conn()
     conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
     rc1 = _insert_rc(conn, 1, 10)
+    # A matching test_case row -- member_test_case_aligned_with_rule_
+    # candidate (Copilot review) requires test_case to already cover every
+    # current rule_candidate id before write_test_doc_with_sidecar will
+    # stamp a fingerprint; this fixture's own rule_candidate row (rc1)
+    # must therefore have its corresponding scenario already derived,
+    # exactly as a real `mfdoc test-plan` run would leave it.
+    insert(
+        conn, "test_case", member_id=1, kind="unit", rule_candidate_id=rc1,
+        scenario_name="FAKEMOD:BR-001",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "COND", "citation": "[[FAKEMOD:10]]"}',
+        then_json='{"citation": "[[FAKEMOD:10]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:10", confidence="verified",
+    )
     conn.commit()
 
     doc_text = (

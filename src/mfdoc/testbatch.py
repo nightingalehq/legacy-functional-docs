@@ -42,8 +42,8 @@ from .brief import (
 from .redact import NULL_REDACTOR, Redactor
 from .testlang import sidecar_path_for
 from .testplan import (
-    doc_rule_fingerprint, fetch_test_case_rows, member_rule_fingerprint, test_case_brief,
-    test_case_brief_chunk,
+    doc_rule_fingerprint, fetch_test_case_rows, member_rule_fingerprint,
+    member_test_case_aligned_with_rule_candidate, test_case_brief, test_case_brief_chunk,
 )
 from .validate import BR_REF, split_frontmatter, validate_test_doc
 
@@ -116,7 +116,16 @@ def write_test_doc_with_sidecar(conn, member_name: str, out_path: Path, doc_text
     directly (issue #195), rather than only inferring staleness from
     whether the sidecar's own ids happen to still resolve against current
     `test_case` rows -- a check an inserted-but-not-yet-shifted-past rule
-    can slip past (see `member_rule_fingerprint`'s docstring). `conn` is
+    can slip past (see `member_rule_fingerprint`'s docstring). Only stamped
+    when every source member's `test_case` rows are currently aligned with
+    its `rule_candidate` rows (`testplan.member_test_case_aligned_with_
+    rule_candidate`, Copilot review) -- otherwise this render's own content
+    already predates a `rule_candidate` change `mfdoc test-plan` hasn't
+    caught up to yet, and stamping the *current* rule_candidate fingerprint
+    onto that still-old-numbered content would bake in a fingerprint this
+    sidecar's own content doesn't actually reflect (see that function's
+    docstring for the exact false-positive this reintroduces at the write
+    side). `conn` is
     only ever used for this fingerprint lookup; omitted (left out of
     front matter entirely) whenever the document's own `sources` can't be
     parsed as a non-empty list of strings -- missing/malformed front
@@ -214,7 +223,28 @@ def write_test_doc_with_sidecar(conn, member_name: str, out_path: Path, doc_text
         # consistent by construction: neither side can compute one for a
         # document with no real `sources` to work from.
         doc_sources = [s.strip() for s in doc_sources]
-        fingerprint = doc_rule_fingerprint(conn, doc_sources)
+        # Only when every source member's current `test_case` rows already
+        # reflect its current `rule_candidate` rows (Copilot review): this
+        # document's own content was rendered from whatever `test_case`
+        # rows were current when `test_case_brief` built its prompt, which
+        # can predate a `rule_candidate` change `mfdoc test-plan` hasn't
+        # caught up to yet (the exact state `run_test_batch`'s per-member
+        # resume-skip regression exercises -- a rule_candidate row appears
+        # with no corresponding test_case row yet). Stamping the *current*
+        # rule_candidate fingerprint onto that still-old-numbered content
+        # bakes in a fingerprint describing a corpus state this sidecar
+        # doesn't actually reflect; since rule_candidate itself doesn't
+        # move again until the next derive/classify-rules run, that
+        # fingerprint keeps matching every later recomputation even after
+        # test-plan catches up and a fresh render's manifest carries the
+        # new/renumbered ids -- making the stale sidecar look current and
+        # rejecting those new ids as "missing from sidecar" on every retry.
+        # Leaving `fingerprint` unset here instead falls back to the
+        # weaker id-overlap check until a `test-plan` run realigns things
+        # and a subsequent render can stamp a fingerprint that actually
+        # describes what it's attached to.
+        if all(member_test_case_aligned_with_rule_candidate(conn, s) for s in doc_sources):
+            fingerprint = doc_rule_fingerprint(conn, doc_sources)
     if fingerprint is not None:
         front_matter_block = front_matter_block.rstrip("\n") + f'\ntest_case_fingerprint: "{fingerprint}"\n'
 

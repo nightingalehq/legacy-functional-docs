@@ -181,8 +181,11 @@ def _copycode_rule_candidates(conn, mid: int, _seen: set | None = None) -> list[
         if t["id"] in seen:
             continue
         seen.add(t["id"])
+        # `, id` (Copilot review on issue #195's fix): this feeds
+        # numbered_rule_candidates() below, same tie-break contract as
+        # fetch_rule_candidate_rows.
         rules = conn.execute(
-            "SELECT * FROM rule_candidate WHERE member_id=? ORDER BY line_no", (t["id"],)
+            "SELECT * FROM rule_candidate WHERE member_id=? ORDER BY line_no, id", (t["id"],)
         ).fetchall()
         if rules:
             out.append((t["id"], t["name"], rules))
@@ -934,8 +937,11 @@ def build_member_facts(conn, member_name: str) -> "MemberFacts | str":
         "SELECT * FROM message_ref WHERE member_id=? ORDER BY line_no", (mid,)
     ).fetchall()
 
+    # `, id` (Copilot review on issue #195's fix): this feeds
+    # numbered_rule_candidates() below (module_brief's "Candidate business
+    # rules" section), same tie-break contract as fetch_rule_candidate_rows.
     rules = conn.execute(
-        "SELECT * FROM rule_candidate WHERE member_id=? ORDER BY line_no", (mid,)
+        "SELECT * FROM rule_candidate WHERE member_id=? ORDER BY line_no, id", (mid,)
     ).fetchall()
 
     copycode_rules = _copycode_rule_candidates(conn, mid)
@@ -2239,10 +2245,16 @@ def rules_register(conn, redact: Redactor = NULL_REDACTOR) -> str:
         rows_by_name[name][0]["id"] for name in names if len(rows_by_name.get(name, [])) == 1
     ]
     id_placeholders = ",".join("?" * len(resolved_ids))
+    # `, id` (Copilot review on issue #195's fix): the per-member grouping
+    # below feeds numbered_rule_candidates(), same tie-break contract every
+    # other BR-numbering consumer uses -- otherwise a same-line pair of
+    # rule_candidate rows could number differently here than in
+    # module_brief()/thematic_rules_register(), pointing a generated test
+    # or fingerprint at the wrong rule.
     rule_rows = (
         conn.execute(
             f"SELECT * FROM rule_candidate WHERE member_id IN ({id_placeholders}) "
-            "ORDER BY member_id, line_no",
+            "ORDER BY member_id, line_no, id",
             resolved_ids,
         ).fetchall()
         if resolved_ids

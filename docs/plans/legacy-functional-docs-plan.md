@@ -12,6 +12,43 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-11m):**
+- Addressed the twenty-fourth Copilot review round on PR #209 (issue
+  #195):
+  1. `write_test_doc_with_sidecar`'s fingerprint stamp is now guarded by a
+     new `testplan.member_test_case_aligned_with_rule_candidate`: this
+     document's own content was rendered from whatever `test_case` rows
+     were current when `test_case_brief` built its prompt, which can
+     predate a `rule_candidate` change `mfdoc test-plan` hasn't caught up
+     to yet (exactly the state `run_test_batch`'s per-member resume-skip
+     regression exercises). Stamping the *current* rule_candidate
+     fingerprint onto that still-old-numbered content bakes in a value
+     that keeps matching every later recomputation (rule_candidate
+     doesn't move again until the next derive run) -- making the
+     now-stale sidecar look current even after test-plan catches up,
+     rejecting a later, legitimate manifest's new ids as "missing from
+     sidecar". Deliberately a subset check (no current rule_candidate id
+     lacks a test_case row), not exact equality -- an unrelated *extra*
+     test_case row isn't this specific false positive's concern.
+  2. The prior round's `, id` tie-break only reached 3 of the several
+     queries that feed `numbered_rule_candidates()` (the shared BR-nnn
+     ordinal assignment `rules_register`, `module_brief`,
+     `thematic_rules_register`, and `testplan.build_member_test_cases`
+     all rely on). `module_brief`'s own rules query, `_copycode_rule_
+     candidates`, `rules_register`'s bulk query, and `thematic_rules_
+     register`'s bulk query now all order the same way -- otherwise a
+     same-line pair of rule_candidate rows could number differently
+     across these views, pointing a generated test or fingerprint at the
+     wrong rule despite each individual query "consistently" using its
+     own unspecified tie order.
+- Five new regression tests (the fingerprint-alignment guard, both
+  directly and via `write_test_doc_with_sidecar`, plus fixing two
+  existing test fixtures that asserted a fingerprint from `rule_candidate`
+  data with no matching `test_case` row -- an unrealistic combination the
+  new guard correctly rejects). Full suite green (1034 passed, 2 skipped)
+  plus a clean `mfdoc validate` pass against `examples/` (71/71 documents,
+  0 invalid citations of 750).
+
 **Progress (2026-09-11l):**
 - Addressed the twenty-third Copilot review round on PR #209 (issue #195):
   1. `member_rule_fingerprint`'s `ORDER BY line_no` (previously deliberately
