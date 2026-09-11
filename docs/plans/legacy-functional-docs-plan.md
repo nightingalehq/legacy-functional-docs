@@ -100,11 +100,21 @@ GitHub org.
      arbitrary file on disk (strip + `generated_by:` version correction,
      in place, a no-op when already clean); wired into SKILL.md's "Write
      from the brief" step, to be run against each such document right
-     after writing it and before `mfdoc validate`. Added
+     after writing it and before `mfdoc validate`, and added to
+     `README.md`'s Quick start. Added
      `test_clean_doc_strips_leaked_preamble_from_an_interactively_written_document`/
      `test_clean_doc_is_a_no_op_and_says_so_when_already_clean`
-     (`tests/test_cli.py`). Full suite: 941 passed, 2 skipped (four new
-     tests total from this fix).
+     (`tests/test_cli.py`). Copilot PR review caught that this initial
+     version could falsely report "already clean" for a document
+     `_fix_generated_by_version` couldn't actually rescue (a preamble
+     still longer than the search window, or no front matter at all) --
+     `mfdoc validate` would then still reject the same file `clean-doc`
+     just reported clean. Fixed by checking `split_frontmatter` on the
+     result before declaring success, and failing loudly (non-zero exit)
+     instead when it still can't find valid front matter; added
+     `test_clean_doc_fails_loudly_instead_of_reporting_already_clean_when_uncleanable`.
+     Full suite (rebased onto main post-#199): 953 passed, 2 skipped (four
+     new tests total from this fix).
 
 **Progress (2026-09-10e):**
 - Fixed issue #188: ported `batch.py`'s near-miss/targeted-patch mechanism

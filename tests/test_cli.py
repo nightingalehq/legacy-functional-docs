@@ -116,3 +116,26 @@ def test_clean_doc_is_a_no_op_and_says_so_when_already_clean(tmp_path, capsys):
     assert exit_code == 0
     assert doc.read_text(encoding="utf-8") == text
     assert "already clean" in capsys.readouterr().out
+
+
+def test_clean_doc_fails_loudly_instead_of_reporting_already_clean_when_uncleanable(
+    tmp_path, capsys,
+):
+    """Copilot review catch on this PR: `_fix_generated_by_version` returns
+    its input unchanged both when the document was already clean *and*
+    when no rescuable front matter was found near the start at all (e.g. a
+    preamble longer than `_PREAMBLE_SEARCH_WINDOW`, or no front matter
+    whatsoever) -- those are very different outcomes for a human/agent
+    running this command to see. Reporting "already clean" for the second
+    case would be actively misleading: `mfdoc validate` will still reject
+    the file exactly as before. clean-doc must tell those apart and fail
+    (non-zero exit) on the second."""
+    doc = tmp_path / "system-overview.md"
+    doc.write_text("Sorry, I can't help with that.\n", encoding="utf-8")
+
+    exit_code = cli.main(["clean-doc", "--file", str(doc)])
+
+    assert exit_code != 0
+    captured = capsys.readouterr()
+    assert "already clean" not in captured.out
+    assert "front matter" in captured.err

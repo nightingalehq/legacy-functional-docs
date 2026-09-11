@@ -529,12 +529,32 @@ def cmd_clean_doc(args) -> int:
     the same leaked-preamble-before-frontmatter defect (issue #197) can
     happen there too, with nothing in the write path to catch it. This is
     the equivalent protection for that path: run it against the file right
-    after writing it, before `mfdoc validate`."""
+    after writing it, before `mfdoc validate`.
+
+    `_fix_generated_by_version`/`_strip_response_preamble` deliberately
+    return their input unchanged when no `---` opening a real YAML mapping
+    is found near the start at all (a preamble longer than
+    `_PREAMBLE_SEARCH_WINDOW`, or a response with no front matter
+    whatsoever) -- by design, since there's nothing there to safely
+    rescue. Left unchecked, that would make this command print "already
+    clean" and exit 0 for exactly the uncleanable case it exists to catch,
+    with `mfdoc validate` then failing on the very same file. So this
+    checks `split_frontmatter` on the result before declaring success:
+    if it still can't find valid front matter, that's reported as a
+    failure (non-zero exit) instead."""
     from .batch import _fix_generated_by_version
+    from .validate import split_frontmatter
 
     path = Path(args.file)
     original = path.read_text(encoding="utf-8")
     cleaned = _fix_generated_by_version(original)
+    _, _, err = split_frontmatter(cleaned)
+    if err:
+        print(f"{args.file}: {err} even after cleaning -- inspect it by hand; "
+              f"`mfdoc validate` will reject this file as-is", file=sys.stderr)
+        if cleaned != original:
+            path.write_text(cleaned, encoding="utf-8")
+        return 1
     if cleaned == original:
         print(f"{args.file}: already clean")
         return 0
