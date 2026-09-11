@@ -171,11 +171,13 @@ def write_test_doc_with_sidecar(conn, member_name: str, out_path: Path, doc_text
     # contract both allow this) would otherwise be stamped from a
     # single-member hash here but compared against a multi-member one
     # there -- mismatching by construction on every single validation,
-    # not because anything about the corpus ever changed. Falls back to
-    # `[member_name]` only when this document's own `sources` can't be
-    # parsed as a non-empty list of strings (front matter missing/
-    # malformed -- the same "leave it out" trade-off as an unresolvable
-    # fingerprint below, not a case worth failing this write over).
+    # not because anything about the corpus ever changed. `fingerprint`
+    # below is left unset entirely -- not substituted with `[member_name]`
+    # -- when this document's own `sources` can't be parsed as a
+    # non-empty list of strings (front matter missing/malformed): see
+    # this function's own docstring above for why a fabricated
+    # `[member_name]` fallback here would only push the document onto the
+    # weaker id-overlap check permanently instead.
     #
     # `isinstance(doc_fm, dict)`, not just `is not None` (Copilot review):
     # `split_frontmatter` can return a truthy scalar or list for

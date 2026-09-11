@@ -943,7 +943,8 @@ def validate_doc(conn, path: Path, outcome_field=OUTCOME_FIELD, _text: str | Non
 
 def validate_test_doc(conn, path: Path, _text: str | None = None,
                        _prior_fingerprint: str | None = None,
-                       _render_time: bool = False) -> dict:
+                       _render_time: bool = False,
+                       _valid_scenarios: set[str] | None = None) -> dict:
     """`validate_doc` plus the checks specific to a generated test file:
     `language`/`framework` front matter, and that every bare `MEMBER:BR-nnn`
     reference names a scenario that actually exists in test_case -- the
@@ -1086,8 +1087,8 @@ def validate_test_doc(conn, path: Path, _text: str | None = None,
             if key not in fm:
                 problems.append(f"front matter missing required key: {key}")
 
-    # Fetched at most once, lazily, and reused for both the sidecar
-    # staleness decision and the final `bad_refs` check -- a per-id
+    # Fetched at most once per call, lazily, and reused for both the
+    # sidecar staleness decision and the final `bad_refs` check -- a per-id
     # `SELECT ... WHERE UPPER(scenario_name)=UPPER(?)` query (no index on
     # that expression) would otherwise scan `test_case` twice per id: once
     # for staleness, once for validity (Copilot PR review on issue #195's
@@ -1095,7 +1096,17 @@ def validate_test_doc(conn, path: Path, _text: str | None = None,
     # no `MEMBER:BR-nnn` references at all (an edge case `validate_tests_
     # tree` can still walk into) has no need for this and shouldn't pay a
     # full `test_case` scan on every single document it validates.
-    _valid_scenarios_cache: set[str] | None = None
+    #
+    # `_valid_scenarios`, from `validate_tests_tree`: the same full-corpus
+    # scan computed once and shared across every document in the tree,
+    # instead of every sidecar-bearing document re-running its own
+    # `SELECT scenario_name FROM test_case` (Copilot review -- otherwise
+    # O(document_count * corpus_size) for a tree validation). A caller
+    # validating one document in isolation (`mfdoc test-gen`'s single-file
+    # path, the render/retry loops, every test in this suite) has no
+    # tree-wide set to share and leaves this unset, falling back to the
+    # same lazy per-call query as before.
+    _valid_scenarios_cache: set[str] | None = _valid_scenarios
 
     def valid_scenarios() -> set[str]:
         nonlocal _valid_scenarios_cache
@@ -1493,7 +1504,14 @@ def _partition_pipeline_docs(conn, root: Path) -> tuple[list[Path], list[str], d
 
 def validate_tests_tree(conn, root: Path) -> dict:
     paths, out_of_scope, text_cache = _partition_pipeline_docs(conn, root)
-    results = [validate_test_doc(conn, p, _text=text_cache.get(p)) for p in paths]
+    # Computed once and shared across every document below instead of each
+    # sidecar-bearing document re-scanning `test_case` on its own (Copilot
+    # review on issue #195's fix -- see `validate_test_doc`'s
+    # `_valid_scenarios` docstring).
+    valid_scenarios = {row["scenario_name"].upper() for row in conn.execute("SELECT scenario_name FROM test_case")}
+    results = [
+        validate_test_doc(conn, p, _text=text_cache.get(p), _valid_scenarios=valid_scenarios) for p in paths
+    ]
     return {
         "documents": len(results),
         "documents_ok": sum(1 for r in results if r["ok"]),

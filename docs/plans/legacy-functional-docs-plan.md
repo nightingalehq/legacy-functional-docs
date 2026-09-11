@@ -12,6 +12,33 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-11i):**
+- Addressed the twentieth Copilot review round on PR #209 (issue #195):
+  1. `validate_tests_tree` now computes its `valid test_case scenario names`
+     scan once and passes it into every `validate_test_doc(..., _valid_
+     scenarios=...)` call via a new optional parameter, instead of each
+     sidecar-bearing document independently re-running that same full
+     `test_case` scan -- was O(document_count * corpus_size) for a tree
+     validation; a caller validating a single document in isolation (every
+     other call site, including this suite) leaves the parameter unset and
+     keeps the prior per-call lazy-cache behaviour.
+  2. `write_test_doc_with_sidecar`'s inline comment above the fingerprint
+     write still claimed a `[member_name]` fallback for unparseable
+     `sources` that the function's own docstring (and the code immediately
+     below it) already disclaims -- the prior round's progress entry
+     verified the wrong piece of text (the docstring, not this comment) and
+     declared the finding already resolved. Corrected the comment to match
+     actual behaviour: `fingerprint` is left unset, never substituted.
+  3. `test_render_time_legacy_sidecar_bypass_does_not_flag_a_legitimately_
+     new_scenario` was named and documented as covering a candidate
+     introducing a scenario the old sidecar never had, but both the
+     candidate and the legacy sidecar it exercised only ever contained
+     `BR-004` -- no new id was actually exercised. Added a second scenario
+     (`BR-001`, real and current) to the candidate that the sidecar still
+     lacks, so the test now exercises the case its name and docstring claim.
+- Full suite green (1024 passed, 2 skipped) plus a clean `mfdoc validate`
+  pass against `examples/` (71/71 documents, 0 invalid citations of 750).
+
 **Progress (2026-09-11h):**
 - Addressed the remaining Copilot review findings on PR #209 (issue #195,
   stale test-batch sidecar detection):

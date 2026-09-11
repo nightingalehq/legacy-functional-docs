@@ -545,6 +545,37 @@ def test_rejects_unconfirmed_order():
 ```
 """
 
+RENDER_TIME_CANDIDATE_WITH_A_NEW_SCENARIO = """---
+title: "MMP0100 -- generated tests (python)"
+doc_type: generated_test
+system: MOM
+module: MMP0100
+language: python
+framework: pytest
+generated_by: legacy-functional-docs 0.1.0
+generated_at: "2026-01-01"
+review_status: draft
+reviewers: []
+confidence_summary:
+  verified: 2
+  inferred: 0
+  unresolved: 0
+sources: ["MMP0100"]
+---
+
+# MMP0100 -- generated tests
+
+```python
+def test_rejects_unconfirmed_order():
+    # MMP0100:BR-004 [[MMP0100:38-40]]
+    ...
+
+def test_something_new():
+    # MMP0100:BR-001 [[MMP0100:1]]
+    ...
+```
+"""
+
 
 def test_render_time_legacy_sidecar_bypass_still_catches_a_dropped_scenario(indexed_db, tmp_path):
     """Copilot review follow-up on issue #195: `_render_time=True`'s legacy-
@@ -590,14 +621,18 @@ def test_render_time_legacy_sidecar_bypass_does_not_flag_a_legitimately_new_scen
     introduces that the old legacy sidecar never had must still pass --
     this is exactly the deadlock case `_render_time=True`'s bypass exists
     to prevent (see `validate_test_doc`'s docstring), and the completeness
-    check added alongside it must not reintroduce that deadlock."""
+    check added alongside it must not reintroduce that deadlock. `BR-001`
+    is real and current but absent from the old sidecar below (which only
+    ever covered `BR-004`) -- Copilot review follow-up: an earlier version
+    of this test used a candidate/sidecar pair that both only had `BR-004`,
+    which exercised no new id at all."""
     conn = indexed_db
     testplan.run_all(conn, member_name="MMP0100")
     path = tmp_path / "MMP0100.md"
     sidecar = tmp_path / "MMP0100.py"
-    path.write_text(RENDER_TIME_CANDIDATE_MISSING_A_SCENARIO, encoding="utf-8")
-    # Legacy sidecar covers only BR-004 (a strict subset of the candidate,
-    # which also only has BR-004 here) -- nothing dropped, nothing new.
+    path.write_text(RENDER_TIME_CANDIDATE_WITH_A_NEW_SCENARIO, encoding="utf-8")
+    # Legacy sidecar covers only BR-004 -- the candidate's BR-001 is
+    # genuinely new, not previously in the sidecar at all.
     sidecar.write_text(
         "def test_rejects_unconfirmed_order():\n"
         "    # MMP0100:BR-004\n"
