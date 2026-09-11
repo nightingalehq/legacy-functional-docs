@@ -170,7 +170,13 @@ def write_test_doc_with_sidecar(conn, member_name: str, out_path: Path, doc_text
     # fingerprint below, not a case worth failing this write over).
     doc_fm, _doc_body, _doc_err = split_frontmatter(doc_text)
     doc_sources = doc_fm.get("sources") if doc_fm is not None else None
-    if not (isinstance(doc_sources, list) and doc_sources and all(isinstance(s, str) for s in doc_sources)):
+    if isinstance(doc_sources, list) and doc_sources and all(isinstance(s, str) for s in doc_sources):
+        # Stripped, matching validate.py's read-side handling of the same
+        # field exactly -- both sides must normalize identically, or a
+        # `sources` entry with incidental whitespace resolves on one side
+        # and not the other, silently skipping the fingerprint stamp.
+        doc_sources = [s.strip() for s in doc_sources]
+    else:
         doc_sources = [member_name]
     fingerprint = doc_rule_fingerprint(conn, doc_sources)
     if fingerprint is not None:
@@ -841,7 +847,16 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
     # tool) is judged against, and a bug in _render_chunk_index deserves
     # the same loud, reported failure a bad model response gets, not a
     # silent `ok=True` because no chunk happened to fail.
-    index_validation = validate_test_doc(conn, out_path)
+    #
+    # `_render_time=True` here too (issue #195 review): the leftover
+    # single-doc sidecar this function just tried to remove above is
+    # best-effort (an OSError there is swallowed, same as
+    # `_prune_stale_chunk_files`) -- if that unlink somehow failed, this
+    # index document (which never gets its own fingerprint, being
+    # deterministic rather than model-authored) would otherwise still be
+    # exposed to the exact stale-sidecar cross-check this whole mechanism
+    # exists to bypass at render time.
+    index_validation = validate_test_doc(conn, out_path, _render_time=True)
     if not index_validation["ok"]:
         problems = problems + [f"index document: {p}" for p in index_validation["problems"]]
 

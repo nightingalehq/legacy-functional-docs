@@ -538,6 +538,51 @@ def test_unknown_language_keeps_code_embedded(tmp_path):
     assert not (tmp_path / "FAKEMOD.cobol").exists()
 
 
+def test_write_test_doc_with_sidecar_strips_whitespace_in_sources_before_fingerprinting(tmp_path):
+    """Copilot review follow-up on issue #195: `validate_test_doc`'s
+    fingerprint recomputation strips whitespace from `sources` member
+    names before resolving them (a prior review round), but the write
+    side (`write_test_doc_with_sidecar`) must normalize identically -- a
+    `sources` entry with incidental whitespace (e.g. `["FAKEMOD "]`)
+    would otherwise fail to resolve here, silently skip stamping a
+    fingerprint at all, and every later validation would fall back to
+    the weaker id-overlap heuristic even though nothing about the
+    document itself is actually malformed."""
+    from mfdoc import testbatch
+    from mfdoc.testplan import doc_rule_fingerprint
+    import sqlite3
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
+    insert(
+        conn, "test_case", member_id=1, kind="unit", scenario_name="FAKEMOD:BR-001",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+        then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:1", confidence="verified",
+    )
+    conn.commit()
+
+    doc_text = _valid_test_doc_text("python", "pytest").replace(
+        'sources: ["FAKEMOD"]', 'sources: ["FAKEMOD "]',
+    )
+    out_path = tmp_path / "FAKEMOD.md"
+    out_path.write_text(doc_text, encoding="utf-8")
+    testbatch.write_test_doc_with_sidecar(conn, "FAKEMOD", out_path, doc_text, "python")
+
+    written = out_path.read_text(encoding="utf-8")
+    assert "test_case_fingerprint:" in written, (
+        "a sources entry with incidental whitespace must not silently "
+        "skip fingerprint stamping"
+    )
+    expected_fp = doc_rule_fingerprint(conn, ["FAKEMOD"])
+    assert f'test_case_fingerprint: "{expected_fp}"' in written
+
+
 def test_generate_member_test_doc_writes_sidecar_and_slims_md(tmp_path):
     from mfdoc import testbatch
     import sqlite3

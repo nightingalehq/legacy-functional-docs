@@ -485,6 +485,27 @@ GitHub org.
   attempt and leave a real fingerprint stamped going forward. Full suite:
   1012 passed, 2 skipped; bundled fixture pipeline unchanged.
 
+  A fifteenth review round found the write-side counterpart of the
+  whitespace-stripping fix from an earlier round: `validate_test_doc`
+  strips `sources` member names before resolving them, but `write_test_
+  doc_with_sidecar` was still passing them through unstripped -- a
+  `sources` entry with incidental whitespace would fail to resolve on
+  the *write* side, silently skip stamping a fingerprint at all, and
+  push every later validation onto the weaker fallback regardless of
+  `_render_time`. Stripped identically on both sides now. Also: the
+  chunked index document's own `validate_test_doc` call didn't pass
+  `_render_time=True` -- if the leftover single-doc sidecar's
+  best-effort `unlink()` (added last round) ever failed (a file lock, a
+  permission-restricted directory), the index (which never gets its own
+  fingerprint, being deterministic rather than model-authored) would
+  still be exposed to exactly the stale-sidecar cross-check this whole
+  mechanism exists to bypass. Passed `_render_time=True` there too,
+  closing the gap without needing to propagate the unlink failure as a
+  hard error. Added
+  `test_write_test_doc_with_sidecar_strips_whitespace_in_sources_before_
+  fingerprinting`. Full suite: 1013 passed, 2 skipped; bundled fixture
+  pipeline unchanged.
+
 **Progress (2026-09-11):**
 - Fixed issue #199: `mfdoc doc-drift`'s existing checks (issue #161) caught
   system-wide/module-scoped drift but nothing keyed on a single dialect --
