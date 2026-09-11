@@ -12,6 +12,7 @@ a business rule without seeing its exact condition is where invention creeps in.
 
 from __future__ import annotations
 
+import bisect
 import json
 import re
 import statistics
@@ -89,7 +90,8 @@ def _copycode_rule_candidates(conn, mid: int, _seen: set | None = None) -> list[
     return out
 
 
-def _branch_data_access(acc_rows: list, name: str, start_line: int, end_line: int) -> str | None:
+def _branch_data_access(acc_rows: list, acc_line_nos: list[int], name: str,
+                         start_line: int, end_line: int) -> str | None:
     """Compact citation list of every data_access row (from `acc_rows` --
     this member's full `data_access` result set, already fetched once by
     `build_member_facts`/`module_brief`; see issue #183) strictly between
@@ -100,13 +102,19 @@ def _branch_data_access(acc_rows: list, name: str, start_line: int, end_line: in
     appearing, uncorrelated, in the brief's separate "Data access"
     section. None when nothing falls in range.
 
-    Filters in Python rather than a fresh `conn.execute` per rule, since
-    `acc_rows` is already ordered by `line_no` (module_brief's own "Data
-    access" query) and covers every rule this is ever called for in one
-    pass -- a member with many IF/ELSE rules no longer means a matching
-    number of extra per-rule queries on top of the ~15 whole-member ones
-    issue #183 is about."""
-    rows = [r for r in acc_rows if start_line < r["line_no"] <= end_line]
+    Looks up the matching slice via `bisect` on `acc_line_nos` (the same
+    `acc_rows`, already ordered by `line_no` -- module_brief's own "Data
+    access" query -- with just its `line_no` column pulled out once,
+    ahead of the per-rule loop, purely so `bisect` has something to search)
+    rather than a full linear scan of every data_access row per rule: with
+    R branch rules and A data_access rows, a per-rule linear scan is
+    O(R*A); this is O(R*log A) to find each slice's bounds plus O(k) to
+    read the k rows actually in range -- avoiding both a fresh
+    `conn.execute` per rule (the original issue #183 finding) and an
+    equivalent-cost Python scan standing in for it."""
+    lo = bisect.bisect_right(acc_line_nos, start_line)
+    hi = bisect.bisect_right(acc_line_nos, end_line)
+    rows = acc_rows[lo:hi]
     if not rows:
         return None
     return "; ".join(
@@ -257,25 +265,30 @@ def _enclosing_condition(conn, member_id: int, rule_rows: list, line_no: int) ->
     return match
 
 
-def _caller_guard_chain(conn, caller_id: int, caller_name: str, call_line_no: int,
-                         redact: Redactor = NULL_REDACTOR) -> list[str]:
-    """For a callee reachable from exactly one call site, the caller's own
-    `call_edge` rows strictly before that call (already ordered by
-    `line_no`, per `call_edge`'s own citation ordering elsewhere in this
-    module) -- the validation/confirmation/mode-gate calls the caller
-    performs before ever reaching this one, which module_brief's own
-    "Inbound callers" section previously dropped entirely by citing only the
-    call line itself (issue #151). Each preceding call is paired with its
-    innermost enclosing `rule_candidate` condition, when one exists, via
-    `_enclosing_condition` -- read-only synthesis over facts already in the
-    store, no new extraction. Returns rendered bullet lines, or an empty
-    list when there is nothing preceding this call in its own caller.
+def _caller_guard_chain_facts(conn, caller_id: int, call_line_no: int) -> list[dict]:
+    """Raw (unredacted) facts for `_render_guard_chain`: for a callee
+    reachable from exactly one call site, the caller's own `call_edge` rows
+    strictly before that call (already ordered by `line_no`, per
+    `call_edge`'s own citation ordering elsewhere in this module) -- the
+    validation/confirmation/mode-gate calls the caller performs before ever
+    reaching this one, which module_brief's own "Inbound callers" section
+    previously dropped entirely by citing only the call line itself (issue
+    #151). Each preceding call is paired with its innermost enclosing
+    `rule_candidate` condition, when one exists, via `_enclosing_condition`
+    -- read-only synthesis over facts already in the store, no new
+    extraction. Returns `[]` when there is nothing preceding this call in
+    its own caller.
 
-    `condition` is raw source text (the same field every other condition
-    rendering in this module passes through `redact` before writing to the
-    brief -- see the "Top rules"/"Candidate business rules" sections below),
-    so it goes through the same `redact` call here rather than being pasted
-    in verbatim."""
+    Deliberately returns raw rows, not rendered bullet lines: `condition`
+    is raw source text that must go through the *caller's own* `redact` at
+    render time (see `_render_guard_chain`), the same way every other
+    condition in this module is redacted only when rendered, never when
+    fetched -- `MemberFacts.guard_lines` (issue #183 review feedback) is
+    built from this function's output plus whichever `redact` a given
+    `module_brief()` call is actually using, rather than baking one
+    `redact` in at fact-gathering time and risking a mismatch if a caller
+    ever reuses a `MemberFacts` with a different `redact` than the one it
+    was built with."""
     preceding = conn.execute(
         "SELECT * FROM call_edge WHERE caller_id=? AND line_no<? ORDER BY line_no",
         (caller_id, call_line_no),
@@ -285,17 +298,35 @@ def _caller_guard_chain(conn, caller_id: int, caller_name: str, call_line_no: in
     rule_rows = conn.execute(
         "SELECT * FROM rule_candidate WHERE member_id=? ORDER BY line_no", (caller_id,)
     ).fetchall()
-    lines = []
+    facts = []
     for call in preceding:
         cond = _enclosing_condition(conn, caller_id, rule_rows, call["line_no"])
-        callee = call["callee_name"] or "UNKNOWN"
-        cite = _cite(caller_name, call["line_no"])
-        if cond and cond["condition"]:
+        facts.append({
+            "callee": call["callee_name"] or "UNKNOWN",
+            "call_kind": call["call_kind"],
+            "call_line_no": call["line_no"],
+            "condition": cond["condition"] if cond else None,
+            "cond_line_no": cond["line_no"] if cond else None,
+            "cond_construct": cond["construct"] if cond else None,
+        })
+    return facts
+
+
+def _render_guard_chain(guard_facts: list[dict], caller_name: str, redact: Redactor) -> list[str]:
+    """Render `_caller_guard_chain_facts`' raw rows into bullet lines,
+    applying `redact` here -- at render time, using whichever `redact` this
+    particular `module_brief()` call is using -- rather than at fact-gather
+    time (see `_caller_guard_chain_facts`'s docstring for why)."""
+    lines = []
+    for f in guard_facts:
+        callee = f["callee"]
+        cite = _cite(caller_name, f["call_line_no"])
+        if f["condition"]:
             lines.append(
-                f"- when `{redact(cond['condition'])}` holds {_cite(caller_name, cond['line_no'])}, "
-                f"calls `{callee}` (`{call['call_kind']}`) {cite}"
+                f"- when `{redact(f['condition'])}` holds {_cite(caller_name, f['cond_line_no'])}, "
+                f"calls `{callee}` (`{f['call_kind']}`) {cite}"
             )
-        elif cond:
+        elif f["cond_line_no"] is not None:
             # `_enclosing_condition` found a real enclosing block (a DECIDE
             # FOR CONDITION, an ELSE, ...) but that construct's own
             # `condition` text wasn't captured -- the call is still
@@ -303,8 +334,8 @@ def _caller_guard_chain(conn, caller_id: int, caller_name: str, call_line_no: in
             # quote. Saying "unconditionally" here would be wrong, not
             # merely uninformative (Copilot review on PR #151).
             lines.append(
-                f"- calls `{callee}` (`{call['call_kind']}`) {cite}, scoped inside "
-                f"`{cond['construct']}` {_cite(caller_name, cond['line_no'])} "
+                f"- calls `{callee}` (`{f['call_kind']}`) {cite}, scoped inside "
+                f"`{f['cond_construct']}` {_cite(caller_name, f['cond_line_no'])} "
                 "(guard condition not captured)"
             )
         else:
@@ -316,7 +347,7 @@ def _caller_guard_chain(conn, caller_id: int, caller_name: str, call_line_no: in
             # absence of a guard line speak for it, rather than asserting
             # "unconditionally", which claims more than this brief can back
             # (Copilot review on PR #151).
-            lines.append(f"- calls `{callee}` (`{call['call_kind']}`) {cite}")
+            lines.append(f"- calls `{callee}` (`{f['call_kind']}`) {cite}")
     return lines
 
 
@@ -646,9 +677,14 @@ class MemberFacts:
     Fields hold raw rows (unredacted, unformatted) exactly as `module_brief`
     used to fetch them inline -- redaction and markdown formatting still
     happen in `module_brief` itself, at render time, so a `MemberFacts`
-    built once and reused across chunks renders identically to a fresh
-    per-chunk fetch would have. The one exception is `guard_lines`, which
-    is pre-rendered (see `build_member_facts`'s docstring for why)."""
+    built once and reused across chunks (or reused with a *different*
+    `redact` than whatever call first built it -- see issue #183 review
+    feedback) renders identically to a fresh per-chunk fetch would have.
+    This includes `guard_facts` (the "preceding calls" facts for a callee
+    reachable from exactly one call site): unlike an earlier version of
+    this class, it is *not* pre-rendered with any particular `redact` --
+    `module_brief` renders it via `_render_guard_chain(guard_facts,
+    caller_name, redact)`, using its own caller's `redact`, every time."""
     mid: int
     name: str
     m: object
@@ -665,7 +701,7 @@ class MemberFacts:
     tx: list
     calls: list
     inbound: list
-    guard_lines: list
+    guard_facts: list
     inter: list
     msgs: list
     rules: list
@@ -673,7 +709,7 @@ class MemberFacts:
     gaps: list
 
 
-def build_member_facts(conn, member_name: str, redact: Redactor = NULL_REDACTOR) -> "MemberFacts | str":
+def build_member_facts(conn, member_name: str) -> "MemberFacts | str":
     """Fetch every whole-member fact `module_brief` needs, once, so a
     chunked member's many `module_brief()` calls (one per chunk -- see
     `_generate_module_doc_chunked`) can share a single fact-gather instead
@@ -685,17 +721,13 @@ def build_member_facts(conn, member_name: str, redact: Redactor = NULL_REDACTOR)
     A caller that gets a `str` back should treat it as a complete brief and
     never call `module_brief()` with it.
 
-    `redact` is used here only to pre-render `guard_lines` (the "preceding
-    calls" bullets for a callee reachable from exactly one call site --
-    see `_caller_guard_chain`), since that helper returns already-formatted
-    markdown, not raw rows. Every other field stays unredacted raw data,
-    redacted later by `module_brief` at render time. Pass the *same*
-    `redact` you will use for every `module_brief` call sharing this
-    `MemberFacts` -- this is exactly what `_generate_module_doc_chunked`
-    and `plan_batch` do (one `redact` for a whole member's chunk loop), so
-    it costs nothing in practice, but a `MemberFacts` built with one
-    `redact` and rendered with a different one would show stale guard-chain
-    text."""
+    Takes no `redact` -- every field, `guard_facts` included, is raw,
+    unredacted data (see `MemberFacts`'s docstring); redaction only ever
+    happens in `module_brief` at render time, using whichever `redact` that
+    particular call was given. This is what makes reusing one `MemberFacts`
+    across a member's chunks safe even if a caller (hypothetically) reused
+    it with a different `redact` per chunk -- there is no redact-dependent
+    state baked into the facts for that to go stale against."""
     from .db import resolve_member_by_name
 
     matches, ambiguous_libs = resolve_member_by_name(conn, member_name)
@@ -780,12 +812,10 @@ def build_member_facts(conn, member_name: str, redact: Redactor = NULL_REDACTOR)
         """,
         (name,),
     ).fetchall()
-    guard_lines: list[str] = []
+    guard_facts: list[dict] = []
     if len(inbound) == 1:
         only = inbound[0]
-        guard_lines = _caller_guard_chain(
-            conn, only["caller_id"], only["caller"], only["line_no"], redact
-        )
+        guard_facts = _caller_guard_chain_facts(conn, only["caller_id"], only["line_no"])
 
     inter = conn.execute(
         "SELECT * FROM interaction WHERE member_id=? ORDER BY line_no", (mid,)
@@ -809,7 +839,7 @@ def build_member_facts(conn, member_name: str, redact: Redactor = NULL_REDACTOR)
         mid=mid, name=name, m=m, line_count=line_count, hdr=hdr, params=params, views=views,
         screen_field_names=screen_field_names, other_vars=other_vars,
         data_area_includes=data_area_includes, routines=routines, acc=acc, unused=unused,
-        tx=tx, calls=calls, inbound=inbound, guard_lines=guard_lines, inter=inter, msgs=msgs,
+        tx=tx, calls=calls, inbound=inbound, guard_facts=guard_facts, inter=inter, msgs=msgs,
         rules=rules, copycode_rules=copycode_rules, gaps=gaps,
     )
 
@@ -854,11 +884,16 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
     built for this same `member_name` -- lets a chunked member's per-chunk
     calls reuse one member-level fact-gather instead of re-querying it on
     every chunk (issue #183). When omitted (the default), this function
-    builds it itself via `build_member_facts(conn, member_name, redact)`,
-    exactly as it always fetched these facts before this parameter existed
-    -- so every call site other than the chunked-render loop is unaffected."""
+    builds it itself via `build_member_facts(conn, member_name)`, exactly
+    as it always fetched these facts before this parameter existed -- so
+    every call site other than the chunked-render loop is unaffected.
+    Every field of a given `facts` (raw, unredacted data -- see
+    `MemberFacts`'s own docstring) is redacted here, with *this* call's own
+    `redact`, so reusing one `MemberFacts` across chunks (or even, in
+    principle, across calls using different `redact` policies) never
+    reads stale or wrongly-redacted text."""
     if facts is None:
-        facts = build_member_facts(conn, member_name, redact)
+        facts = build_member_facts(conn, member_name)
     if isinstance(facts, str):
         return facts
     mid, name, m = facts.mid, facts.name, facts.m
@@ -1009,6 +1044,11 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
 
     # --- data access
     acc = facts.acc
+    # Pulled out once, ahead of the "Candidate business rules" loop below,
+    # purely so _branch_data_access's bisect lookups (issue #183 review
+    # feedback) have a plain line_no list to search rather than re-deriving
+    # one (or falling back to an O(rules * data_access) scan) on every rule.
+    acc_line_nos = [r["line_no"] for r in acc]
     if acc:
         add("## Data access (verified from source statements)")
         for r in acc:
@@ -1107,7 +1147,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
         # deliberately scoped to the single-caller case only.
         if len(inbound) == 1:
             only = inbound[0]
-            guard_lines = facts.guard_lines
+            guard_lines = _render_guard_chain(facts.guard_facts, only["caller"], redact)
             if guard_lines:
                 add("")
                 add(
@@ -1181,14 +1221,14 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
                         f"has a paired ELSE at {_cite(name, else_line)} -- "
                         "document what happens on BOTH branches, not just this one"
                     )
-                access_summary = _branch_data_access(acc, name, r["line_no"], body_end)
+                access_summary = _branch_data_access(acc, acc_line_nos, name, r["line_no"], body_end)
                 if access_summary:
                     bits.append(f"data access on the true branch: {access_summary}")
             elif r["construct"] == "ELSE" and r["pair_line_no"]:
                 bits.append(f"pairs with the IF at {_cite(name, r['pair_line_no'])}")
                 if r["end_line"]:
                     bits.append(f"else-branch extent {_cite(name, r['line_no'], r['end_line'])}")
-                    access_summary = _branch_data_access(acc, name, r["line_no"], r["end_line"])
+                    access_summary = _branch_data_access(acc, acc_line_nos, name, r["line_no"], r["end_line"])
                     if access_summary:
                         bits.append(f"data access on this branch: {access_summary}")
             add("- " + " — ".join(bits))

@@ -943,7 +943,7 @@ def test_build_member_facts_returns_every_whole_member_section_module_brief_need
     vars/routines/data access/calls/rules/gaps in its own fixture source, so
     a MemberFacts built from it should carry all of them, not an
     accidentally-empty subset."""
-    facts = build_member_facts(indexed_db, "MMP0100", NULL_REDACTOR)
+    facts = build_member_facts(indexed_db, "MMP0100")
     assert isinstance(facts, MemberFacts)
     assert facts.name == "MMP0100"
     assert facts.rules, "MMP0100's fixture source has rule_candidate rows"
@@ -957,7 +957,7 @@ def test_build_member_facts_reused_across_chunks_makes_no_further_queries(indexe
     reusing raw rows already fetched, not re-querying them under a
     different rule_range each time."""
     counting = _CountingConn(indexed_db)
-    facts = build_member_facts(counting, "MMP0100", NULL_REDACTOR)
+    facts = build_member_facts(counting, "MMP0100")
     assert counting.calls > 5, "sanity: building facts should run several whole-member queries"
 
     counting.calls = 0
@@ -977,7 +977,7 @@ def test_module_brief_output_identical_whether_facts_are_shared_or_rebuilt_per_c
     member's chunks from one shared MemberFacts must produce byte-identical
     output to the old behaviour of letting each chunk's own module_brief()
     call rebuild its facts from scratch (facts=None, the default)."""
-    facts = build_member_facts(indexed_db, "MMP0100", NULL_REDACTOR)
+    facts = build_member_facts(indexed_db, "MMP0100")
     ranges = [(1, 6), (7, 12), (13, 18)]
     for i, rule_range in enumerate(ranges, start=1):
         chunk_info = (i, len(ranges))
@@ -998,7 +998,7 @@ def test_module_brief_output_identical_with_chunk_map_whether_facts_are_shared(i
     that annotation depends on chunk_info's current-chunk position, not on
     anything cached in MemberFacts, so it must still vary correctly per
     chunk even when every chunk shares one MemberFacts."""
-    facts = build_member_facts(indexed_db, "MMP0100", NULL_REDACTOR)
+    facts = build_member_facts(indexed_db, "MMP0100")
     routines = facts.routines
     assert routines, "sanity: MMP0100 must have routines for this test to mean anything"
     chunk_map = {r["name"].upper(): (idx % 3) + 1 for idx, r in enumerate(routines)}
@@ -1016,13 +1016,40 @@ def test_module_brief_output_identical_with_chunk_map_whether_facts_are_shared(i
         assert shared == rebuilt, f"chunk {i}: shared-facts output diverged with chunk_map set"
 
 
-def test_build_member_facts_returns_ambiguous_markdown_string_like_module_brief_did(indexed_db):
+def test_build_member_facts_returns_not_found_markdown_string_like_module_brief_did(indexed_db):
     """build_member_facts() must preserve module_brief's own graceful
     "no such member" early return -- callers (batch.py's chunked loop) treat
     a str result as a complete brief rather than a MemberFacts to render
     from."""
-    facts = build_member_facts(indexed_db, "NO-SUCH-MEMBER-AT-ALL", NULL_REDACTOR)
+    facts = build_member_facts(indexed_db, "NO-SUCH-MEMBER-AT-ALL")
     assert isinstance(facts, str)
     assert "No such member in the index" in facts
     # module_brief() itself must return the identical text for the same lookup.
     assert module_brief(indexed_db, "NO-SUCH-MEMBER-AT-ALL", redact=NULL_REDACTOR) == facts
+
+
+def test_build_member_facts_returns_ambiguous_markdown_string_like_module_brief_did():
+    """Same early-return preservation as the not-found case above, but for
+    a genuinely ambiguous name -- two distinct members sharing one bare
+    name across different libraries (member.name is only unique together
+    with library+dialect; see db.py's UNIQUE constraint)."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute(
+        "INSERT INTO member (id, name, dialect, library) VALUES (1, 'DUPMOD', 'natural', 'LIBA')"
+    )
+    conn.execute(
+        "INSERT INTO member (id, name, dialect, library) VALUES (2, 'DUPMOD', 'natural', 'LIBB')"
+    )
+    conn.commit()
+
+    facts = build_member_facts(conn, "DUPMOD")
+    assert isinstance(facts, str)
+    assert "ambiguous across libraries" in facts
+    # module_brief() itself must return the identical text for the same lookup.
+    assert module_brief(conn, "DUPMOD", redact=NULL_REDACTOR) == facts

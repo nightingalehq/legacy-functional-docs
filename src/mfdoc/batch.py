@@ -30,9 +30,9 @@ from typing import Callable
 
 from . import __version__
 from .brief import (
-    build_member_facts, chunk_density_metrics, fetch_routines, fetch_rule_candidate_rows,
-    flag_density_outliers, format_density_note, module_brief, routine_aware_chunk_ranges,
-    routine_for_line,
+    MemberFacts, build_member_facts, chunk_density_metrics, fetch_routines,
+    fetch_rule_candidate_rows, flag_density_outliers, format_density_note, module_brief,
+    routine_aware_chunk_ranges, routine_for_line,
 )
 from .citations import _cite, _rule_id, numbered_rule_candidates
 from .db import GAP_SEVERITY_ORDER_SQL
@@ -1505,7 +1505,8 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
                                   max_attempts: int, chunk_size: int,
                                   prior_chunks: dict | None = None,
                                   index_template: str | None = None,
-                                  sme_notes: dict | None = None) -> DocResult:
+                                  sme_notes: dict | None = None,
+                                  member_facts: MemberFacts | None = None) -> DocResult:
     """Render one member as several independent chunk documents plus a
     deterministic index doc at `out_path`, instead of asking one completion
     to cover the member's whole rule set. Each chunk goes through the exact
@@ -1523,7 +1524,17 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
     resume check's only choice: reuse every chunk (if the whole member's
     combined brief hash is unchanged) or re-render all of them. This is
     what makes a fix affecting only one routine's worth of source cheap to
-    pick up: only the chunk(s) whose own brief actually changed re-render."""
+    pick up: only the chunk(s) whose own brief actually changed re-render.
+
+    `member_facts`, when given, is a `MemberFacts` (built via
+    `build_member_facts`) that some earlier step (`run_batch`'s own
+    routing/hashing pass, which already computes a full, unchunked
+    `module_brief` for every member before deciding chunked vs. not) has
+    already built for this exact member -- passed through so this
+    function's chunk loop doesn't gather the same whole-member facts a
+    second time (issue #183 review feedback). When omitted (the default,
+    e.g. `generate_module_doc` called directly, not via `run_batch`), this
+    function builds its own, exactly as before this parameter existed."""
     routines = fetch_routines(conn, rule_rows[0]["member_id"])
     ranges = routine_aware_chunk_ranges(
         [r["line_no"] for r in rule_rows], routines, chunk_size,
@@ -1596,8 +1607,11 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
     # since none of it depends on rule_range. Sharing one fact-gather here
     # instead of letting each chunk's own module_brief() call re-run those
     # ~15 fact-store queries is the whole point of this loop no longer
-    # calling module_brief() with facts=None.
-    member_facts = build_member_facts(conn, member_name, redact)
+    # calling module_brief() with facts=None. Reuse the caller-supplied one
+    # (run_batch's own routing/hashing pass already built one for this
+    # member) rather than gathering a second time when one is given.
+    if member_facts is None:
+        member_facts = build_member_facts(conn, member_name)
     for i, (start, end) in enumerate(ranges, start=1):
         chunk_path = out_path.with_name(f"{out_path.stem}.chunk{i:0{chunk_width}d}{out_path.suffix}")
         brief = module_brief(
@@ -1760,7 +1774,8 @@ def generate_module_doc(conn, member_name: str, out_path: Path, caller: ModelCal
                          max_rules_per_call: int | None = None,
                          prior_chunks: dict | None = None,
                          index_template: str | None = None,
-                         sme_notes: dict | None = None) -> DocResult:
+                         sme_notes: dict | None = None,
+                         facts: MemberFacts | None = None) -> DocResult:
     """Single-member version of the harness: brief -> call -> validate ->
     retry once. Used directly for one-off generation and by run_batch's
     per-item work (with the model call itself dispatched to a thread pool
@@ -1771,7 +1786,17 @@ def generate_module_doc(conn, member_name: str, out_path: Path, caller: ModelCal
     chunk documents instead -- see _generate_module_doc_chunked. The
     ambiguous-name and no-rule-candidate cases fall through to the
     original single-call path unchanged (module_brief already reports both
-    as prose in the brief itself)."""
+    as prose in the brief itself).
+
+    `facts`, when given, is a `MemberFacts` (`build_member_facts`) already
+    built for this exact member by an earlier step -- run_batch's own
+    routing/hashing pass builds one for every member (to fingerprint its
+    brief and decide chunked vs. not) before ever reaching this function,
+    so passing it through here means a member that turns out to be chunked
+    doesn't have its whole-member facts gathered a second time (issue #183
+    review feedback). Used for the chunked path only; the non-chunked path
+    below builds its own single `module_brief()` call regardless, since
+    that call already needs the full brief text, not just its facts."""
     rows, ambiguous_libs = fetch_rule_candidate_rows(conn, member_name)
     threshold = _resolve_max_rules_per_call(max_rules_per_call)
     if not ambiguous_libs and rows and len(rows) > threshold:
@@ -1782,9 +1807,10 @@ def generate_module_doc(conn, member_name: str, out_path: Path, caller: ModelCal
             conn, member_name, system["system"] if system else None, rows, out_path, caller,
             writing_rules, template, redact, lexicon, max_attempts, threshold,
             prior_chunks=prior_chunks, index_template=index_template, sme_notes=sme_notes,
+            member_facts=facts,
         )
 
-    brief = module_brief(conn, member_name, redact=redact, lexicon=lexicon, sme_notes=sme_notes)
+    brief = module_brief(conn, member_name, redact=redact, lexicon=lexicon, sme_notes=sme_notes, facts=facts)
     return _generate_module_doc_from_brief(
         conn, member_name, brief, out_path, caller, writing_rules, template, max_attempts=max_attempts,
     )
@@ -2048,7 +2074,7 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
     # then discarding it.
     briefs: dict[str, str] = {}
     to_run: list[tuple[str, str, Path, str]] = []
-    to_run_chunked: list[tuple[str, str, Path, str]] = []
+    to_run_chunked: list[tuple[str, str, Path, str, MemberFacts | str]] = []
 
     for name in members:
         subdir = _output_subdir(conn, name)
@@ -2069,8 +2095,13 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
         # Always the member's *full* brief, even for a member that ends up
         # chunked below -- it's only ever used as a content fingerprint for
         # resume/skip, never sent to the model as-is (the chunked path
-        # builds its own per-chunk briefs from scratch).
-        brief = module_brief(conn, name, redact=redact, lexicon=lexicon, sme_notes=sme_notes)
+        # builds its own per-chunk briefs from scratch). Built via
+        # build_member_facts() + module_brief(facts=...) rather than a bare
+        # module_brief(...) call so the same whole-member facts can be
+        # threaded through to the chunked path below instead of that path
+        # gathering them a second time (issue #183 review feedback).
+        member_facts = build_member_facts(conn, name)
+        brief = module_brief(conn, name, redact=redact, lexicon=lexicon, sme_notes=sme_notes, facts=member_facts)
         brief_hash = hashlib.sha256(f"{brief}\x00{threshold}".encode("utf-8")).hexdigest()
         if prior_ok and prior.get("brief_sha256") == brief_hash:
             logger.debug("skip %s: unchanged (brief hash match, resumed)", name)
@@ -2079,7 +2110,7 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
 
         rows, ambiguous_libs = fetch_rule_candidate_rows(conn, name)
         if not ambiguous_libs and rows and len(rows) > threshold:
-            to_run_chunked.append((name, brief_hash, out_path, state_key))
+            to_run_chunked.append((name, brief_hash, out_path, state_key, member_facts))
         else:
             briefs[state_key] = brief
             to_run.append((name, brief_hash, out_path, state_key))
@@ -2176,7 +2207,7 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
             if state_path:
                 _save_state(state_path, state)
 
-    for name, brief_hash, out_path, state_key in to_run_chunked:
+    for name, brief_hash, out_path, state_key, member_facts in to_run_chunked:
         prior = state.get(state_key)
         prior_chunks = prior.get("chunks") if isinstance(prior, dict) else None
         # Same isolation as the single-call pool above, one member wide: a
@@ -2193,6 +2224,14 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
                 conn, name, out_path, caller, writing_rules, template, redact=redact,
                 lexicon=lexicon, max_rules_per_call=threshold, prior_chunks=prior_chunks,
                 index_template=index_template, sme_notes=sme_notes,
+                # Reuse the MemberFacts the routing/hashing pass above
+                # already built for this member instead of gathering the
+                # same whole-member facts a second time (issue #183 review
+                # feedback) -- unless that pass hit an ambiguous/not-found
+                # lookup (a str, not a MemberFacts), in which case there's
+                # nothing valid to reuse and generate_module_doc must build
+                # its own.
+                facts=member_facts if isinstance(member_facts, MemberFacts) else None,
             )
         except Exception as exc:
             logger.error(
@@ -2361,7 +2400,14 @@ def plan_batch(conn, members: list[str], out_dir: Path,
             plans.append(MemberPlan(name, "skip"))
             continue
 
-        brief = module_brief(conn, name, redact=redact, lexicon=lexicon, sme_notes=sme_notes)
+        # Built once via build_member_facts()/module_brief(facts=...), not a
+        # bare module_brief(...) call, so the same whole-member facts can be
+        # reused by the chunk loop below instead of it gathering them a
+        # second time (issue #183 review feedback) -- this initial call
+        # already builds them internally when facts=None, so the only
+        # change here is capturing that same MemberFacts for reuse.
+        member_facts = build_member_facts(conn, name)
+        brief = module_brief(conn, name, redact=redact, lexicon=lexicon, sme_notes=sme_notes, facts=member_facts)
         brief_hash = hashlib.sha256(f"{brief}\x00{threshold}".encode("utf-8")).hexdigest()
         if prior_ok and prior.get("brief_sha256") == brief_hash:
             plans.append(MemberPlan(name, "skip"))
@@ -2379,11 +2425,6 @@ def plan_batch(conn, members: list[str], out_dir: Path,
         prior_chunks = prior.get("chunks") if isinstance(prior, dict) else None
         chunks_reusable = 0
         chunk_bodies: list[tuple[int, str]] = []
-        # Same member-level fact-gather reuse as _generate_module_doc_chunked
-        # (issue #183) -- this dry-run path hashes every chunk's brief just
-        # like a real render would, so it pays the same per-chunk cost
-        # unless the whole-member facts are shared across the loop too.
-        member_facts = build_member_facts(conn, name, redact)
         for i, (start, end) in enumerate(ranges, start=1):
             chunk_path = out_path.with_name(f"{out_path.stem}.chunk{i:0{chunk_width}d}{out_path.suffix}")
             chunk_brief = module_brief(
