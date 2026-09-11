@@ -1599,6 +1599,58 @@ def test_invented():
     assert "verified: 101" not in index_text
 
 
+def test_run_test_batch_per_member_skip_sees_a_rule_candidate_only_change(tmp_path):
+    """Copilot review follow-up on issue #195: `run_test_batch`'s
+    per-member resume skip hashes `test_case_brief()`'s output, which only
+    ever reads `test_case` -- never `rule_candidate` directly. A `derive`
+    rebuild that inserts a `rule_candidate` row for this member *before*
+    `mfdoc test-plan` re-runs to reflect it in `test_case` would leave
+    that brief (and therefore the old per-member hash) completely
+    unchanged, wrongly skipping re-rendering and leaving a now-stale
+    sidecar in place indefinitely -- a different resume layer from
+    `_corpus_signature`'s global fast path, which alone doesn't cover
+    this. `member_rule_fingerprint` folded into this hash is what closes
+    it."""
+    from mfdoc import testbatch
+    import sqlite3
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_scenarios(conn, 2)
+
+    caller = _chunk_aware_caller("python", "pytest")
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+
+    summary1 = testbatch.run_test_batch(
+        conn, ["FAKEMOD"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path,
+        max_scenarios_per_call=10,
+    )
+    assert summary1.skipped == 0 and summary1.ok == 1
+
+    # A rule_candidate row appears (a derive rebuild), but no new test_case
+    # row yet -- test_case_brief()'s output is byte-identical to before.
+    insert(
+        conn, "rule_candidate", member_id=1, line_no=99, construct="IF",
+        condition="COND-NEW", raw="IF COND-NEW",
+    )
+    conn.commit()
+
+    summary2 = testbatch.run_test_batch(
+        conn, ["FAKEMOD"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path,
+        max_scenarios_per_call=10,
+    )
+    assert summary2.skipped == 0, (
+        "a rule_candidate-only change must not be masked by the per-member "
+        "brief-hash skip just because test_case_brief() itself is unchanged"
+    )
+    assert summary2.ok == 1
+
+
 def test_run_test_batch_threshold_change_is_not_masked_by_resume_state(tmp_path):
     """Changing max_scenarios_per_call between runs must not be treated as
     'nothing changed' by resumable skip -- the same test_case content can

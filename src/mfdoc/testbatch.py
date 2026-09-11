@@ -42,7 +42,10 @@ from .brief import (
 )
 from .redact import NULL_REDACTOR, Redactor
 from .testlang import sidecar_path_for
-from .testplan import doc_rule_fingerprint, fetch_test_case_rows, test_case_brief, test_case_brief_chunk
+from .testplan import (
+    doc_rule_fingerprint, fetch_test_case_rows, member_rule_fingerprint, test_case_brief,
+    test_case_brief_chunk,
+)
 from .validate import BR_REF, split_frontmatter, validate_test_doc
 
 # Same progress/diagnostic logger idea as batch.py -- see that module's
@@ -1034,8 +1037,20 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
         # single-doc and chunked output shapes, and the per-member skip
         # must not treat that as "nothing changed" (see _corpus_signature's
         # docstring for the same reasoning at the corpus level).
+        #
+        # `member_rule_fingerprint` folded in too (issue #195 review): a
+        # `derive` rebuild that inserts/reorders this member's own
+        # `rule_candidate` rows before `mfdoc test-plan` re-runs leaves
+        # `test_case_brief()`'s output (and therefore `brief` above)
+        # completely unchanged -- it only ever reads `test_case`, never
+        # `rule_candidate` directly -- so without this, this per-member
+        # skip (a *different* resume layer from `_corpus_signature`'s
+        # global one, which this alone doesn't fix) would still wrongly
+        # treat the member as unchanged and skip re-rendering, leaving a
+        # stale sidecar in place indefinitely.
         brief = test_case_brief(conn, name, redact=redact, sme_notes=sme_notes)
-        brief_hash = hashlib.sha256(f"{brief}\x00{threshold}".encode("utf-8")).hexdigest()
+        rule_fp = member_rule_fingerprint(conn, name) or ""
+        brief_hash = hashlib.sha256(f"{brief}\x00{threshold}\x00{rule_fp}".encode("utf-8")).hexdigest()
         if prior_ok and prior.get("brief_sha256") == brief_hash:
             logger.debug("skip %s: unchanged (brief hash match, resumed)", name)
             results.append(_skip_result(name, out_path, prior))
@@ -1428,7 +1443,12 @@ def plan_test_batch(conn, members: list[str], language: str, framework: str, out
             continue
 
         brief = test_case_brief(conn, name, redact=redact, sme_notes=sme_notes)
-        brief_hash = hashlib.sha256(f"{brief}\x00{threshold}".encode("utf-8")).hexdigest()
+        # Must match run_test_batch's own per-member brief_hash exactly
+        # (rule_fp included, issue #195 review) -- a dry-run preview using
+        # a differently-computed hash could report "skip" for a member the
+        # real run would actually re-render, or vice versa.
+        rule_fp = member_rule_fingerprint(conn, name) or ""
+        brief_hash = hashlib.sha256(f"{brief}\x00{threshold}\x00{rule_fp}".encode("utf-8")).hexdigest()
         if prior_ok and prior.get("brief_sha256") == brief_hash:
             plans.append(TestMemberPlan(name, "skip"))
             continue

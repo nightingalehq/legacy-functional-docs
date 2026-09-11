@@ -361,6 +361,23 @@ GitHub org.
   now-stale sidecar. Full suite: 980 passed, 2 skipped; bundled fixture
   pipeline unchanged.
 
+  Same round flagged one more resume layer with the identical blind spot:
+  `run_test_batch`/`plan_test_batch`'s *per-member* skip (distinct from
+  `_corpus_signature`'s global one) hashes `test_case_brief()`'s own
+  output, which only ever reads `test_case`, never `rule_candidate`
+  directly -- a `derive` rebuild that inserts a `rule_candidate` row for
+  one member, before `mfdoc test-plan` re-runs to reflect it in
+  `test_case`, leaves that brief (and the old per-member hash) completely
+  unchanged, so this skip would still wrongly treat the member as
+  unchanged and never reach the render path at all, leaving a stale
+  sidecar in place indefinitely regardless of the corpus-level and
+  render-loop fixes above. Folded `testplan.member_rule_fingerprint` into
+  both the real per-member `brief_hash` (`run_test_batch`) and its
+  dry-run mirror (`plan_test_batch`, which must match exactly per its own
+  documented contract). Added
+  `test_run_test_batch_per_member_skip_sees_a_rule_candidate_only_change`.
+  Full suite: 981 passed, 2 skipped.
+
 **Progress (2026-09-11):**
 - Fixed issue #199: `mfdoc doc-drift`'s existing checks (issue #161) caught
   system-wide/module-scoped drift but nothing keyed on a single dialect --
