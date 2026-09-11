@@ -694,7 +694,20 @@ GitHub org.
   never exercised -- rewritten to use `MMP0100:BR-001` (confirmed via the
   bundled fixture's own `test_case` rows), a real, current, but different
   id from the manifest's `BR-004`, actually exercising the cross-check.
-  Full suite: 954 passed, 2 skipped.
+  Full suite: 954 passed, 2 skipped. A second Copilot review round caught
+  two more real gaps: the staleness check's per-id `SELECT ... WHERE
+  UPPER(scenario_name)=UPPER(?)` query (no index on that expression) was
+  run once per sidecar id for the staleness decision and again per scanned
+  id in the final `bad_refs` check -- refactored to fetch every current
+  `test_case.scenario_name`, uppercased, into one set at the top of
+  `validate_test_doc` and reuse it for both (`code_ids <= valid_scenarios`
+  replaces the per-id query loop); and the partial-positional-shift claim
+  in `all(...)`'s docstring justification had no test actually exercising
+  it -- added `test_partial_positional_shift_sidecar_is_still_treated_as_
+  stale` (an old `{BR-001, BR-002, BR-003}` sidecar against a current
+  `{BR-002, BR-003, BR-004}` `test_case`/manifest, proving `any(...)` would
+  have missed this and `all(...)` catches it). Full suite: 955 passed, 2
+  skipped.
 
 **Progress (2026-09-10e):**
 - Fixed issue #188: ported `batch.py`'s near-miss/targeted-patch mechanism

@@ -995,6 +995,15 @@ def validate_test_doc(conn, path: Path, _text: str | None = None) -> dict:
             if key not in fm:
                 problems.append(f"front matter missing required key: {key}")
 
+    # Fetched once and reused below for both the sidecar staleness decision
+    # and the final `bad_refs` check -- a per-id `SELECT ... WHERE
+    # UPPER(scenario_name)=UPPER(?)` query (no index on that expression)
+    # would otherwise scan `test_case` twice per id: once for staleness,
+    # once for validity (Copilot PR review on issue #195's fix).
+    valid_scenarios = {
+        row["scenario_name"].upper() for row in conn.execute("SELECT scenario_name FROM test_case")
+    }
+
     sidecar = sidecar_path_for(path, fm.get("language")) if fm is not None else None
     sidecar_usable = False
     if sidecar is not None and sidecar.exists():
@@ -1023,12 +1032,7 @@ def validate_test_doc(conn, path: Path, _text: str | None = None) -> dict:
         # wrongly read as "still current" and cross-check anyway --
         # producing the exact false "not found" this guard exists to
         # prevent, just for a subset of ids instead of all of them.
-        sidecar_usable = not code_ids or all(
-            conn.execute(
-                "SELECT 1 FROM test_case WHERE UPPER(scenario_name)=UPPER(?)", (sid,)
-            ).fetchone()
-            for sid in code_ids
-        )
+        sidecar_usable = not code_ids or code_ids <= valid_scenarios
         # Deliberately not appended to `problems`/`ok`: a stale sidecar isn't
         # a defect in *this* document -- it's leftover state from before an
         # upstream renumbering, and `write_test_doc_with_sidecar` will
@@ -1051,10 +1055,7 @@ def validate_test_doc(conn, path: Path, _text: str | None = None) -> dict:
 
     bad_refs = 0
     for scenario in scan_ids:
-        row = conn.execute(
-            "SELECT 1 FROM test_case WHERE UPPER(scenario_name)=UPPER(?)", (scenario,)
-        ).fetchone()
-        if not row:
+        if scenario.upper() not in valid_scenarios:
             bad_refs += 1
             problems.append(f"'{scenario}' is not a known test_case scenario -- run `mfdoc test-plan`, "
                              f"or this id was invented/renumbered")

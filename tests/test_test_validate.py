@@ -119,6 +119,85 @@ def test_stale_sidecar_from_renumbering_is_treated_as_absent(indexed_db, tmp_pat
     assert not any("not found in" in p for p in result["problems"])
 
 
+def test_partial_positional_shift_sidecar_is_still_treated_as_stale(tmp_path):
+    """Copilot review follow-up on issue #195: a partial positional
+    renumbering (only some ids move) must still trip the staleness guard.
+    If the check used `any(...)` instead of `all(...)`, an id that happens
+    to still match by coincidence would make the whole sidecar look
+    "current" and the cross-check would report a false "not found"/
+    "missing from manifest" for every id that genuinely shifted, exactly
+    the systemic false-positive issue #195 exists to eliminate -- just for
+    a subset of ids instead of all of them."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
+    # Current numbering, as if a renumbering shifted every id up by one --
+    # BR-002/BR-003 coincidentally still exist under the new numbering too.
+    for n in (2, 3, 4):
+        insert(
+            conn, "test_case", member_id=1, kind="unit", scenario_name=f"FAKEMOD:BR-{n:03d}",
+            given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+            when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+            then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+            status="characterization", citation="FAKEMOD:1", confidence="verified",
+        )
+    conn.commit()
+
+    path = tmp_path / "FAKEMOD.md"
+    sidecar = tmp_path / "FAKEMOD.py"
+    # The manifest reflects a freshly generated document under the *new*
+    # numbering (BR-002..BR-004); the sidecar on disk is the *old* one
+    # (BR-001..BR-003), written before the renumbering.
+    path.write_text(
+        """---
+title: "FAKEMOD -- generated tests (python)"
+doc_type: generated_test
+system: MOM
+module: FAKEMOD
+language: python
+framework: pytest
+generated_by: legacy-functional-docs 0.1.0
+generated_at: "2026-01-01"
+review_status: draft
+reviewers: []
+confidence_summary:
+  verified: 1
+  inferred: 0
+  unresolved: 0
+sources: ["FAKEMOD"]
+---
+
+# FAKEMOD -- generated tests
+
+See [`FAKEMOD.py`](./FAKEMOD.py) for the generated test source.
+
+## Scenarios covered
+
+- FAKEMOD:BR-002
+- FAKEMOD:BR-003
+- FAKEMOD:BR-004
+""",
+        encoding="utf-8",
+    )
+    sidecar.write_text(
+        "def test_one():\n    # FAKEMOD:BR-001\n    ...\n\n"
+        "def test_two():\n    # FAKEMOD:BR-002\n    ...\n\n"
+        "def test_three():\n    # FAKEMOD:BR-003\n    ...\n",
+        encoding="utf-8",
+    )
+    result = validate_test_doc(conn, path)
+    assert result["sidecar_stale"] is True
+    assert result["ok"], result["problems"]
+    assert result["invalid_scenario_refs"] == 0
+    assert not any("BR-001" in p or "BR-004" in p for p in result["problems"])
+
+
 def test_current_sidecar_still_cross_checked_against_manifest(indexed_db, tmp_path):
     """A sidecar whose BR-ids *do* all match current `test_case` rows is
     still authoritative -- the staleness guard must not swallow a genuine
