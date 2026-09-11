@@ -77,3 +77,42 @@ def test_sample_citations_accepts_api_timeout_flag(cli_args, tmp_path, capsys):
     assert cli.main(argv) == 0
     out = capsys.readouterr().out
     assert "claim(s) sampled" in out
+
+
+def test_clean_doc_strips_leaked_preamble_from_an_interactively_written_document(tmp_path, capsys):
+    """Issue #197 part 2: `system-overview.md`, `interface-matrix.md`, and
+    the other documents written directly by the interactive Claude Code
+    path (per SKILL.md's "Write from the brief" step) never pass through
+    `generate_module_doc`'s write site, so they never got the issue #150/
+    #152 preamble strip. `mfdoc clean-doc --file PATH` is the equivalent
+    protection, run explicitly against the file after writing it."""
+    doc = tmp_path / "system-overview.md"
+    doc.write_text(
+        "I'll write the system overview from the brief now.\n\n"
+        "---\ntitle: System overview\ngenerated_by: legacy-functional-docs 0.1.0\n---\n"
+        "body text here\n",
+        encoding="utf-8",
+    )
+
+    exit_code = cli.main(["clean-doc", "--file", str(doc)])
+
+    assert exit_code == 0
+    from mfdoc import __version__
+
+    cleaned = doc.read_text(encoding="utf-8")
+    assert cleaned.startswith("---\n")
+    assert f"generated_by: legacy-functional-docs {__version__}" in cleaned
+    assert "I'll write the system overview" not in cleaned
+    assert "cleaned" in capsys.readouterr().out
+
+
+def test_clean_doc_is_a_no_op_and_says_so_when_already_clean(tmp_path, capsys):
+    doc = tmp_path / "gap-register.md"
+    text = "---\ntitle: Gap register\n---\nbody\n"
+    doc.write_text(text, encoding="utf-8")
+
+    exit_code = cli.main(["clean-doc", "--file", str(doc)])
+
+    assert exit_code == 0
+    assert doc.read_text(encoding="utf-8") == text
+    assert "already clean" in capsys.readouterr().out
