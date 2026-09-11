@@ -255,30 +255,51 @@ def write_test_doc_with_sidecar(conn, member_name: str, out_path: Path, doc_text
     # (e.g. because a later step raised), a mismatched pair no different
     # in effect from the staleness this whole mechanism exists to prevent.
     #
-    # Written to `.tmp` siblings first, then atomically renamed into place
-    # (Copilot review) -- two plain `write_text` calls in sequence leaves a
-    # window where the sidecar write has already succeeded and `out_path`'s
-    # own write then fails (disk-full, a permissions change mid-run): the
-    # new sidecar would be left paired with the *old* document, which
-    # `validate_test_doc` would then cross-check as a genuine mismatch
-    # (the exact class of false drift this whole mechanism exists to
-    # prevent) rather than recognise as an incomplete write. Content is
+    # Written to `.tmp` siblings first, then replaced into place with a
+    # best-effort rollback if the second replace fails (Copilot review):
+    # two plain `write_text` calls in sequence left a window where the
+    # sidecar write had already succeeded and `out_path`'s own write then
+    # failed (disk-full, a permissions change mid-run), leaving a new
+    # sidecar paired with the *old* document -- a genuine mismatch
+    # `validate_test_doc` would cross-check as real drift. Content is
     # fully written to the temp files -- the only place a disk-full/
-    # permissions failure can still occur -- *before* either final path is
-    # touched at all, so that failure mode now leaves both original files
-    # completely untouched instead of a mismatched pair. `Path.rename`
-    # (same filesystem, no cross-device copy) is atomic at the OS level
-    # and only needs a directory-entry update with content already
-    # allocated, narrowing (though on most filesystems not perfectly
-    # eliminating) the remaining window to something far less likely to
-    # fail than the original two-file content write ever was.
+    # permissions failure can realistically still occur -- *before*
+    # either final path is touched at all, so that failure mode leaves
+    # both original files completely untouched. `Path.replace` (not
+    # `Path.rename`) is used for both: same-filesystem, atomic at the OS
+    # level on POSIX *and* Windows (unlike `rename`, which Windows refuses
+    # outright when the destination already exists), needing only a
+    # directory-entry update with content already allocated.
+    #
+    # The two `replace` calls are still not one atomic transaction across
+    # both files -- if the process is killed, or the second `replace`
+    # itself fails, between them, the sidecar has already moved but the
+    # document hasn't. Snapshotting the sidecar's own pre-existing bytes
+    # first and restoring them (or removing the just-placed sidecar, if
+    # there was nothing to restore) in that specific failure lets this
+    # return to the same paired state (old/old, or nothing/nothing) it
+    # started from, rather than leaving a real, harder-to-diagnose
+    # mismatch on disk -- a true multi-file transaction (a journal or
+    # generation-marker protocol readers check before trusting either
+    # file) would close the remaining sliver of this window too, but is
+    # more machinery than a single-process batch tool's residual risk
+    # here (an OS-level kill or out-of-space error occurring in the
+    # instant between two directory-entry updates) currently justifies.
     sidecar_path.parent.mkdir(parents=True, exist_ok=True)
     sidecar_tmp = sidecar_path.with_name(sidecar_path.name + ".tmp")
     out_tmp = out_path.with_name(out_path.name + ".tmp")
     sidecar_tmp.write_text(code, encoding="utf-8")
     out_tmp.write_text(f"---{front_matter_block}---{prose}{manifest}", encoding="utf-8")
-    sidecar_tmp.rename(sidecar_path)
-    out_tmp.rename(out_path)
+    sidecar_backup = sidecar_path.read_bytes() if sidecar_path.exists() else None
+    sidecar_tmp.replace(sidecar_path)
+    try:
+        out_tmp.replace(out_path)
+    except OSError:
+        if sidecar_backup is None:
+            sidecar_path.unlink(missing_ok=True)
+        else:
+            sidecar_path.write_bytes(sidecar_backup)
+        raise
     return sidecar_path
 
 

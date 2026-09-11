@@ -335,6 +335,59 @@ def test_member_test_case_aligned_with_rule_candidate_catches_a_reorder_with_sam
     assert testplan.member_test_case_aligned_with_rule_candidate(conn, "FAKEMOD") is False
 
 
+def test_member_test_case_aligned_with_rule_candidate_catches_a_removed_rule_still_cited():
+    """Copilot review follow-up: a `derive` rebuild can change a
+    `rule_candidate` row so it's no longer branch-eligible (a dialect
+    scanner refinement reclassifying its `construct`) before `mfdoc
+    test-plan` re-runs just as easily as it can insert a new branch row --
+    `test_case` then still carries a `unit` row linked to that
+    no-longer-current `rule_candidate_id`, which the model's
+    `test_case_brief`-driven render still cites. An earlier version of
+    this function's subset check (deliberately checking only "every
+    expected id has a matching test_case row") missed this direction
+    entirely: the row's own id is no longer in `expected` at all once it
+    stops being a branch row, so a check that only walks `expected` never
+    looks at it. (A hard SQL DELETE of the row itself isn't reachable
+    here to simulate instead -- test_case.rule_candidate_id's own foreign
+    key, enforced in this schema, refuses it while a test_case row still
+    references it; the real pipeline's own `purge_member_facts` always
+    deletes `test_case` and `rule_candidate` together for exactly this
+    reason, so a row changing shape without disappearing outright is the
+    actually-reachable version of this state.)"""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'x')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 2, 'y')")
+    rc1 = insert(conn, "rule_candidate", member_id=1, line_no=1, construct="IF", raw="a")
+    rc2 = insert(conn, "rule_candidate", member_id=1, line_no=2, construct="IF", raw="b")
+    insert(
+        conn, "test_case", member_id=1, kind="unit", rule_candidate_id=rc1, scenario_name="FAKEMOD:BR-001",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "A", "citation": "[[FAKEMOD:1]]"}',
+        then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:1", confidence="verified",
+    )
+    insert(
+        conn, "test_case", member_id=1, kind="unit", rule_candidate_id=rc2, scenario_name="FAKEMOD:BR-002",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "B", "citation": "[[FAKEMOD:2]]"}',
+        then_json='{"citation": "[[FAKEMOD:2]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:2", confidence="verified",
+    )
+    conn.commit()
+    assert testplan.member_test_case_aligned_with_rule_candidate(conn, "FAKEMOD") is True
+
+    # A derive rebuild reclassifies rc2 as non-branch (DECIDE is excluded
+    # by _is_branch_row) before test-plan re-runs -- test_case's BR-002
+    # row (still linked to rc2) is exactly the stale content a fresh
+    # render would still cite.
+    conn.execute("UPDATE rule_candidate SET construct='DECIDE ON' WHERE id=?", (rc2,))
+    conn.commit()
+    assert testplan.member_test_case_aligned_with_rule_candidate(conn, "FAKEMOD") is False
+
+
 def test_register_lists_scenarios_with_resolvable_citations(indexed_db):
     conn = indexed_db
     testplan.run_all(conn)

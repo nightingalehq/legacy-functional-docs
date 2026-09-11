@@ -12,6 +12,40 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-11q):**
+- Addressed the twenty-eighth Copilot review round on PR #209 (issue
+  #195):
+  1. `write_test_doc_with_sidecar`'s temp-then-replace write (previous
+     round) used `Path.rename` (refuses an existing destination on
+     Windows, unlike `Path.replace`) and was still only two individually-
+     atomic replaces, not one transaction for the pair -- if the sidecar's
+     replace succeeded and the document's own then failed, the new
+     sidecar was left paired with the old document. Switched to
+     `Path.replace`, and the sidecar's pre-existing bytes are now
+     snapshotted first and restored (or the just-placed sidecar removed,
+     if none existed) if the document's replace then fails -- returning
+     to the same paired state it started from rather than a real
+     mismatch. A true cross-file transaction (a journal/generation-marker
+     protocol) would close the remaining sliver of this window too, but
+     is more machinery than currently justified for a single-process
+     batch tool's residual risk here.
+  2. `member_test_case_aligned_with_rule_candidate` (rounds 24-25) checked
+     only that every *current* rule_candidate id has a matching test_case
+     row -- a one-directional subset check that missed a `rule_candidate`
+     row *removed* (or reclassified out of branch-row status) before
+     `mfdoc test-plan` re-runs: `test_case` then still carries a `unit`
+     row for an id no longer in the current expected set at all, which a
+     check that only walks the expected side never looks at. Now exact
+     equality of the `{rule_candidate_id: scenario_name}` mapping (only
+     over `rule_candidate_id`-linked rows -- an overlay-sourced row with
+     no such link is still excluded, as before), catching both directions
+     at once.
+- Five new regression tests (both halves of the rollback -- restoring an
+  existing sidecar and removing a newly-placed one with nothing to
+  restore -- and the removed/reclassified-rule alignment case). Full
+  suite green (1043 passed, 2 skipped) plus a clean `mfdoc validate` pass
+  against `examples/` (71/71 documents, 0 invalid citations of 750).
+
 **Progress (2026-09-11p):**
 - Addressed the twenty-seventh Copilot review round on PR #209 (issue
   #195):

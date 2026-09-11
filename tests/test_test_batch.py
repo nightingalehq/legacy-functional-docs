@@ -4246,6 +4246,113 @@ def test_write_test_doc_with_sidecar_leaves_both_files_untouched_if_doc_write_fa
     assert not (tmp_path / "FAKEMOD.py").exists(), "no sidecar should be left behind at its final path"
 
 
+def test_write_test_doc_with_sidecar_rolls_back_the_sidecar_if_the_doc_replace_fails(tmp_path, monkeypatch):
+    """Copilot review follow-up: both temp files can be fully written and
+    the sidecar's own `replace` can succeed before the document's
+    `replace` then fails (a transient filesystem error striking between
+    the two directory-entry updates, not during content writing) --
+    without a rollback, that leaves a *new* sidecar paired with the *old*
+    document, the exact mismatched pair this whole mechanism exists to
+    avoid. The old sidecar's own pre-existing bytes must be restored, not
+    the new content left in place."""
+    import pytest
+
+    from mfdoc import testbatch
+    from mfdoc.db import insert
+
+    conn = _sqlite_conn()
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    rc1 = _insert_rc(conn, 1, 10)
+    insert(
+        conn, "test_case", member_id=1, kind="unit", rule_candidate_id=rc1,
+        scenario_name="FAKEMOD:BR-001",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "COND", "citation": "[[FAKEMOD:10]]"}',
+        then_json='{"citation": "[[FAKEMOD:10]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:10", confidence="verified",
+    )
+    conn.commit()
+
+    doc_text = (
+        "---\nsources: [\"FAKEMOD\"]\n---\n\n"
+        "# FAKEMOD tests\n\n"
+        "```python\ndef test_one():\n    # FAKEMOD:BR-001\n    ...\n```\n"
+    )
+    out_path = tmp_path / "FAKEMOD.md"
+    sidecar_path = tmp_path / "FAKEMOD.py"
+    old_doc_text = "old document content, must survive untouched"
+    old_sidecar_text = "old sidecar content, must be restored"
+    out_path.write_text(old_doc_text, encoding="utf-8")
+    sidecar_path.write_text(old_sidecar_text, encoding="utf-8")
+
+    real_replace = Path.replace
+
+    def exploding_replace(self, target):
+        if self.name == "FAKEMOD.md.tmp":
+            raise OSError("simulated: filesystem error between the two replaces")
+        return real_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", exploding_replace)
+
+    with pytest.raises(OSError):
+        testbatch.write_test_doc_with_sidecar(conn, "FAKEMOD", out_path, doc_text, "python")
+
+    assert out_path.read_text(encoding="utf-8") == old_doc_text, "the old document must be untouched"
+    assert sidecar_path.read_text(encoding="utf-8") == old_sidecar_text, (
+        "the old sidecar must be restored, not left as the new (now-orphaned) content"
+    )
+
+
+def test_write_test_doc_with_sidecar_removes_the_sidecar_if_the_doc_replace_fails_and_none_existed(
+    tmp_path, monkeypatch,
+):
+    """The other half of the rollback: when there was no pre-existing
+    sidecar to restore (a brand-new document/sidecar pair), the failure
+    must leave neither file behind, not a new sidecar with no document to
+    pair it with."""
+    import pytest
+
+    from mfdoc import testbatch
+    from mfdoc.db import insert
+
+    conn = _sqlite_conn()
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    rc1 = _insert_rc(conn, 1, 10)
+    insert(
+        conn, "test_case", member_id=1, kind="unit", rule_candidate_id=rc1,
+        scenario_name="FAKEMOD:BR-001",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "COND", "citation": "[[FAKEMOD:10]]"}',
+        then_json='{"citation": "[[FAKEMOD:10]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:10", confidence="verified",
+    )
+    conn.commit()
+
+    doc_text = (
+        "---\nsources: [\"FAKEMOD\"]\n---\n\n"
+        "# FAKEMOD tests\n\n"
+        "```python\ndef test_one():\n    # FAKEMOD:BR-001\n    ...\n```\n"
+    )
+    out_path = tmp_path / "FAKEMOD.md"
+    sidecar_path = tmp_path / "FAKEMOD.py"
+    # Neither final path exists yet -- a brand-new member's first render.
+
+    real_replace = Path.replace
+
+    def exploding_replace(self, target):
+        if self.name == "FAKEMOD.md.tmp":
+            raise OSError("simulated: filesystem error between the two replaces")
+        return real_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", exploding_replace)
+
+    with pytest.raises(OSError):
+        testbatch.write_test_doc_with_sidecar(conn, "FAKEMOD", out_path, doc_text, "python")
+
+    assert not out_path.exists()
+    assert not sidecar_path.exists(), "no orphaned sidecar should remain with no document to pair it with"
+
+
 def test_write_test_doc_with_sidecar_writes_sidecar_and_doc_together(tmp_path):
     """The sidecar file and the rewritten `out_path` must be written as the
     last two steps, after every step that can still bail out early (a

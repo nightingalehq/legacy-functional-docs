@@ -220,12 +220,13 @@ def doc_rule_fingerprint(conn, member_names: list[str]) -> str | None:
 
 
 def member_test_case_aligned_with_rule_candidate(conn, member_name: str) -> bool:
-    """Whether `member_name`'s current `test_case` rows already cover every
-    id its *current* `rule_candidate` rows imply -- False whenever a
-    `derive`/`classify-rules` rebuild has inserted a `rule_candidate` row
-    for this member since `mfdoc test-plan` last ran, and `test_case`
-    hasn't caught up yet (a currently-unresolvable member counts as
-    misaligned too: nothing to compare against).
+    """Whether `member_name`'s current `rule_candidate_id`-linked `test_case`
+    rows exactly match its *current* `rule_candidate` rows -- False
+    whenever a `derive`/`classify-rules` rebuild has inserted, removed, or
+    reordered a `rule_candidate` row for this member since `mfdoc
+    test-plan` last ran, and `test_case` hasn't caught up yet (a
+    currently-unresolvable member counts as misaligned too: nothing to
+    compare against).
 
     Exists to guard `testbatch.write_test_doc_with_sidecar`'s fingerprint
     stamp (Copilot review on issue #195's fix): that fingerprint is a pure
@@ -240,36 +241,38 @@ def member_test_case_aligned_with_rule_candidate(conn, member_name: str) -> bool
     the new/renumbered ids, that stamped fingerprint (unchanged, since
     rule_candidate itself hasn't moved again) still matches the current
     recomputation, making the stale sidecar look current and the new
-    manifest's ids get rejected as "missing from sidecar" -- the same
-    class of false positive issue #195 exists to close, reintroduced at
-    the write side instead of the read side.
+    manifest's ids get rejected -- the same class of false positive issue
+    #195 exists to close, reintroduced at the write side instead of the
+    read side.
 
-    Deliberately a subset check (every current-rule_candidate id already
-    has a matching `test_case` row), not set equality: the failure mode
-    above is specifically a *missing* id (a rule_candidate row nothing in
-    `test_case` reflects yet) becoming reachable through a fingerprint
-    that looks authoritative. A `test_case` row with no current
-    rule_candidate counterpart (an overlay-sourced scenario, or a rule
-    since removed but not yet re-planned) doesn't reintroduce that
-    specific false positive and isn't this function's concern.
+    Exact equality of the `{rule_candidate_id: scenario_name}` mapping on
+    both sides, not a one-directional subset check (Copilot review on an
+    earlier version of this function, which only checked "every expected
+    id has a matching test_case row" and missed the opposite direction):
+    a `derive` rebuild can *remove* a `rule_candidate` row before
+    `test-plan` re-runs just as easily as it can insert one -- `test_case`
+    then still carries a `unit` row linked to that now-gone
+    `rule_candidate_id`, which the model's `test_case_brief`-driven
+    render still cites. Stamping a fingerprint computed from the smaller,
+    already-shrunk `rule_candidate` set in that state has the identical
+    consequence as the missing-id case: once `test-plan` removes that
+    stale `test_case` row too, the fingerprint (unchanged, since
+    `rule_candidate` itself doesn't move again) still matches, and the
+    new, now-shorter manifest gets rejected against a sidecar that still
+    cites the long-gone id. Equality also subsumes the reorder case a
+    prior round added `rule_candidate_id` linkage for: a name-set match
+    with a differing `rule_candidate_id` for the same key already fails
+    the dict comparison.
 
-    "Matching" means the expected id's `test_case` row must still be
-    `rule_candidate_id`-linked to the *same* row `numbered_rule_
-    candidates` currently assigns that ordinal to (Copilot review) -- a
-    same-name-set check alone misses a `rule_candidate` rebuild that
-    reorders existing rows (their `line_no`s shift, none inserted or
-    removed) without changing which BR-nnn *names* exist at all: the id
-    set matches by coincidence, but `test_case`'s row for that id is still
-    linked to whatever row previously held that ordinal, not the row that
-    holds it now. Stamping a fingerprint in that state has the exact same
-    consequence as the missing-id case this function otherwise guards.
-
-    Only `unit`-kind test_case rows are compared -- the only kind
-    `build_member_test_cases` derives one-for-one from a branch
-    `rule_candidate` row (`_is_branch_row`), via the same
-    `numbered_rule_candidates` ordinal every other BR-numbering consumer
-    uses; overlay-sourced/other kinds carry no such positional
-    relationship to `rule_candidate` and would only add noise here."""
+    Only `unit`-kind, `rule_candidate_id`-linked `test_case` rows are
+    compared -- the only rows `build_member_test_cases` derives
+    one-for-one from a branch `rule_candidate` row (`_is_branch_row`), via
+    the same `numbered_rule_candidates` ordinal every other BR-numbering
+    consumer uses. An overlay-sourced `unit` row with no such link
+    (`rule_candidate_id IS NULL`) is excluded from `current` entirely --
+    it carries no positional relationship to `rule_candidate` to compare
+    against, and would only add noise (a false mismatch on every check)
+    here."""
     rows, ambiguous = resolve_member_by_name(conn, member_name)
     if ambiguous or not rows:
         return False
@@ -285,19 +288,17 @@ def member_test_case_aligned_with_rule_candidate(conn, member_name: str) -> bool
         "SELECT * FROM rule_candidate WHERE member_id=? ORDER BY line_no, id", (mid,)
     ).fetchall()
     expected = {
-        _rule_id(canonical_name, n): r["id"]
+        r["id"]: _rule_id(canonical_name, n)
         for n, r in numbered_rule_candidates(rc_rows) if _is_branch_row(r)
     }
     current = {
-        row["scenario_name"]: row["rule_candidate_id"]
+        row["rule_candidate_id"]: row["scenario_name"]
         for row in conn.execute(
-            "SELECT scenario_name, rule_candidate_id FROM test_case WHERE member_id=? AND kind='unit'", (mid,)
+            "SELECT scenario_name, rule_candidate_id FROM test_case "
+            "WHERE member_id=? AND kind='unit' AND rule_candidate_id IS NOT NULL", (mid,)
         ).fetchall()
     }
-    return all(
-        scenario_name in current and current[scenario_name] == rc_id
-        for scenario_name, rc_id in expected.items()
-    )
+    return expected == current
 
 
 def build_member_test_cases(conn, mid: int, name: str, overlay: dict | None = None) -> list[dict]:
