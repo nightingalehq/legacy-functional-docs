@@ -12,6 +12,55 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-10e):**
+- Fixed issue #188: ported `batch.py`'s near-miss/targeted-patch mechanism
+  (issue #131, generalized by #170) to `testbatch.py`'s test-generation
+  retry loop, which previously had none of it -- every `mfdoc test-batch`
+  validation failure, from a single uncited scenario sentence to a
+  structural problem, triggered a full chunk regeneration. Reused
+  `batch.py`'s `_is_near_miss`/`_localized_findings`/
+  `_auto_cite_uncited_assertions` unchanged (they operate only on
+  `result["problems"]`/`brief`/`current_text`, none of which are module-
+  doc-specific) and added a test-generation-specific
+  `build_localized_test_patch_prompt`, wording-adapted from `batch.py`'s
+  `build_localized_patch_prompt` for a generated-test document (mentions
+  the fenced code block explicitly; "Test brief" heading instead of "Fact
+  brief"). One genuine difference from `batch.py`, confirmed by reading
+  `validate.py`: `validate_test_doc`'s `_reversed_condition_problems` call
+  is gated on `doc_type in ("module", "module_index")`, which a generated-
+  test document never is -- so the reversed-condition near-miss class
+  `_is_near_miss` also recognizes can never actually fire on this path;
+  `_localized_findings`'s uncited-assertion class is the only one that
+  applies here, and `reversed_findings` stays in every signature purely to
+  keep this a drop-in match for `_localized_findings`'s return shape.
+  Applied to both places a test document is actually retried:
+  `_generate_test_doc_from_brief` (the direct `mfdoc test-gen`/chunked-
+  member path) *and* `run_test_batch`'s own thread-pooled loop for
+  non-chunked members -- the latter caught by Copilot PR review: that pool
+  loop is the ordinary `mfdoc test-batch` path for every member at or
+  below `max_scenarios_per_call` (the common case this issue's own cost
+  evidence was measured against) and isn't routed through
+  `_generate_test_doc_from_brief` at all, so the fix initially missed it
+  entirely. Also fixed, same review round: a targeted-patch call itself
+  raising (the real `ClaudeCLICaller` timeout/`RuntimeError` risk
+  `_generate_test_doc_from_brief`'s main call already guards against) was
+  logged but never appended to `problems`, silently dropping it from the
+  next retry_note and the final `DocResult`'s diagnostics on an eventual
+  failure -- now appended before falling through to the full retry, same
+  as every other failure class this loop tracks. Added
+  `test_near_miss_uncited_assertion_in_test_doc_gets_a_targeted_patch_not_a_
+  full_retry`/`test_near_miss_patch_failure_in_test_doc_falls_back_to_
+  full_retry` (the direct/chunked path) and
+  `test_run_test_batch_near_miss_uncited_assertion_gets_a_targeted_patch_
+  not_a_full_retry`/`test_run_test_batch_near_miss_patch_failure_falls_
+  back_to_full_retry` (the pool-loop path) in `tests/test_test_batch.py`,
+  mirroring `test_batch.py`'s corresponding pair. Full suite (rebased onto
+  main post-#194): 915 passed, 2 skipped -- six new tests total from this
+  fix (the four above plus this branch's pre-existing pair); bundled
+  fixture pipeline (`ingest`/`derive`/`coverage`/`validate --docs
+  examples`) unaffected (this change touches no dialect/derive/validate
+  code, only the model-retry loops).
+
 **Progress (2026-09-10d):**
 - Fixed issue #194: `mfdoc ingest`'s incremental-ingest skip decision
   compared only a source file's own content hash (`sha256`) against what

@@ -197,6 +197,132 @@ def test_generate_member_test_doc_retries_and_reports_failure_for_fake_echo():
     assert not out_path.with_suffix(".py").exists(), "a failed validation must never produce a sidecar"
 
 
+def _near_miss_test_doc_conn():
+    """An in-memory fact store with one member (one citable source line) and
+    one test_case scenario -- enough for validate_test_doc to resolve a
+    `[[FAKEMOD:1]]` citation and a `FAKEMOD:BR-001` scenario reference, the
+    minimum needed to exercise the near-miss/targeted-patch path below."""
+    import sqlite3
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute(
+        "INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')"
+    )
+    insert(
+        conn, "test_case", member_id=1, kind="unit", scenario_name="FAKEMOD:BR-001",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+        then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:1", confidence="verified",
+    )
+    conn.commit()
+    return conn
+
+
+def _near_miss_test_doc_text(prose: str) -> str:
+    return (
+        _valid_test_doc_text("python", "pytest")
+        .replace("Covers the module as a whole [[FAKEMOD:1]].", prose)
+    )
+
+
+def test_near_miss_uncited_assertion_in_test_doc_gets_a_targeted_patch_not_a_full_retry():
+    """Issue #188 (porting #131/#170 to testbatch.py): a test document whose
+    only validation problem is a single near-miss uncited assertive
+    statement gets a cheap targeted-patch follow-up call
+    (build_localized_test_patch_prompt) instead of a full retry -- the
+    second call must carry the flagged-sentence prompt, not the writing
+    rules/template/"Previous attempt failed" full-retry prompt, and must
+    not consume one of the full-regeneration attempts."""
+    from mfdoc import testbatch
+
+    conn = _near_miss_test_doc_conn()
+    calls = {"n": 0}
+    prompts: list[str] = []
+
+    near_miss_text = _near_miss_test_doc_text(
+        "Covers the module as a whole [[FAKEMOD:1]]. The system also "
+        "validates the account balance before posting."
+    )
+    patched_text = _near_miss_test_doc_text(
+        "Covers the module as a whole [[FAKEMOD:1]]. The system also "
+        "validates the account balance before posting [[FAKEMOD:1]]."
+    )
+
+    def caller(prompt: str) -> ModelResponse:
+        calls["n"] += 1
+        prompts.append(prompt)
+        if calls["n"] == 1:
+            return ModelResponse(text=near_miss_text, input_tokens=10, output_tokens=20)
+        return ModelResponse(text=patched_text, input_tokens=5, output_tokens=8)
+
+    import tempfile
+    out_path = Path(tempfile.mkdtemp()) / "FAKEMOD.md"
+    brief = "# Test brief: FAKEMOD\n\nSome brief text [[FAKEMOD:1]].\n"
+    result = testbatch._generate_test_doc_from_brief(
+        conn, "FAKEMOD", brief, "python", "pytest", out_path, caller,
+        "writing rules text", "template text",
+    )
+    assert result.ok, result.problems
+    assert calls["n"] == 2
+    assert result.attempts == 1  # the patch call doesn't count as a full-retry attempt
+    patch_prompt = prompts[1]
+    assert "Flagged findings (locate the matching sentence; fix only these)" in patch_prompt
+    assert "Uncited assertive statements" in patch_prompt
+    assert "truncated to 140 characters" in patch_prompt
+    assert "Previous attempt failed validation" not in patch_prompt
+    assert "writing rules text" not in patch_prompt  # writing rules not resent
+    assert "template text" not in patch_prompt  # template not resent
+    assert out_path.with_suffix(".py").exists(), "a successful patch must still write the sidecar"
+
+
+def test_near_miss_patch_failure_in_test_doc_falls_back_to_full_retry():
+    """When the targeted patch attempt itself doesn't resolve validation,
+    generation must still fall back to the existing full-retry path (with
+    its normal max_attempts budget) rather than giving up."""
+    from mfdoc import testbatch
+
+    conn = _near_miss_test_doc_conn()
+    calls = {"n": 0}
+    prompts: list[str] = []
+
+    near_miss_text = _near_miss_test_doc_text(
+        "Covers the module as a whole [[FAKEMOD:1]]. The system also "
+        "validates the account balance before posting."
+    )
+    fixed_text = _near_miss_test_doc_text(
+        "Covers the module as a whole [[FAKEMOD:1]]. The system also "
+        "validates the account balance before posting [[FAKEMOD:1]]."
+    )
+
+    def caller(prompt: str) -> ModelResponse:
+        calls["n"] += 1
+        prompts.append(prompt)
+        if calls["n"] == 1:
+            return ModelResponse(text=near_miss_text, input_tokens=10, output_tokens=20)
+        if calls["n"] == 2:
+            # Patch attempt: model fails to actually fix it.
+            return ModelResponse(text=near_miss_text, input_tokens=5, output_tokens=8)
+        # Full retry: succeeds.
+        return ModelResponse(text=fixed_text, input_tokens=1, output_tokens=1)
+
+    import tempfile
+    out_path = Path(tempfile.mkdtemp()) / "FAKEMOD.md"
+    brief = "# Test brief: FAKEMOD\n\nSome brief text [[FAKEMOD:1]].\n"
+    result = testbatch._generate_test_doc_from_brief(
+        conn, "FAKEMOD", brief, "python", "pytest", out_path, caller,
+        "writing rules text", "template text", max_attempts=2,
+    )
+    assert result.ok, result.problems
+    assert calls["n"] == 3
+    assert result.attempts == 2
+    assert "Previous attempt failed validation" in prompts[2]
+
+
 def test_extract_code_fence_rejects_zero_or_multiple_fences():
     from mfdoc.testbatch import extract_code_fence
 
@@ -1700,6 +1826,117 @@ def test_run_test_batch_initial_call_exception_is_retried_and_can_still_succeed(
     assert good.ok is True
     assert good.attempts == 2
     assert calls["n"] == 2, "the retry must actually call the model again, not give up after the first exception"
+
+
+def test_run_test_batch_near_miss_uncited_assertion_gets_a_targeted_patch_not_a_full_retry(tmp_path):
+    """Issue #188 code review: `run_test_batch`'s own non-chunked pool loop
+    -- the ordinary `mfdoc test-batch` path for every member at or below
+    max_scenarios_per_call, which is *not* routed through
+    `_generate_test_doc_from_brief` -- must get the same near-miss/
+    targeted-patch treatment as the direct-call and chunked paths, or the
+    command this issue's own evidence was measured against never actually
+    benefits from the fix."""
+    import sqlite3
+
+    from mfdoc import testbatch
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
+    insert(
+        conn, "test_case", member_id=1, kind="unit", scenario_name="FAKEMOD:BR-001",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+        then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:1", confidence="verified",
+    )
+    conn.commit()
+
+    near_miss_text = _valid_test_doc_text("python", "pytest").replace(
+        "Covers the module as a whole [[FAKEMOD:1]].",
+        "Covers the module as a whole [[FAKEMOD:1]]. The system also "
+        "validates the account balance before posting.",
+    )
+    patched_text = _valid_test_doc_text("python", "pytest").replace(
+        "Covers the module as a whole [[FAKEMOD:1]].",
+        "Covers the module as a whole [[FAKEMOD:1]]. The system also "
+        "validates the account balance before posting [[FAKEMOD:1]].",
+    )
+    calls = {"n": 0}
+
+    def caller(prompt: str) -> ModelResponse:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return ModelResponse(text=near_miss_text, input_tokens=10, output_tokens=20)
+        return ModelResponse(text=patched_text, input_tokens=5, output_tokens=8)
+
+    summary = testbatch.run_test_batch(
+        conn, ["FAKEMOD"], "python", "pytest", tmp_path / "out", caller,
+        "writing rules text", "template text", concurrency=1,
+    )
+    result = summary.results[0]
+    assert result.ok, result.problems
+    assert calls["n"] == 2
+    assert result.attempts == 1  # the patch call doesn't count as a full-retry attempt
+
+
+def test_run_test_batch_near_miss_patch_failure_falls_back_to_full_retry(tmp_path):
+    """Same non-chunked pool loop: when the targeted patch attempt itself
+    doesn't resolve validation, the member must still fall back to the
+    existing full-retry path (attempts=2) rather than being reported
+    ok=False after only the one patch attempt."""
+    import sqlite3
+
+    from mfdoc import testbatch
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
+    insert(
+        conn, "test_case", member_id=1, kind="unit", scenario_name="FAKEMOD:BR-001",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+        then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:1", confidence="verified",
+    )
+    conn.commit()
+
+    near_miss_text = _valid_test_doc_text("python", "pytest").replace(
+        "Covers the module as a whole [[FAKEMOD:1]].",
+        "Covers the module as a whole [[FAKEMOD:1]]. The system also "
+        "validates the account balance before posting.",
+    )
+    fixed_text = _valid_test_doc_text("python", "pytest").replace(
+        "Covers the module as a whole [[FAKEMOD:1]].",
+        "Covers the module as a whole [[FAKEMOD:1]]. The system also "
+        "validates the account balance before posting [[FAKEMOD:1]].",
+    )
+    calls = {"n": 0}
+
+    def caller(prompt: str) -> ModelResponse:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return ModelResponse(text=near_miss_text, input_tokens=10, output_tokens=20)
+        if calls["n"] == 2:
+            # Patch attempt: model fails to actually fix it.
+            return ModelResponse(text=near_miss_text, input_tokens=5, output_tokens=8)
+        # Full retry: succeeds.
+        return ModelResponse(text=fixed_text, input_tokens=1, output_tokens=1)
+
+    summary = testbatch.run_test_batch(
+        conn, ["FAKEMOD"], "python", "pytest", tmp_path / "out", caller,
+        "writing rules text", "template text", concurrency=1,
+    )
+    result = summary.results[0]
+    assert result.ok, result.problems
+    assert calls["n"] == 3
+    assert result.attempts == 2
 
 
 def test_generate_member_test_doc_reports_caller_exception_without_crashing(tmp_path):
