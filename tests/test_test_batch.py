@@ -176,6 +176,54 @@ def test_corpus_signature_changes_when_member_system_changes(tmp_path):
     assert sig_before != sig_after
 
 
+def test_corpus_signature_changes_when_rule_candidate_ordering_shifts_but_test_case_does_not(tmp_path):
+    """Copilot review follow-up on issue #195: a `derive` rebuild can
+    insert/reorder `rule_candidate` rows (and shift `routine` boundaries)
+    before `mfdoc test-plan` has re-run to reflect that in `test_case` --
+    leaving every `test_case` column `_corpus_signature` already hashes
+    untouched. Without also hashing `rule_candidate`'s own `(id, line_no)`
+    ordering and `routine` boundaries directly, the corpus-level fast path
+    in `run_test_batch`/`plan_test_batch` would wrongly treat this as
+    "nothing changed" and skip straight past `_test_chunk_reuse_ok`'s own
+    per-chunk sidecar-staleness check."""
+    import sqlite3
+
+    from mfdoc import testbatch
+    from mfdoc.db import SCHEMA, insert
+
+    def seed(extra_rule: bool) -> sqlite3.Connection:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(SCHEMA)
+        conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+        conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 40, 'irrelevant')")
+        rc_id = insert(
+            conn, "rule_candidate", member_id=1, line_no=10, construct="IF",
+            condition="COND-1", raw="IF COND-1",
+        )
+        insert(
+            conn, "test_case", member_id=1, kind="unit", rule_candidate_id=rc_id,
+            scenario_name="FAKEMOD:BR-001",
+            given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+            when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+            then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+            status="characterization", citation="FAKEMOD:1", confidence="verified",
+        )
+        if extra_rule:
+            # A rule_candidate the derive rebuild produced, with no
+            # matching test_case row yet -- test-plan hasn't re-run.
+            insert(
+                conn, "rule_candidate", member_id=1, line_no=20, construct="IF",
+                condition="COND-2", raw="IF COND-2",
+            )
+        conn.commit()
+        return conn
+
+    sig_before = testbatch._corpus_signature(seed(False), "python", "pytest", 999)
+    sig_after = testbatch._corpus_signature(seed(True), "python", "pytest", 999)
+    assert sig_before != sig_after
+
+
 def test_run_test_batch_does_not_reuse_state_or_file_across_frameworks(tmp_path):
     """Running the same member/language for two different frameworks must
     produce two separate output files and two separate resume-state
@@ -440,7 +488,7 @@ def test_unknown_language_keeps_code_embedded(tmp_path):
     doc_text = _valid_test_doc_text("cobol", "cobol-unit")
     out_path = tmp_path / "FAKEMOD.md"
     out_path.write_text(doc_text, encoding="utf-8")
-    sidecar = write_test_doc_with_sidecar(out_path, doc_text, "cobol")
+    sidecar = write_test_doc_with_sidecar(None, "FAKEMOD", out_path, doc_text, "cobol")
     assert sidecar is None
     assert out_path.read_text(encoding="utf-8") == doc_text
     assert not (tmp_path / "FAKEMOD.cobol").exists()

@@ -246,6 +246,71 @@ GitHub org.
   passed, 2 skipped (up from 955 passed, 2 skipped per #210's own progress
   entry).
 
+**Progress (2026-09-11g):**
+- Issue #195, real redesign: the previous rounds' `all(...)` id-overlap
+  staleness heuristic in `validate_test_doc` had a genuine hole Copilot's
+  review correctly identified -- a rule inserted (or removed) *after* the
+  sidecar's own BR-range still shifts every later id project-wide, but
+  leaves the sidecar's own ids a literal subset of the new, larger valid
+  set (old `{BR-001, BR-002, BR-003}`, current `{BR-001, ..., BR-004}`).
+  `code_ids <= valid_scenarios()` reads that as "still current" and
+  cross-checks the stale sidecar against a fresh manifest anyway --
+  reproducing the exact false "not found" failure this issue exists to
+  fix, for this one insertion shape. No amount of tuning the id-overlap
+  threshold (any/all/majority) can close this: it's testing the wrong
+  thing (which ids happen to still resolve) instead of the right one
+  (has the corpus that determined this numbering actually changed).
+  Replaced the primary signal with a real content fingerprint:
+  `testplan.member_rule_fingerprint(conn, member_name)` hashes the
+  member's own `rule_candidate` `(id, line_no)` ordering -- exactly the
+  input `build_member_test_cases`'s `numbered_rule_candidates()` reads
+  positionally to assign every `BR-nnn` id -- and `doc_rule_fingerprint`
+  combines it across a document's `sources` (normally one member, but not
+  assumed to be). `testbatch.write_test_doc_with_sidecar` now stamps this
+  as `test_case_fingerprint` into the document's front matter at write
+  time (needed `conn`/`member_name` added to its signature; updated all
+  four call sites in `testbatch.py` plus the one direct test call).
+  `validate_test_doc` recomputes the same fingerprint at validation time
+  and compares directly: a mismatch means the corpus has genuinely moved
+  on, independent of which specific ids happen to still resolve -- this
+  is what actually catches the insertion-after-range case. The original
+  `all(...)` id-overlap check is kept, but demoted to a fallback for
+  documents with no stored fingerprint at all (older documents written
+  before this field existed, or hand-written fixtures) -- every document
+  written from here on gets the exact check instead. One implementation
+  bug caught before pushing (self-review, not a review round): the write
+  side initially called `member_rule_fingerprint` directly while the read
+  side called `doc_rule_fingerprint` (which re-hashes its inputs) --
+  always-mismatching by construction, breaking `_test_chunk_reuse_ok`'s
+  reuse check for every already-correct chunk (six existing tests caught
+  this immediately). Fixed by using `doc_rule_fingerprint(conn,
+  [member_name])` on both sides.
+  Also fixed, same round: `_corpus_signature` (the global "nothing
+  changed, skip everything" fast path in `run_test_batch`/
+  `plan_test_batch`) hashed `test_case`'s own columns but not
+  `rule_candidate`'s `(id, line_no)` ordering or `routine` boundaries
+  directly -- a `derive` rebuild that shifts those *before* `mfdoc
+  test-plan` re-runs to reflect it in `test_case` could leave every
+  hashed column untouched while chunk boundaries/BR-numbering have
+  already moved, wrongly skipping every member and bypassing
+  `_test_chunk_reuse_ok`'s own per-chunk check entirely; and a stale
+  sidecar being ignored with nothing in the document body to fall back on
+  scanning (an empty manifest) previously validated `ok=True` for lack of
+  anything left to flag -- now reported as an explicit "cannot be
+  verified at all" problem instead of a silent pass. Confirmed by hand
+  (not just by the new tests) that the insertion-scenario test fails
+  without the fingerprint (using a temporary version with the field
+  stripped -- `sidecar_stale` came back `False`, the exact bug being
+  fixed) and passes with it. Added
+  `test_stale_sidecar_whose_old_ids_remain_a_subset_after_an_insertion`,
+  `test_stale_sidecar_with_no_body_fallback_is_reported_as_untraceable`,
+  `test_hand_edited_sidecar_with_a_fingerprint_still_flags_an_invented_id`
+  (`tests/test_test_validate.py`) and
+  `test_corpus_signature_changes_when_rule_candidate_ordering_shifts_but_test_case_does_not`
+  (`tests/test_test_batch.py`). Full suite: 966 passed, 2 skipped; bundled
+  fixture pipeline (`ingest`/`derive`/`coverage`/`validate --docs
+  examples`) unchanged from before this change.
+
 **Progress (2026-09-11):**
 - Fixed issue #199: `mfdoc doc-drift`'s existing checks (issue #161) caught
   system-wide/module-scoped drift but nothing keyed on a single dialect --

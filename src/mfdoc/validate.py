@@ -32,6 +32,7 @@ from .conditions import (
 )
 from .db import insert, resolve_member_by_name
 from .testlang import sidecar_path_for
+from .testplan import doc_rule_fingerprint
 
 CITATION = re.compile(r"\[\[(?P<member>[A-Z0-9#@$&\-_.]+)(?::(?P<from>\d+)(?:-(?P<to>\d+))?)?\]\]", re.I)
 
@@ -968,31 +969,57 @@ def validate_test_doc(conn, path: Path, _text: str | None = None) -> dict:
     matching any current `test_case` row (issue #195). Comparing that
     numbering against a freshly generated manifest would then report every
     id in the sidecar as missing, even though nothing about the current run
-    is wrong. This is detected by checking whether *every* one of the
-    sidecar's own BR-ids resolves against `test_case` -- if it has BR-ids
-    and *any* of them don't, the sidecar is treated as though it weren't
-    there (same as no sidecar on disk) rather than authoritative;
-    `result["sidecar_stale"]` reports this without it counting toward
-    `problems`/`ok`. Requiring *every* id to resolve (rather than just one
-    of them, i.e. `all(...)` and not `any(...)`) matters for a partial
-    positional shift -- e.g. old `{BR-001, BR-002, BR-003}` renumbered to
-    `{BR-002, BR-003, BR-004}` still has two overlapping ids by
-    coincidence; an `any(...)` check would call that "still current" and
-    miss the shift, which is exactly the same staleness this guard exists
-    to catch. The trade-off: a
-    sidecar with one genuinely invented/malformed id mixed in among
-    otherwise-current ones is also treated as stale rather than flagged
-    directly in `problems` -- accepted here since `test-batch`'s retry loop
-    re-validates a freshly rendered chunk against the (also freshly
-    written) manifest on every attempt regardless, so a real invented id
-    still surfaces via `body`'s own scenario references, just not via the
-    sidecar cross-check specifically. It isn't silently lost, though:
+    is wrong.
+
+    Detected two ways, tried in this order:
+
+    1. **Fingerprint comparison (authoritative).** `write_test_doc_with_
+       sidecar` stamps a `test_case_fingerprint` field into the document's
+       front matter -- `testplan.member_rule_fingerprint`'s hash of the
+       exact `rule_candidate` `(id, line_no)` ordering that determined this
+       render's `BR-nnn` numbering, at write time. If that field is
+       present, this recomputes the same fingerprint from `sources`'
+       member(s) right now (`testplan.doc_rule_fingerprint`) and compares:
+       any mismatch means the corpus has genuinely moved on since the
+       sidecar was written, full stop -- this is a direct, exact signal,
+       not an inference from which ids happen to still resolve. It is what
+       correctly catches the case an ID-overlap check alone cannot: a rule
+       inserted (or removed) *after* the sidecar's own BR-range still
+       shifts every later id project-wide, but leaves the sidecar's own
+       (unshifted) ids a literal subset of the current valid set -- e.g.
+       old `{BR-001, BR-002, BR-003}` with a rule now inserted afterward,
+       current valid set `{BR-001, BR-002, BR-003, BR-004}`. An
+       ID-membership check reads that as "still current" (every old id
+       still resolves) and wrongly cross-checks the stale sidecar against
+       the fresh manifest anyway; the fingerprint, computed from the whole
+       member's `rule_candidate` ordering rather than just the ids this one
+       sidecar happens to mention, does not.
+    2. **ID-overlap fallback (legacy documents only).** No stored
+       `test_case_fingerprint` at all (an older document written before
+       this field existed, or a hand-written/test fixture) falls back to
+       checking whether *every* one of the sidecar's own BR-ids resolves
+       against `test_case`: if it has BR-ids and *any* of them don't, the
+       sidecar is treated as though it weren't there. Deliberately
+       `all(...)`, not `any(...)`: a partial positional shift (old
+       `{BR-001, BR-002, BR-003}` renumbered to `{BR-002, BR-003, BR-004}`)
+       still has two overlapping ids by coincidence, which `any(...)` would
+       wrongly call "still current". This fallback cannot catch the
+       insertion-after-range case (1) handles -- accepted here because it
+       only applies to a document that predates the fingerprint field
+       existing at all; every document `write_test_doc_with_sidecar`
+       writes from here on gets the exact check instead.
+
+    Either way, `result["sidecar_stale"]` reports the outcome without it
+    counting toward `problems`/`ok` -- a stale sidecar isn't a defect in
+    *this* document, and gets overwritten with fresh content the next time
+    this validation actually succeeds. When the ID-overlap fallback is what
+    triggered it, a sidecar with one genuinely invented/malformed id mixed
+    in among otherwise-current ones is also treated as stale rather than
+    flagged directly in `problems` -- not silently lost, though:
     `result["sidecar_unresolved_ids"]` lists exactly which of the
-    sidecar's ids didn't resolve whenever `sidecar_stale` is true, for a
-    caller or a human reading a `mfdoc test-validate` report who wants to
-    tell "genuine renumbering" apart from "one bad id" -- there's no
-    persisted per-run generation signature `test_case` carries today that
-    would let this function make that call on its own with certainty.
+    sidecar's ids didn't resolve, for a caller or a human reading a `mfdoc
+    test-validate` report who wants to tell "genuine renumbering" apart
+    from "one bad id" in that fallback case.
     """
     result = validate_doc(conn, path, _text=_text)
     fm, body = result.pop("_fm"), result.pop("_body")
@@ -1022,14 +1049,26 @@ def validate_test_doc(conn, path: Path, _text: str | None = None) -> dict:
             }
         return _valid_scenarios_cache
 
+    stored_fingerprint = fm.get("test_case_fingerprint") if fm is not None else None
+    _current_fingerprint_cache: list = []  # 0 or 1 element -- memoized None is valid too
+
+    def current_fingerprint() -> str | None:
+        if not _current_fingerprint_cache:
+            sources = fm.get("sources") if fm is not None else None
+            fp = doc_rule_fingerprint(conn, sources) if sources else None
+            _current_fingerprint_cache.append(fp)
+        return _current_fingerprint_cache[0]
+
     sidecar = sidecar_path_for(path, fm.get("language")) if fm is not None else None
     sidecar_usable = False
     sidecar_unresolved_ids: list[str] = []
+    sidecar_had_ids = False
     if sidecar is not None and sidecar.exists():
         code_ids = {
             f"{m.group('member').upper()}:BR-{m.group('n')}"
             for m in BR_REF.finditer(sidecar.read_text(encoding="utf-8"))
         }
+        sidecar_had_ids = bool(code_ids)
         # Staleness guard (issue #195): the sidecar is only rewritten after a
         # *successful* validation, so if something upstream of `test-plan`
         # renumbers `rule_candidate` rows after the sidecar was last written
@@ -1038,20 +1077,32 @@ def validate_test_doc(conn, path: Path, _text: str | None = None) -> dict:
         # row. Comparing that stale numbering against a freshly generated
         # manifest then produces a "not found" for every id in the sidecar,
         # not because anything about this run is actually wrong -- just
-        # because the sidecar predates the renumbering. Detect that by
-        # checking whether *every* one of the sidecar's own BR-ids resolves
-        # against `test_case`: if it has BR-ids and any of them don't,
-        # treat the sidecar as though it weren't there (fall back to
-        # scanning `body` directly below) rather than as authoritative --
-        # the same treatment already given to "no sidecar on disk".
-        # Deliberately `all(...)`, not `any(...)`: a partial positional
-        # shift (old {BR-001, BR-002, BR-003} renumbered to {BR-002,
-        # BR-003, BR-004}) still leaves some ids coincidentally overlapping
-        # with `test_case`'s current numbering, which `any(...)` would
-        # wrongly read as "still current" and cross-check anyway --
-        # producing the exact false "not found" this guard exists to
-        # prevent, just for a subset of ids instead of all of them.
-        sidecar_usable = not code_ids or code_ids <= valid_scenarios()
+        # because the sidecar predates the renumbering.
+        #
+        # Fingerprint check first (exact, see docstring): a stored
+        # `test_case_fingerprint` that no longer matches the current
+        # `rule_candidate` ordering for this document's `sources` means the
+        # corpus has genuinely moved on, regardless of whether the
+        # sidecar's own ids happen to still resolve -- this is what catches
+        # an insertion *after* the sidecar's own BR-range, which leaves its
+        # ids a literal (and therefore ID-overlap-invisible) subset of the
+        # current valid set.
+        fp = current_fingerprint() if stored_fingerprint else None
+        if stored_fingerprint and fp is not None:
+            sidecar_usable = fp == stored_fingerprint
+        else:
+            # Fallback (legacy documents with no stored fingerprint, or a
+            # `sources` that doesn't resolve cleanly to fingerprint): the
+            # same id-overlap heuristic this guard originally shipped with.
+            # Deliberately `all(...)`, not `any(...)`: a partial positional
+            # shift (old {BR-001, BR-002, BR-003} renumbered to {BR-002,
+            # BR-003, BR-004}) still leaves some ids coincidentally
+            # overlapping with `test_case`'s current numbering, which
+            # `any(...)` would wrongly read as "still current". This
+            # fallback still can't see an insertion after the sidecar's own
+            # range the way the fingerprint check above can -- accepted
+            # only because it's limited to documents predating that field.
+            sidecar_usable = not code_ids or code_ids <= valid_scenarios()
         if not sidecar_usable:
             # Diagnostic only, deliberately not appended to `problems`/`ok`:
             # a stale sidecar isn't a defect in *this* document -- it's
@@ -1060,14 +1111,10 @@ def validate_test_doc(conn, path: Path, _text: str | None = None) -> dict:
             # content the next time this validation actually succeeds.
             # Recorded via `result["sidecar_unresolved_ids"]` so a caller
             # (or a human reading a `mfdoc test-validate` report) can still
-            # see exactly which ids didn't resolve, rather than the
-            # all-or-nothing `all(...)` staleness decision silently
-            # discarding that detail -- one of them could genuinely be an
-            # invented/malformed id rather than a renumbering artifact, and
-            # this is what lets that still be noticed even though it isn't
-            # (and can't reliably be, without a persisted per-run
-            # generation signature `test_case` doesn't currently carry)
-            # cross-checked against the manifest here.
+            # see exactly which sidecar ids don't resolve against current
+            # `test_case` rows (even when the fingerprint mismatch, not an
+            # unresolved id, is what actually triggered `sidecar_stale` --
+            # this can come back empty in that case, which is expected).
             sidecar_unresolved_ids = sorted(code_ids - valid_scenarios())
     if sidecar is not None and sidecar.exists() and sidecar_usable:
         manifest_ids = {
@@ -1082,6 +1129,20 @@ def validate_test_doc(conn, path: Path, _text: str | None = None) -> dict:
                              f"{path.name}'s '## Scenarios covered' manifest")
     else:
         scan_ids = {f"{m.group('member').upper()}:BR-{m.group('n')}" for m in BR_REF.finditer(body)}
+        if sidecar_had_ids and not sidecar_usable and not scan_ids:
+            # A stale sidecar that actually had BR-nnn content is being
+            # ignored (see the staleness guard above), and the document
+            # body has nothing to fall back on scanning either (an empty
+            # "## Scenarios covered" manifest, or a code fence with no
+            # references) -- this document is untraceable, not clean.
+            # Without this, `bad_refs` would stay 0 purely because there is
+            # nothing left to check, and `ok=True` would silently report a
+            # document that can no longer be verified against anything as
+            # though it had passed genuine verification.
+            problems.append(
+                f"{sidecar.name} is stale and {path.name}'s body has no MEMBER:BR-nnn "
+                f"references to fall back on -- this document cannot be verified at all"
+            )
 
     bad_refs = 0
     for scenario in scan_ids:

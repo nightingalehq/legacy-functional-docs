@@ -203,6 +203,234 @@ See [`FAKEMOD.py`](./FAKEMOD.py) for the generated test source.
     assert result["sidecar_unresolved_ids"] == ["FAKEMOD:BR-001"]
 
 
+def test_stale_sidecar_whose_old_ids_remain_a_subset_after_an_insertion(indexed_db, tmp_path):
+    """Copilot review follow-up on issue #195: an ID-overlap/subset check
+    alone cannot detect a rule inserted *after* the sidecar's own BR-range.
+    Old sidecar `{BR-001, BR-002, BR-003}` stays a literal subset of the
+    current valid set `{BR-001, BR-002, BR-003, BR-004}` once a fourth rule
+    is derived -- `code_ids <= valid_scenarios()` alone would read that as
+    "still current" and cross-check the stale sidecar against a freshly
+    generated manifest anyway, reproducing the exact false "not found"
+    failure #195 exists to eliminate. The `test_case_fingerprint` this
+    sidecar was written with (from the member's `rule_candidate` ordering
+    at that time, via `testplan.doc_rule_fingerprint`) no longer matches
+    the current one now that a fourth `rule_candidate` row exists -- this
+    is the signal that actually catches this case, where ID-overlap alone
+    cannot."""
+    import sqlite3
+
+    from mfdoc import testplan
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 40, 'irrelevant')")
+
+    def seed_rule_and_test_case(n: int, line_no: int) -> None:
+        rc_id = insert(
+            conn, "rule_candidate", member_id=1, line_no=line_no, construct="IF",
+            condition=f"COND-{n}", raw=f"IF COND-{n}",
+        )
+        insert(
+            conn, "test_case", member_id=1, kind="unit", rule_candidate_id=rc_id,
+            scenario_name=f"FAKEMOD:BR-{n:03d}",
+            given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+            when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+            then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+            status="characterization", citation="FAKEMOD:1", confidence="verified",
+        )
+
+    for n, line_no in ((1, 10), (2, 20), (3, 30)):
+        seed_rule_and_test_case(n, line_no)
+    conn.commit()
+
+    # Fingerprint the corpus *before* the insertion -- this is what
+    # write_test_doc_with_sidecar would have stamped into the document's
+    # front matter at the time this (soon to be stale) sidecar was written.
+    fingerprint_before_insertion = testplan.doc_rule_fingerprint(conn, ["FAKEMOD"])
+
+    path = tmp_path / "FAKEMOD.md"
+    sidecar = tmp_path / "FAKEMOD.py"
+    path.write_text(
+        f"""---
+title: "FAKEMOD -- generated tests (python)"
+doc_type: generated_test
+system: MOM
+module: FAKEMOD
+language: python
+framework: pytest
+generated_by: legacy-functional-docs 0.1.0
+generated_at: "2026-01-01"
+review_status: draft
+reviewers: []
+confidence_summary:
+  verified: 1
+  inferred: 0
+  unresolved: 0
+sources: ["FAKEMOD"]
+test_case_fingerprint: "{fingerprint_before_insertion}"
+---
+
+# FAKEMOD -- generated tests
+
+See [`FAKEMOD.py`](./FAKEMOD.py) for the generated test source.
+
+## Scenarios covered
+
+- FAKEMOD:BR-001
+- FAKEMOD:BR-002
+- FAKEMOD:BR-003
+""",
+        encoding="utf-8",
+    )
+    sidecar.write_text(
+        "def test_one():\n    # FAKEMOD:BR-001\n    ...\n\n"
+        "def test_two():\n    # FAKEMOD:BR-002\n    ...\n\n"
+        "def test_three():\n    # FAKEMOD:BR-003\n    ...\n",
+        encoding="utf-8",
+    )
+
+    # Now insert a fourth rule -- every old id is still a literal subset of
+    # the now-larger valid set, which the pre-fingerprint id-overlap-only
+    # check would have wrongly read as "sidecar still current".
+    seed_rule_and_test_case(4, 25)  # between BR-002 and BR-003's line numbers
+    conn.commit()
+
+    # Confirm the premise: without the fingerprint, this really would look
+    # "usable" to a bare subset check -- otherwise this test wouldn't be
+    # proving what it claims to.
+    valid_now = {
+        r["scenario_name"].upper() for r in conn.execute("SELECT scenario_name FROM test_case")
+    }
+    old_ids = {"FAKEMOD:BR-001", "FAKEMOD:BR-002", "FAKEMOD:BR-003"}
+    assert old_ids <= valid_now, "test setup didn't reproduce the subset scenario"
+
+    result = validate_test_doc(conn, path)
+    assert result["sidecar_stale"] is True, (
+        "fingerprint mismatch must catch this even though every old id "
+        "still resolves"
+    )
+    assert result["ok"], result["problems"]
+    assert result["invalid_scenario_refs"] == 0
+    assert not any("not found in" in p or "missing from" in p for p in result["problems"])
+
+
+def test_stale_sidecar_with_no_body_fallback_is_reported_as_untraceable(indexed_db, tmp_path):
+    """Copilot review follow-up on issue #195: when a stale sidecar is
+    ignored, the fallback scans the document `body` for `MEMBER:BR-nnn`
+    references -- but if the body's own manifest is empty (or missing),
+    there's nothing left to check at all. Without a guard, `scan_ids` would
+    come back empty, `bad_refs` would stay 0 for lack of anything to flag,
+    and this would silently validate `ok=True` even though the document is
+    now completely unverifiable -- a stale sidecar tolerated into a
+    structural failure, not a clean pass."""
+    conn = indexed_db
+    testplan.run_all(conn, member_name="MMP0100")
+    path = tmp_path / "MMP0100.md"
+    sidecar = tmp_path / "MMP0100.py"
+    # Same shape as SIDECAR_DOC, but the manifest section is empty -- no
+    # MEMBER:BR-nnn reference anywhere in the body to fall back on.
+    path.write_text(
+        """---
+title: "MMP0100 -- generated tests (python)"
+doc_type: generated_test
+system: MOM
+module: MMP0100
+language: python
+framework: pytest
+generated_by: legacy-functional-docs 0.1.0
+generated_at: "2026-01-01"
+review_status: draft
+reviewers: []
+confidence_summary:
+  verified: 1
+  inferred: 0
+  unresolved: 0
+sources: ["MMP0100"]
+---
+
+# MMP0100 -- generated tests
+
+See [`MMP0100.py`](./MMP0100.py) for the generated test source.
+
+## Scenarios covered
+
+(none)
+""",
+        encoding="utf-8",
+    )
+    # Old numbering -- BR-999 doesn't exist, so the sidecar is stale.
+    sidecar.write_text(
+        "def test_rejects_unconfirmed_order():\n    # MMP0100:BR-999\n    ...\n",
+        encoding="utf-8",
+    )
+    result = validate_test_doc(conn, path)
+    assert result["sidecar_stale"] is True
+    assert not result["ok"]
+    assert any("cannot be verified" in p for p in result["problems"])
+
+
+def test_hand_edited_sidecar_with_a_fingerprint_still_flags_an_invented_id(indexed_db, tmp_path):
+    """Copilot review follow-up on issue #195: a hand-edited sidecar with
+    one valid id and one invented id (e.g. `{BR-004, BR-999}`) must not
+    validate clean. For a document carrying a `test_case_fingerprint` that
+    still matches the current corpus (i.e. genuinely not stale), the
+    fingerprint check makes the sidecar authoritative *without* going
+    through the id-overlap `all(...)` check that would otherwise treat any
+    unresolved id as "the whole sidecar is stale" and quietly fall back to
+    the body -- so the invented id still reaches the ordinary
+    manifest/bad_refs checks and gets reported, the same as it always
+    would for a sidecar that was never stale at all."""
+    conn = indexed_db
+    testplan.run_all(conn, member_name="MMP0100")
+    path = tmp_path / "MMP0100.md"
+    sidecar = tmp_path / "MMP0100.py"
+    fingerprint = testplan.doc_rule_fingerprint(conn, ["MMP0100"])
+    path.write_text(
+        f"""---
+title: "MMP0100 -- generated tests (python)"
+doc_type: generated_test
+system: MOM
+module: MMP0100
+language: python
+framework: pytest
+generated_by: legacy-functional-docs 0.1.0
+generated_at: "2026-01-01"
+review_status: draft
+reviewers: []
+confidence_summary:
+  verified: 1
+  inferred: 0
+  unresolved: 0
+sources: ["MMP0100"]
+test_case_fingerprint: "{fingerprint}"
+---
+
+# MMP0100 -- generated tests
+
+See [`MMP0100.py`](./MMP0100.py) for the generated test source.
+
+## Scenarios covered
+
+- MMP0100:BR-004
+- MMP0100:BR-999
+""",
+        encoding="utf-8",
+    )
+    sidecar.write_text(
+        "def test_one():\n    # MMP0100:BR-004\n    ...\n\n"
+        "def test_two():\n    # MMP0100:BR-999\n    ...\n",
+        encoding="utf-8",
+    )
+    result = validate_test_doc(conn, path)
+    assert result["sidecar_stale"] is False, "a matching fingerprint must not be reported as stale"
+    assert not result["ok"]
+    assert result["invalid_scenario_refs"] == 1
+    assert any("BR-999" in p for p in result["problems"])
+
+
 def test_current_sidecar_still_cross_checked_against_manifest(indexed_db, tmp_path):
     """A sidecar whose BR-ids *do* all match current `test_case` rows is
     still authoritative -- the staleness guard must not swallow a genuine

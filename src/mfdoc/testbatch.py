@@ -42,7 +42,7 @@ from .brief import (
 )
 from .redact import NULL_REDACTOR, Redactor
 from .testlang import sidecar_path_for
-from .testplan import fetch_test_case_rows, test_case_brief, test_case_brief_chunk
+from .testplan import doc_rule_fingerprint, fetch_test_case_rows, test_case_brief, test_case_brief_chunk
 from .validate import BR_REF, split_frontmatter, validate_test_doc
 
 # Same progress/diagnostic logger idea as batch.py -- see that module's
@@ -94,7 +94,8 @@ def extract_code_fence(body: str, language: str) -> str | None:
     return matches[0]
 
 
-def write_test_doc_with_sidecar(out_path: Path, doc_text: str, language: str) -> Path | None:
+def write_test_doc_with_sidecar(conn, member_name: str, out_path: Path, doc_text: str,
+                                 language: str) -> Path | None:
     """Given a response that has already validated ok, split its one code
     fence out to a sibling source file (`{member}.py`/`{member}.java`, per
     `language`) and rewrite `out_path` to reference it plus a `## Scenarios
@@ -102,6 +103,21 @@ def write_test_doc_with_sidecar(out_path: Path, doc_text: str, language: str) ->
     what lets `validate_test_doc` keep checking every MEMBER:BR-nnn
     reference once the actual code has moved somewhere its body-only scan
     would no longer see.
+
+    Also stamps a `test_case_fingerprint` field into the rewritten front
+    matter, from `testplan.doc_rule_fingerprint(conn, [member_name])` --
+    the exact `rule_candidate` ordering that determined this render's
+    `BR-nnn` numbering, at the moment the sidecar is written. This is what
+    lets `validate_test_doc` later detect a genuine positional renumbering
+    directly (issue #195), rather than only inferring staleness from
+    whether the sidecar's own ids happen to still resolve against current
+    `test_case` rows -- a check an inserted-but-not-yet-shifted-past rule
+    can slip past (see `member_rule_fingerprint`'s docstring). `conn`
+    is only ever used for this fingerprint lookup; omitted (left out of
+    front matter entirely) when it can't be computed (`member_name`
+    doesn't resolve to exactly one member -- shouldn't happen for a
+    member this run just rendered, but this must never be the reason a
+    write that would otherwise succeed fails instead).
 
     Returns the sidecar path written, or None if no split was performed
     (unrecognised language, front matter missing, fence not exactly one,
@@ -134,6 +150,15 @@ def write_test_doc_with_sidecar(out_path: Path, doc_text: str, language: str) ->
         body, count=1,
     ).rstrip()
     manifest = "\n\n## Scenarios covered\n\n" + "\n".join(f"- {sid}" for sid in scenario_ids) + "\n"
+    # doc_rule_fingerprint, not member_rule_fingerprint directly, even
+    # though this is (today) always exactly one member -- validate.py's
+    # validate_test_doc recomputes via doc_rule_fingerprint(conn,
+    # fm["sources"]) to also cover a document naming more than one source
+    # member, and the two sides must hash the same way or every comparison
+    # mismatches by construction, not because anything actually changed.
+    fingerprint = doc_rule_fingerprint(conn, [member_name])
+    if fingerprint is not None:
+        front_matter_block = front_matter_block.rstrip("\n") + f'\ntest_case_fingerprint: "{fingerprint}"\n'
     out_path.write_text(f"---{front_matter_block}---{prose}{manifest}", encoding="utf-8")
     return sidecar_path
 
@@ -332,7 +357,7 @@ def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: 
         out_path.write_text(text, encoding="utf-8")
         result = validate_test_doc(conn, out_path)
         if result["ok"]:
-            write_test_doc_with_sidecar(out_path, text, language)
+            write_test_doc_with_sidecar(conn, member_name, out_path, text, language)
             return DocResult(member_name, str(out_path), True, attempt, input_tokens, output_tokens, [])
 
         if _is_near_miss(result):
@@ -354,7 +379,7 @@ def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: 
                             member_name, len(uncited) - len(remaining_uncited),
                         )
                         out_path.write_text(candidate_text, encoding="utf-8")
-                        write_test_doc_with_sidecar(out_path, candidate_text, language)
+                        write_test_doc_with_sidecar(conn, member_name, out_path, candidate_text, language)
                         return DocResult(
                             member_name, str(out_path), True, attempt, input_tokens,
                             output_tokens, [],
@@ -406,7 +431,7 @@ def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: 
                 out_path.write_text(text, encoding="utf-8")
                 result = validate_test_doc(conn, out_path)
                 if result["ok"]:
-                    write_test_doc_with_sidecar(out_path, text, language)
+                    write_test_doc_with_sidecar(conn, member_name, out_path, text, language)
                     return DocResult(
                         member_name, str(out_path), True, attempt, input_tokens, output_tokens, [],
                     )
@@ -810,7 +835,23 @@ def _corpus_signature(conn, language: str, framework: str, threshold: int,
       output shapes without any test_case row or status changing at all --
       the two checks above wouldn't see that either, and a stale "nothing
       changed" skip would leave the previous run's now-wrong-shaped output
-      (or count of chunk files) in place.
+      (or count of chunk files) in place;
+    - every member's `rule_candidate` `(id, line_no)` sequence and
+      `routine` boundary rows, in the same order `test_case_brief_chunk`'s
+      routine-aware chunk planning
+      (`brief.routine_aware_chunk_ranges`/`fetch_routines`) and
+      `testplan.member_rule_fingerprint`'s BR-numbering both read them.
+      `test_case`'s own columns above only capture a *derived* rule's
+      content -- a `rule_candidate` inserted, removed, or reordered by a
+      `derive` rebuild (the same shift `member_rule_fingerprint`'s
+      per-document fingerprint exists to catch, see `validate.
+      validate_test_doc`) can, before `mfdoc test-plan` re-runs to
+      reflect it in `test_case`, leave every `test_case` row (and
+      therefore everything hashed above) untouched while chunk boundaries
+      and BR-numbering have already moved underneath. Without this, the
+      corpus-level fast path here could gate every member through
+      `corpus_unchanged` and skip straight past `_test_chunk_reuse_ok`'s
+      own per-chunk sidecar-staleness check entirely.
     """
     rows = conn.execute(
         "SELECT tc.scenario_name, tc.status, tc.citation, tc.given_json, tc.when_json, "
@@ -822,6 +863,19 @@ def _corpus_signature(conn, language: str, framework: str, threshold: int,
     for r in rows:
         extra.extend((r["scenario_name"], r["status"], r["citation"],
                       r["given_json"], r["when_json"], r["then_json"], r["system"] or ""))
+
+    rc_rows = conn.execute(
+        "SELECT rc.id, rc.member_id, rc.line_no FROM rule_candidate rc ORDER BY rc.member_id, rc.line_no, rc.id"
+    ).fetchall()
+    for r in rc_rows:
+        extra.extend((str(r["member_id"]), str(r["line_no"]), str(r["id"])))
+
+    routine_rows = conn.execute(
+        "SELECT member_id, name, start_line, end_line FROM routine ORDER BY member_id, start_line, name"
+    ).fetchall()
+    for r in routine_rows:
+        extra.extend((str(r["member_id"]), r["name"], str(r["start_line"]), str(r["end_line"])))
+
     return _base_corpus_signature(conn, redact=redact, sme_notes=sme_notes, extra=extra)
 
 
@@ -1147,7 +1201,7 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
                 }
 
             if validation["ok"]:
-                write_test_doc_with_sidecar(out_path, final_text, language)
+                write_test_doc_with_sidecar(conn, name, out_path, final_text, language)
 
             result = DocResult(
                 name, str(out_path), validation["ok"], attempts, input_tokens, output_tokens,

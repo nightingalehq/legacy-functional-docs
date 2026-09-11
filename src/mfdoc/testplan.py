@@ -16,6 +16,7 @@ that can get a generated doc can also get a generated test plan.
 
 from __future__ import annotations
 
+import hashlib
 import json
 
 from .citations import _cite, _rule_id, numbered_rule_candidates
@@ -147,6 +148,56 @@ def _branch_excerpt(conn, mid: int, name: str, header_line: int, body_lines: lis
         "citation": _cite(name, first, last if last != first else None),
         "source_excerpt": [r["text"] for r in rows],
     }
+
+
+def member_rule_fingerprint(conn, member_name: str) -> str | None:
+    """A fingerprint of exactly the input that determines this member's
+    `BR-nnn` numbering: `rule_candidate`'s own `(id, line_no)` sequence,
+    ordered by `line_no` -- the same ordering `build_member_test_cases`
+    feeds through `numbered_rule_candidates()` to assign every scenario its
+    id, positionally. `None` if `member_name` doesn't resolve to exactly
+    one member (unknown, or ambiguous across libraries) -- a caller with no
+    real member to fingerprint, not an error this function should raise.
+
+    Deliberately over `rule_candidate`, not `test_case`: a `derive` rebuild
+    can insert, remove, or reorder `rule_candidate` rows for a member
+    without `mfdoc test-plan` having re-run yet to reflect that in
+    `test_case`. Comparing this fingerprint (recorded at sidecar-write time
+    by `testbatch.write_test_doc_with_sidecar`, in the document's own front
+    matter) against a freshly computed one is what lets `validate.
+    validate_test_doc` detect a genuine positional shift directly (issue
+    #195's staleness guard) instead of inferring it from whether an old
+    sidecar's `BR-nnn` ids happen to still resolve against current
+    `test_case` rows -- an id-overlap check alone cannot tell a real shift
+    apart from one where the old id set, by coincidence or because the
+    insertion/removal happened entirely *after* the sidecar's own range,
+    remains a literal subset of the current one."""
+    rows, ambiguous = resolve_member_by_name(conn, member_name)
+    if ambiguous or not rows:
+        return None
+    mid = rows[0]["id"]
+    rc_rows = conn.execute(
+        "SELECT id, line_no FROM rule_candidate WHERE member_id=? ORDER BY line_no, id", (mid,)
+    ).fetchall()
+    joined = "|".join(f"{r['id']}:{r['line_no']}" for r in rc_rows)
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
+
+
+def doc_rule_fingerprint(conn, member_names: list[str]) -> str | None:
+    """`member_rule_fingerprint`, combined across every member a generated
+    test document's `sources` front matter names (normally exactly one,
+    but not guaranteed) -- `None` if *any* of them doesn't resolve (same
+    "don't guess" contract as the single-member version), since a partial
+    fingerprint would be worse than none: a caller falling back to a
+    weaker staleness signal for a document it can't fully fingerprint is
+    safer than this function silently fingerprinting only part of it."""
+    parts = []
+    for name in sorted(member_names, key=str.upper):
+        fp = member_rule_fingerprint(conn, name)
+        if fp is None:
+            return None
+        parts.append(f"{name.upper()}={fp}")
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
 
 
 def build_member_test_cases(conn, mid: int, name: str, overlay: dict | None = None) -> list[dict]:
