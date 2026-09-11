@@ -146,6 +146,65 @@ GitHub org.
   skipped, same as before this investigation). Closing #191 as
   confirmed-not-applicable.
 
+**Progress (2026-09-11c):**
+- Investigated issue #207 (#183 Part 2: a second prompt-cache breakpoint on
+  `MemberFacts`' precomputed shared context, layered on top of the existing
+  project-level breakpoint from #159/#168) and decided **not** to implement
+  it yet -- closing as "not currently safely implementable without a
+  section-reorder design change", per #207's own suggested next step.
+  Confirmed the budget question first: the Anthropic API's documented limit
+  is 4 `cache_control` breakpoints per request (`shared/prompt-caching.md`
+  in the bundled Claude API skill, and `anthropic_caller.py`'s own #159
+  comment); the existing project-level breakpoint uses 1, so a second,
+  member-level one would use 2 -- comfortably inside budget for every code
+  path that uses both (`AnthropicCaller.__call__`/`_content` builds one
+  `messages[0].content` list per call, chunked or not). Budget was never
+  the blocker.
+  The structural blocker #207 already named -- `module_brief`'s section
+  order renders "Business rules from included copycode" and "Known gaps"
+  *after* the rule_range-dependent "Candidate business rules" section, so
+  a chunked member's brief is `[shared A][chunk-specific][shared B]`, not
+  `[shared][chunk-specific]` -- turned out to have a second layer #207
+  didn't call out: even "shared A" (everything module_brief renders
+  *before* "Candidate business rules" -- header comments through "Messages
+  and error handling") is **not** byte-identical across a member's own
+  chunk calls, for two independent reasons found by tracing `module_brief`
+  end to end:
+  1. The "PARTIAL BRIEF" note itself (`module_brief`'s own `rule_range`
+     branch) says "chunk `{this_chunk}` of `{chunk_count}`" -- literally
+     different text on every chunk of the same member -- and renders
+     *before* "shared A", inside what would need to be the cached block.
+  2. The "Internal routines" section (also inside "shared A") annotates a
+     routine with `**[documented in chunk N]**` only when that routine's
+     chunk differs from `chunk_info`'s current chunk -- so which routines
+     get annotated (and the section's exact text) also changes chunk to
+     chunk, via the same `chunk_map`/`chunk_info` parameters
+     `_generate_module_doc_chunked` already passes per-chunk.
+  A third, pre-existing wrinkle (implicit in #207's own vocabulary-section
+  reasoning): the "Business vocabulary" section is spliced into the output
+  *before* "shared A" (`vocab_insert_at`, right after the intro) but is
+  computed by scanning the **fully rendered** brief text for
+  `options.narrative.lexicon` hits, chunk-specific rules included -- so
+  whenever a project configures a lexicon, its presence/content also
+  varies per chunk.
+  Net effect: with today's `module_brief` layout, there is no contiguous,
+  chunk-invariant substring long enough to be worth a second
+  `cache_control` breakpoint without first (a) moving `rule_range`/
+  `chunk_info`/`chunk_map`-dependent text (the PARTIAL BRIEF note, the
+  routine chunk-annotations, and the vocabulary section's scan scope) out
+  of what would become the cached prefix, and (b) re-validating that this
+  doesn't change any generated document's actual content -- exactly the
+  "real output-shape change... needing its own design pass, tests, and a
+  fresh pipeline validation run" #207 flagged as more than a caching-only
+  change. Rather than force a narrower, riskier slice under time pressure,
+  leaving this closed pending that design pass (or a narrower follow-up:
+  render a purpose-built, `chunk_info`/`chunk_map`-free "shared prefix"
+  string from `MemberFacts` directly, bypassing `module_brief` entirely for
+  the cached block, and let `module_brief` keep doing what it does for the
+  rendered document body -- untried here, flagged as the least invasive
+  option for a future attempt). No code change; full suite unchanged at
+  944 passed, 2 skipped.
+
 **Progress (2026-09-10e):**
 - Fixed issue #188: ported `batch.py`'s near-miss/targeted-patch mechanism
   (issue #131, generalized by #170) to `testbatch.py`'s test-generation
