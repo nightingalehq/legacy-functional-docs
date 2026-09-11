@@ -191,9 +191,9 @@ GitHub org.
      chunk's request, because everything preceding the breakpoint (intro
      included) must match byte-for-byte first, and here it doesn't.
   2. **"Shared A" itself also varies, independent of (1).** Its own
-     "Internal routines" section annotates a routine with `**[documented
-     in chunk N]**` only when that routine's chunk differs from
-     `chunk_info`'s current chunk -- so which routines get annotated (and
+     "Internal routines" section annotates a routine with
+     `**[documented in chunk N]**` only when that routine's chunk differs
+     from `chunk_info`'s current chunk -- so which routines get annotated (and
      the section's exact text) changes chunk to chunk, via the same
      `chunk_map`/`chunk_info` parameters `_generate_module_doc_chunked`
      already passes per-chunk.
@@ -215,22 +215,27 @@ GitHub org.
   entirely for the cached block, and let `module_brief` keep doing what it
   does for the rendered document body. Untried here, and incomplete as
   stated -- real code in at least three places, not a drop-in:
-  1. Both `AnthropicCaller._content` and `VertexCaller` (`anthropic_
-     caller.py`/`vertex_caller.py`) currently only recognize a single
-     leading cache prefix and split a prompt into exactly one cached block
-     plus one uncached suffix -- a second, member-level tier needs that
-     prefix-matching/content-assembly logic extended to emit a second
-     cache-controlled block, not just a new string to feed it.
-  2. `batch.py`'s `_apply_cache_prefixes` -- the only thing that ever calls
-     `set_cache_prefixes` -- is called once per `run_batch`, up front, with
-     only the run-level project/reconciliation prefixes (`build_prompt_
-     cache_prefix`/`build_reconciliation_prompt_cache_prefix`). A
-     member-level prefix is a new one per member, not a fixed run-level
-     set, so this also needs `run_batch`'s (and `plan_batch`'s) per-member
-     orchestration extended to register (or re-register) that member's own
-     prefix before its chunk loop runs -- and (1)'s content-assembly
-     change needs to keep picking the right prefix out of however many are
-     now registered, per call.
+  1. Both `AnthropicCaller._content` and `VertexCaller`
+     (`anthropic_caller.py`/`vertex_caller.py`) currently only recognize a
+     single leading cache prefix and split a prompt into exactly one
+     cached block plus one uncached suffix -- a second, member-level tier
+     needs that prefix-matching/content-assembly logic extended to emit a
+     second cache-controlled block, not just a new string to feed it.
+  2. `batch.py`'s `_apply_cache_prefixes` -- the module-doc path's own
+     registration point (`testbatch.py`'s parallel test-generation path
+     already has its own, `_apply_test_cache_prefix`, unaffected by this)
+     -- is called once per `run_batch`, up front, with only the run-level
+     project/reconciliation prefixes
+     (`build_prompt_cache_prefix`/`build_reconciliation_prompt_cache_prefix`).
+     A member-level prefix is a new one per member, not a fixed run-level
+     set, so this also needs `run_batch`'s per-member orchestration
+     extended to register (or re-register) that member's own prefix
+     before its chunk loop runs -- and (1)'s content-assembly change needs
+     to keep picking the right prefix out of however many are now
+     registered, per call. (`plan_batch` itself is a no-model-call preview
+     with no caller to register anything with -- not in scope for this at
+     all, unless a future preview also wants to estimate the new
+     breakpoint's savings, which would be separate work again.)
   Flagged as the least invasive option for a future attempt, with its own
   tests, not as something either of these bullets makes trivial).
   No code change; full suite unchanged at 955 passed, 2 skipped.
