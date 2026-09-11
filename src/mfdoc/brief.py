@@ -24,6 +24,61 @@ from .redact import NULL_REDACTOR, Redactor
 from .sme_notes import Notes, notes_for
 
 
+def _tbl(headers: list[str], rows: list[list[str]]) -> list[str]:
+    """A compact, CSV-like rendering (one `col|col|col` header line, then
+    one bare `val|val|val` line per row -- no markdown table padding or
+    separator row) as a list of lines ready to append to a brief. Applied
+    to every whole-member section that is naturally one-row-per-fact with
+    a small, fixed set of columns (issue #185).
+
+    Deliberately *not* a padded/aligned markdown table (`| a | b |` plus a
+    `|---|---|` separator row): that decoration costs a fixed ~2 extra
+    lines and ~4 extra characters per cell, which measured *larger* than
+    the original bullet-per-row prose on this repo's small bundled
+    fixtures (most sections here are only 1-5 rows -- not enough rows for
+    the "labels stated once" saving to outrun the decoration's fixed
+    cost). This bare `col|col` form has no such floor: a single header
+    line plus one minimal-punctuation line per row is never longer than
+    the equivalent prose bullet, and the saving grows with row count on a
+    real (larger) engagement's briefs.
+
+    Every cell is pre-formatted by the caller (already `redact`ed, already
+    `_cite`d) and passed through `_esc_cell` here so a `|` that happens to
+    appear in source-derived text (a condition, a literal, an arg string)
+    can never be mistaken for a column boundary. An absent value renders
+    as an empty field between two `|`s (ordinary CSV-like convention), not
+    a placeholder character.
+
+    A column that is empty on *every* row is dropped entirely (header
+    included) rather than rendered as a run of bare `|`s -- a fixed-shape
+    caller (e.g. "Candidate business rules"'s `routine`/`literals`/`notes`
+    columns, often blank for a whole member) would otherwise pay a
+    separator's worth of characters per row for a column carrying no
+    information anywhere in this table.
+
+    (A per-row `col=val` inline label was considered as a way to skip the
+    header line on a single-row table, but it never actually wins: for one
+    row, `header line + data line` is always exactly one separator
+    character shorter than repeating every column's own name as a `col=`
+    prefix inline -- so the plain header+row form below is used
+    unconditionally; it's already the shortest correct rendering.)"""
+    if not rows:
+        return ["|".join(headers)]
+    keep = [i for i in range(len(headers)) if any(row[i] for row in rows)]
+    out = ["|".join(headers[i] for i in keep)]
+    for row in rows:
+        out.append("|".join(_esc_cell(row[i]) for i in keep))
+    return out
+
+
+def _esc_cell(cell: str) -> str:
+    """`cell`, with a literal `|` escaped so it can never be misread as a
+    markdown table column boundary -- the one character a table cell can't
+    safely contain unescaped that free-form source text (a condition, a
+    literal, an arg string) could otherwise carry."""
+    return cell.replace("|", "\\|") if cell else cell
+
+
 def _sme_notes_section(redact: Redactor, sme_notes: Notes | None, name: str | None) -> list[str]:
     """Lines for the advisory-only "SME notes" section shared by
     module_brief/entity_brief/executive_brief/test_case_brief, or `[]` when
@@ -942,16 +997,22 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
     params = facts.params
     if params:
         add("## Interface (parameters)")
+        add("")
+        rows = []
         for r in params:
-            spec = f" ({r['format'] or ''}{r['length'] or ''})" if (r["format"] or r["length"]) else ""
-            add(f"- {_cite(name, r['line_no'])} level {r['level'] or '-'} `{r['name']}`{spec}")
+            spec = f"{r['format'] or ''}{r['length'] or ''}"
+            rows.append([_cite(name, r["line_no"]), str(r["level"] or "-"), f"`{r['name']}`", spec])
+        out.extend(_tbl(["citation", "level", "name", "spec"], rows))
         add("")
 
     views = facts.views
     if views:
         add("## Data views declared")
-        for r in views:
-            add(f"- {_cite(name, r['line_no'])} view `{r['name']}` over `{r['view_of']}`")
+        add("")
+        rows = [
+            [_cite(name, r["line_no"]), f"`{r['name']}`", f"`{r['view_of']}`"] for r in views
+        ]
+        out.extend(_tbl(["citation", "view", "view_of"], rows))
         add("")
 
     # --- program variables and screen/MAP fields (issue #141): every other
@@ -984,11 +1045,14 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
             "runs). Don't conflate the two just because a field name alone "
             "doesn't make the distinction obvious."
         )
+        add("")
+        rows = []
         for r in other_vars:
             kind = _variable_kind(r, screen_field_names)
-            spec = f" ({r['format'] or ''}{r['length'] or ''})" if (r["format"] or r["length"]) else ""
-            bound = f" bound to `{r['view_of']}`" if r["view_of"] else ""
-            add(f"- {_cite(name, r['line_no'])} {kind} `{r['name']}`{spec}{bound}")
+            spec = f"{r['format'] or ''}{r['length'] or ''}"
+            bound = f"`{r['view_of']}`" if r["view_of"] else ""
+            rows.append([_cite(name, r["line_no"]), kind, f"`{r['name']}`", spec, bound])
+        out.extend(_tbl(["citation", "kind", "name", "spec", "bound_to"], rows))
         add("")
     if data_area_includes:
         add("## Data areas included")
@@ -998,8 +1062,11 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
             "not here; this is only the include itself, not a program "
             "variable."
         )
-        for r in data_area_includes:
-            add(f"- {_cite(name, r['line_no'])} data area include `{r['name'][len('USING '):]}`")
+        add("")
+        rows = [
+            [_cite(name, r["line_no"]), f"`{r['name'][len('USING '):]}`"] for r in data_area_includes
+        ]
+        out.extend(_tbl(["citation", "data_area"], rows))
         add("")
 
     # --- internal routines (Natural DEFINE SUBROUTINE / Mantis ENTRY) --
@@ -1120,17 +1187,20 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
     calls = facts.calls
     if calls:
         add("## Outbound calls")
+        add("")
+        rows = []
         for r in calls:
             if r["dynamic"]:
-                tag = " **[dynamic target — callee set unknown]**"
+                tag = "**[dynamic target — callee set unknown]**"
             elif r["call_kind"] == "PERFORM_INTERNAL":
-                tag = " *(internal subroutine in this member)*"
+                tag = "*(internal subroutine in this member)*"
             elif r["resolved"]:
                 tag = ""
             else:
-                tag = " **[source not supplied]**"
-            add(f"- {_cite(name, r['line_no'])} `{r['call_kind']}` -> `{r['callee_name']}`{tag}"
-                + (f" args: `{redact(r['args'])}`" if r["args"] else ""))
+                tag = "**[source not supplied]**"
+            args = f"`{redact(r['args'])}`" if r["args"] else ""
+            rows.append([_cite(name, r["line_no"]), f"`{r['call_kind']}`", f"`{r['callee_name']}`", tag, args])
+        out.extend(_tbl(["citation", "call_kind", "callee", "flag", "args"], rows))
         add("")
 
     inbound = facts.inbound
@@ -1181,10 +1251,10 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
     if rules:
         add("## Candidate business rules (exact conditions — paraphrase, never invent)")
         add(
-            "Each carries a stable `BR-nnn` ID -- carry it verbatim into the "
-            "generated document immediately after the rule's own citation. It "
-            "is derived from source position, not written by you, so it stays "
-            "the same across a re-run of unchanged source."
+            "`id` (`BR-nnn`) is stable across reruns -- carry it verbatim "
+            "after the rule's citation. `notes`, when present, flags a "
+            "paired IF/ELSE (`paired-else@CITE`/`pairs-with-if@CITE`: "
+            "document BOTH branches) plus any verified `branch-access`."
         )
         if rule_range:
             start, end = rule_range
@@ -1193,17 +1263,16 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
                 "this is intentional, not a truncated brief; see the "
                 "PARTIAL BRIEF note above."
             )
+        add("")
+        rule_rows = []
         for n, r in numbered_rule_candidates(rules):
             if rule_range and not (rule_range[0] <= n <= rule_range[1]):
                 continue
-            bits = [f"**{_rule_id(name, n)}** {_cite(name, r['line_no'])} depth {r['depth']} `{r['construct']}`"]
             routine = routine_for_line(routines, r["line_no"])
-            if routine:
-                bits.append(f"routine: `{routine['name']}`")
-            if r["condition"]:
-                bits.append(f"condition: `{redact(r['condition'])}`")
-            if r["literals"]:
-                bits.append(f"literals: `{redact(r['literals'])}`")
+            routine_cell = f"`{routine['name']}`" if routine else ""
+            cond_cell = f"`{redact(r['condition'])}`" if r["condition"] else ""
+            lit_cell = f"`{redact(r['literals'])}`" if r["literals"] else ""
+            bits = []
             # --- IF/ELSE branch extent and what's inside it -- see
             # db.py's rule_candidate.end_line/pair_line_no comment. Told
             # apart explicitly so the generated document has no excuse to
@@ -1215,23 +1284,27 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
                     (rr["line_no"] for rr in rules if rr["pair_line_no"] == r["line_no"]), None
                 )
                 body_end = (else_line - 1) if else_line else r["end_line"]
-                bits.append(f"true-branch extent {_cite(name, r['line_no'], body_end)}")
+                bits.append(f"true-branch {_cite(name, r['line_no'], body_end)}")
                 if else_line:
-                    bits.append(
-                        f"has a paired ELSE at {_cite(name, else_line)} -- "
-                        "document what happens on BOTH branches, not just this one"
-                    )
+                    bits.append(f"paired-else@{_cite(name, else_line)}")
                 access_summary = _branch_data_access(acc, acc_line_nos, name, r["line_no"], body_end)
                 if access_summary:
-                    bits.append(f"data access on the true branch: {access_summary}")
+                    bits.append(f"branch-access:{access_summary}")
             elif r["construct"] == "ELSE" and r["pair_line_no"]:
-                bits.append(f"pairs with the IF at {_cite(name, r['pair_line_no'])}")
+                bits.append(f"pairs-with-if@{_cite(name, r['pair_line_no'])}")
                 if r["end_line"]:
-                    bits.append(f"else-branch extent {_cite(name, r['line_no'], r['end_line'])}")
+                    bits.append(f"else-branch {_cite(name, r['line_no'], r['end_line'])}")
                     access_summary = _branch_data_access(acc, acc_line_nos, name, r["line_no"], r["end_line"])
                     if access_summary:
-                        bits.append(f"data access on this branch: {access_summary}")
-            add("- " + " — ".join(bits))
+                        bits.append(f"branch-access:{access_summary}")
+            rule_rows.append([
+                f"**{_rule_id(name, n)}**", _cite(name, r["line_no"]), str(r["depth"]),
+                f"`{r['construct']}`", routine_cell, cond_cell, lit_cell, "; ".join(bits),
+            ])
+        out.extend(_tbl(
+            ["id", "citation", "depth", "construct", "routine", "condition", "literals", "notes"],
+            rule_rows,
+        ))
         add("")
 
     # --- rules inherited from included copycode, cited against the copycode
@@ -1241,17 +1314,20 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
     # can look complete and still miss a validation rule it depends on.
     for cc_id, cc_name, cc_rules in facts.copycode_rules:
         add(f"## Business rules from included copycode `{cc_name}`")
+        add("")
+        cc_rows = []
         for n, r in numbered_rule_candidates(cc_rules):
             # IDs are qualified with the copycode's own name and numbered
             # from its own row order -- the same ID a direct brief of
             # cc_name would show, since the rule "lives" there regardless
             # of which including module's brief surfaces it.
-            bits = [f"**{_rule_id(cc_name, n)}** {_cite(cc_name, r['line_no'])} depth {r['depth']} `{r['construct']}`"]
-            if r["condition"]:
-                bits.append(f"condition: `{redact(r['condition'])}`")
-            if r["literals"]:
-                bits.append(f"literals: `{redact(r['literals'])}`")
-            add("- " + " — ".join(bits))
+            cond_cell = f"`{redact(r['condition'])}`" if r["condition"] else ""
+            lit_cell = f"`{redact(r['literals'])}`" if r["literals"] else ""
+            cc_rows.append([
+                f"**{_rule_id(cc_name, n)}**", _cite(cc_name, r["line_no"]), str(r["depth"]),
+                f"`{r['construct']}`", cond_cell, lit_cell,
+            ])
+        out.extend(_tbl(["id", "citation", "depth", "construct", "condition", "literals"], cc_rows))
         add("")
 
     gaps = facts.gaps

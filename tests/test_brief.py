@@ -337,10 +337,14 @@ def test_module_brief_surfaces_else_branch_data_access_next_to_the_rule():
     mantis.extract(conn, 1, lines, "TESTMOD")
 
     brief = module_brief(conn, "TESTMOD", redact=NULL_REDACTOR)
-    assert "has a paired ELSE at [[TESTMOD:5]]" in brief
-    assert "document what happens on BOTH branches" in brief
-    else_line = [l for l in brief.splitlines() if l.startswith("- **TESTMOD:BR-003**")][0]
-    assert "pairs with the IF at [[TESTMOD:3]]" in else_line
+    # Candidate business rules render as a table now (issue #185) -- the
+    # IF row's `notes` cell marks the paired ELSE compactly
+    # (`paired-else@CITE`), and the section preamble (said once, not
+    # per-row) is what instructs the narrator to document both branches.
+    assert "paired-else@[[TESTMOD:5]]" in brief
+    assert "document BOTH branches" in brief
+    else_line = [l for l in brief.splitlines() if l.startswith("**TESTMOD:BR-003**")][0]
+    assert "pairs-with-if@[[TESTMOD:3]]" in else_line
     assert "GET" in else_line and "WIDGETFILE01" in else_line and "[[TESTMOD:6]]" in else_line
     assert "DELETE" in else_line and "WIDGETFILE02" in else_line and "[[TESTMOD:7]]" in else_line
 
@@ -500,15 +504,18 @@ def test_natural_brief_keeps_using_data_area_includes_out_of_program_variables()
     tally_line = [l for l in var_section.splitlines() if "#TALLY" in l][0]
     assert "program variable" in tally_line
 
+    # "Data areas included" is its own table -- a data-area include row
+    # carries only a citation and the data-area name (no "program variable"/
+    # "data area include" label repeated per row; the section heading says
+    # that once for the whole table).
     assert "## Data areas included" in brief
     includes_section = brief.split("## Data areas included", 1)[1]
     include_line = [l for l in includes_section.splitlines() if "LDAWGT01" in l][0]
-    assert "data area include" in include_line
     assert "program variable" not in include_line
     parameter_include_line = [
         l for l in includes_section.splitlines() if "PDAWGT01" in l
     ][0]
-    assert "data area include" in parameter_include_line
+    assert "|" in parameter_include_line  # citation|data_area row, not a bullet
 
 
 # --- issue #148: FIND/READ/HISTOGRAM found-body extent must reach the brief
@@ -1078,6 +1085,75 @@ def test_build_member_facts_returns_not_found_markdown_string_like_module_brief_
     assert "No such member in the index" in facts
     # module_brief() itself must return the identical text for the same lookup.
     assert module_brief(indexed_db, "NO-SUCH-MEMBER-AT-ALL", redact=NULL_REDACTOR) == facts
+
+
+# --- issue #185: compact/tabular rendering of naturally-tabular sections ---
+
+
+def test_module_brief_renders_interface_and_variables_as_tables(indexed_db):
+    """"Interface (parameters)" and "Program variables and screen/MAP
+    fields" are naturally one-row-per-fact -- they must render as a
+    compact, CSV-like table (one `col|col|...` header line, then one bare
+    `val|val|...` line per fact) rather than a bullet-per-row prose list,
+    so the column labels ("level", "kind", ...) are stated once instead of
+    repeated on every row (issue #185)."""
+    brief = module_brief(indexed_db, "MMP0100", redact=NULL_REDACTOR)
+
+    iface_section = brief.split("## Interface (parameters)", 1)[1].split("## ", 1)[0]
+    iface_lines = [l for l in iface_section.splitlines() if l.strip()]
+    assert iface_lines[0] == "citation|level|name|spec"
+    assert any(l.startswith("[[") for l in iface_lines[1:])
+
+    var_section = brief.split("## Program variables and screen/MAP fields", 1)[1].split("## ", 1)[0]
+    var_lines = [l for l in var_section.splitlines() if "|" in l]
+    # bound_to is dropped when no row in this member's brief has one (see
+    # _tbl's "empty column dropped" behaviour) -- MMP0100 has no view-bound
+    # fields, so only the first four columns survive.
+    assert var_lines[0] == "citation|kind|name|spec"
+    assert any("program variable" in l for l in var_lines[1:])
+
+
+def test_module_brief_renders_outbound_calls_as_a_table(indexed_db):
+    brief = module_brief(indexed_db, "MMP0100", redact=NULL_REDACTOR)
+    calls_section = brief.split("## Outbound calls", 1)[1].split("## ", 1)[0]
+    calls_lines = [l for l in calls_section.splitlines() if "|" in l]
+    assert calls_lines[0] == "citation|call_kind|callee|flag|args"
+    assert len(calls_lines) > 1
+
+
+def test_module_brief_renders_candidate_rules_as_a_table_with_all_columns(indexed_db):
+    """Every fact the narration stage relied on in the old prose bullet --
+    id, citation, depth, construct, routine, condition, literals, and any
+    branch/data-access notes -- must still be present, just as table
+    columns instead of an em-dash-joined sentence."""
+    brief = module_brief(indexed_db, "MMP0100", redact=NULL_REDACTOR)
+    rules_section = brief.split(
+        "## Candidate business rules (exact conditions", 1
+    )[1].split("## ", 1)[0]
+    rule_lines = [l for l in rules_section.splitlines() if "|" in l]
+    # `routine` is dropped here because none of MMP0100's rule candidates
+    # fall inside a routine (see _tbl's "empty column dropped" behaviour).
+    assert rule_lines[0] == "id|citation|depth|construct|condition|literals|notes"
+    body_rows = rule_lines[1:]
+    assert body_rows, "MMP0100 fixture must have at least one rule candidate"
+    assert any("MMP0100:BR-001" in l for l in body_rows)
+    # Every surviving row has exactly as many pipes as the header does.
+    expected_pipes = rule_lines[0].count("|")
+    assert all(l.count("|") == expected_pipes for l in body_rows)
+
+
+def test_tbl_escapes_a_literal_pipe_in_cell_content():
+    """A `|` inside source-derived text (a condition, a literal) must never
+    be misread as a column boundary -- it must come back escaped."""
+    from mfdoc.brief import _tbl
+
+    one_row = _tbl(["citation", "condition"], [["[[X:1]]", "`A | B`"]])
+    assert one_row == ["citation|condition", "[[X:1]]|`A \\| B`"]
+
+    many_rows = _tbl(["citation", "condition"], [["[[X:1]]", "`A | B`"], ["[[X:2]]", "`C`"]])
+    assert many_rows[0] == "citation|condition"
+    assert many_rows[1] == "[[X:1]]|`A \\| B`"
+    assert many_rows[2] == "[[X:2]]|`C`"
 
 
 def test_build_member_facts_returns_ambiguous_markdown_string_like_module_brief_did():
