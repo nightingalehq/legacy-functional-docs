@@ -711,8 +711,17 @@ def fetch_rule_candidate_rows(conn, member_name: str):
     if not matches:
         return [], []
     mid = matches[0]["id"]
+    # `, id` (Copilot review on issue #195's fix): same-line rule_candidate
+    # rows are explicitly supported (natural.py can record more than one
+    # per source line), and `id` is the same explicit tie-break
+    # `graph.py`/`structural.py`'s own rule_candidate queries already use --
+    # bare `ORDER BY line_no` leaves tied rows' relative order to SQLite's
+    # unspecified tie behaviour, which numbers every downstream BR-nnn id
+    # from (`numbered_rule_candidates`) and which `testplan.
+    # member_rule_fingerprint` fingerprints -- an unspecified order a later
+    # query-plan/index change could silently alter with no fact changing.
     rows = conn.execute(
-        "SELECT * FROM rule_candidate WHERE member_id=? ORDER BY line_no", (mid,)
+        "SELECT * FROM rule_candidate WHERE member_id=? ORDER BY line_no, id", (mid,)
     ).fetchall()
     return rows, []
 

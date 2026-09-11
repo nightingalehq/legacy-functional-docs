@@ -173,25 +173,30 @@ def member_rule_fingerprint(conn, member_name: str) -> str | None:
     insertion/removal happened entirely *after* the sidecar's own range,
     remains a literal subset of the current one.
 
-    `ORDER BY line_no` only, deliberately matching `brief.
+    `ORDER BY line_no, id`, deliberately matching `brief.
     fetch_rule_candidate_rows`/`build_member_test_cases`'s own query
-    verbatim (both `SELECT * FROM rule_candidate WHERE member_id=? ORDER
-    BY line_no`, no secondary tie-break) -- same-line rows are explicitly
-    supported (natural.py can record more than one rule_candidate per
-    source line), and this fingerprint exists to describe *the same
-    ordering* `numbered_rule_candidates()` actually numbers from, not a
-    different, independently-invented one. Adding a tie-break here that
-    the numbering side doesn't also use would make this fingerprint
-    describe an ordering that isn't the one that actually produced the
-    scenario IDs -- SQLite's own row order for tied `line_no` values is
-    the load-bearing assumption every other BR-numbering consumer already
-    depends on, not something this function should second-guess alone."""
+    verbatim (all three `SELECT * FROM rule_candidate WHERE member_id=?
+    ORDER BY line_no, id`) -- same-line rows are explicitly supported
+    (natural.py can record more than one rule_candidate per source line),
+    and this fingerprint exists to describe *the same ordering*
+    `numbered_rule_candidates()` actually numbers from, not a different,
+    independently-invented one. `id` (the row's own insertion-order
+    primary key) is the explicit tie-break already used elsewhere for
+    this exact table (`graph.py`/`structural.py`'s own `rule_candidate`
+    queries) -- bare `ORDER BY line_no` leaves same-line rows' relative
+    order to SQLite's unspecified tie behaviour, which a later query-plan
+    or index change could alter with no fact actually changing, silently
+    reordering every tied id and marking every existing sidecar's
+    fingerprint stale for no real reason (Copilot review). Naming `id`
+    here, not leaving it implicit, is what makes it *this* function's own
+    explicit contract instead of an accident of whatever plan SQLite picks
+    today."""
     rows, ambiguous = resolve_member_by_name(conn, member_name)
     if ambiguous or not rows:
         return None
     mid = rows[0]["id"]
     rc_rows = conn.execute(
-        "SELECT id, line_no FROM rule_candidate WHERE member_id=? ORDER BY line_no", (mid,)
+        "SELECT id, line_no FROM rule_candidate WHERE member_id=? ORDER BY line_no, id", (mid,)
     ).fetchall()
     joined = "|".join(f"{r['id']}:{r['line_no']}" for r in rc_rows)
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
@@ -231,7 +236,7 @@ def build_member_test_cases(conn, mid: int, name: str, overlay: dict | None = No
     given = {"parameters": params, "mocks": mocks}
 
     rules = conn.execute(
-        "SELECT * FROM rule_candidate WHERE member_id=? ORDER BY line_no", (mid,)
+        "SELECT * FROM rule_candidate WHERE member_id=? ORDER BY line_no, id", (mid,)
     ).fetchall()
 
     inserted: list[dict] = []

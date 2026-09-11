@@ -12,6 +12,31 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-11l):**
+- Addressed the twenty-third Copilot review round on PR #209 (issue #195):
+  1. `member_rule_fingerprint`'s `ORDER BY line_no` (previously deliberately
+     left without a secondary key, to match `build_member_test_cases`/
+     `brief.fetch_rule_candidate_rows`'s own bare `ORDER BY line_no`) left
+     same-line rule_candidate rows' relative order to SQLite's unspecified
+     tie behaviour -- a later query-plan/index change could silently
+     reorder them with no fact actually changing, marking every existing
+     sidecar's fingerprint stale for no real reason. All three queries now
+     explicitly order `line_no, id` -- the same tie-break `graph.py`/
+     `structural.py`'s own `rule_candidate` queries already use -- so the
+     three stay consistent with each other (the actual requirement) while
+     also being deterministic (the fix), instead of consistent-by-accident.
+  2. `sidecar_path_for` now rejects a non-string `language` (any YAML
+     scalar shape a malformed/hand-edited document's front matter allows --
+     a list, a number, a mapping) instead of reaching `LANGUAGE_EXTENSIONS.
+     get(language)` with an unhashable value and crashing `mfdoc
+     test-validate` with `TypeError`.
+- Three new regression tests (fingerprint tie-break query text,
+  `sidecar_path_for`'s type guard, and an end-to-end `validate_test_doc`
+  check for malformed `language`). Full suite green (1032 passed, 2
+  skipped) plus a clean `mfdoc validate` pass against `examples/` (71/71
+  documents, 0 invalid citations of 750 -- confirming the new tie-break
+  changed no real document's numbering).
+
 **Progress (2026-09-11k):**
 - Addressed the twenty-second Copilot review round on PR #209 (issue
   #195): the prior round's shared `_fingerprint_cache` never reached

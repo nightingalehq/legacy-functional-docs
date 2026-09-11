@@ -580,6 +580,25 @@ def test_unknown_language_keeps_code_embedded(tmp_path):
     assert not (tmp_path / "FAKEMOD.cobol").exists()
 
 
+def test_sidecar_path_for_rejects_non_string_language_instead_of_crashing():
+    """Copilot review follow-up on issue #195's fix: a malformed/hand-edited
+    document's `language` front-matter value can be any YAML scalar shape
+    (a list, a number, a mapping), not just a string. `LANGUAGE_EXTENSIONS.
+    get(language)` on an unhashable value (e.g. `language: [python]`) used
+    to raise `TypeError` instead of this function's own documented "unknown
+    language" `None`, crashing `mfdoc test-validate` on exactly that
+    malformed shape."""
+    from pathlib import Path
+
+    from mfdoc.testlang import sidecar_path_for
+
+    doc_path = Path("FAKEMOD.md")
+    assert sidecar_path_for(doc_path, ["python"]) is None  # must not raise
+    assert sidecar_path_for(doc_path, {"python": True}) is None
+    assert sidecar_path_for(doc_path, 42) is None
+    assert sidecar_path_for(doc_path, "python") == Path("FAKEMOD.py")
+
+
 def test_write_test_doc_with_sidecar_strips_whitespace_in_sources_before_fingerprinting(tmp_path):
     """Copilot review follow-up on issue #195: `validate_test_doc`'s
     fingerprint recomputation strips whitespace from `sources` member

@@ -211,6 +211,43 @@ def test_fetch_test_case_rows_orders_by_source_line_not_insertion_order():
     assert [r["scenario_name"] for r in rows] == ["FAKEMOD:BR-EARLY", "FAKEMOD:BR-LATE"]
 
 
+def test_member_rule_fingerprint_breaks_line_no_ties_with_id():
+    """Copilot review follow-up on issue #195's fix: same-line
+    rule_candidate rows are explicitly supported (natural.py can record
+    more than one per source line), so `member_rule_fingerprint`'s query
+    must order by `id` as an explicit secondary key, matching
+    `build_member_test_cases`/`brief.fetch_rule_candidate_rows`, instead of
+    leaving tied `line_no` rows to SQLite's unspecified tie order -- a
+    later query-plan/index change could otherwise reorder them with no
+    fact actually changing, silently marking every existing sidecar's
+    fingerprint stale. Locks in the query text itself as a regression
+    guard, since the ordering contract isn't otherwise reliably observable
+    through SQLite's typical (but unspecified) tie behavior."""
+    queries: list[str] = []
+    real_execute = sqlite3.Connection.execute
+
+    class _CapturingConn(sqlite3.Connection):
+        def execute(self, sql, *args):
+            queries.append(sql)
+            return real_execute(self, sql, *args)
+
+    conn = sqlite3.connect(":memory:", factory=_CapturingConn)
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'x')")
+    insert(conn, "rule_candidate", member_id=1, line_no=1, construct="IF", raw="x")
+    insert(conn, "rule_candidate", member_id=1, line_no=1, construct="IF", raw="y")
+    conn.commit()
+    queries.clear()
+
+    fp = testplan.member_rule_fingerprint(conn, "FAKEMOD")
+    assert fp is not None
+    assert any("ORDER BY line_no, id" in q for q in queries), (
+        "member_rule_fingerprint must break line_no ties with an explicit id order"
+    )
+
+
 def test_register_lists_scenarios_with_resolvable_citations(indexed_db):
     conn = indexed_db
     testplan.run_all(conn)

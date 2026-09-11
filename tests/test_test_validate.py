@@ -60,6 +60,24 @@ def test_non_mapping_front_matter_is_flagged_not_crashed(indexed_db, tmp_path):
     assert any("front matter is not a mapping" in p for p in result["problems"])
 
 
+def test_malformed_language_front_matter_does_not_crash_the_sidecar_lookup(indexed_db, tmp_path):
+    """Copilot review follow-up on issue #195's fix: `language` can be any
+    YAML scalar shape a document's own (malformed/hand-edited) front matter
+    allows, not just a string -- `sidecar_path_for`'s `LANGUAGE_EXTENSIONS.
+    get(language)` used to raise `TypeError: unhashable type: 'list'` for
+    `language: [python]`, crashing `mfdoc test-validate` outright. Treated
+    the same as any other language `sidecar_path_for` doesn't recognise (no
+    sidecar to cross-check against, falling back to scanning the body
+    directly) -- not itself a validation failure, just no longer a crash."""
+    conn = indexed_db
+    testplan.run_all(conn, member_name="MMP0100")
+    bad = VALID_DOC.replace("language: python\n", "language: [python]\n")
+    path = tmp_path / "MMP0100.md"
+    path.write_text(bad, encoding="utf-8")
+    result = validate_test_doc(conn, path)  # must not raise
+    assert result["ok"], result["problems"]
+
+
 def test_invented_scenario_id_is_flagged(indexed_db, tmp_path):
     """MMP0100:BR-999 doesn't exist -- a model inventing or renumbering a
     scenario id must be caught, the same way an invalid [[MEMBER:LINE]]
