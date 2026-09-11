@@ -119,6 +119,11 @@ class VertexCaller:
         # identical Claude models and `messages.create` shape, so the same
         # `cache_control: {"type": "ephemeral"}` breakpoint applies here too.
         self._cache_prefixes: tuple[str, ...] = ()
+        # Issue #214: see AnthropicCaller's identical attribute/comment --
+        # a second, member-level cache-prefix tier layered after whichever
+        # project-level prefix matches, empty (no behavior change) unless
+        # something calls set_member_cache_prefixes.
+        self._member_cache_prefixes: tuple[str, ...] = ()
 
     def set_cache_prefixes(self, prefixes: str | list[str] | tuple[str, ...] | None) -> None:
         """See AnthropicCaller.set_cache_prefixes -- identical contract,
@@ -131,14 +136,32 @@ class VertexCaller:
             prefixes = (prefixes,)
         self._cache_prefixes = tuple(sorted({p for p in prefixes if p}, key=len, reverse=True))
 
+    def set_member_cache_prefixes(self, prefixes: str | list[str] | tuple[str, ...] | None) -> None:
+        """See AnthropicCaller.set_member_cache_prefixes -- identical
+        contract (issue #214)."""
+        if prefixes is None:
+            prefixes = ()
+        elif isinstance(prefixes, str):
+            prefixes = (prefixes,)
+        self._member_cache_prefixes = tuple(sorted({p for p in prefixes if p}, key=len, reverse=True))
+
     def _content(self, prompt: str) -> str | list[dict]:
-        """See AnthropicCaller._content -- identical contract."""
+        """See AnthropicCaller._content -- identical contract, including the
+        second, member-level cache_control breakpoint (issue #214)."""
         for prefix in self._cache_prefixes:
             if prompt.startswith(prefix):
-                return [
-                    {"type": "text", "text": prefix, "cache_control": {"type": "ephemeral"}},
-                    {"type": "text", "text": prompt[len(prefix):]},
-                ]
+                rest = prompt[len(prefix):]
+                blocks = [{"type": "text", "text": prefix, "cache_control": {"type": "ephemeral"}}]
+                for member_prefix in self._member_cache_prefixes:
+                    if rest.startswith(member_prefix):
+                        blocks.append({
+                            "type": "text", "text": member_prefix,
+                            "cache_control": {"type": "ephemeral"},
+                        })
+                        rest = rest[len(member_prefix):]
+                        break
+                blocks.append({"type": "text", "text": rest})
+                return blocks
         return prompt
 
     def __call__(self, prompt: str) -> ModelResponse:

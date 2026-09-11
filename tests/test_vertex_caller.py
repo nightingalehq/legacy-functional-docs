@@ -239,6 +239,77 @@ def test_call_splits_a_matching_prefix_into_a_cached_content_block(monkeypatch):
     ]
 
 
+def test_call_emits_two_cache_breakpoints_for_a_chunked_member_with_a_member_prefix(monkeypatch):
+    """Issue #214: same two-breakpoint contract as AnthropicCaller -- a
+    registered project-level prefix plus a registered member-level prefix
+    that the prompt actually shares both must yield exactly two
+    cache_control-marked blocks, project-level first."""
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "some-project")
+    _fake_google_auth_package(monkeypatch)
+    seen = {}
+
+    class FakeMessages:
+        def create(self, **kw):
+            seen["content"] = kw["messages"][0]["content"]
+            return SimpleNamespace(
+                content=[SimpleNamespace(text="ok", type="text")],
+                usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+            )
+
+    fake_client = SimpleNamespace(messages=FakeMessages())
+    monkeypatch.setitem(sys.modules, "anthropic", SimpleNamespace(
+        AnthropicVertex=lambda **kw: fake_client, RateLimitError=Exception,
+        APIConnectionError=Exception, InternalServerError=Exception,
+    ))
+
+    caller = VertexCaller(project="some-project")
+    caller.set_cache_prefixes(["project prefix\n\n---\n\n"])
+    caller.set_member_cache_prefixes(["# Fact brief\n\nmember shared context\n\n---\n\n"])
+    caller(
+        "project prefix\n\n---\n\n# Fact brief\n\nmember shared context\n\n---\n\nchunk-specific brief"
+    )
+
+    breakpoints = [b for b in seen["content"] if "cache_control" in b]
+    assert len(breakpoints) == 2
+    assert seen["content"] == [
+        {"type": "text", "text": "project prefix\n\n---\n\n",
+         "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": "# Fact brief\n\nmember shared context\n\n---\n\n",
+         "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": "chunk-specific brief"},
+    ]
+
+
+def test_call_emits_one_cache_breakpoint_when_no_member_prefix_is_registered(monkeypatch):
+    """A non-chunked member (or nothing ever calling
+    set_member_cache_prefixes) keeps the single existing project-level
+    breakpoint -- no behavior change for the common case."""
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "some-project")
+    _fake_google_auth_package(monkeypatch)
+    seen = {}
+
+    class FakeMessages:
+        def create(self, **kw):
+            seen["content"] = kw["messages"][0]["content"]
+            return SimpleNamespace(
+                content=[SimpleNamespace(text="ok", type="text")],
+                usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+            )
+
+    fake_client = SimpleNamespace(messages=FakeMessages())
+    monkeypatch.setitem(sys.modules, "anthropic", SimpleNamespace(
+        AnthropicVertex=lambda **kw: fake_client, RateLimitError=Exception,
+        APIConnectionError=Exception, InternalServerError=Exception,
+    ))
+
+    caller = VertexCaller(project="some-project")
+    caller.set_cache_prefixes(["project prefix\n\n---\n\n"])
+    caller("project prefix\n\n---\n\n# Fact brief\n\na whole, unchunked member's brief")
+
+    breakpoints = [b for b in seen["content"] if "cache_control" in b]
+    assert len(breakpoints) == 1
+
+
 def test_set_cache_prefixes_treats_a_single_string_as_one_prefix_not_chars(monkeypatch):
     """A caller passing a bare string (an easy mistake -- `str` is iterable)
     must not have it silently exploded into one-character prefixes, which

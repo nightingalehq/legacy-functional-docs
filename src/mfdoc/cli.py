@@ -1320,6 +1320,25 @@ def cmd_batch(args) -> int:
             state_path=(base / args.state) if args.state else None,
             lexicon=lexicon, max_rules_per_call=narrative_opts.get("max_rules_per_call"),
             sme_notes=sme_notes, writing_rules=writing_rules, index_template=index_template,
+            # Issue #214: a chunked member's member-level shared-prefix
+            # cache tier is only ever registered/prepended for a caller
+            # exposing set_member_cache_prefixes (AnthropicCaller,
+            # VertexCaller) -- --provider claude-code's ClaudeCLICaller
+            # never gets one, same as a real run. No caller is built for a
+            # dry run (that's the whole point -- no credentials needed), so
+            # this is derived from --caller/--provider alone, not from
+            # actually constructing one -- mirroring _build_model_caller's
+            # own precedence exactly: `--caller fake-echo` wins over
+            # `--provider` there (checked first, before any provider
+            # branch), so `--caller fake-echo --provider anthropic` must
+            # also read as "not capable" here, or this preview would hash
+            # as if a member-level prefix were active for a run that (via
+            # the fake-echo path) never builds a caller with the hook at
+            # all (Copilot review round 3 on PR #215).
+            member_cache_capable=(
+                getattr(args, "caller", "anthropic") != "fake-echo"
+                and getattr(args, "provider", "anthropic") in ("anthropic", "vertex")
+            ),
         )
         _print_batch_plan(plan)
         return 0

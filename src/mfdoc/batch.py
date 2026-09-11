@@ -31,8 +31,8 @@ from typing import Callable
 from . import __version__
 from .brief import (
     MemberFacts, _unescape_cell, build_member_facts, chunk_density_metrics, fetch_routines,
-    fetch_rule_candidate_rows, flag_density_outliers, format_density_note, module_brief,
-    routine_aware_chunk_ranges, routine_for_line,
+    fetch_rule_candidate_rows, flag_density_outliers, format_density_note, member_shared_prefix,
+    module_brief, routine_aware_chunk_ranges, routine_for_line,
 )
 from .citations import _cite, _rule_id, numbered_rule_candidates
 from .db import GAP_SEVERITY_ORDER_SQL
@@ -401,6 +401,27 @@ def build_prompt_cache_prefix(writing_rules: str, template: str) -> str:
     `set_cache_prefixes`."""
     stable = build_prompt_parts("", writing_rules, template)[:3]
     return "\n\n---\n\n".join(stable) + "\n\n---\n\n"
+
+
+def build_member_prompt_cache_prefix(shared_prefix: str) -> str:
+    """The exact leading substring of a chunked member's own per-chunk
+    `brief` text (issue #214, following up on #207/#183) that stays byte-
+    identical across every one of that member's chunks: the `"# Fact
+    brief\\n\\n"` heading `build_prompt_parts` always puts ahead of a brief,
+    plus `shared_prefix` itself (`member_shared_prefix(member_facts,
+    redact)` -- see that function's docstring for exactly what it does and
+    doesn't include), plus the same `"\\n\\n---\\n\\n"` section separator
+    `_generate_module_doc_chunked` puts between `shared_prefix` and that
+    chunk's own `module_brief()` text.
+
+    Registered via `AnthropicCaller`/`VertexCaller`'s `set_member_cache_
+    prefixes` -- *not* against the whole prompt like `build_prompt_cache_
+    prefix` above, since `shared_prefix` alone (unlike that function's
+    output) is never a literal prefix of the full request: the existing
+    project-level prefix always precedes it. `_content` matches this
+    against the text left over after the project-level prefix is already
+    stripped -- see its own docstring."""
+    return "# Fact brief\n\n" + shared_prefix + "\n\n---\n\n"
 
 
 # Corrective hints keyed by a substring of a validate_doc problem -- appended
@@ -1543,6 +1564,46 @@ def _chunk_reuse_ok(conn, prior_chunks: dict | None, i: int, brief_hash: str,
     return validate_doc(conn, chunk_path)["ok"]
 
 
+def _routine_chunk_map(routines: list, rule_rows: list, ranges: list[tuple[int, int]]) -> dict[str, int]:
+    """Routine name (upper) -> 1-based chunk index whose rule range contains
+    that routine's own rules -- the mapping `module_brief`'s `chunk_map`
+    param needs to annotate "Internal routines" with `[documented in
+    chunk N]` (see that function's docstring). Factored out of
+    `_generate_module_doc_chunked` (issue #214 review) so `plan_batch`'s
+    dry-run preview computes the identical mapping before hashing a
+    preview chunk brief, instead of silently omitting it and hashing a
+    brief `module_brief` would never actually render that way for a member
+    with internal routines -- exactly the class of resume-preview drift
+    this module's docstrings already warn `_chunk_reuse_ok`/`plan_batch`
+    must not have.
+
+    `ranges` is in rule-ordinal space (1-based position within `rule_rows`,
+    not raw source line numbers -- see `routine_aware_chunk_ranges`), so a
+    routine's chunk is found by scanning `rule_rows` directly (not via a
+    line_no-keyed dict: `rule_candidate.line_no` is not guaranteed unique
+    per member, and a dict built that way silently collapses same-line rows
+    to whichever is last, discarding the rest) for the first row whose line
+    falls inside the routine's own span, using that row's position (its
+    index in `rule_rows`, 1-based) as the ordinal. A routine with no
+    rule_candidate rows of its own (nothing to key off) is simply left out
+    of the map."""
+    chunk_map: dict[str, int] = {}
+    for routine in routines:
+        end_line = routine["end_line"] if routine["end_line"] is not None else routine["start_line"]
+        ordinal = next(
+            (pos for pos, r in numbered_rule_candidates(rule_rows)
+             if routine["start_line"] <= r["line_no"] <= end_line),
+            None,
+        )
+        if ordinal is None:
+            continue
+        for idx, (start, end) in enumerate(ranges, start=1):
+            if start <= ordinal <= end:
+                chunk_map[routine["name"].upper()] = idx
+                break
+    return chunk_map
+
+
 def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rule_rows: list,
                                   out_path: Path, caller: ModelCaller, writing_rules: str,
                                   template: str, redact: Redactor, lexicon: dict[str, str] | None,
@@ -1610,40 +1671,13 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
     density_metrics = flag_density_outliers(chunk_density_metrics(
         [r["line_no"] for r in rule_rows], ranges, [r["depth"] for r in rule_rows],
     ))
-    # Routine name (upper) -> 1-based chunk index whose rule range contains
-    # that routine's own rules -- known in full before any chunk is
-    # narrated, since `ranges` is already fixed above. Handed to every
-    # chunk's own brief (see module_brief's `chunk_map` param) so a chunk
-    # whose own rules dispatch to a routine documented elsewhere can name
-    # the specific chunk instead of leaving a dangling "covered elsewhere".
-    #
-    # `ranges` is in rule-ordinal space (1-based position within `rule_rows`,
-    # not raw source line numbers -- see routine_aware_chunk_ranges), so a
-    # routine's chunk is found by scanning `rule_rows` directly (not via a
-    # line_no-keyed dict: `rule_candidate.line_no` is not guaranteed unique
-    # per member, and a dict built that way silently collapses same-line
-    # rows to whichever is last, discarding the rest) for the first row
-    # whose line falls inside the routine's own span, using that row's
-    # position (its index in `rule_rows`, 1-based) as the ordinal.
-    # routine_aware_chunk_ranges already keeps a routine's rules as one
-    # contiguous, unsplit run, so any one of its rows' ordinals lands in the
-    # same chunk as every other rule belonging to that routine. A routine
-    # with no rule_candidate rows of its own (nothing to key off) is simply
-    # left out of the map.
-    chunk_map: dict[str, int] = {}
-    for routine in routines:
-        end_line = routine["end_line"] if routine["end_line"] is not None else routine["start_line"]
-        ordinal = next(
-            (pos for pos, r in numbered_rule_candidates(rule_rows)
-             if routine["start_line"] <= r["line_no"] <= end_line),
-            None,
-        )
-        if ordinal is None:
-            continue
-        for idx, (start, end) in enumerate(ranges, start=1):
-            if start <= ordinal <= end:
-                chunk_map[routine["name"].upper()] = idx
-                break
+    # Handed to every chunk's own brief (see module_brief's `chunk_map`
+    # param) so a chunk whose own rules dispatch to a routine documented
+    # elsewhere can name the specific chunk instead of leaving a dangling
+    # "covered elsewhere" -- see _routine_chunk_map's own docstring for the
+    # mapping's exact shape and why plan_batch's preview shares this same
+    # helper (issue #214 review) instead of computing it separately.
+    chunk_map = _routine_chunk_map(routines, rule_rows, ranges)
     input_tokens = output_tokens = 0
     duration_s = 0.0
     retries = 0
@@ -1656,6 +1690,60 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
         f"{out_path.stem}.chunk{n:0{chunk_width}d}{out_path.suffix}" for n in range(1, chunk_count + 1)
     }
     _prune_stale_chunk_files(out_path, expected_chunk_names)
+    # Issue #214: this member's own chunk-invariant shared prefix,
+    # registered as a second, member-level cache_control breakpoint
+    # (see build_member_prompt_cache_prefix/AnthropicCaller.set_member_
+    # cache_prefixes) *before* the chunk loop below runs -- every chunk's
+    # own build_prompt() call shares this exact leading text, so it's
+    # computed once per member here, not once per chunk.
+    #
+    # Gated on `caller` actually exposing `set_member_cache_prefixes`
+    # (AnthropicCaller, VertexCaller) -- checked *before* `shared_prefix` is
+    # even computed, not just before registering it, so a caller without
+    # this hook (ClaudeCLICaller, the fake-echo test caller) never gets
+    # `shared_prefix` prepended into its own brief below either (Copilot
+    # review on PR #215): with no cache breakpoint to make it a saving, that
+    # prepend would be a pure duplicate-context/token-cost regression for
+    # exactly those callers, and for ClaudeCLICaller specifically, a real
+    # (uncached) change to what gets sent to the model on every chunk --
+    # not the caching-only change this issue is scoped to.
+    #
+    # Also gated on `chunk_count > 1` (Copilot review, second pass):
+    # routine_aware_chunk_ranges never splits a single oversized routine
+    # (see its own docstring/tests), so a member that reached this function
+    # because its rule count exceeds the threshold can still collapse to
+    # exactly one chunk. With only one chunk (and, short of a retry, one
+    # call), there is no second call left to ever read the cache entry this
+    # breakpoint would write -- prepending shared_prefix there is a pure
+    # cache-write cost with no matching read, not a saving.
+    #
+    # A member-level breakpoint is only useful *behind* the existing
+    # project-level one (see AnthropicCaller.set_member_cache_prefixes --
+    # `_content` matches a member prefix against the text left after the
+    # project prefix is stripped, never against the whole prompt). `run_
+    # batch` registers the project-level prefix once, up front, via `_apply_
+    # cache_prefixes` -- but `generate_module_doc`/this function are also a
+    # public, direct call path (tests, a one-off script) that never goes
+    # through `run_batch` at all, so a caller built fresh for that path has
+    # no project-level prefix registered yet. Without this, `_content`'s
+    # outer prefix match would simply fail for every prompt (no cache_
+    # control applied to *anything*, project or member tier), while this
+    # function still prepended shared_prefix's text into every chunk's
+    # brief for zero caching benefit (Copilot review round 3 on PR #215).
+    # Calling `_apply_cache_prefixes` here too -- idempotent, since it's the
+    # same `writing_rules`/`template`/`index_template` for every call in one
+    # project -- guarantees the project tier is always active before the
+    # member tier is even considered, regardless of which path got here.
+    _apply_cache_prefixes(caller, writing_rules, template, index_template)
+    set_member_cache_prefixes = getattr(caller, "set_member_cache_prefixes", None)
+    shared_prefix = (
+        member_shared_prefix(member_facts, redact)
+        if isinstance(member_facts, MemberFacts) and set_member_cache_prefixes is not None
+        and chunk_count > 1
+        else None
+    )
+    if shared_prefix is not None:
+        set_member_cache_prefixes([build_member_prompt_cache_prefix(shared_prefix)])
     # `member_facts` was already resolved above (before `routines`) --
     # every whole-member section module_brief() renders (interface, data
     # access, calls, inbound callers, gaps, ...) is identical across this
@@ -1665,10 +1753,34 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
     # point of this loop no longer calling module_brief() with facts=None.
     for i, (start, end) in enumerate(ranges, start=1):
         chunk_path = out_path.with_name(f"{out_path.stem}.chunk{i:0{chunk_width}d}{out_path.suffix}")
-        brief = module_brief(
+        chunk_brief = module_brief(
             conn, member_name, redact=redact, lexicon=lexicon,
             rule_range=(start, end), chunk_info=(i, chunk_count), chunk_map=chunk_map,
-            sme_notes=sme_notes, facts=member_facts,
+            sme_notes=sme_notes, facts=member_facts, shared_prefix=shared_prefix,
+        )
+        # `shared_prefix` (when this member resolved to a real MemberFacts
+        # and a member-level cache tier is active) is prepended ahead of
+        # every chunk's own module_brief() text, with the same separator
+        # build_member_prompt_cache_prefix expects to find -- this is what
+        # makes the registered member-level cache prefix above an actual
+        # literal prefix of this brief, on every chunk, not just a string
+        # that happens to be byte-identical somewhere inside it.
+        #
+        # This is *not* duplicate content: `chunk_brief` above was given
+        # this same `shared_prefix`, so module_brief() already skipped
+        # re-rendering every whole-member section it covers (issue #214,
+        # Copilot review round 3 on PR #215) -- sending the same facts
+        # twice per chunk would inflate every chunk's actual request size
+        # regardless of any cache hit (a cache hit only changes billing,
+        # never how many tokens are in the request), which could turn an
+        # already-large member's chunk into a context-limit failure, the
+        # exact case chunking exists to prevent. `shared_prefix` +
+        # `chunk_brief` together cover the same facts a single unshared
+        # module_brief() call would, just split across two blocks instead
+        # of duplicated.
+        brief = (
+            shared_prefix + "\n\n---\n\n" + chunk_brief if shared_prefix is not None
+            else chunk_brief
         )
         brief_hash = hashlib.sha256(brief.encode("utf-8")).hexdigest()
         result = None
@@ -2418,7 +2530,8 @@ def plan_batch(conn, members: list[str], out_dir: Path,
                max_rules_per_call: int | None = None,
                sme_notes: dict | None = None,
                writing_rules: str | None = None,
-               index_template: str | None = None) -> BatchPlan:
+               index_template: str | None = None,
+               member_cache_capable: bool = False) -> BatchPlan:
     """Cheap, local, no-model-call preview of what `run_batch` over these
     same arguments would actually do -- every brief a real run would render
     is computed and hashed exactly the same way (corpus-level check, then
@@ -2446,7 +2559,22 @@ def plan_batch(conn, members: list[str], out_dir: Path,
     verdict (whether the whole-module reconciliation call would also be
     skipped) -- omitted (left None) when not given, since computing it
     needs the same inputs a real reconciliation call would build its prompt
-    from."""
+    from.
+
+    `member_cache_capable` (issue #214): whether the caller a real run
+    would actually use exposes `set_member_cache_prefixes` (AnthropicCaller,
+    VertexCaller -- not ClaudeCLICaller or the fake-echo test caller). This
+    function never builds a caller itself (that's the whole point -- no
+    `--model`/`--provider` credentials needed for a preview), so it can't
+    detect this on its own; a caller of `plan_batch` that already knows
+    which provider a real run would use (cli.py passes `args.provider in
+    ("anthropic", "vertex")`) should pass it through, so a chunked member's
+    preview hash matches whether a real run would actually prepend/register
+    a member-level shared prefix -- see `_generate_module_doc_chunked`'s
+    matching gate. Defaults to False (assume no member-level tier), the
+    safe direction: understating `chunks_reusable` costs an unnecessary
+    re-render; overstating it would wrongly report a stale chunk as
+    reusable."""
     threshold = _resolve_max_rules_per_call(max_rules_per_call)
     state = _load_state(state_path) if state_path else {}
     corpus_sig = (
@@ -2497,17 +2625,52 @@ def plan_batch(conn, members: list[str], out_dir: Path,
         ranges = routine_aware_chunk_ranges([r["line_no"] for r in rows], routines, threshold)
         chunk_count = len(ranges)
         chunk_width = len(str(chunk_count))
+        # Issue #214 review: a real chunked render passes chunk_map to every
+        # chunk's own module_brief() call (see _generate_module_doc_chunked)
+        # -- this preview must too, or a member with internal routines gets
+        # a chunk_brief missing the chunk_map paragraph/`[documented in
+        # chunk N]` annotations _generate_module_doc_chunked's own brief
+        # actually carries, hashing something a real render would never
+        # produce. Same `_routine_chunk_map` helper both use, so neither can
+        # drift from the other.
+        chunk_map = _routine_chunk_map(routines, rows, ranges)
         prior_chunks = prior.get("chunks") if isinstance(prior, dict) else None
         chunks_reusable = 0
         chunk_bodies: list[tuple[int, str]] = []
+        # A real chunked render's own brief_hash (see
+        # _generate_module_doc_chunked) is computed over `shared_prefix +
+        # "\n\n---\n\n" + chunk_brief`, not `chunk_brief` alone -- this
+        # preview must hash the identical string, or its chunks_reusable
+        # count silently drifts from what a real run would actually do
+        # (exactly the class of bug this function's own docstring exists to
+        # prevent). Computed once per member, same as the real render, and
+        # only when the run this previews would actually register/prepend
+        # it -- see _generate_module_doc_chunked's matching
+        # set_member_cache_prefixes capability gate; a caller with no such
+        # hook never gets this prepended in a real run, so this preview
+        # must not hash as if it would (see `member_cache_capable` above).
+        # Also mirrors that function's `chunk_count > 1` gate (Copilot
+        # review, second pass on PR #215): a member whose routine-aware
+        # chunking still collapses to one chunk never gets a member-level
+        # prefix registered in a real run either (no second call left to
+        # read the cache entry), so this preview must not hash as if it
+        # would.
+        shared_prefix = (
+            member_shared_prefix(member_facts, redact)
+            if isinstance(member_facts, MemberFacts) and member_cache_capable and chunk_count > 1
+            else None
+        )
         for i, (start, end) in enumerate(ranges, start=1):
             chunk_path = out_path.with_name(f"{out_path.stem}.chunk{i:0{chunk_width}d}{out_path.suffix}")
             chunk_brief = module_brief(
                 conn, name, redact=redact, lexicon=lexicon,
-                rule_range=(start, end), chunk_info=(i, chunk_count), sme_notes=sme_notes,
-                facts=member_facts,
+                rule_range=(start, end), chunk_info=(i, chunk_count), chunk_map=chunk_map,
+                sme_notes=sme_notes, facts=member_facts, shared_prefix=shared_prefix,
             )
-            chunk_hash = hashlib.sha256(chunk_brief.encode("utf-8")).hexdigest()
+            preview_brief = (
+                shared_prefix + "\n\n---\n\n" + chunk_brief if shared_prefix is not None else chunk_brief
+            )
+            chunk_hash = hashlib.sha256(preview_brief.encode("utf-8")).hexdigest()
             if _chunk_reuse_ok(conn, prior_chunks, i, chunk_hash, chunk_path):
                 chunks_reusable += 1
                 if writing_rules is not None and chunk_path.exists():

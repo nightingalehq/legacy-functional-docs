@@ -55,6 +55,17 @@ class AnthropicCaller:
         # test, or used outside `mfdoc batch`) sends every prompt exactly as
         # before, one plain string with no cache_control at all.
         self._cache_prefixes: tuple[str, ...] = ()
+        # Issue #214: a second, member-level cache-prefix tier, layered
+        # *after* whichever project-level prefix above `prompt` matches --
+        # e.g. a chunked member's own chunk-invariant shared context
+        # (brief.py's `member_shared_prefix`), registered once per member
+        # by batch.py's `_generate_module_doc_chunked` before that member's
+        # chunk loop runs, not once per project run like `_cache_prefixes`.
+        # Matched the same way (longest first, against the text remaining
+        # *after* the project-level prefix is stripped -- see `_content`),
+        # so this stays empty (no behavior change at all) for any caller
+        # nobody has told about a member-level prefix.
+        self._member_cache_prefixes: tuple[str, ...] = ()
 
     def set_cache_prefixes(self, prefixes: str | list[str] | tuple[str, ...] | None) -> None:
         """Register the stable prompt prefixes `__call__` should look for and
@@ -71,20 +82,62 @@ class AnthropicCaller:
             prefixes = (prefixes,)
         self._cache_prefixes = tuple(sorted({p for p in prefixes if p}, key=len, reverse=True))
 
+    def set_member_cache_prefixes(self, prefixes: str | list[str] | tuple[str, ...] | None) -> None:
+        """Register this member's own stable prompt prefix(es) as a second,
+        later `cache_control` breakpoint (issue #214) -- same contract as
+        `set_cache_prefixes` (bare `str` is one prefix, not iterated
+        character-by-character; `None` clears), but matched against the text
+        left *after* stripping whichever project-level prefix `_content`
+        already found, not against the whole prompt (a member-level prefix,
+        e.g. `batch.build_member_prompt_cache_prefix`'s output, is never
+        itself a literal prefix of the full request -- the project-level
+        prefix always precedes it).
+
+        Ordering two stacked breakpoints this way (project-level first,
+        member-level second) matches the bundled Claude API skill's prompt-
+        caching guidance: classify content by stability and place the more
+        stable, more-widely-shared content earlier, the narrower/more
+        volatile content later -- the project-level prefix is shared by
+        every member/chunk in the whole batch run, the member-level one only
+        by one member's own chunks. Both stay comfortably within the
+        documented 4-breakpoint-per-request budget (2 used here, project +
+        member, on top of nothing else this caller ever adds)."""
+        if prefixes is None:
+            prefixes = ()
+        elif isinstance(prefixes, str):
+            prefixes = (prefixes,)
+        self._member_cache_prefixes = tuple(sorted({p for p in prefixes if p}, key=len, reverse=True))
+
     def _content(self, prompt: str) -> str | list[dict]:
-        """`prompt` split into a cached stable-prefix block plus a plain
-        variable-suffix block, for whichever registered cache prefix (if
-        any) `prompt` actually starts with -- or `prompt` itself, unchanged,
-        when none matches (no prefixes registered yet, or this particular
-        prompt doesn't share one, e.g. build_uncited_patch_prompt's
-        targeted-patch follow-up, which never resends writing rules or
-        template in the first place -- see its own docstring)."""
+        """`prompt` split into a cached stable-prefix block, an optional
+        second cached member-level block (issue #214), and a plain
+        variable-suffix block -- for whichever registered cache prefix (if
+        any) `prompt` actually starts with, and whichever registered
+        member-level prefix (if any) the remaining text after that starts
+        with in turn -- or `prompt` itself, unchanged, when no project-level
+        prefix matches at all (no prefixes registered yet, or this
+        particular prompt doesn't share one, e.g. build_uncited_patch_
+        prompt's targeted-patch follow-up, which never resends writing
+        rules or template in the first place -- see its own docstring).
+        Exactly two `cache_control` breakpoints when both match (a chunked
+        member with a registered member-level prefix), exactly one when
+        only the project-level prefix matches (every other call), matching
+        this caller's pre-#214 behavior exactly when `_member_cache_
+        prefixes` is empty."""
         for prefix in self._cache_prefixes:
             if prompt.startswith(prefix):
-                return [
-                    {"type": "text", "text": prefix, "cache_control": {"type": "ephemeral"}},
-                    {"type": "text", "text": prompt[len(prefix):]},
-                ]
+                rest = prompt[len(prefix):]
+                blocks = [{"type": "text", "text": prefix, "cache_control": {"type": "ephemeral"}}]
+                for member_prefix in self._member_cache_prefixes:
+                    if rest.startswith(member_prefix):
+                        blocks.append({
+                            "type": "text", "text": member_prefix,
+                            "cache_control": {"type": "ephemeral"},
+                        })
+                        rest = rest[len(member_prefix):]
+                        break
+                blocks.append({"type": "text", "text": rest})
+                return blocks
         return prompt
 
     def __call__(self, prompt: str) -> ModelResponse:

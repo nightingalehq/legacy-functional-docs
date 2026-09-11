@@ -10,6 +10,7 @@ from mfdoc.brief import (
     entity_brief,
     flag_density_outliers,
     format_density_note,
+    member_shared_prefix,
     module_brief,
     routine_aware_chunk_ranges,
     routine_for_line,
@@ -175,6 +176,208 @@ def test_module_brief_tags_rules_and_data_access_with_their_routine(indexed_db):
     brief = module_brief(indexed_db, "MMP0100", redact=NULL_REDACTOR)
     assert "## Internal routines" in brief
     assert "`WRITE-AUDIT` (natural_subroutine)" in brief
+
+
+# --- member_shared_prefix (issue #214) --------------------------------
+
+def test_member_shared_prefix_is_byte_identical_across_every_chunk_of_the_same_member(indexed_db):
+    """The exact property #207 found missing from any slice of module_brief's
+    own rendered output: build_member_facts() once, then member_shared_prefix
+    must return the identical string no matter what rule_range/chunk_info/
+    chunk_map a caller's per-chunk module_brief() calls use alongside it --
+    it never looks at any of those at all."""
+    facts = build_member_facts(indexed_db, "MMP0100")
+    assert isinstance(facts, MemberFacts)
+    routines = facts.routines
+    chunk_map = {r["name"].upper(): 1 for r in routines} if routines else {}
+
+    prefix_a = member_shared_prefix(facts, NULL_REDACTOR)
+    # Simulate three different "chunks" of the same member calling
+    # module_brief with different rule_range/chunk_info/chunk_map/lexicon --
+    # none of that should ever reach member_shared_prefix's own output.
+    module_brief(
+        indexed_db, "MMP0100", redact=NULL_REDACTOR, rule_range=(1, 1),
+        chunk_info=(1, 3), chunk_map=chunk_map, facts=facts,
+    )
+    prefix_b = member_shared_prefix(facts, NULL_REDACTOR)
+    module_brief(
+        indexed_db, "MMP0100", redact=NULL_REDACTOR, rule_range=(2, 2),
+        chunk_info=(2, 3), chunk_map=chunk_map, facts=facts,
+    )
+    prefix_c = member_shared_prefix(facts, NULL_REDACTOR)
+
+    assert prefix_a == prefix_b == prefix_c
+
+
+def test_member_shared_prefix_omits_chunk_dependent_content(indexed_db):
+    """member_shared_prefix must never carry the PARTIAL BRIEF note, a
+    chunk-annotated "Internal routines" entry, the "Candidate business
+    rules" section, or a "Business vocabulary" section -- everything #207
+    found chunk-dependent, or explicitly rule_range-sliced, in module_brief's
+    own rendering."""
+    facts = build_member_facts(indexed_db, "MMP0100")
+    assert isinstance(facts, MemberFacts)
+    prefix = member_shared_prefix(facts, NULL_REDACTOR)
+    assert "PARTIAL BRIEF" not in prefix
+    assert "documented in chunk" not in prefix
+    assert "## Candidate business rules" not in prefix
+    assert "## Business vocabulary" not in prefix
+    assert "## SME notes" not in prefix
+    # But every whole-member section module_brief also renders must still
+    # be present -- this is a rendering of those facts, not an empty shell.
+    assert "## Internal routines" in prefix
+    assert "`WRITE-AUDIT` (natural_subroutine)" in prefix
+
+
+def test_member_shared_prefix_matches_module_briefs_table_rendering(indexed_db):
+    """Issue #185/#213 switched module_brief's Interface/Data views/
+    Program variables/Data areas included/Outbound calls/copycode-rules
+    sections to a compact `_tbl` pipe-table rendering -- member_shared_
+    prefix's own copies of those same sections must stay in that same
+    format (not the old, pre-#213 bullet-per-row prose), or a chunked
+    member's prompt ends up showing the same facts twice in two different
+    styles, and forfeits #213's density saving for the cached copy."""
+    facts = build_member_facts(indexed_db, "MMP0100")
+    assert isinstance(facts, MemberFacts)
+    prefix = member_shared_prefix(facts, NULL_REDACTOR)
+    assert "citation|level|name|spec" in prefix, "Interface section must use _tbl's header row"
+    # The old bullet format ("- [[MMP0100:N]] level ... `NAME`") must be gone.
+    assert "- [[MMP0100:" not in prefix.split("## Interface")[1].split("##")[0]
+
+
+def test_member_shared_prefix_redacts_gap_detail(indexed_db):
+    """Copilot review on PR #215: a gap's `detail` is free text that can
+    carry the same sensitive values `redact` exists to strip everywhere
+    else in this renderer -- must not slip through unredacted just because
+    module_brief's own matching line doesn't redact it either."""
+    facts = build_member_facts(indexed_db, "MMP0100")
+    assert isinstance(facts, MemberFacts)
+    assert facts.gaps, "fixture must have at least one gap to exercise this"
+
+    def redact_all(text):
+        return "[REDACTED]" if text else text
+
+    prefix = member_shared_prefix(facts, redact_all)
+    gaps_section = prefix.split("## Known gaps for this module")[1]
+    for r in facts.gaps:
+        if r["detail"]:
+            assert r["detail"] not in gaps_section
+
+
+def test_member_shared_prefix_is_redacted_with_the_callers_own_redactor(indexed_db):
+    """Every MemberFacts field is raw/unredacted (see MemberFacts's own
+    docstring) -- member_shared_prefix must redact through the given
+    `redact`, the same as module_brief does for every other field, not
+    silently leak unredacted text through this block instead."""
+    facts = build_member_facts(indexed_db, "MMP0100")
+    assert isinstance(facts, MemberFacts)
+
+    def redact_all(text):
+        return "[REDACTED]" if text else text
+
+    prefix = member_shared_prefix(facts, redact_all)
+    unredacted = member_shared_prefix(facts, NULL_REDACTOR)
+    assert prefix != unredacted
+    assert "[REDACTED]" in prefix
+
+
+def test_member_shared_prefix_redacts_metadata_fields(indexed_db):
+    """Copilot review round 3/4 on PR #215: system/library are project-
+    supplied engagement metadata (not this tool's own fixed vocabulary),
+    so a configured redaction pattern could legitimately match one -- must
+    not be interpolated raw just because this is the top-of-brief metadata
+    block rather than a body section."""
+    facts = build_member_facts(indexed_db, "MMP0100")
+    assert isinstance(facts, MemberFacts)
+
+    def redact_system_and_library(text):
+        if text in ("MOM", "MILLPROD"):
+            return "[REDACTED]"
+        return text
+
+    prefix = member_shared_prefix(facts, redact_system_and_library)
+    assert "MOM" not in prefix.splitlines()[2]  # "- system: ..." line
+    assert "MILLPROD" not in prefix.splitlines()[5]  # "- library: ..." line
+    assert "[REDACTED]" in prefix
+
+
+def test_module_brief_shared_prefix_skips_duplicate_sections(indexed_db):
+    """Copilot review round 3 on PR #215: a cache hit only changes billing,
+    never how many tokens are actually in a request -- so passing
+    `shared_prefix` must genuinely remove the sections it already covers
+    from module_brief's own rendering, not just add a cache marker on top
+    of an unchanged, duplicated brief."""
+    facts = build_member_facts(indexed_db, "MMP0100")
+    assert isinstance(facts, MemberFacts)
+    shared_prefix = member_shared_prefix(facts, NULL_REDACTOR)
+
+    unshared = module_brief(indexed_db, "MMP0100", redact=NULL_REDACTOR, facts=facts)
+    shared = module_brief(
+        indexed_db, "MMP0100", redact=NULL_REDACTOR, facts=facts, shared_prefix=shared_prefix,
+    )
+    # Every whole-member section shared_prefix already carries must be gone
+    # from module_brief's own output when shared_prefix is given.
+    for heading in (
+        "## Header comments", "## Interface (parameters)", "## Data views declared",
+        "## Program variables and screen/MAP fields", "## Data areas included",
+        "## Data access (verified from source statements)", "## Transaction boundaries",
+        "## Outbound calls", "## Inbound callers",
+    ):
+        assert heading in unshared, f"fixture must exercise {heading!r} for this test to mean anything"
+        assert heading not in shared, f"{heading!r} must not be duplicated when shared_prefix is given"
+    # But the chunk-dependent sections module_brief alone can render must
+    # still be present -- shared_prefix never carries these.
+    assert "## Internal routines" in shared
+    assert "## Candidate business rules" in shared
+
+
+def test_module_brief_shared_prefix_keeps_internal_routines_chunk_annotations(indexed_db):
+    """Internal routines is deliberately NOT skipped even when shared_prefix
+    is given -- its own `[documented in chunk N]` annotations are chunk_map-
+    dependent, so module_brief's copy (not shared_prefix's unannotated one)
+    is the only place that information can live."""
+    facts = build_member_facts(indexed_db, "MMP0100")
+    assert isinstance(facts, MemberFacts)
+    shared_prefix = member_shared_prefix(facts, NULL_REDACTOR)
+    chunk_map = {r["name"].upper(): 99 for r in facts.routines}
+    brief = module_brief(
+        indexed_db, "MMP0100", redact=NULL_REDACTOR, facts=facts, shared_prefix=shared_prefix,
+        rule_range=(1, 1), chunk_info=(1, 2), chunk_map=chunk_map,
+    )
+    assert "[documented in chunk 99]" in brief
+
+
+def test_module_brief_shared_prefix_lexicon_scan_still_finds_a_skipped_sections_term(
+    indexed_db, project_lexicon,
+):
+    """The lexicon-relevance scan reads module_brief's own `out`, which no
+    longer carries the sections shared_prefix covers -- a term that only
+    appears in one of those (e.g. MILL-ORDER, cited only via Interface/Data
+    access/Outbound calls for MMP0100) must still be found via shared_
+    prefix's own text folded into the haystack, matching what an unshared
+    call would find."""
+    facts = build_member_facts(indexed_db, "MMP0100")
+    assert isinstance(facts, MemberFacts)
+    shared_prefix = member_shared_prefix(facts, NULL_REDACTOR)
+
+    unshared = module_brief(indexed_db, "MMP0100", redact=NULL_REDACTOR, lexicon=project_lexicon, facts=facts)
+    shared = module_brief(
+        indexed_db, "MMP0100", redact=NULL_REDACTOR, lexicon=project_lexicon, facts=facts,
+        shared_prefix=shared_prefix,
+    )
+    assert "## Business vocabulary" in unshared
+    assert "## Business vocabulary" in shared
+    for present in ("CONF", "GRADE-CODE", "MILL-ORDER", "PART", "RLSD"):
+        assert f"`{present}` ->" in shared, f"lost lexicon hit for {present} once its section was skipped"
+
+
+def test_module_brief_without_shared_prefix_is_unchanged(indexed_db):
+    """Default behavior (no shared_prefix passed, the case for every
+    existing call site) must be byte-identical to before this parameter
+    existed -- this is additive, not a required argument."""
+    with_default = module_brief(indexed_db, "MMP0100", redact=NULL_REDACTOR)
+    with_explicit_none = module_brief(indexed_db, "MMP0100", redact=NULL_REDACTOR, shared_prefix=None)
+    assert with_default == with_explicit_none
 
 
 # --- routine_for_line / routine_aware_chunk_ranges -------------------------
