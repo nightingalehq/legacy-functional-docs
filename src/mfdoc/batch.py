@@ -2608,9 +2608,9 @@ def plan_batch(conn, members: list[str], out_dir: Path,
         # prevent). Computed once per member, same as the real render, and
         # only when the run this previews would actually register/prepend
         # it -- see _generate_module_doc_chunked's matching
-        # caller_supports_member_cache gate; a caller with no
-        # set_member_cache_prefixes hook never gets this prepended in a
-        # real run, so this preview must not hash as if it would.
+        # set_member_cache_prefixes capability gate; a caller with no such
+        # hook never gets this prepended in a real run, so this preview
+        # must not hash as if it would (see `member_cache_capable` above).
         shared_prefix = (
             member_shared_prefix(member_facts, redact)
             if isinstance(member_facts, MemberFacts) and member_cache_capable
