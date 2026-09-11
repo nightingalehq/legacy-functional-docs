@@ -151,6 +151,11 @@ mfdoc test-gen      --config project.yml --member NAME --language python --frame
 mfdoc test-gen      --config project.yml --member NAME --matrix   # every options.testgen.matrix target for one member
 mfdoc test-batch    --config project.yml --matrix                # every options.testgen.matrix target, every batchable member
 mfdoc test-batch    --config project.yml --language python --framework pytest --out tests_generated  # needs mfdoc[batch]
+mfdoc test-batch    --config project.yml --matrix --dry-run
+# --dry-run: same no-model-call resume preview as `mfdoc batch --dry-run`
+# (issue #160), ported to test-batch's own independent prior_chunks/
+# brief_sha256 resume state (issue #190) -- one report per --matrix/
+# --language+--framework target
 mfdoc test-validate --config project.yml --docs tests_generated
 ```
 

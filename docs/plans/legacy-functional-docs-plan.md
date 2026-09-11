@@ -60,6 +60,62 @@ GitHub org.
   fixture pipeline (`ingest`/`derive`/`coverage`/`validate --docs
   examples`) unaffected (this change touches no dialect/derive/validate
   code, only the model-retry loops).
+- Fixed issue #190 (part of the #187 epic): ported `batch.py`'s `plan_batch`/
+  `--dry-run` resume preview (issue #160) to `testbatch.py`'s own,
+  independently-implemented `prior_chunks`/`brief_sha256` chunked-resume
+  state. Confirmed the fragility #160 found in `batch.py` is real here too:
+  `testplan.py` derives a scenario's `MEMBER:BR-nnn` id via the same
+  `citations.numbered_rule_candidates`/`_rule_id` ordinal-position numbering
+  `batch.py`'s rule ids use (see #184), so a rule inserted or removed
+  anywhere earlier in a member's rule list renumbers every later scenario
+  and changes every later chunk's brief hash, even though that chunk's own
+  routine facts are untouched -- exactly the "a resume is silently a full
+  regeneration" risk `--dry-run` exists to surface before it costs
+  anything.
+  - Added `testbatch._test_chunk_reuse_ok`, mirroring `batch._chunk_reuse_ok`
+    except calling `validate_test_doc` instead of `validate_doc` (a test
+    doc's `language`/`framework` front matter and `MEMBER:BR-nnn`
+    references aren't things `validate_doc` alone checks) -- refactored
+    `_generate_member_test_doc_chunked`'s previously-inline reuse check to
+    use it too, so the real render path and the dry-run preview can never
+    drift onto two different reuse rules.
+  - Added `testbatch.plan_test_batch`/`TestBatchPlan`/`TestMemberPlan`,
+    mirroring `batch.plan_batch`/`BatchPlan`/`MemberPlan` for one
+    language/framework target at a time (matching `run_test_batch`'s own
+    per-target shape) -- deliberately has no `narrative_reusable` estimate,
+    since a chunked test-batch member's index document
+    (`_render_chunk_index`) is built deterministically, never via its own
+    model call the way a chunked module doc's whole-module reconciliation
+    call is.
+  - Wired `mfdoc test-batch --dry-run` in `cli.py` (`_print_test_batch_plan`,
+    mirroring `_print_batch_plan`), printed once per `--matrix`/
+    `--language`+`--framework` target -- same "no --model/--provider/
+    --caller needed" contract as `mfdoc batch --dry-run`.
+  - Copilot PR review then caught two real gaps: (1) the dry-run branch
+    skipped the real loop's per-target template-existence check, so a
+    missing/misconfigured template silently reported every member as
+    RENDER and exited 0 instead of matching the real run's exit 2
+    (single target) / skip-with-warning (matrix mode) -- fixed by
+    resolving and checking each target's template before planning it;
+    (2) `_test_chunk_reuse_ok`'s revalidation of a cache-hit chunk calls
+    `validate_test_doc`, which deletes/reinserts that path's `doc_claim`
+    rows and commits -- a real database mutation from a command whose
+    whole contract is "writes nothing" -- fixed by adding
+    `_readonly_validate_test_doc` (snapshots and restores the affected
+    `doc_claim` rows around the call) and a `readonly` flag on
+    `_test_chunk_reuse_ok`, used only by `plan_test_batch`; the real
+    chunked-render path's own revalidation is unchanged.
+  - New tests in `tests/test_test_batch.py`: `plan_test_batch` reporting
+    render/skip/chunked correctly (including a fresh-vs-stale
+    `prior_chunks` comparison against a real `generate_member_test_doc`
+    chunk-reuse count, the same cross-check
+    `test_plan_batch_matches_generate_module_doc_chunk_reuse` does for
+    `batch.py`), a CLI-level guard that `--dry-run` never reaches
+    `_build_model_caller`, a missing-template exit-2 case, and a
+    doc_claim-untouched assertion across a cache-hit dry-run plan. Full
+    suite: 915 collected, 913 passed, 2 skipped. Bundled fixture pipeline
+    (`ingest`/`derive`/`coverage`/`validate --docs examples`) still 71/71
+    documents clean, 0 invalid citations of 750.
 
 **Progress (2026-09-10d):**
 - Fixed issue #194: `mfdoc ingest`'s incremental-ingest skip decision

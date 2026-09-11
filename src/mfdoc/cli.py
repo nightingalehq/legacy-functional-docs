@@ -997,6 +997,41 @@ def cmd_test_gen(args) -> int:
     return 1 if any_failed else 0
 
 
+def _print_test_batch_plan(plan) -> None:
+    """Print a `--dry-run mfdoc test-batch` plan (testbatch.TestBatchPlan)
+    for one language/framework target -- read before committing to a real
+    `mfdoc test-batch` run, the same way `_print_batch_plan` is read before
+    a real `mfdoc batch` run. See testbatch.plan_test_batch's docstring for
+    what "cache hit" means here and why it can differ from what the CLI
+    invocation alone would suggest."""
+    print(f"corpus signature: {'unchanged' if plan.corpus_unchanged else 'changed (or no prior state)'}")
+    for m in plan.members:
+        if m.status == "skip":
+            print(f"SKIP    {m.member:<20} cache hit -- no model call")
+        elif m.status == "render":
+            print(f"RENDER  {m.member:<20} single call")
+        else:
+            print(
+                f"CHUNKED {m.member:<20} {m.chunks_reusable}/{m.chunk_count} chunks reusable, "
+                f"{m.chunks_to_render}/{m.chunk_count} would render"
+            )
+    print()
+    print(
+        f"{plan.members_skip}/{plan.members_total} members skip (cache hit), "
+        f"{plan.members_render} render, {plan.members_chunked} chunked"
+    )
+    if plan.members_chunked:
+        print(
+            f"chunks: {plan.chunks_reusable}/{plan.chunks_total} reusable, "
+            f"{plan.chunks_to_render}/{plan.chunks_total} would render"
+        )
+        if plan.chunks_to_render == plan.chunks_total and plan.chunks_total > 0:
+            print(
+                "warning: every chunk of every chunked member would render -- a resumed "
+                "run here is effectively a full regeneration, not a cheap resume"
+            )
+
+
 def cmd_test_batch(args) -> int:
     """Batch harness for generated tests -- the same option-C treatment
     `mfdoc batch` gives module docs, applied to test_case rows instead of
@@ -1064,6 +1099,39 @@ def cmd_test_batch(args) -> int:
     if not members:
         print("no test_case rows in the index -- run `mfdoc test-plan` first")
         return 0
+
+    if getattr(args, "dry_run", False):
+        # Mirror the real loop's template-existence check below (rather than
+        # skip straight to planning) -- otherwise a missing/misconfigured
+        # template would report every member as RENDER and exit 0 here, while
+        # the real run for the same invocation exits 2 (single target) or
+        # skips/fails that target (matrix mode). A dry-run whose own preview
+        # can't happen for a target must say so the same way the real run
+        # would, not silently report a plan for an invocation that can't
+        # actually run (issue #190 review).
+        any_target_failed = False
+        for target in targets:
+            language, framework = target["language"], target["framework"]
+            template_override = target.get("template") or args.template
+            template_path = _test_template_path(base, language, framework, template_override)
+            if not template_path.exists():
+                print(f"no template at {template_path} -- pass --template, or add one for "
+                      f"--language {language} --framework {framework}; skipping this target",
+                      file=sys.stderr)
+                if not args.matrix:
+                    return 2
+                any_target_failed = True
+                continue
+            plan = testbatch_mod.plan_test_batch(
+                conn, members, language, framework, base / out_dir, redact=redact,
+                state_path=(base / state_rel) if state_rel else None,
+                max_scenarios_per_call=testgen_cfg.get("max_scenarios_per_call"),
+                sme_notes=sme_notes,
+            )
+            if len(targets) > 1:
+                print(f"\n=== {language}/{framework} ===")
+            _print_test_batch_plan(plan)
+        return 1 if any_target_failed else 0
 
     writing_rules = (base / "reference" / "test-writing-rules.md").read_text(encoding="utf-8")
     caller = _build_model_caller(args)
@@ -1877,6 +1945,14 @@ def main(argv=None) -> int:
              "resume tracking; default: .mfdoc/<project-namespace>-test-batch-state.json (see "
              "--config's system or project key -- namespaced so two configs sharing a working "
              "directory don't share, and clobber, one resume-state file)")
+    sub.choices["test-batch"].add_argument(
+        "--dry-run", action="store_true",
+        help="report how many members/chunks this run would actually skip (cache hit) versus "
+             "render, for each --matrix/--language+--framework target, without calling the "
+             "model or writing anything -- read this before a resumed run that looks cheap "
+             "turns out to be a full re-render (issue #190, porting `mfdoc batch --dry-run` "
+             "from #160). No --model/--provider/--caller is needed; exits before any of that "
+             "is touched")
 
     p = sub.add_parser("batch")
     p.add_argument("--config", required=True)

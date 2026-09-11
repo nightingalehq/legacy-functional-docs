@@ -7,6 +7,7 @@ directly without a real model call.
 
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
@@ -2495,3 +2496,273 @@ def test_test_batch_explicit_out_dir_wins_over_docs_root_default(tmp_path, monke
            / "natural" / "python" / "pytest" / "FAKEMOD.md")
     assert out.exists()
     assert not (project_dir / "docs" / "functional" / "tests").exists()
+
+
+# --- Issue #190: port batch.py's plan_batch/--dry-run resume preview
+# (issue #160) to testbatch.py's own independent prior_chunks/brief_sha256
+# resume state, mirroring tests/test_batch.py's test_plan_batch_* tests. ---
+
+def _valid_test_doc_caller(language: str, framework: str):
+    """A fake caller that returns a fully valid document citing exactly the
+    `MEMBER:BR-nnn` scenario ids present in the prompt it was sent, for any
+    member name -- unlike `_chunk_aware_caller` above (which only ever
+    recognises `FAKEMOD:BR-...`), this is used against the `indexed_db`
+    fixture's own bundled, invented example members (e.g. MMP0100 --
+    see `examples/inputs/` and this repo's "never commit client-specific
+    content" policy: these are this repo's own synthetic worked example,
+    not derived from any real engagement)."""
+    import re as _re
+
+    ids_re = _re.compile(r"\b[A-Z][A-Z0-9_]*:BR-\d+\b")
+
+    def caller(prompt: str) -> ModelResponse:
+        ids = sorted(set(ids_re.findall(prompt)))
+        fence_lines = "\n".join(
+            f"def test_{i.split(':BR-')[-1]}():\n    # {i} [[{i.split(':BR-')[0]}:1]]\n    pass"
+            for i in ids
+        )
+        text = f"""---
+title: "generated tests"
+doc_type: generated_test
+system: "MOM"
+generated_by: mfdoc
+generated_at: "2026-09-10"
+review_status: draft
+confidence_summary:
+  verified: {len(ids)}
+language: {language}
+framework: {framework}
+sources: {json.dumps(sorted({i.split(':BR-')[0] for i in ids}) or ["UNKNOWN"])}
+---
+
+# generated tests
+
+Covers the module as a whole.
+
+```python
+{fence_lines}
+```
+"""
+        return ModelResponse(text=text, input_tokens=1, output_tokens=2)
+    return caller
+
+
+def test_plan_test_batch_reports_a_member_with_no_prior_state_as_render(indexed_db, tmp_path):
+    """No --state file at all -- the member is a fresh render, never
+    chunked here (MMP0100's test_case count is under any reasonable
+    default threshold)."""
+    from mfdoc import testbatch
+
+    testplan.run_all(indexed_db, member_name="MMP0100")
+
+    plan = testbatch.plan_test_batch(indexed_db, ["MMP0100"], "python", "pytest", tmp_path / "out")
+    assert plan.language == "python" and plan.framework == "pytest"
+    assert plan.corpus_unchanged is False
+    assert len(plan.members) == 1
+    assert plan.members[0].status == "render"
+    assert plan.members_render == 1 and plan.members_skip == 0 and plan.members_chunked == 0
+
+
+def test_plan_test_batch_reports_skip_after_a_real_run_with_unchanged_facts(indexed_db, tmp_path):
+    from mfdoc import testbatch
+
+    testplan.run_all(indexed_db, member_name="MMP0100")
+    members = ["MMP0100"]
+    state_path = tmp_path / "state.json"
+    caller = _valid_test_doc_caller("python", "pytest")
+    first = testbatch.run_test_batch(
+        indexed_db, members, "python", "pytest", tmp_path / "out", caller,
+        "writing rules text", "template text", state_path=state_path,
+    )
+    assert first.ok == 1
+
+    plan = testbatch.plan_test_batch(
+        indexed_db, members, "python", "pytest", tmp_path / "out", state_path=state_path,
+    )
+    assert plan.corpus_unchanged is True
+    assert plan.members[0].status == "skip"
+    assert plan.members_skip == 1 and plan.members_render == 0
+
+
+def test_plan_test_batch_matches_generate_member_test_doc_chunk_reuse(tmp_path):
+    """The core promise of the dry-run preview: its chunk-level reuse count
+    for a chunked member must match what a real generate_member_test_doc
+    call would actually do -- computed via the same _test_chunk_reuse_ok,
+    not a second, potentially-drifting copy of the reuse rule. Also proves
+    the "fresh vs. stale prior_chunks state" cases the dry-run exists to
+    distinguish: a fresh prior_chunks (from the run immediately before)
+    reports every chunk reusable; a stale one (one row changed since) reports
+    exactly the affected chunk as needing to render."""
+    import json
+    import sqlite3
+
+    from mfdoc import testbatch
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_scenarios_with_routines(conn, {"X": 3, "Y": 2})
+
+    out_dir = tmp_path / "out"
+    subdir = testbatch._output_subdir(conn, "FAKEMOD")
+    out_path = out_dir / subdir / "python" / "pytest" / "FAKEMOD.md"
+    first = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, _chunk_aware_caller("python", "pytest"),
+        "writing rules text", "template text", max_scenarios_per_call=2,
+    )
+    assert first.ok is True
+    assert first.chunked is True
+
+    state_key = f"{subdir.as_posix()}::FAKEMOD::python::pytest"
+    state = {state_key: {"ok": True, "chunks": first.chunk_state}}
+    state_path = tmp_path / "state.json"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    # Fresh prior_chunks state (nothing changed since it was recorded):
+    # every chunk must report reusable.
+    fresh_plan = testbatch.plan_test_batch(
+        conn, ["FAKEMOD"], "python", "pytest", out_dir, state_path=state_path,
+        max_scenarios_per_call=2,
+    )
+    assert fresh_plan.members[0].status == "chunked"
+    assert fresh_plan.members[0].chunk_count == 2
+    assert fresh_plan.members[0].chunks_reusable == 2
+    assert fresh_plan.members[0].chunks_to_render == 0
+
+    # BR-004 is Y's first scenario, in chunk 2's range -- change its
+    # condition (same perturbation as
+    # test_chunk_resume_only_regenerates_the_chunk_whose_own_test_case_changed)
+    # so the recorded prior_chunks state is now stale for chunk 2 only.
+    conn.execute(
+        "UPDATE test_case SET when_json=json_set(when_json, '$.condition', 'COND-4-CHANGED') "
+        "WHERE scenario_name='FAKEMOD:BR-004'"
+    )
+    conn.commit()
+
+    stale_plan = testbatch.plan_test_batch(
+        conn, ["FAKEMOD"], "python", "pytest", out_dir, state_path=state_path,
+        max_scenarios_per_call=2,
+    )
+    assert stale_plan.members[0].status == "chunked"
+    assert stale_plan.members[0].chunk_count == 2
+    assert stale_plan.members[0].chunks_reusable == 1
+    assert stale_plan.members[0].chunks_to_render == 1
+
+    second = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, _chunk_aware_caller("python", "pytest"),
+        "writing rules text", "template text", max_scenarios_per_call=2,
+        prior_chunks=first.chunk_state,
+    )
+    actually_reused = sum(
+        1 for i in range(1, 3)
+        if second.chunk_state[str(i)]["brief_sha256"] == first.chunk_state[str(i)]["brief_sha256"]
+    )
+    assert actually_reused == stale_plan.members[0].chunks_reusable
+
+
+def test_test_batch_command_dry_run_reports_a_plan_and_makes_no_model_calls(
+    cli_args, indexed_db, tmp_path, capsys, monkeypatch,
+):
+    """--dry-run must never reach _build_model_caller (no --model/--provider/
+    API key needed) and must print a plan, not run a real test-batch --
+    mirrors test_cli_batch.py's identical guard for `mfdoc batch --dry-run`."""
+    _with_reference_and_templates(cli_args, tmp_path)
+    testplan.run_all(indexed_db, member_name="MMP0100")
+
+    def exploding_build_caller(args):
+        raise AssertionError("--dry-run must never build a real model caller")
+
+    monkeypatch.setattr(cli, "_build_model_caller", exploding_build_caller)
+
+    args = SimpleNamespace(
+        config=cli_args.config, out=str(tmp_path / "out"), members=None,
+        language="python", framework="pytest", template=None, matrix=False,
+        concurrency=1, state="", dry_run=True,
+    )
+    rc = cli.cmd_test_batch(args)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "corpus signature:" in out
+    assert "MMP0100" in out
+    assert not (tmp_path / "out").exists(), "--dry-run must not write any output"
+
+
+def test_test_batch_command_dry_run_exits_2_for_a_missing_template_single_target(
+    cli_args, indexed_db, tmp_path, monkeypatch,
+):
+    """Issue #190 review: --dry-run must reflect a runnable invocation, not
+    just report RENDER/SKIP for a target that would actually fail to run --
+    a missing template must exit the same way (2, single target) the real
+    (non-dry-run) loop already does, not silently report a plan."""
+    _with_reference_and_templates(cli_args, tmp_path)
+    testplan.run_all(indexed_db, member_name="MMP0100")
+
+    def exploding_build_caller(args):
+        raise AssertionError("--dry-run must never build a real model caller")
+
+    monkeypatch.setattr(cli, "_build_model_caller", exploding_build_caller)
+
+    args = SimpleNamespace(
+        config=cli_args.config, out=str(tmp_path / "out"), members=None,
+        language="cobol", framework="nonexistent", template=None, matrix=False,
+        concurrency=1, state="", dry_run=True,
+    )
+    rc = cli.cmd_test_batch(args)
+    assert rc == 2
+
+
+def test_plan_test_batch_chunk_reuse_check_does_not_mutate_doc_claim(tmp_path):
+    """Issue #190 review: `plan_test_batch`'s chunk-reuse check must be a
+    true dry-run -- `_test_chunk_reuse_ok`'s revalidation of a cached chunk
+    calls `validate_test_doc`, which (via `validate.validate_doc`) deletes
+    and reinserts that path's `doc_claim` rows and commits as a side
+    effect. A plan run must leave that table exactly as it found it, even
+    though every chunk here is cache-reusable and gets revalidated."""
+    import sqlite3
+
+    from mfdoc import testbatch
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_scenarios_with_routines(conn, {"X": 3, "Y": 2})
+
+    out_dir = tmp_path / "out"
+    subdir = testbatch._output_subdir(conn, "FAKEMOD")
+    out_path = out_dir / subdir / "python" / "pytest" / "FAKEMOD.md"
+    first = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, _chunk_aware_caller("python", "pytest"),
+        "writing rules text", "template text", max_scenarios_per_call=2,
+    )
+    assert first.ok is True
+
+    # A state file recording every chunk as ok, so plan_test_batch's
+    # chunk-reuse check actually attempts a revalidation (rather than
+    # short-circuiting on "no prior state") -- the case this bug affects.
+    state_key = f"{subdir.as_posix()}::FAKEMOD::python::pytest"
+    state_path = tmp_path / "state.json"
+    state_path.write_text(
+        json.dumps({state_key: {"ok": True, "chunks": first.chunk_state}}), encoding="utf-8",
+    )
+
+    before = conn.execute(
+        "SELECT doc_path, claim_id, confidence, citation, member_name, line_from, line_to, "
+        "valid, note FROM doc_claim ORDER BY doc_path, claim_id"
+    ).fetchall()
+    assert len(before) > 0, "the real chunked render must have populated doc_claim"
+
+    testbatch.plan_test_batch(
+        conn, ["FAKEMOD"], "python", "pytest", out_dir, state_path=state_path,
+        max_scenarios_per_call=2,
+    )
+
+    after = conn.execute(
+        "SELECT doc_path, claim_id, confidence, citation, member_name, line_from, line_to, "
+        "valid, note FROM doc_claim ORDER BY doc_path, claim_id"
+    ).fetchall()
+    assert [tuple(r) for r in after] == [tuple(r) for r in before], (
+        "plan_test_batch must not change doc_claim, even though its chunk-reuse "
+        "check calls validate_test_doc under the hood"
+    )

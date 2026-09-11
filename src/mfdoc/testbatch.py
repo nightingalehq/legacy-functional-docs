@@ -515,6 +515,96 @@ def _render_chunk_index(member_name: str, system: str | None, language: str, fra
     return fm + body
 
 
+# Every column `validate.validate_doc` writes into `doc_claim` for one
+# document path -- see db.SCHEMA's `doc_claim` table. `id` is deliberately
+# excluded: it's an autoincrement surrogate key nothing else in the schema
+# references (see db.py/validate.py), so `_readonly_validate_test_doc`'s
+# restore doesn't need to reproduce the exact prior id values, only the
+# same content under the same doc_path.
+_DOC_CLAIM_COLUMNS = (
+    "doc_path", "claim_id", "confidence", "citation", "member_name",
+    "line_from", "line_to", "valid", "note",
+)
+
+
+def _readonly_validate_test_doc(conn, path: Path) -> dict:
+    """The same result `validate_test_doc(conn, path)` returns, but leaves
+    the `doc_claim` table exactly as it was before the call.
+    `validate_test_doc` (via `validate.validate_doc`) deletes and
+    reinserts every `doc_claim` row for `path` and commits as a side
+    effect -- correct, and the point, for a real render (it's what keeps
+    `doc_claim` in sync with what a document currently cites, for `mfdoc
+    sample-citations` to read later), but not acceptable for
+    `plan_test_batch`'s dry-run: its whole documented contract (like
+    `mfdoc batch --dry-run`'s) is that it writes nothing, anywhere (issue
+    #190 review flagged this: `_test_chunk_reuse_ok`'s revalidation of a
+    cached chunk was mutating the index database even though it never
+    touches the filesystem). Snapshots this one path's rows first and
+    restores them verbatim afterward in a `finally` (so a raised exception
+    still restores before propagating), rather than skip the revalidation
+    -- the reuse check still needs today's real `ok` verdict, just without
+    the persistent side effect."""
+    path_str = str(path)
+    before = conn.execute(
+        f"SELECT {', '.join(_DOC_CLAIM_COLUMNS)} FROM doc_claim WHERE doc_path=?",
+        (path_str,),
+    ).fetchall()
+    try:
+        return validate_test_doc(conn, path)
+    finally:
+        conn.execute("DELETE FROM doc_claim WHERE doc_path=?", (path_str,))
+        if before:
+            placeholders = ", ".join("?" * len(_DOC_CLAIM_COLUMNS))
+            conn.executemany(
+                f"INSERT INTO doc_claim ({', '.join(_DOC_CLAIM_COLUMNS)}) VALUES ({placeholders})",
+                [tuple(row[c] for c in _DOC_CLAIM_COLUMNS) for row in before],
+            )
+        conn.commit()
+
+
+def _test_chunk_reuse_ok(conn, prior_chunks: dict | None, i: int, brief_hash: str,
+                          chunk_path: Path, readonly: bool = False) -> bool:
+    """Whether chunk `i` can be reused verbatim -- no model call -- given a
+    prior run's chunk_state and this chunk's freshly-computed brief hash:
+    the prior run must have recorded this exact chunk as clean (`ok` True)
+    with the same `brief_sha256`, its output file must still exist on disk,
+    and it must still validate today (`validate_test_doc`'s own logic can
+    have changed since it was last checked, even though the content
+    hasn't).
+
+    A failed chunk is never a reuse candidate: it leaves its last (invalid)
+    attempt on disk, so treating it as reusable would re-validate the same
+    bad file forever and the chunk would never re-render.
+
+    Mirrors batch.py's `_chunk_reuse_ok` (issue #160) verbatim except for
+    calling `validate_test_doc` instead of `validate_doc` -- test docs carry
+    `language`/`framework` front matter and `MEMBER:BR-nnn` scenario
+    references `validate_doc` alone doesn't check, so this can't just
+    import batch.py's version, same reason `_generate_member_test_doc_
+    chunked` doesn't call `_generate_module_doc_chunked`. Shared by that
+    function's real reuse path and `plan_test_batch`'s dry-run estimate
+    (issue #190) so both apply exactly the same reuse rule -- a preview
+    that used a second, slightly different copy of this logic could drift
+    from what a real run actually does.
+
+    `readonly` (only ever set by `plan_test_batch`) routes the
+    revalidation through `_readonly_validate_test_doc` instead of
+    `validate_test_doc` directly, so a dry-run's reuse check can't leave
+    the `doc_claim` table changed even though it makes no model call and
+    writes no file -- the real chunked-render path leaves this False, so
+    its own revalidation keeps refreshing `doc_claim` exactly as before."""
+    prior_chunk = (prior_chunks or {}).get(str(i))
+    reusable = (
+        isinstance(prior_chunk, dict) and prior_chunk.get("ok") is True
+        and prior_chunk.get("brief_sha256") == brief_hash
+        and chunk_path.exists()
+    )
+    if not reusable:
+        return False
+    validator = _readonly_validate_test_doc if readonly else validate_test_doc
+    return validator(conn, chunk_path)["ok"]
+
+
 def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None, rows: list,
                                        language: str, framework: str, out_path: Path,
                                        caller: ModelCaller, writing_rules: str, template: str,
@@ -575,32 +665,10 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
             sme_notes=sme_notes,
         )
         brief_hash = hashlib.sha256(brief.encode("utf-8")).hexdigest()
-        prior_chunk = (prior_chunks or {}).get(str(i))
-        reusable = (
-            isinstance(prior_chunk, dict) and prior_chunk.get("ok") is True
-            and prior_chunk.get("brief_sha256") == brief_hash
-            and chunk_path.exists()
-        )
         result = None
-        if reusable:
-            # Re-validate rather than trust the stored "ok" flag verbatim --
-            # the *content* is cached, but validate_test_doc's own logic can
-            # have changed since it was last checked, and this costs no
-            # model call. Only ever attempted when the prior run's own
-            # record for this chunk was itself ok=True: reusing a
-            # previously-*failed* chunk just because its brief is unchanged
-            # would re-validate the same broken content and report the same
-            # failure forever, with no path back to a real retry -- a
-            # failed chunk must always get a fresh model call instead. And
-            # if re-validation of a genuinely-ok cached chunk still fails
-            # (e.g. validate_test_doc's own logic changed since it was
-            # written), fall back to regenerating rather than reporting a
-            # stale failure for content that was never actually wrong when
-            # it was produced.
-            revalidated = validate_test_doc(conn, chunk_path)
-            if revalidated["ok"]:
-                result = DocResult(member_name, str(chunk_path), True, 0, 0, 0, [])
-                logger.debug("%s: chunk %d/%d reused (unchanged)", member_name, i, chunk_count)
+        if _test_chunk_reuse_ok(conn, prior_chunks, i, brief_hash, chunk_path):
+            result = DocResult(member_name, str(chunk_path), True, 0, 0, 0, [])
+            logger.debug("%s: chunk %d/%d reused (unchanged)", member_name, i, chunk_count)
         if result is None:
             logger.info("%s: chunk %d/%d generating", member_name, i, chunk_count)
             result = _generate_test_doc_from_brief(
@@ -1087,4 +1155,171 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
         ok=sum(1 for r in results if r.ok),
         failed=sum(1 for r in results if not r.ok),
         skipped=sum(1 for r in results if r.skipped),
+    )
+
+
+@dataclass
+class TestMemberPlan:
+    """One member's resume estimate from `plan_test_batch` -- what
+    `run_test_batch` would actually do for this member/target, computed the
+    same way but with no model call and no write. `status` is one of:
+
+    - "skip": corpus- or member-level resume hit -- run_test_batch would
+      call `test_case_brief()` at most once (member-level check) and no
+      model.
+    - "render": a normal (non-chunked) member that will make exactly one
+      model call (plus a possible validation retry).
+    - "chunked": an over-threshold member rendered as several chunks --
+      `chunk_count`/`chunks_reusable` describe how many of those chunks
+      would actually need a model call versus be reused from prior state.
+
+    Deliberately has no `narrative_reusable` equivalent to batch.py's
+    `MemberPlan`: a chunked test-batch member's index document
+    (`_render_chunk_index`) is built deterministically from already-
+    validated chunks, never its own model call the way a chunked module
+    doc's whole-module reconciliation call is -- there's nothing on that
+    axis for a preview to estimate."""
+    member: str
+    status: str
+    chunk_count: int | None = None
+    chunks_reusable: int | None = None
+
+    @property
+    def chunks_to_render(self) -> int | None:
+        if self.chunk_count is None or self.chunks_reusable is None:
+            return None
+        return self.chunk_count - self.chunks_reusable
+
+
+@dataclass
+class TestBatchPlan:
+    """Whole-run resume estimate from `plan_test_batch` for one language/
+    framework target -- see that function's docstring. Aggregates
+    TestMemberPlan entries into the totals cli.py prints before a real
+    `mfdoc test-batch` run spends any model calls (issue #190, porting
+    batch.py's `BatchPlan` from #160). Scoped to a single target rather than
+    a whole `--matrix` run, mirroring `run_test_batch` itself (one call per
+    target) -- `cmd_test_batch` prints one of these per target in the loop
+    it already has."""
+    language: str
+    framework: str
+    corpus_unchanged: bool
+    members: list[TestMemberPlan]
+
+    @property
+    def members_total(self) -> int:
+        return len(self.members)
+
+    @property
+    def members_skip(self) -> int:
+        return sum(1 for m in self.members if m.status == "skip")
+
+    @property
+    def members_render(self) -> int:
+        return sum(1 for m in self.members if m.status == "render")
+
+    @property
+    def members_chunked(self) -> int:
+        return sum(1 for m in self.members if m.status == "chunked")
+
+    @property
+    def chunks_total(self) -> int:
+        return sum(m.chunk_count or 0 for m in self.members if m.status == "chunked")
+
+    @property
+    def chunks_reusable(self) -> int:
+        return sum(m.chunks_reusable or 0 for m in self.members if m.status == "chunked")
+
+    @property
+    def chunks_to_render(self) -> int:
+        return self.chunks_total - self.chunks_reusable
+
+
+def plan_test_batch(conn, members: list[str], language: str, framework: str, out_dir: Path,
+                     redact: Redactor = NULL_REDACTOR,
+                     state_path: Path | None = None,
+                     max_scenarios_per_call: int | None = None,
+                     sme_notes: dict | None = None) -> TestBatchPlan:
+    """Cheap, local, no-model-call preview of what `run_test_batch` over
+    these same arguments would actually do -- every brief a real run would
+    render is computed and hashed exactly the same way (corpus-level check,
+    then per-member brief hash, then -- for an over-threshold member --
+    each chunk's own brief hash via the same `_test_chunk_reuse_ok` a real
+    chunked render uses), but no model is ever called and nothing is
+    written to disk. Ports `batch.plan_batch` (issue #160) to testbatch.py's
+    own independent `prior_chunks`/`brief_sha256` resume-state machinery
+    (issue #190) -- meant to be read before committing to a real `mfdoc
+    test-batch` run, the same way `mfdoc batch --dry-run` is read before a
+    real `mfdoc batch` run.
+
+    This exists because a "resume" can silently be a full regeneration in
+    disguise: a scenario's `MEMBER:BR-nnn` id (see testplan.py's
+    `numbered_rule_candidates`/`citations._rule_id`, the same numbering
+    `batch.plan_batch`'s docstring describes for module docs) is a position
+    in that member's whole rule list, so a single rule added or removed
+    anywhere earlier in the same member renumbers every later scenario and
+    changes every later chunk's brief hash, even when that chunk's own
+    routine's facts are otherwise unchanged. There is no way to tell from
+    the CLI invocation alone whether a given resume will actually hit the
+    per-chunk cache or fully re-render every chunk -- this function does
+    the same (cheap, deterministic) hashing work a real run would, up
+    front, so that can be seen before it costs anything.
+
+    Scoped to one `language`/`framework` target, mirroring `run_test_batch`
+    itself -- a `--matrix` dry-run calls this once per target, exactly like
+    a real `--matrix` run calls `run_test_batch` once per target."""
+    threshold = _resolve_max_scenarios_per_call(max_scenarios_per_call)
+    state = _load_state(state_path) if state_path else {}
+    corpus_sig = (
+        _corpus_signature(conn, language, framework, threshold, redact, sme_notes) if state_path else None
+    )
+    corpus_unchanged = bool(state_path) and state.get("_corpus_sha256") == corpus_sig
+
+    plans: list[TestMemberPlan] = []
+    for name in members:
+        subdir = _output_subdir(conn, name)
+        key = f"{subdir.as_posix()}::{name}::{language}::{framework}"
+        out_path = out_dir / subdir / language / framework / f"{name}.md"
+        prior = state.get(key)
+        prior_ok = isinstance(prior, dict) and prior.get("ok") and out_path.exists()
+
+        if corpus_unchanged and prior_ok:
+            plans.append(TestMemberPlan(name, "skip"))
+            continue
+
+        brief = test_case_brief(conn, name, redact=redact, sme_notes=sme_notes)
+        brief_hash = hashlib.sha256(f"{brief}\x00{threshold}".encode("utf-8")).hexdigest()
+        if prior_ok and prior.get("brief_sha256") == brief_hash:
+            plans.append(TestMemberPlan(name, "skip"))
+            continue
+
+        system, rows, ambiguous_libs = fetch_test_case_rows(conn, name)
+        if ambiguous_libs or not rows or len(rows) <= threshold:
+            plans.append(TestMemberPlan(name, "render"))
+            continue
+
+        routines = fetch_routines(conn, rows[0]["member_id"])
+        line_nos = [r["rule_line_no"] if r["rule_line_no"] is not None else -1 for r in rows]
+        ranges = routine_aware_chunk_ranges(line_nos, routines, threshold)
+        chunk_count = len(ranges)
+        chunk_width = len(str(chunk_count))
+        prior_chunks = prior.get("chunks") if isinstance(prior, dict) else None
+        chunks_reusable = 0
+        for i, (start, end) in enumerate(ranges, start=1):
+            chunk_path = out_path.with_name(f"{out_path.stem}.chunk{i:0{chunk_width}d}{out_path.suffix}")
+            chunk_rows = rows[start - 1:end]
+            chunk_brief = test_case_brief_chunk(
+                name, system, chunk_rows, i, chunk_count, redact=redact, routines=routines,
+                sme_notes=sme_notes,
+            )
+            chunk_hash = hashlib.sha256(chunk_brief.encode("utf-8")).hexdigest()
+            if _test_chunk_reuse_ok(conn, prior_chunks, i, chunk_hash, chunk_path, readonly=True):
+                chunks_reusable += 1
+
+        plans.append(TestMemberPlan(
+            name, "chunked", chunk_count=chunk_count, chunks_reusable=chunks_reusable,
+        ))
+
+    return TestBatchPlan(
+        language=language, framework=framework, corpus_unchanged=corpus_unchanged, members=plans,
     )
