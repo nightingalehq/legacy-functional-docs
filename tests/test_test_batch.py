@@ -625,6 +625,47 @@ def test_write_test_doc_with_sidecar_strips_whitespace_in_sources_before_fingerp
     assert f'test_case_fingerprint: "{expected_fp}"' in written
 
 
+def test_write_test_doc_with_sidecar_omits_fingerprint_for_empty_sources(tmp_path):
+    """Copilot review follow-up on issue #195: `sources: []` is a
+    syntactically valid list (so `validate_doc`'s own malformed-shape
+    check doesn't flag it), but an earlier version of this fix
+    substituted `[member_name]` for it and stamped a fingerprint anyway.
+    `validate_test_doc`'s own recomputation always reads the document's
+    *own* `sources` verbatim (never substituting `member_name`), so that
+    stamped value could never be reproduced there -- permanently pushing
+    such a document onto the weaker id-overlap fallback despite carrying
+    what looked like a valid fingerprint. The write side must omit the
+    field entirely for this shape instead, consistent with the read
+    side's own inability to recompute one."""
+    from mfdoc import testbatch
+    import sqlite3
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
+    insert(
+        conn, "test_case", member_id=1, kind="unit", scenario_name="FAKEMOD:BR-001",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+        then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:1", confidence="verified",
+    )
+    conn.commit()
+
+    doc_text = _valid_test_doc_text("python", "pytest").replace(
+        'sources: ["FAKEMOD"]', "sources: []",
+    )
+    out_path = tmp_path / "FAKEMOD.md"
+    out_path.write_text(doc_text, encoding="utf-8")
+    testbatch.write_test_doc_with_sidecar(conn, "FAKEMOD", out_path, doc_text, "python")
+
+    written = out_path.read_text(encoding="utf-8")
+    assert "test_case_fingerprint:" not in written
+
+
 def test_generate_member_test_doc_writes_sidecar_and_slims_md(tmp_path):
     from mfdoc import testbatch
     import sqlite3

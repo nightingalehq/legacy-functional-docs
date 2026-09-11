@@ -545,6 +545,30 @@ GitHub org.
   rule_candidate`. Full suite: 1015 passed, 2 skipped; bundled fixture
   pipeline unchanged.
 
+  A seventeenth review round found one more write/read inconsistency and
+  repeated a previously-documented, accepted point unchanged (the
+  leftover-sidecar `unlink()`'s best-effort failure mode -- left as
+  documented, not re-litigated). The new one: `sources: []` is a
+  syntactically valid (if useless) list, so `validate_doc`'s own
+  malformed-shape check doesn't flag it, but `write_test_doc_with_
+  sidecar` was substituting `[member_name]` for it and stamping a
+  fingerprint from that substitution anyway. `validate_test_doc`'s own
+  recomputation always reads the document's *own* `sources` verbatim,
+  with no such substitution -- a fingerprint derived that way could never
+  be reproduced by that recomputation, permanently pushing such a
+  document onto the weaker id-overlap fallback despite carrying what
+  looked like a valid stamped value. Removed the `[member_name]`
+  substitution entirely: the write side now omits the fingerprint field
+  whenever the document's own `sources` can't be parsed as a non-empty
+  list of strings, the same "leave it out" treatment already given to a
+  genuinely malformed one -- consistent with the read side by
+  construction, since neither side can compute one without real
+  `sources` to work from. `member_name` is now otherwise unused inside
+  this function's own logic (kept in the signature for caller-side
+  clarity/API consistency, not removed). Added
+  `test_write_test_doc_with_sidecar_omits_fingerprint_for_empty_sources`.
+  Full suite: 1016 passed, 2 skipped; bundled fixture pipeline unchanged.
+
 **Progress (2026-09-11):**
 - Fixed issue #199: `mfdoc doc-drift`'s existing checks (issue #161) caught
   system-wide/module-scoped drift but nothing keyed on a single dialect --

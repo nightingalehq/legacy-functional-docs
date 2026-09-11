@@ -117,12 +117,24 @@ def write_test_doc_with_sidecar(conn, member_name: str, out_path: Path, doc_text
     directly (issue #195), rather than only inferring staleness from
     whether the sidecar's own ids happen to still resolve against current
     `test_case` rows -- a check an inserted-but-not-yet-shifted-past rule
-    can slip past (see `member_rule_fingerprint`'s docstring). `conn`
-    is only ever used for this fingerprint lookup; omitted (left out of
-    front matter entirely) when it can't be computed (`member_name`
-    doesn't resolve to exactly one member -- shouldn't happen for a
-    member this run just rendered, but this must never be the reason a
-    write that would otherwise succeed fails instead).
+    can slip past (see `member_rule_fingerprint`'s docstring). `conn` is
+    only ever used for this fingerprint lookup; omitted (left out of
+    front matter entirely) whenever the document's own `sources` can't be
+    parsed as a non-empty list of strings -- missing/malformed front
+    matter, or a syntactically valid but empty `sources: []` (a shape
+    `validate_doc`'s own front-matter check doesn't flag as malformed, so
+    it can't be assumed away). Deliberately *not* substituted with
+    `[member_name]` in that case (an earlier version of this fix did):
+    `validate_test_doc`'s own recomputation always reads the document's
+    *own* `sources` value verbatim, with no such substitution, so a
+    fingerprint derived from a fabricated `[member_name]` here could never
+    be reproduced by that recomputation -- permanently pushing such a
+    document onto the weaker id-overlap fallback despite carrying what
+    looks like a valid stamped value. `member_name` itself is otherwise
+    unused inside this function now (kept in the signature purely for
+    caller-side clarity/API consistency across its several call sites,
+    and because a future use -- e.g. logging which member a write
+    concerns -- shouldn't need a signature change to add).
 
     Returns the sidecar path written, or None if no split was performed
     (unrecognised language, front matter missing, fence not exactly one,
@@ -170,15 +182,29 @@ def write_test_doc_with_sidecar(conn, member_name: str, out_path: Path, doc_text
     # fingerprint below, not a case worth failing this write over).
     doc_fm, _doc_body, _doc_err = split_frontmatter(doc_text)
     doc_sources = doc_fm.get("sources") if doc_fm is not None else None
+    fingerprint = None
     if isinstance(doc_sources, list) and doc_sources and all(isinstance(s, str) for s in doc_sources):
         # Stripped, matching validate.py's read-side handling of the same
         # field exactly -- both sides must normalize identically, or a
         # `sources` entry with incidental whitespace resolves on one side
         # and not the other, silently skipping the fingerprint stamp.
+        #
+        # Deliberately *not* substituted with `[member_name]` when
+        # `sources` is missing, malformed, or (a valid but unusable shape)
+        # an empty list (Copilot review): `validate_test_doc`'s own
+        # recomputation always reads the document's *own* `sources` value
+        # verbatim, with no such substitution -- a fingerprint stamped
+        # from a fabricated `[member_name]` here could never be
+        # reproduced by that recomputation for a document whose `sources`
+        # is genuinely `[]` (a syntactically valid list, so it isn't
+        # caught by `validate_doc`'s own malformed-shape check either),
+        # permanently pushing that document onto the weaker fallback
+        # despite carrying what looks like a valid stamped value. Leaving
+        # `fingerprint` as `None` here instead keeps write and read
+        # consistent by construction: neither side can compute one for a
+        # document with no real `sources` to work from.
         doc_sources = [s.strip() for s in doc_sources]
-    else:
-        doc_sources = [member_name]
-    fingerprint = doc_rule_fingerprint(conn, doc_sources)
+        fingerprint = doc_rule_fingerprint(conn, doc_sources)
     if fingerprint is not None:
         front_matter_block = front_matter_block.rstrip("\n") + f'\ntest_case_fingerprint: "{fingerprint}"\n'
     out_path.write_text(f"---{front_matter_block}---{prose}{manifest}", encoding="utf-8")
