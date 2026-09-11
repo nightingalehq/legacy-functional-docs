@@ -12,6 +12,21 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-12c):**
+- Addressed the thirty-fourth Copilot review round on PR #209 (issue
+  #195): `write_test_doc_with_sidecar`'s rollback (when the document's
+  own `replace` fails after the sidecar's already succeeded) restored the
+  old sidecar with a direct `write_bytes` onto the real path -- not
+  atomic, so an interrupted or failed rollback write could itself leave a
+  truncated sidecar behind, the identical class of mismatch this whole
+  rollback exists to avoid. Now restores through a temp file plus
+  `Path.replace`, keeping the rollback itself a single directory-entry
+  update like every other write in this function.
+- Extended an existing regression test to also assert no rollback temp
+  file is left behind. Full suite green (1054 passed, 2 skipped) plus a
+  clean `mfdoc validate` pass against `examples/` (71/71 documents, 0
+  invalid citations of 750).
+
 **Progress (2026-09-12b):**
 - Addressed the thirty-third Copilot review round on PR #209 (issue
   #195): `_corpus_signature`'s own `rule_candidate` query hashed `(id,

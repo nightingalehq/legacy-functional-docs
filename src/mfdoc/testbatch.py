@@ -299,7 +299,21 @@ def write_test_doc_with_sidecar(conn, member_name: str, out_path: Path, doc_text
             if sidecar_backup is None:
                 sidecar_path.unlink(missing_ok=True)
             else:
-                sidecar_path.write_bytes(sidecar_backup)
+                # `Path.replace`, not a plain `write_bytes` onto
+                # `sidecar_path` directly (Copilot review): the latter
+                # isn't atomic -- an interrupted or failed rollback write
+                # could leave a truncated sidecar next to the old
+                # document, the identical mismatch this whole rollback
+                # exists to avoid, just one step further down. Restoring
+                # through a temp file plus an atomic replace keeps this
+                # rollback itself a single directory-entry update, same
+                # as every other write in this function.
+                sidecar_rollback_tmp = sidecar_path.with_name(sidecar_path.name + ".rollback.tmp")
+                try:
+                    sidecar_rollback_tmp.write_bytes(sidecar_backup)
+                    sidecar_rollback_tmp.replace(sidecar_path)
+                finally:
+                    sidecar_rollback_tmp.unlink(missing_ok=True)
             raise
         return sidecar_path
     finally:

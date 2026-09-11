@@ -4680,6 +4680,10 @@ def test_write_test_doc_with_sidecar_rolls_back_the_sidecar_if_the_doc_replace_f
     assert sidecar_path.read_text(encoding="utf-8") == old_sidecar_text, (
         "the old sidecar must be restored, not left as the new (now-orphaned) content"
     )
+    # Copilot review: the rollback itself is a temp-write-then-replace, not
+    # a direct write_bytes onto sidecar_path -- no leftover rollback temp
+    # file should remain either way.
+    assert not sidecar_path.with_name(sidecar_path.name + ".rollback.tmp").exists()
 
 
 def test_write_test_doc_with_sidecar_removes_the_sidecar_if_the_doc_replace_fails_and_none_existed(
