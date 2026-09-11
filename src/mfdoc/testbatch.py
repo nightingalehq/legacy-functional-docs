@@ -390,6 +390,15 @@ def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: 
                     "falling back to a full retry",
                     member_name, exc.__class__.__name__, attempt, max_attempts, exc,
                 )
+                # Issue #188 review: this attempt's own validation problems
+                # (accumulated into `problems` below via `result["problems"]`)
+                # would otherwise be the only record of what went wrong on
+                # this attempt -- the patch call's own exception must be
+                # preserved too, or a final failure's diagnostics and the
+                # next attempt's retry_note silently drop it.
+                problems = problems + [
+                    f"targeted patch model call raised {exc.__class__.__name__}: {exc}"
+                ]
             else:
                 input_tokens += patch_response.input_tokens
                 output_tokens += patch_response.output_tokens
@@ -900,6 +909,100 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
             final_text = _fix_generated_by_version(response.text)
             out_path.write_text(final_text, encoding="utf-8")
             validation = validate_test_doc(conn, out_path)
+
+            # Issue #188 review: this pool loop is the ordinary `mfdoc
+            # test-batch` path for every non-chunked member -- the common
+            # case a real run's cost is actually measured against.
+            # `_generate_test_doc_from_brief`'s near-miss/targeted-patch
+            # mechanism (see that function's docstring) only reaches
+            # generate_member_test_doc's chunked members and a direct
+            # single-member `mfdoc test-gen` call, never this loop, so it's
+            # applied here too, inline -- mirroring that function's near-
+            # miss branch as closely as this loop's own shape (the initial
+            # response already dispatched to the pool, rather than built
+            # fresh each attempt) allows.
+            if not validation["ok"] and attempts == 1 and _is_near_miss(validation):
+                uncited, reversed_findings = _localized_findings(validation)
+                patched = False
+                if uncited:
+                    # Issue #171's deterministic, no-model-call auto-citation
+                    # pass -- see _generate_test_doc_from_brief.
+                    auto = _auto_cite_uncited_assertions(briefs[name], final_text, uncited)
+                    if auto is not None:
+                        candidate_text, remaining_uncited = auto
+                        candidate_result = validate_test_doc(conn, out_path, _text=candidate_text)
+                        if candidate_result["ok"]:
+                            logger.info(
+                                "%s: %d near-miss uncited assertion(s) auto-cited from the "
+                                "brief with no model call; document now validates clean",
+                                name, len(uncited) - len(remaining_uncited),
+                            )
+                            final_text = candidate_text
+                            out_path.write_text(final_text, encoding="utf-8")
+                            validation = candidate_result
+                            patched = True
+                        elif _is_near_miss(candidate_result):
+                            logger.info(
+                                "%s: %d/%d near-miss uncited assertion(s) auto-cited from "
+                                "the brief with no model call; %d still need a targeted patch",
+                                name, len(uncited) - len(remaining_uncited), len(uncited),
+                                len(remaining_uncited),
+                            )
+                            final_text = candidate_text
+                            out_path.write_text(final_text, encoding="utf-8")
+                            validation = candidate_result
+                            uncited, reversed_findings = _localized_findings(candidate_result)
+                        # else: the candidate is no longer a near-miss --
+                        # discard it and fall through to the patch prompt
+                        # using the original, unpatched final_text/uncited/
+                        # reversed_findings.
+                if not patched:
+                    logger.warning(
+                        "%s: validation failed with %d near-miss localized finding(s) "
+                        "only (%d uncited, %d reversed-condition) -- trying a targeted "
+                        "patch before a full retry",
+                        name, len(uncited) + len(reversed_findings),
+                        len(uncited), len(reversed_findings),
+                    )
+                    patch_prompt = build_localized_test_patch_prompt(
+                        briefs[name], final_text, uncited, reversed_findings
+                    )
+                    try:
+                        patch_response = caller(patch_prompt)
+                    except Exception as exc:
+                        logger.warning(
+                            "%s: targeted patch model call raised %s: %s -- falling "
+                            "back to a full retry",
+                            name, exc.__class__.__name__, exc,
+                        )
+                        validation = {
+                            "ok": False,
+                            "problems": list(validation["problems"]) + [
+                                f"targeted patch model call raised {exc.__class__.__name__}: {exc}"
+                            ],
+                        }
+                    else:
+                        input_tokens += patch_response.input_tokens
+                        output_tokens += patch_response.output_tokens
+                        final_text = _fix_generated_by_version(patch_response.text)
+                        out_path.write_text(final_text, encoding="utf-8")
+                        validation = validate_test_doc(conn, out_path)
+                        if validation["ok"]:
+                            patched = True
+                        else:
+                            logger.warning(
+                                "%s: targeted patch attempt did not resolve validation "
+                                "(%d problem(s)); falling back to a full retry",
+                                name, len(validation["problems"]),
+                            )
+                # A resolved near-miss (auto-cited or model-patched) doesn't
+                # consume the one full-retry attempt below -- `attempts`
+                # stays 1, matching _generate_test_doc_from_brief's
+                # contract. An unresolved one falls straight into the
+                # existing full-retry block below, unchanged, using
+                # whatever final_text/validation this near-miss attempt
+                # left behind.
+
             if not validation["ok"] and attempts == 1:
                 logger.warning(
                     "%s: validation failed (%d problem(s)), retrying once",
