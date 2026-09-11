@@ -19,6 +19,7 @@ from types import SimpleNamespace
 import pytest
 
 from mfdoc import cli
+from mfdoc.model_errors import QuotaExhaustedError
 from mfdoc.vertex_caller import VertexCaller
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -54,6 +55,47 @@ def test_missing_project_raises_before_any_client_construction(monkeypatch):
     monkeypatch.setitem(sys.modules, "anthropic", fake_anthropic)
     with pytest.raises(RuntimeError, match="no GCP project configured"):
         VertexCaller()
+
+
+def test_rate_limit_error_surviving_every_retry_raises_quota_exhausted(monkeypatch):
+    """Issue #198: same contract as AnthropicCaller's identical test -- a
+    429 that survives every retry on the Vertex transport looks like real
+    usage-limit/quota exhaustion, not a genuine content/tooling failure."""
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "some-project")
+
+    class _RateLimitError(Exception):
+        pass
+
+    class _APIConnectionError(Exception):
+        pass
+
+    class _InternalServerError(Exception):
+        pass
+
+    calls = {"n": 0}
+
+    class FakeMessages:
+        def create(self, **kw):
+            calls["n"] += 1
+            exc = _RateLimitError("simulated persistent 429")
+            exc.status_code = 429
+            raise exc
+
+    fake_client = SimpleNamespace(messages=FakeMessages())
+    fake_anthropic = SimpleNamespace(
+        AnthropicVertex=lambda **kw: fake_client,
+        RateLimitError=_RateLimitError,
+        APIConnectionError=_APIConnectionError,
+        InternalServerError=_InternalServerError,
+    )
+    monkeypatch.setitem(sys.modules, "anthropic", fake_anthropic)
+    _fake_google_auth_package(monkeypatch)
+    monkeypatch.setattr("mfdoc.retry.time.sleep", lambda s: None)
+
+    caller = VertexCaller(project="some-project", max_retries=2)
+    with pytest.raises(QuotaExhaustedError, match="usage-limit/quota exhaustion"):
+        caller("some prompt")
+    assert calls["n"] == 3  # initial attempt + 2 retries
 
 
 def test_call_retries_a_transient_error_and_eventually_succeeds(monkeypatch):

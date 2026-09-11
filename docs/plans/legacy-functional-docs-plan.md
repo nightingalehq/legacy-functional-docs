@@ -164,6 +164,47 @@ GitHub org.
   regression case distinct from #157's own tests. No production code
   change needed -- full suite: 908 passed, 2 skipped.
 
+**Progress (2026-09-10f):**
+- Fixed issue #198: `ModelCaller` failures (the `claude -p` subprocess in
+  `claude_cli_caller.py`, and the Anthropic-SDK-backed `anthropic_caller.py`/
+  `vertex_caller.py`) previously surfaced usage-limit/quota exhaustion no
+  differently from a genuine per-chunk content/tooling failure: `claude -p`
+  as the same generic `RuntimeError`, and the Anthropic/Vertex path as
+  whatever raw, unstructured SDK exception `retry.call_with_retry` gave up
+  on (e.g. `anthropic.RateLimitError` propagating as-is) -- either way,
+  indistinguishable without a human (or an orchestrating agent) noticing
+  "everything failed at once" by eye, which materially extended a
+  real regeneration run's wall-clock time across several recurrences.
+  Researched what signal is actually available rather than assuming: for
+  `claude -p`, neither a distinct exit code nor a `--output-format json`
+  `subtype` exists for this condition, but extracting strings from the
+  `claude` CLI binary itself (v2.1.268) surfaced its own internal error-
+  classification regex, which matches `usage limit reached` and
+  `credit balance (is )?too low` case-insensitively against output text --
+  reused verbatim as the detection pattern so `mfdoc`'s classification
+  stays aligned with what Claude Code itself already treats as
+  authoritative. For the Anthropic SDK (installed package inspected
+  directly), `APIStatusError` carries a `type` attribute from the response
+  body's `error.type` (`"billing_error"` for a credit-balance/quota
+  problem) and a `status_code`; a 429 (`RateLimitError`) that survives
+  every one of `retry.call_with_retry`'s attempts is treated as the same
+  "everything failed at once" pattern, not just an ordinary transient
+  throttle recovering within the retry budget. Added
+  `model_errors.py` (`QuotaExhaustedError` -- a `RuntimeError` subclass, so
+  every existing `except RuntimeError`/`except Exception` still catches it
+  unless a caller wants to distinguish it -- plus `is_quota_exhaustion_text`/
+  `is_quota_exhaustion_error`), wired into all three callers so each raises
+  the distinct type instead of a generic failure; `batch.py`'s existing
+  per-chunk/per-member exception handling already logs
+  `exc.__class__.__name__`, so this alone makes the condition grep-able in
+  logs with no change to `batch.py` itself. Deliberately scoped to
+  detection only -- no automatic pause/resume-on-quota scheduling, which
+  issue #198 explicitly leaves to a future wrapping orchestrator. Added
+  `test_model_errors.py` plus new cases in `test_claude_cli_caller.py`/
+  `test_anthropic_caller.py`/`test_vertex_caller.py` covering both the
+  quota-shaped and genuine-failure paths for every caller; full suite (923
+  passed, 2 skipped) and the bundled fixture pipeline both green.
+
 **Progress (2026-09-10c):**
 - Fixed issue #184: `citations._rule_id(member_name, n)` is a pure
   formatting helper -- the ordinal `n` was independently re-derived by

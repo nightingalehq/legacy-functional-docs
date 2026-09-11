@@ -34,8 +34,21 @@ import json
 import subprocess
 
 from .batch import ModelResponse
+from .model_errors import QuotaExhaustedError, is_quota_exhaustion_text
 
 DEFAULT_TIMEOUT_S = 600
+
+
+def _combine_streams(*texts: str | None) -> str:
+    """Join whichever of `texts` (a `claude -p` JSON `result` string,
+    subprocess stderr, ...) is actually non-empty, so a `QuotaExhaustedError`
+    raised because the usage-limit marker showed up in *either* stream still
+    carries both in its message/`detail` -- never just the one a caller
+    happened to check first (see the Copilot review on PR #198/#204: the
+    marker can land on stdout/`result` while `detail` only looked at
+    stderr, silently dropping the matched evidence)."""
+    parts = [str(t).strip() for t in texts if t and str(t).strip()]
+    return " | ".join(parts) if parts else "(no output captured)"
 
 
 class ClaudeCLICaller:
@@ -69,6 +82,23 @@ class ClaudeCLICaller:
             raise RuntimeError(f"`claude -p` timed out after {self.timeout}s") from exc
 
         if proc.returncode != 0:
+            # Issue #198: `claude -p` surfaces Claude Code's own usage-limit
+            # exhaustion (5-hour/weekly reset) as just another nonzero exit,
+            # indistinguishable at this point from a genuine content/tooling
+            # failure -- check stderr (and stdout, in case the JSON payload
+            # still made it out despite the nonzero exit) for the same
+            # substrings Claude Code itself uses to recognize this condition
+            # before falling back to the generic failure below.
+            if is_quota_exhaustion_text(proc.stderr, proc.stdout):
+                # Build `detail` from whichever stream(s) actually carried the
+                # matched marker -- it may be stdout, not stderr, so stderr
+                # alone would silently drop the evidence that triggered this
+                # classification (see the Copilot review on PR #204).
+                detail = _combine_streams(proc.stderr, proc.stdout)
+                raise QuotaExhaustedError(
+                    f"`claude -p` usage limit/quota exhausted (exit {proc.returncode}): {detail}",
+                    detail=detail,
+                )
             raise RuntimeError(f"`claude -p` exited {proc.returncode}: {proc.stderr.strip()}")
 
         try:
@@ -77,7 +107,18 @@ class ClaudeCLICaller:
             raise RuntimeError(f"`claude -p --output-format json` produced unparseable output: {proc.stdout[:500]!r}") from exc
 
         if data.get("is_error"):
-            raise RuntimeError(f"`claude -p` reported an error: {data.get('result')!r}")
+            result_text = data.get("result")
+            # Same detection as the nonzero-exit branch above -- a quota
+            # exhaustion can also come back as exit 0 with `is_error: true`
+            # and the usage-limit message in `result` rather than a nonzero
+            # exit at all.
+            if is_quota_exhaustion_text(result_text, proc.stderr):
+                detail = _combine_streams(result_text, proc.stderr)
+                raise QuotaExhaustedError(
+                    f"`claude -p` usage limit/quota exhausted: {detail}",
+                    detail=detail,
+                )
+            raise RuntimeError(f"`claude -p` reported an error: {result_text!r}")
 
         usage = data.get("usage") or {}
         # Issue #169: `claude -p --output-format json`'s `usage` object is the

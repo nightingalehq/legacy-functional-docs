@@ -17,6 +17,7 @@ import pytest
 
 from mfdoc import cli
 from mfdoc.claude_cli_caller import ClaudeCLICaller
+from mfdoc.model_errors import QuotaExhaustedError
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -76,6 +77,44 @@ def test_cache_token_fields_default_to_zero_when_absent(monkeypatch):
 def test_nonzero_exit_raises_with_stderr(monkeypatch):
     monkeypatch.setattr(subprocess, "run", _fake_run(stderr="boom", returncode=1))
     with pytest.raises(RuntimeError, match="boom"):
+        ClaudeCLICaller()("ping")
+
+
+def test_nonzero_exit_with_usage_limit_stderr_raises_quota_exhausted(monkeypatch):
+    """Issue #198: a `claude -p` failure that looks like a genuine
+    content/tooling error (the test above, plain "boom" stderr) must still
+    raise the generic RuntimeError -- only stderr matching Claude Code's own
+    usage-limit wording should raise the distinct `QuotaExhaustedError`, so
+    an orchestrator can tell "everything failed because quota" apart from
+    "this one chunk genuinely failed" without eyeballing a wall of
+    identical failures."""
+    monkeypatch.setattr(
+        subprocess, "run",
+        _fake_run(stderr="Claude AI usage limit reached|1234567890", returncode=1),
+    )
+    with pytest.raises(QuotaExhaustedError, match="usage limit/quota exhausted") as excinfo:
+        ClaudeCLICaller()("ping")
+    assert "usage limit reached" in excinfo.value.detail.lower()
+
+
+def test_nonzero_exit_with_credit_balance_stderr_raises_quota_exhausted(monkeypatch):
+    monkeypatch.setattr(
+        subprocess, "run",
+        _fake_run(stderr="Error: credit balance too low", returncode=1),
+    )
+    with pytest.raises(QuotaExhaustedError):
+        ClaudeCLICaller()("ping")
+
+
+def test_is_error_with_usage_limit_result_raises_quota_exhausted(monkeypatch):
+    """The same usage-limit condition can also come back as exit 0 with
+    `is_error: true` and the message in the JSON `result` field, rather
+    than a nonzero exit at all -- must be detected there too."""
+    monkeypatch.setattr(
+        subprocess, "run",
+        _fake_run(stdout='{"is_error": true, "result": "Usage limit reached \\u00b7 finishing up"}'),
+    )
+    with pytest.raises(QuotaExhaustedError, match="usage limit/quota exhausted"):
         ClaudeCLICaller()("ping")
 
 
