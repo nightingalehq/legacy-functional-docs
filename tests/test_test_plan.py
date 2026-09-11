@@ -249,15 +249,17 @@ def test_member_rule_fingerprint_breaks_line_no_ties_with_id():
 
 
 def test_member_rule_fingerprint_changes_when_a_row_is_reclassified_out_of_branch_status():
-    """Copilot review follow-up: `build_member_test_cases` only numbers
-    *branch* rows (`_is_branch_row`, which reads `construct`) into BR-nnn
-    scenarios. A `derive`/dialect-scanner change that reclassifies an
-    existing row's `construct` (e.g. from a branch construct to `DECIDE
-    ON`, which `_is_branch_row` excludes) leaves that row's own `(id,
-    line_no)` pair completely unchanged while still shifting every later
-    positional BR-nnn id -- the same consequence an inserted/removed row
-    has, and the fingerprint must move too, not just when `(id, line_no)`
-    itself changes."""
+    """Copilot review follow-up: `build_member_test_cases` assigns an
+    ordinal to *every* `rule_candidate` row via `numbered_rule_candidates`
+    before filtering with `_is_branch_row` -- so reclassifying an existing
+    row's `construct` (e.g. from a branch construct to `DECIDE ON`, which
+    `_is_branch_row` excludes) does *not* shift any other row's ordinal.
+    It only removes (or adds back) *that row's own* scenario from the set
+    `test_case` should have, while that row's `(id, line_no)` pair stays
+    completely unchanged. Still a real change the fingerprint must catch:
+    without `construct` in the hash, this reclassification would leave the
+    existing `test_case` row for that scenario stale with nothing to
+    detect it, since `(id, line_no)` alone doesn't move."""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)

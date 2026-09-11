@@ -993,8 +993,8 @@ def validate_test_doc(conn, path: Path, _text: str | None = None,
     1. **Fingerprint comparison (authoritative).** `write_test_doc_with_
        sidecar` stamps a `test_case_fingerprint` field into the document's
        front matter -- `testplan.member_rule_fingerprint`'s hash of the
-       exact `rule_candidate` `(id, line_no)` ordering that determined this
-       render's `BR-nnn` numbering, at write time. If that field is
+       exact `rule_candidate` `(id, line_no, construct)` ordering that
+       determined this render's `BR-nnn` numbering, at write time. If that field is
        present, this recomputes the same fingerprint from `sources`'
        member(s) right now (`testplan.doc_rule_fingerprint`) and compares:
        any mismatch means the corpus has genuinely moved on since the

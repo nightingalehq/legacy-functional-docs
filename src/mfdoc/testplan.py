@@ -152,10 +152,13 @@ def _branch_excerpt(conn, mid: int, name: str, header_line: int, body_lines: lis
 
 def member_rule_fingerprint(conn, member_name: str) -> str | None:
     """A fingerprint of exactly the input that determines this member's
-    `BR-nnn` numbering: `rule_candidate`'s own `(id, line_no)` sequence,
+    `BR-nnn` numbering and which rows contribute a scenario at all:
+    `rule_candidate`'s own `(id, line_no, construct)` for every row,
     ordered by `line_no` -- the same ordering `build_member_test_cases`
-    feeds through `numbered_rule_candidates()` to assign every scenario its
-    id, positionally. `None` if `member_name` doesn't resolve to exactly
+    feeds through `numbered_rule_candidates()` (which assigns an ordinal
+    to *every* row positionally, branch or not) before filtering with
+    `_is_branch_row` to decide which of those ordinals actually become a
+    `BR-nnn` scenario. `None` if `member_name` doesn't resolve to exactly
     one member (unknown, or ambiguous across libraries) -- a caller with no
     real member to fingerprint, not an error this function should raise.
 
@@ -193,16 +196,22 @@ def member_rule_fingerprint(conn, member_name: str) -> str | None:
     today.
 
     `construct` is hashed alongside `(id, line_no)` too (Copilot review):
-    `build_member_test_cases` only numbers *branch* rows
-    (`_is_branch_row`, which reads `construct`) into `BR-nnn` scenarios --
-    a `derive`/dialect-scanner change that reclassifies an existing row's
-    `construct` (e.g. between a branch construct and `DECIDE ON`, which
-    `_is_branch_row` excludes) leaves this row's own `(id, line_no)` pair
-    completely unchanged while still shifting every later positional
-    BR-nnn id, the identical consequence an inserted/removed/reordered row
-    has. Without this, that reclassification would leave the fingerprint
-    unchanged and let a now-wrong-numbered sidecar keep looking
-    authoritative indefinitely."""
+    `build_member_test_cases` only turns *branch* rows (`_is_branch_row`,
+    which reads `construct`) into `BR-nnn` scenarios -- ordinals are
+    assigned to every row *before* that filter runs, so a `derive`/
+    dialect-scanner change that reclassifies an existing row's `construct`
+    (e.g. between a branch construct and `DECIDE ON`, which
+    `_is_branch_row` excludes) does *not* shift any other row's ordinal;
+    it only adds or removes *that one row's own* scenario from the set
+    `test_case` should have, leaving every other id exactly where it was.
+    That's still a real change this fingerprint must catch: without
+    `construct`, the row's own `(id, line_no)` pair is unaffected by a
+    construct-only reclassification, so the fingerprint would stay
+    unchanged and let a sidecar/manifest that still includes (or still
+    lacks) that one now-stale scenario keep looking authoritative
+    indefinitely -- the same effect `member_test_case_aligned_with_rule_
+    candidate`'s own exact-equality check exists to catch on the write
+    side."""
     rows, ambiguous = resolve_member_by_name(conn, member_name)
     if ambiguous or not rows:
         return None

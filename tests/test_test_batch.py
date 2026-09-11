@@ -849,10 +849,11 @@ def test_write_test_doc_with_sidecar_or_invalidate_removes_a_stale_sidecar_when_
         "# FAKEMOD tests\n\n"
         "```python\ndef test_placeholder():\n    pass\n```\n"
     )
-    written = testbatch._write_test_doc_with_sidecar_or_invalidate(
+    written, cleanup_problem = testbatch._write_test_doc_with_sidecar_or_invalidate(
         None, "FAKEMOD", out_path, doc_text_no_br_refs, "python",
     )
     assert written is None, "no BR references in the fence -- nothing should be split out"
+    assert cleanup_problem is None
     assert not sidecar_path.exists(), (
         "the stale sidecar from a previous render must be removed, not left orphaned "
         "next to a document that no longer references any of it"
@@ -887,12 +888,51 @@ def test_write_test_doc_with_sidecar_or_invalidate_leaves_a_fresh_sidecar_alone(
         "---\nsources: [\"FAKEMOD\"]\n---\n\n# FAKEMOD tests\n\n"
         "```python\ndef test_one():\n    # FAKEMOD:BR-001\n    ...\n```\n"
     )
-    written = testbatch._write_test_doc_with_sidecar_or_invalidate(
+    written, cleanup_problem = testbatch._write_test_doc_with_sidecar_or_invalidate(
         conn, "FAKEMOD", out_path, doc_text, "python",
     )
+    assert cleanup_problem is None
     assert written is not None
     assert written.exists()
     assert "FAKEMOD:BR-001" in written.read_text(encoding="utf-8")
+
+
+def test_write_test_doc_with_sidecar_or_invalidate_reports_a_failed_stale_removal(tmp_path, monkeypatch):
+    """Copilot review follow-up: a failed removal of the stale sidecar must
+    be propagated as a problem, not just logged -- otherwise the render
+    caller reports `ok=True` (a clean, resumable state) while a stale
+    sidecar that a later standalone `mfdoc test-validate` sweep (or this
+    same member's own next resumed run, via its recorded state) would
+    treat as still current remains on disk next to a document that no
+    longer references any of it."""
+    from mfdoc import testbatch
+    from pathlib import Path
+
+    out_path = tmp_path / "FAKEMOD.md"
+    sidecar_path = tmp_path / "FAKEMOD.py"
+    sidecar_path.write_text("# leftover from a prior render with real BR refs\n", encoding="utf-8")
+
+    real_unlink = Path.unlink
+
+    def exploding_unlink(self, *args, **kwargs):
+        if self == sidecar_path:
+            raise OSError("simulated: file is locked by another process")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", exploding_unlink)
+
+    doc_text_no_br_refs = (
+        "---\nsources: [\"FAKEMOD\"]\nlanguage: python\n---\n\n"
+        "# FAKEMOD tests\n\n"
+        "```python\ndef test_placeholder():\n    pass\n```\n"
+    )
+    written, cleanup_problem = testbatch._write_test_doc_with_sidecar_or_invalidate(
+        None, "FAKEMOD", out_path, doc_text_no_br_refs, "python",
+    )
+    assert written is None
+    assert cleanup_problem is not None
+    assert "could not remove stale sidecar" in cleanup_problem
+    assert sidecar_path.exists()
 
 
 def test_prior_fingerprint_for_does_not_crash_on_malformed_front_matter(tmp_path):
@@ -2769,6 +2809,52 @@ def test_chunked_render_surfaces_a_failed_stale_index_sidecar_removal(tmp_path, 
     assert stale_sidecar.exists()
 
 
+def test_single_doc_render_leaves_old_chunk_output_untouched_when_the_new_render_fails(tmp_path):
+    """Copilot review follow-up: a member shrinking back under the
+    chunking threshold must not have its old `.chunk<N>` files (its own
+    *last successful* output) pruned before the new single-document
+    render has even been attempted -- if that new render then fails (a
+    model timeout, exhausted invalid retries), the old chunk files are
+    exactly what a caller reading `out_path` (still the old chunked
+    index, untouched, still naming them) needs -- destroying them first
+    would leave nothing behind at all instead of a stale-but-real result."""
+    from mfdoc import testbatch
+
+    conn = _sqlite_conn()
+    _seed_fakemod_scenarios(conn, 4)
+
+    out_path = tmp_path / "FAKEMOD.md"
+    first = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, _chunk_aware_caller("python", "pytest"),
+        "writing rules text", "template text", max_scenarios_per_call=2,
+    )
+    assert first.ok is True
+    assert first.chunked is True
+    chunk1_path = tmp_path / "FAKEMOD.chunk1.md"
+    chunk1_sidecar = tmp_path / "FAKEMOD.chunk1.py"
+    assert chunk1_path.exists() and chunk1_sidecar.exists()
+    old_chunk1_text = chunk1_path.read_text(encoding="utf-8")
+    old_index_text = out_path.read_text(encoding="utf-8")
+
+    def exploding_caller(prompt: str) -> ModelResponse:
+        raise RuntimeError("simulated: model call always fails")
+
+    # Threshold raised past 4 -- this member now goes through the
+    # single-document path, which would prune the (now-orphaned) chunk
+    # files; the render itself fails outright.
+    second = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, exploding_caller,
+        "writing rules text", "template text", max_scenarios_per_call=10,
+    )
+    assert second.ok is False
+    assert chunk1_path.exists(), "the old chunk document must survive a failed replacement render"
+    assert chunk1_sidecar.exists(), "the old chunk sidecar must survive a failed replacement render too"
+    assert chunk1_path.read_text(encoding="utf-8") == old_chunk1_text
+    assert out_path.read_text(encoding="utf-8") == old_index_text, (
+        "out_path itself (the old chunked index) must be untouched by a render that never wrote to it"
+    )
+
+
 def test_single_doc_render_surfaces_a_failed_orphaned_chunk_file_removal(tmp_path, monkeypatch):
     """Copilot review follow-up on issue #195's fix: a member that shrinks
     back under the chunking threshold leaves its old `.chunk<N>.md` files
@@ -2784,6 +2870,7 @@ def test_single_doc_render_surfaces_a_failed_orphaned_chunk_file_removal(tmp_pat
 
     conn = _sqlite_conn()
     conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
     rc1 = _insert_rc(conn, 1, 10)
     from mfdoc.db import insert
     insert(

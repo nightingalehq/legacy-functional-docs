@@ -12,6 +12,39 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-12):**
+- Addressed the thirty-second Copilot review round on PR #209 (issue
+  #195):
+  1. Corrected an inaccurate claim the previous round's own progress
+     entry, several docstrings, and a test repeated: `numbered_rule_
+     candidates()` assigns an ordinal to *every* `rule_candidate` row
+     before `_is_branch_row` filters which ones become scenarios, so
+     reclassifying an existing row's `construct` does *not* shift any
+     other row's positional id -- it only adds or removes that row's own
+     scenario from the set `test_case` should have. The fingerprint fix
+     itself was already correct (hashing `construct` still catches this,
+     just for a different reason than documented); only the documentation
+     was wrong, across `testplan.py` (two docstrings), `validate.py`, a
+     test docstring, and this file's own prior entry.
+  2. `_write_test_doc_with_sidecar_or_invalidate`'s stale-sidecar removal
+     failure was only logged, not propagated -- the render caller still
+     reported `ok=True` (a clean, resumable state) while the stale sidecar
+     remained. Now returns `(sidecar_path, cleanup_problem)`; every call
+     site folds a returned problem into that member's own result.
+  3. `generate_member_test_doc`'s (and `run_test_batch`'s identical
+     dispatch-time copy of the same) shrink-back cleanup pruned a
+     member's old `.chunk<N>` files -- its own *last successful* output --
+     before attempting the new single-document render, not after. A
+     model timeout or validation failure in that new render then
+     destroyed the last known-good result instead of leaving it as a
+     stale-but-real fallback. Both now defer the prune until the new
+     render actually succeeds.
+- Two new regression tests (the stale-sidecar-removal failure now
+  surfacing as a problem, and old chunk output surviving a failed
+  replacement render). Full suite green (1053 passed, 2 skipped) plus a
+  clean `mfdoc validate` pass against `examples/` (71/71 documents, 0
+  invalid citations of 750).
+
 **Progress (2026-09-11t):**
 - Addressed the thirty-first Copilot review round on PR #209 (issue
   #195):
@@ -37,13 +70,15 @@ GitHub org.
      `_write_test_doc_with_sidecar_or_invalidate` wraps every call site,
      removing a stale leftover sidecar whenever this call doesn't produce
      a replacement.
-  3. `member_rule_fingerprint` hashed only `(id, line_no)` -- a `derive`/
-     dialect-scanner change that reclassifies an existing row's
-     `construct` (e.g. between a branch construct and `DECIDE ON`, which
-     `_is_branch_row` excludes from BR-numbering) left that row's `(id,
-     line_no)` pair completely unchanged while still shifting every later
-     positional id, the same consequence an inserted/removed row has.
-     `construct` is now hashed alongside.
+  3. `member_rule_fingerprint` hashed only `(id, line_no)` -- ordinals are
+     assigned to every `rule_candidate` row before `_is_branch_row`
+     filters which ones become scenarios, so a `derive`/dialect-scanner
+     change that reclassifies an existing row's `construct` (e.g. between
+     a branch construct and `DECIDE ON`, which `_is_branch_row` excludes)
+     doesn't shift any other row's ordinal -- it only adds or removes
+     *that row's own* scenario from the set `test_case` should have,
+     while `(id, line_no)` itself stays unchanged. Still a real change
+     the fingerprint must catch: `construct` is now hashed alongside.
 - Four new regression tests (both outcomes of the corrected three-way
   chunk cleanup, an exception-during-render case, the single-document
   wrapper's own removal/no-op behavior, and the construct-reclassification

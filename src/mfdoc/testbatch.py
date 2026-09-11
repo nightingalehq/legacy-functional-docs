@@ -319,7 +319,7 @@ def write_test_doc_with_sidecar(conn, member_name: str, out_path: Path, doc_text
 
 
 def _write_test_doc_with_sidecar_or_invalidate(conn, member_name: str, out_path: Path, doc_text: str,
-                                                language: str) -> Path | None:
+                                                language: str) -> tuple[Path | None, str | None]:
     """`write_test_doc_with_sidecar`, plus removing any leftover sidecar
     from a *prior* render of this same path when this one doesn't produce
     a replacement (Copilot review): that function silently returns `None`
@@ -335,26 +335,28 @@ def _write_test_doc_with_sidecar_or_invalidate(conn, member_name: str, out_path:
     document member losing all its BR references between renders instead
     of a chunk boundary shifting.
 
-    Best-effort on that removal, logged rather than raised: this runs
-    after the new document has already validated and been written
-    successfully, so a stale-sidecar cleanup failure here is real but
-    strictly less severe than this render's own outcome -- the same
-    trade-off `_prune_stale_test_chunk_files` makes for its own leftover
-    files, not the harder failure `_invalidate_sidecar_if_range_changed`
-    guards (there, the removal happens *before* the render that depends
-    on it; here, after one that has already succeeded on its own terms)."""
+    Returns `(sidecar_path_or_None, cleanup_problem_or_None)`: a failed
+    removal is logged *and* returned as a problem string (Copilot review)
+    -- not swallowed into a bare log line -- so every caller folds it into
+    this member's own render result instead of reporting `ok=True`/a clean
+    resumable state while a stale sidecar (that a later standalone
+    `mfdoc test-validate` sweep, or this same member's next resumed run
+    via its recorded `state["ok"]`, would trust as still current) remains
+    on disk next to a document that no longer references any of it."""
     written = write_test_doc_with_sidecar(conn, member_name, out_path, doc_text, language)
+    cleanup_problem = None
     if written is None:
         stale = sidecar_path_for(out_path, language)
         if stale is not None and stale.exists():
             try:
                 stale.unlink()
             except OSError as exc:
-                logger.warning(
-                    "%s: could not remove stale sidecar %s for a document that no longer "
-                    "references it: %s", member_name, stale, exc,
+                cleanup_problem = (
+                    f"could not remove stale sidecar {stale} for a document that no longer "
+                    f"references it: {exc.__class__.__name__}: {exc}"
                 )
-    return written
+                logger.warning("%s: %s", member_name, cleanup_problem)
+    return written, cleanup_problem
 
 
 def _prior_fingerprint_for(out_path: Path) -> str | None:
@@ -811,8 +813,13 @@ def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: 
             _fingerprint_cache=_fingerprint_cache,
         )
         if result["ok"]:
-            _write_test_doc_with_sidecar_or_invalidate(conn, member_name, out_path, text, language)
-            return DocResult(member_name, str(out_path), True, attempt, input_tokens, output_tokens, [])
+            _, cleanup_problem = _write_test_doc_with_sidecar_or_invalidate(
+                conn, member_name, out_path, text, language,
+            )
+            return DocResult(
+                member_name, str(out_path), cleanup_problem is None, attempt, input_tokens, output_tokens,
+                [cleanup_problem] if cleanup_problem else [],
+            )
 
         if _is_near_miss(result):
             uncited, reversed_findings = _localized_findings(result)
@@ -836,10 +843,12 @@ def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: 
                             member_name, len(uncited) - len(remaining_uncited),
                         )
                         out_path.write_text(candidate_text, encoding="utf-8")
-                        _write_test_doc_with_sidecar_or_invalidate(conn, member_name, out_path, candidate_text, language)
+                        _, cleanup_problem = _write_test_doc_with_sidecar_or_invalidate(
+                            conn, member_name, out_path, candidate_text, language,
+                        )
                         return DocResult(
-                            member_name, str(out_path), True, attempt, input_tokens,
-                            output_tokens, [],
+                            member_name, str(out_path), cleanup_problem is None, attempt, input_tokens,
+                            output_tokens, [cleanup_problem] if cleanup_problem else [],
                         )
                     if _is_near_miss(candidate_result):
                         logger.info(
@@ -891,9 +900,12 @@ def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: 
                     _fingerprint_cache=_fingerprint_cache,
                 )
                 if result["ok"]:
-                    _write_test_doc_with_sidecar_or_invalidate(conn, member_name, out_path, text, language)
+                    _, cleanup_problem = _write_test_doc_with_sidecar_or_invalidate(
+                        conn, member_name, out_path, text, language,
+                    )
                     return DocResult(
-                        member_name, str(out_path), True, attempt, input_tokens, output_tokens, [],
+                        member_name, str(out_path), cleanup_problem is None, attempt, input_tokens, output_tokens,
+                        [cleanup_problem] if cleanup_problem else [],
                     )
                 logger.warning(
                     "%s: targeted patch attempt did not resolve validation (%d problem(s)); "
@@ -1472,7 +1484,17 @@ def generate_member_test_doc(conn, member_name: str, language: str, framework: s
     overwrites them, but a full tree walk (`mfdoc test-validate`) still
     finds and validates them independently, where their stale manifests/
     sidecars can produce the exact false staleness failures this whole
-    mechanism exists to prevent."""
+    mechanism exists to prevent.
+
+    That cleanup runs *after* this render succeeds, not before (Copilot
+    review): the orphaned `.chunk<N>` files are this member's *last
+    successful* chunked output -- removing them first and only then
+    attempting the new single-document render would destroy that last
+    known-good result before the replacement has actually landed, so a
+    model timeout or validation failure here would leave `out_path` as a
+    stale *index* document (still naming chunks that no longer exist)
+    with nothing behind it at all, rather than the harmless "orphaned
+    file nothing currently reads" state this cleanup exists to tidy up."""
     system, rows, ambiguous_libs = fetch_test_case_rows(conn, member_name)
     threshold = _resolve_max_scenarios_per_call(max_scenarios_per_call)
     if not ambiguous_libs and rows and len(rows) > threshold:
@@ -1482,19 +1504,20 @@ def generate_member_test_doc(conn, member_name: str, language: str, framework: s
             prior_chunks=prior_chunks, sme_notes=sme_notes,
         )
 
-    cleanup_problems = _prune_stale_test_chunk_files(out_path, set(), language)
     brief = test_case_brief(conn, member_name, redact=redact, sme_notes=sme_notes)
     result = _generate_test_doc_from_brief(
         conn, member_name, brief, language, framework, out_path, caller, writing_rules,
         template, max_attempts=max_attempts,
     )
-    if cleanup_problems:
-        # A leftover obsolete `.chunk<N>` document/sidecar this render
-        # never revisits -- `validate_tests_tree` still walks and
-        # validates it independently (Copilot review), so this render
-        # must not report `ok=True` while one remains.
-        result.problems = result.problems + cleanup_problems
-        result.ok = False
+    if result.ok:
+        cleanup_problems = _prune_stale_test_chunk_files(out_path, set(), language)
+        if cleanup_problems:
+            # A leftover obsolete `.chunk<N>` document/sidecar this render
+            # never revisits -- `validate_tests_tree` still walks and
+            # validates it independently (Copilot review), so this render
+            # must not report `ok=True` while one remains.
+            result.problems = result.problems + cleanup_problems
+            result.ok = False
     return result
 
 
@@ -1778,12 +1801,15 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
             # chunk-file cleanup that path already gets, since this
             # dispatch loop (run_test_batch's own, not
             # generate_member_test_doc's) never calls that function at
-            # all for a non-chunked member. Recorded here, folded into
-            # this member's own DocResult once it's built below (Copilot
-            # review) -- see cleanup_problems_by_name's own comment above.
-            cleanup_problems = _prune_stale_test_chunk_files(out_path, set(), language)
-            if cleanup_problems:
-                cleanup_problems_by_name[name] = cleanup_problems
+            # all for a non-chunked member. Deferred until that render
+            # actually succeeds, in the pool result loop below (Copilot
+            # review) -- not run here at dispatch time: the orphaned
+            # `.chunk<N>` files are this member's *last successful*
+            # chunked output, and removing them before the new render has
+            # even been attempted would destroy that last known-good
+            # result if the new attempt then fails (a model timeout or a
+            # validation failure), leaving out_path a stale index
+            # document with nothing behind it at all.
             briefs[name] = brief
             to_run.append((name, brief_hash, out_path))
 
@@ -2010,10 +2036,20 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
                     "problems": [initial_exc_problem] + list(validation["problems"]),
                 }
 
-            if validation["ok"]:
-                _write_test_doc_with_sidecar_or_invalidate(conn, name, out_path, final_text, language)
-
             member_cleanup_problems = cleanup_problems_by_name.get(name, [])
+            if validation["ok"]:
+                _, cleanup_problem = _write_test_doc_with_sidecar_or_invalidate(
+                    conn, name, out_path, final_text, language,
+                )
+                if cleanup_problem:
+                    member_cleanup_problems = member_cleanup_problems + [cleanup_problem]
+                # Only now that this member's own render has actually
+                # succeeded (Copilot review) -- see the dispatch-time
+                # comment above for why this can't run any earlier.
+                member_cleanup_problems = member_cleanup_problems + _prune_stale_test_chunk_files(
+                    out_path, set(), language,
+                )
+
             result = DocResult(
                 name, str(out_path), validation["ok"] and not member_cleanup_problems, attempts,
                 input_tokens, output_tokens, list(validation.get("problems", [])) + member_cleanup_problems,
