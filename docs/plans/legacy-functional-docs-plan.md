@@ -232,8 +232,19 @@ GitHub org.
   cache_capable_reflects_caller_not_just_provider`
   (`tests/test_cli_batch.py`). Bundled fixture pipeline re-run clean:
   71/71 documents, 0 invalid citations, no `examples/` content changed.
-  Full suite: 992 passed, 2 skipped (up from 955 passed, 2 skipped per
-  #210's own progress entry).
+  A follow-up self-review pass (Copilot quota-exhausted by this point)
+  caught one more real gap in `member_shared_prefix`'s own top-of-brief
+  metadata block: `system`/`dialect`/`object_type`/`library`/`natural_mode`
+  were interpolated raw, contrary to this function's own docstring claim
+  that every field goes through `redact`. `system`/`library` are project-
+  supplied engagement metadata a configured redaction pattern could
+  legitimately match (the other three are this tool's own fixed
+  vocabulary -- natural/mantis/program/subprogram/etc -- so redacting them
+  is a defensive no-op in practice, applied anyway for consistency rather
+  than a carve-out a reader has to notice). New test `test_member_shared_
+  prefix_redacts_metadata_fields` (`tests/test_brief.py`). Full suite: 993
+  passed, 2 skipped (up from 955 passed, 2 skipped per #210's own progress
+  entry).
 
 **Progress (2026-09-11):**
 - Fixed issue #199: `mfdoc doc-drift`'s existing checks (issue #161) caught

@@ -281,6 +281,26 @@ def test_member_shared_prefix_is_redacted_with_the_callers_own_redactor(indexed_
     assert "[REDACTED]" in prefix
 
 
+def test_member_shared_prefix_redacts_metadata_fields(indexed_db):
+    """Copilot review round 3/4 on PR #215: system/library are project-
+    supplied engagement metadata (not this tool's own fixed vocabulary),
+    so a configured redaction pattern could legitimately match one -- must
+    not be interpolated raw just because this is the top-of-brief metadata
+    block rather than a body section."""
+    facts = build_member_facts(indexed_db, "MMP0100")
+    assert isinstance(facts, MemberFacts)
+
+    def redact_system_and_library(text):
+        if text in ("MOM", "MILLPROD"):
+            return "[REDACTED]"
+        return text
+
+    prefix = member_shared_prefix(facts, redact_system_and_library)
+    assert "MOM" not in prefix.splitlines()[2]  # "- system: ..." line
+    assert "MILLPROD" not in prefix.splitlines()[5]  # "- library: ..." line
+    assert "[REDACTED]" in prefix
+
+
 def test_module_brief_shared_prefix_skips_duplicate_sections(indexed_db):
     """Copilot review round 3 on PR #215: a cache hit only changes billing,
     never how many tokens are actually in a request -- so passing

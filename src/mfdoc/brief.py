@@ -1010,12 +1010,25 @@ def member_shared_prefix(facts: "MemberFacts", redact: Redactor = NULL_REDACTOR)
     # heading here would silently break that lookup instead of raising.
     add(f"# Shared member context: {name} (cached across chunks -- issue #214)")
     add("")
-    add(f"- system: {m['system'] or 'unknown'}")
-    add(f"- dialect: {m['dialect']}")
-    add(f"- object_type: {m['object_type'] or 'unknown'}")
-    add(f"- library: {m['library'] or 'unknown'}")
+    # `redact()`'d here even though module_brief's own matching lines
+    # (below) aren't -- same reasoning as this function's "Known gaps"
+    # section: `system`/`library` in particular are project-supplied
+    # engagement metadata, not built-in structural constants, so a
+    # configured redaction pattern could legitimately match one (Copilot
+    # review round 3/4 on PR #215). `dialect`/`object_type`/`natural_mode`
+    # are drawn from this tool's own fixed vocabulary (natural/mantis/
+    # program/subprogram/structured/reporting, ...), not client-supplied
+    # text, so redacting them is a defensive no-op in practice, not a
+    # meaningful behavior change -- applied uniformly anyway so every field
+    # this function renders genuinely goes through `redact`, matching what
+    # its own docstring promises, rather than carving out an unredacted
+    # exception a reader has to notice and double-check.
+    add(f"- system: {redact(m['system']) or 'unknown'}")
+    add(f"- dialect: {redact(m['dialect'])}")
+    add(f"- object_type: {redact(m['object_type']) or 'unknown'}")
+    add(f"- library: {redact(m['library']) or 'unknown'}")
     if m["dialect"] == "natural":
-        add(f"- natural_mode: {m['mode'] or 'unknown'}")
+        add(f"- natural_mode: {redact(m['mode']) or 'unknown'}")
     add(f"- line_count: {facts.line_count}")
     add("")
 
