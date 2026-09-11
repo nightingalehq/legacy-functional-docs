@@ -65,6 +65,38 @@ def test_module_brief_surfaces_a_lexicon_term_that_contains_a_pipe():
     assert "`A|B` -> combined status flag" in brief
 
 
+def test_module_brief_lexicon_scan_only_decodes_actual_table_rows():
+    """Copilot review round 5 on PR #213: the round-4 fix used a shape
+    guess ("doesn't start with `- `") to decide which lines to decode
+    before the lexicon scan -- wrong in principle, because `## ` headings
+    and prose preambles also don't start with `- ` but were never
+    `_esc_cell`-encoded, so decoding them is unsound even though none of
+    this brief's *own* static heading/preamble text happens to contain a
+    `\\` today. Replaced with `table_line_idxs`, recorded precisely by
+    `add_tbl` at the one place that actually knows which lines came from
+    `_tbl`. This is a narrower sanity check than reproducing the original
+    over-decoding bug (which needs heading/preamble text this brief
+    doesn't currently generate): a lexicon key genuinely absent from the
+    brief, escaped or not, must not spuriously surface via either
+    mechanism."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA
+    from mfdoc.dialects import mantis
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'TESTMOD', 'mantis')")
+    src = 'PROGRAM "TESTMOD"\nENTRY MAIN\nEXIT\n'
+    lines = [(i + 1, None, t) for i, t in enumerate(src.splitlines())]
+    mantis.extract(conn, 1, lines, "TESTMOD")
+
+    lexicon = {"A\\|B": "should not appear"}
+    brief = module_brief(conn, "TESTMOD", redact=NULL_REDACTOR, lexicon=lexicon)
+    assert "## Business vocabulary" not in brief
+
+
 def test_module_brief_omits_vocabulary_section_when_no_lexicon_given(indexed_db):
     """Default behaviour (no lexicon passed) must be unchanged -- this is
     additive, not a required section."""
@@ -1232,9 +1264,8 @@ def test_count_unescaped_delimiters_handles_a_trailing_encoded_backslash():
 
     cell = _esc_cell("C:" + "\\")  # raw value ending in one literal backslash
     line = f"[[X:1]]|{cell}|next"
-    # 3 real column boundaries: after the citation, after the backslash-
-    # ending cell, and none inside "next" -- i.e. 2 pipes total in this
-    # 3-field row.
+    # 2 real column boundaries in this 3-field row: after the citation,
+    # and after the backslash-ending cell (none inside "next").
     assert _count_unescaped_delimiters(line) == 2
 
 

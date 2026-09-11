@@ -999,6 +999,22 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
     mid, name, m = facts.mid, facts.name, facts.m
     out: list[str] = []
     add = out.append
+    # Exact indices (into `out`) of every line `_tbl` produced -- tracked
+    # precisely here, at the one place that knows for certain which lines
+    # were `_esc_cell`-encoded, rather than guessed later from a line's
+    # shape. The lexicon-relevance scan below needs to decode exactly
+    # these lines and nothing else: a structural guess like "doesn't start
+    # with '- '" over-matches `## ` headings and prose preambles too
+    # (Copilot review round 5 on PR #213) -- unlike `batch.py`'s own
+    # decode, which only ever sees lines that already passed a citation
+    # pre-filter (headings/prose never carry one), this scan runs over
+    # every line in `out`, filter or no.
+    table_line_idxs: set[int] = set()
+
+    def add_tbl(lines: list[str]) -> None:
+        start = len(out)
+        out.extend(lines)
+        table_line_idxs.update(range(start, len(out)))
 
     add(f"# Fact brief: {name}")
     add("")
@@ -1047,7 +1063,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
         for r in params:
             spec = f"{r['format'] or ''}{r['length'] or ''}"
             rows.append([_cite(name, r["line_no"]), str(r["level"] or "-"), f"`{r['name']}`", spec])
-        out.extend(_tbl(["citation", "level", "name", "spec"], rows))
+        add_tbl(_tbl(["citation", "level", "name", "spec"], rows))
         add("")
 
     views = facts.views
@@ -1057,7 +1073,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
         rows = [
             [_cite(name, r["line_no"]), f"`{r['name']}`", f"`{r['view_of']}`"] for r in views
         ]
-        out.extend(_tbl(["citation", "view", "view_of"], rows))
+        add_tbl(_tbl(["citation", "view", "view_of"], rows))
         add("")
 
     # --- program variables and screen/MAP fields (issue #141): every other
@@ -1097,7 +1113,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
             spec = f"{r['format'] or ''}{r['length'] or ''}"
             bound = f"`{r['view_of']}`" if r["view_of"] else ""
             rows.append([_cite(name, r["line_no"]), kind, f"`{r['name']}`", spec, bound])
-        out.extend(_tbl(["citation", "kind", "name", "spec", "bound_to"], rows))
+        add_tbl(_tbl(["citation", "kind", "name", "spec", "bound_to"], rows))
         add("")
     if data_area_includes:
         add("## Data areas included")
@@ -1111,7 +1127,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
         rows = [
             [_cite(name, r["line_no"]), f"`{r['name'][len('USING '):]}`"] for r in data_area_includes
         ]
-        out.extend(_tbl(["citation", "data_area"], rows))
+        add_tbl(_tbl(["citation", "data_area"], rows))
         add("")
 
     # --- internal routines (Natural DEFINE SUBROUTINE / Mantis ENTRY) --
@@ -1245,7 +1261,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
                 tag = "**[source not supplied]**"
             args = f"`{redact(r['args'])}`" if r["args"] else ""
             rows.append([_cite(name, r["line_no"]), f"`{r['call_kind']}`", f"`{r['callee_name']}`", tag, args])
-        out.extend(_tbl(["citation", "call_kind", "callee", "flag", "args"], rows))
+        add_tbl(_tbl(["citation", "call_kind", "callee", "flag", "args"], rows))
         add("")
 
     inbound = facts.inbound
@@ -1348,7 +1364,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
                 f"**{_rule_id(name, n)}**", _cite(name, r["line_no"]), str(r["depth"]),
                 f"`{r['construct']}`", routine_cell, cond_cell, lit_cell, "; ".join(bits),
             ])
-        out.extend(_tbl(
+        add_tbl(_tbl(
             ["id", "citation", "depth", "construct", "routine", "condition", "literals", "notes"],
             rule_rows,
         ))
@@ -1374,7 +1390,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
                 f"**{_rule_id(cc_name, n)}**", _cite(cc_name, r["line_no"]), str(r["depth"]),
                 f"`{r['construct']}`", cond_cell, lit_cell,
             ])
-        out.extend(_tbl(["id", "citation", "depth", "construct", "condition", "literals"], cc_rows))
+        add_tbl(_tbl(["id", "citation", "depth", "construct", "condition", "literals"], cc_rows))
         add("")
 
     gaps = facts.gaps
@@ -1391,16 +1407,21 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
     # just makes it reach mfdoc batch's headless prompts too, not only a
     # human who happens to have project.yml open alongside a chat session.
     if lexicon:
-        # Scanned with each _tbl row's own table-escaping undone first
-        # (the same "- "-prefix structural rule batch.py's
-        # `_maybe_unescape_table_row` uses) -- otherwise a lexicon key
+        # Scanned with each _tbl row's own table-escaping undone first,
+        # using `table_line_idxs` (recorded by `add_tbl` above, exactly --
+        # not guessed from a line's shape) to decode only the lines that
+        # were actually `_esc_cell`-encoded. Otherwise a lexicon key
         # containing a literal `|` or `\` would appear in `out` only in
         # its escaped form (`\|`/doubled backslashes) after issue #185's
         # rendering change, and `k in haystack` would silently stop
         # matching it, dropping that term from both this section and the
-        # batch prompt it feeds (Copilot review round 4 on PR #213).
+        # batch prompt it feeds (Copilot review round 4 on PR #213) --
+        # while a shape-based guess like "doesn't start with '- '" would
+        # over-match `## ` headings and prose preambles that were never
+        # encoded at all, corrupting *their* content instead (round 5).
         haystack = "\n".join(
-            line if line.lstrip().startswith("- ") else _unescape_cell(line) for line in out
+            _unescape_cell(line) if i in table_line_idxs else line
+            for i, line in enumerate(out)
         )
         hits = [(k, v) for k, v in lexicon.items() if k in haystack]
         if hits:

@@ -304,7 +304,7 @@ GitHub org.
   fixtures re-run clean: 71/71 documents, 0 invalid citations -- no
   regression (this checks generated docs, not briefs, since briefs aren't
   committed, but confirms nothing else broke).
-  Two rounds of Copilot PR review caught real correctness gaps in the
+  Several rounds of Copilot PR review caught real correctness gaps in the
   pipe-escaping this rendering needed: round 1, `batch._key_tokens`'s
   auto-citation token matcher compared a narrated sentence's tokens
   against a brief line's verbatim, so a fact whose condition/literal
@@ -377,7 +377,24 @@ GitHub org.
   property the brief doesn't back. (5) A grammatically incomplete
   docstring sentence in `batch._key_tokens`. Also reconciled the PR
   description's test count, which had gone stale after round-1's fixes.
-  Full suite: 966 passed, 2 skipped. Fixture pipeline re-run clean: 71/71
+  Full suite: 966 passed, 2 skipped.
+  Round 5 found the round-4 lexicon-haystack fix used the same "doesn't
+  start with `- `" shape guess `batch._maybe_unescape_table_row` uses --
+  correct there (that function only ever sees lines that already passed
+  `_brief_cited_lines`'s citation-regex pre-filter, which excludes every
+  `## ` heading and prose preamble in `module_brief`'s output), but wrong
+  for the lexicon scan, which runs over the *entire* `out` list, headings
+  and preambles included, and would "decode" any stray `\\`/`\|` inside
+  them too. Replaced the shape guess with `table_line_idxs`, a set of the
+  *exact* line indices `_tbl` produced -- recorded precisely by a new
+  `add_tbl` helper at the one place that actually knows (every
+  `out.extend(_tbl(...))` call site became `add_tbl(_tbl(...))`), so the
+  lexicon scan decodes only real table rows now, nothing else. Also fixed
+  an inconsistent test comment (said "3 real column boundaries" for a row
+  with 2) and reworded "Two rounds of Copilot PR review" (by then
+  actually five) to "Several rounds". Added
+  `test_module_brief_lexicon_scan_only_decodes_actual_table_rows`. Full
+  suite: 967 passed, 2 skipped. Fixture pipeline re-run clean: 71/71
   documents, 0 invalid citations.
 
 **Progress (2026-09-10e):**
