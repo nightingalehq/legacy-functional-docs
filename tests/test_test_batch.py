@@ -2681,14 +2681,14 @@ def test_chunked_render_surfaces_a_failed_stale_index_sidecar_removal(tmp_path, 
     stale_sidecar = out_path.with_suffix(".py")
     stale_sidecar.write_text("# leftover from a prior single-document render\n", encoding="utf-8")
 
-    real_unlink = Path.unlink
+    real_replace = Path.replace
 
-    def exploding_unlink(self, *args, **kwargs):
+    def exploding_replace(self, target):
         if self == stale_sidecar:
             raise OSError("simulated: file is locked by another process")
-        return real_unlink(self, *args, **kwargs)
+        return real_replace(self, target)
 
-    monkeypatch.setattr(Path, "unlink", exploding_unlink)
+    monkeypatch.setattr(Path, "replace", exploding_replace)
 
     caller = _chunk_aware_caller("python", "pytest")
     result = testbatch.generate_member_test_doc(
@@ -4099,6 +4099,32 @@ def test_invalidate_sidecar_if_range_changed_removes_a_wrong_range_sidecar(tmp_p
     testbatch._invalidate_sidecar_if_range_changed(chunk_path, "python", {"FAKEMOD:BR-001"})
 
 
+def test_invalidate_sidecar_if_range_changed_renames_not_deletes(tmp_path):
+    """Copilot review follow-up on issue #195's fix: a wrong-range sidecar
+    is renamed to a `.stale` sibling, not deleted outright, and the backup
+    path is returned so the caller can restore it if the render that
+    follows doesn't succeed -- a plain delete would leave the chunk
+    document (if its own render never gets far enough to write anything
+    at all) with no sidecar next to it whatsoever, which `validate_test_
+    doc` treats as an embedded-fence document and can validate clean from
+    a stale manifest alone."""
+    from mfdoc import testbatch
+
+    chunk_path = tmp_path / "FAKEMOD.chunk1.md"
+    sidecar = tmp_path / "FAKEMOD.chunk1.py"
+    sidecar.write_text(
+        "def test_one():\n    # FAKEMOD:BR-001\n    ...\n"
+        "def test_two():\n    # FAKEMOD:BR-002\n    ...\n",
+        encoding="utf-8",
+    )
+
+    backup = testbatch._invalidate_sidecar_if_range_changed(chunk_path, "python", {"FAKEMOD:BR-001"})
+    assert backup is not None
+    assert not sidecar.exists()
+    assert backup.exists()
+    assert "BR-002" in backup.read_text(encoding="utf-8")
+
+
 def test_chunk_boundary_shift_does_not_deadlock_on_a_stale_wrong_range_sidecar(tmp_path):
     """End-to-end regression for the chunk-boundary case Copilot review
     flagged on issue #195: lowering `max_scenarios_per_call` between runs
@@ -4145,6 +4171,44 @@ def test_chunk_boundary_shift_does_not_deadlock_on_a_stale_wrong_range_sidecar(t
     assert second.ok is True, second.problems
     assert (tmp_path / "FAKEMOD.chunk1.py").read_text(encoding="utf-8").count("FAKEMOD:BR-002") == 0, (
         "chunk 1's sidecar must now only cover its own (narrower) range"
+    )
+
+
+def test_chunk_boundary_shift_restores_the_old_sidecar_when_the_rerender_fails(tmp_path):
+    """Copilot review follow-up: the same boundary-shift setup as above, but
+    the re-render's own model call fails outright this time (every attempt
+    raises, so _generate_test_doc_from_brief never gets far enough to
+    write anything new to chunk_path at all). The old, wrong-range sidecar
+    _invalidate_sidecar_if_range_changed moved aside must be restored, not
+    left removed -- otherwise chunk_path (still its own unchanged, valid-
+    looking prior content) would be paired with no sidecar whatsoever."""
+    from mfdoc import testbatch
+
+    conn = _sqlite_conn()
+    _seed_fakemod_scenarios(conn, 4)
+
+    out_path = tmp_path / "FAKEMOD.md"
+    first = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, _chunk_aware_caller("python", "pytest"),
+        "writing rules text", "template text", max_scenarios_per_call=2,
+    )
+    assert first.ok is True
+    chunk1_sidecar = tmp_path / "FAKEMOD.chunk1.py"
+    old_sidecar_text = chunk1_sidecar.read_text(encoding="utf-8")
+
+    def exploding_caller(prompt: str) -> ModelResponse:
+        raise RuntimeError("simulated: model call always fails")
+
+    second = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, exploding_caller,
+        "writing rules text", "template text", max_scenarios_per_call=1,
+        prior_chunks=first.chunk_state,
+    )
+    assert second.ok is False
+    assert chunk1_sidecar.exists(), "the old sidecar must be restored, not left missing"
+    assert chunk1_sidecar.read_text(encoding="utf-8") == old_sidecar_text
+    assert not chunk1_sidecar.with_name(chunk1_sidecar.name + ".stale").exists(), (
+        "the backup must not be left behind once restored"
     )
 
 
@@ -4351,6 +4415,55 @@ def test_write_test_doc_with_sidecar_removes_the_sidecar_if_the_doc_replace_fail
 
     assert not out_path.exists()
     assert not sidecar_path.exists(), "no orphaned sidecar should remain with no document to pair it with"
+    assert not out_path.with_name("FAKEMOD.md.tmp").exists(), "no leftover .tmp document should remain"
+    assert not sidecar_path.with_name("FAKEMOD.py.tmp").exists(), "no leftover .tmp sidecar should remain"
+
+
+def test_write_test_doc_with_sidecar_cleans_up_tmp_files_when_the_first_write_fails(tmp_path, monkeypatch):
+    """Copilot review follow-up: every failure path -- including the
+    earliest one, a plain content write to one of the `.tmp` siblings --
+    must not leave that `.tmp` file behind. A failed run repeated enough
+    times would otherwise accumulate misleading generated-source/markdown
+    artifacts in the output tree that no validation ever looks at."""
+    import pytest
+
+    from mfdoc import testbatch
+    from mfdoc.db import insert
+
+    conn = _sqlite_conn()
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    rc1 = _insert_rc(conn, 1, 10)
+    insert(
+        conn, "test_case", member_id=1, kind="unit", rule_candidate_id=rc1,
+        scenario_name="FAKEMOD:BR-001",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "COND", "citation": "[[FAKEMOD:10]]"}',
+        then_json='{"citation": "[[FAKEMOD:10]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:10", confidence="verified",
+    )
+    conn.commit()
+
+    doc_text = (
+        "---\nsources: [\"FAKEMOD\"]\n---\n\n"
+        "# FAKEMOD tests\n\n"
+        "```python\ndef test_one():\n    # FAKEMOD:BR-001\n    ...\n```\n"
+    )
+    out_path = tmp_path / "FAKEMOD.md"
+
+    real_write_text = Path.write_text
+
+    def exploding_write_text(self, content, *args, **kwargs):
+        if self.name == "FAKEMOD.py.tmp":
+            raise OSError("simulated: disk full")
+        return real_write_text(self, content, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", exploding_write_text)
+
+    with pytest.raises(OSError):
+        testbatch.write_test_doc_with_sidecar(conn, "FAKEMOD", out_path, doc_text, "python")
+
+    assert not (tmp_path / "FAKEMOD.py.tmp").exists()
+    assert not (tmp_path / "FAKEMOD.md.tmp").exists()
 
 
 def test_write_test_doc_with_sidecar_writes_sidecar_and_doc_together(tmp_path):

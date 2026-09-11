@@ -288,19 +288,34 @@ def write_test_doc_with_sidecar(conn, member_name: str, out_path: Path, doc_text
     sidecar_path.parent.mkdir(parents=True, exist_ok=True)
     sidecar_tmp = sidecar_path.with_name(sidecar_path.name + ".tmp")
     out_tmp = out_path.with_name(out_path.name + ".tmp")
-    sidecar_tmp.write_text(code, encoding="utf-8")
-    out_tmp.write_text(f"---{front_matter_block}---{prose}{manifest}", encoding="utf-8")
-    sidecar_backup = sidecar_path.read_bytes() if sidecar_path.exists() else None
-    sidecar_tmp.replace(sidecar_path)
     try:
-        out_tmp.replace(out_path)
-    except OSError:
-        if sidecar_backup is None:
-            sidecar_path.unlink(missing_ok=True)
-        else:
-            sidecar_path.write_bytes(sidecar_backup)
-        raise
-    return sidecar_path
+        sidecar_tmp.write_text(code, encoding="utf-8")
+        out_tmp.write_text(f"---{front_matter_block}---{prose}{manifest}", encoding="utf-8")
+        sidecar_backup = sidecar_path.read_bytes() if sidecar_path.exists() else None
+        sidecar_tmp.replace(sidecar_path)
+        try:
+            out_tmp.replace(out_path)
+        except OSError:
+            if sidecar_backup is None:
+                sidecar_path.unlink(missing_ok=True)
+            else:
+                sidecar_path.write_bytes(sidecar_backup)
+            raise
+        return sidecar_path
+    finally:
+        # Every failure path above can leave one or both `.tmp` siblings
+        # behind (Copilot review): `sidecar_tmp`/`out_tmp` survive a failed
+        # write to either of them, and `out_tmp` also survives its own
+        # failed `replace` (already handled above, but that handling
+        # rolls back `sidecar_path`, not this leftover temp file). Neither
+        # path is ever read back by anything -- `sidecar_path_for` only
+        # ever resolves the real extension, never `.tmp` -- so this is
+        # cosmetic in the same sense `_prune_stale_test_chunk_files`'
+        # cleanup is, but a failed run repeated enough times would
+        # otherwise accumulate misleading generated-source/markdown
+        # artifacts in the output tree that no validation ever looks at.
+        sidecar_tmp.unlink(missing_ok=True)
+        out_tmp.unlink(missing_ok=True)
 
 
 def _prior_fingerprint_for(out_path: Path) -> str | None:
@@ -449,11 +464,14 @@ def _prune_stale_test_chunk_files(out_path: Path, expected_names: set[str], lang
     return problems
 
 
-def _invalidate_sidecar_if_range_changed(chunk_path: Path, language: str, expected_ids: set[str]) -> None:
-    """Remove `chunk_path`'s existing sidecar if its own `MEMBER:BR-nnn`
-    content no longer matches `expected_ids` -- this chunk index's current
-    row range, from this run's freshly recomputed `routine_aware_chunk_
-    ranges` -- before this chunk is (re)rendered.
+def _invalidate_sidecar_if_range_changed(chunk_path: Path, language: str,
+                                          expected_ids: set[str]) -> Path | None:
+    """Rename `chunk_path`'s existing sidecar out of the way if its own
+    `MEMBER:BR-nnn` content no longer matches `expected_ids` -- this chunk
+    index's current row range, from this run's freshly recomputed
+    `routine_aware_chunk_ranges` -- before this chunk is (re)rendered.
+    Returns the backup path it was renamed to, or `None` if nothing needed
+    invalidating.
 
     Closes a narrower gap than the full chunk-scoped-fingerprint redesign
     `_prior_fingerprint_for`'s docstring already declines to do (Copilot
@@ -494,7 +512,22 @@ def _invalidate_sidecar_if_range_changed(chunk_path: Path, language: str, expect
     invalidate) or if its content already matches `expected_ids` (nothing
     changed for this index -- the common case).
 
-    Raises `OSError` if removal fails, unlike this module's other
+    Renamed to a `.stale` sibling rather than deleted outright (Copilot
+    review): the caller renders this chunk immediately afterward, and if
+    that render never gets far enough to write anything at all (every
+    model call raises before a single response comes back), a plain
+    delete here would leave the *old*, otherwise-unchanged `chunk_path`
+    on disk with no sidecar at all -- `validate_test_doc` would then fall
+    back to scanning `chunk_path`'s own body, whose old `## Scenarios
+    covered` manifest still cites real, resolvable `test_case` ids, and
+    report the pair `ok=True` even though the actual generated test
+    source file has vanished. The caller restores this backup when the
+    render didn't succeed, and removes it once a fresh sidecar has been
+    written in its place; either way, this chunk always has *some*
+    sidecar next to it on disk when this function returns, or the render
+    that follows is what determines whether a fresh one gets written.
+
+    Raises `OSError` if the rename fails, unlike this module's other
     best-effort cleanup helpers (`_prune_stale_test_chunk_files`'s own
     swallowed `OSError`s): those only ever risk leaving an orphaned file
     an unrelated future tree validation might flag, cosmetic in the sense
@@ -510,14 +543,16 @@ def _invalidate_sidecar_if_range_changed(chunk_path: Path, language: str, expect
     rendering into a validation it cannot pass."""
     sidecar = sidecar_path_for(chunk_path, language)
     if sidecar is None or not sidecar.exists():
-        return
+        return None
     on_disk_ids = {
         f"{m.group('member').upper()}:BR-{m.group('n')}"
         for m in BR_REF.finditer(sidecar.read_text(encoding="utf-8"))
     }
     if on_disk_ids == expected_ids:
-        return
-    sidecar.unlink()
+        return None
+    backup = sidecar.with_name(sidecar.name + ".stale")
+    sidecar.replace(backup)
+    return backup
 
 
 def select_test_batch_members(conn) -> list[str]:
@@ -1174,10 +1209,21 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
     # the index is ever written -- `_prune_stale_chunk_files` above only
     # ever touches `.chunk<N>` files, deliberately, so this is a separate
     # cleanup step, not something to fold into it.
+    # Renamed to a `.stale` sibling, not deleted outright (Copilot review):
+    # every path below that reaches the index write further down
+    # overwrites `out_path` unconditionally, regardless of individual
+    # chunk failures -- but if something in between raises an exception
+    # this function doesn't itself catch (escaping uncaught, all the way
+    # out of a run_test_batch/plan_test_batch call), `out_path` never gets
+    # there at all and is left exactly as it was: the *old* single-
+    # document render, with its sidecar already gone. Restored in the
+    # `finally` below unless the index write actually completes.
     stale_index_sidecar = sidecar_path_for(out_path, language)
+    index_sidecar_backup = None
     if stale_index_sidecar is not None and stale_index_sidecar.exists():
         try:
-            stale_index_sidecar.unlink()
+            index_sidecar_backup = stale_index_sidecar.with_name(stale_index_sidecar.name + ".stale")
+            stale_index_sidecar.replace(index_sidecar_backup)
         except OSError as exc:
             # Not merely cosmetic (Copilot review): unlike a leftover
             # `.chunk<N>` file (nothing currently authoritative reads it
@@ -1194,72 +1240,115 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
             # lock is still the kind of transient condition that shouldn't
             # stop every other member/chunk in this run from completing.
             problems.append(f"could not remove stale single-document sidecar {stale_index_sidecar}: {exc}")
-    for i, (start, end) in enumerate(ranges, start=1):
-        chunk_rows = rows[start - 1:end]
-        chunk_path = out_path.with_name(f"{out_path.stem}.chunk{i:0{chunk_width}d}{out_path.suffix}")
-        brief = test_case_brief_chunk(
-            member_name, system, chunk_rows, i, chunk_count, redact=redact, routines=routines,
-            sme_notes=sme_notes,
-        )
-        brief_hash = hashlib.sha256(brief.encode("utf-8")).hexdigest()
-        result = None
-        if _test_chunk_reuse_ok(
-            conn, prior_chunks, i, brief_hash, chunk_path, _fingerprint_cache=fingerprint_cache,
-            _valid_scenarios=valid_scenarios,
-        ):
-            result = DocResult(member_name, str(chunk_path), True, 0, 0, 0, [])
-            logger.debug("%s: chunk %d/%d reused (unchanged)", member_name, i, chunk_count)
-        if result is None:
-            # See _invalidate_sidecar_if_range_changed's docstring (issue
-            # #195 review): about to regenerate this chunk index as a
-            # cache miss regardless -- if it still has an on-disk sidecar
-            # from a *prior* run whose range no longer matches this run's
-            # `chunk_rows` (boundaries moved even though the member-wide
-            # rule_candidate ordering didn't), drop it now so the
-            # about-to-run validation can't wrongly treat that
-            # wrong-range sidecar as authoritative just because the
-            # member-wide fingerprint still happens to match.
-            expected_ids = {r["scenario_name"].upper() for r in chunk_rows}
-            try:
-                _invalidate_sidecar_if_range_changed(chunk_path, language, expected_ids)
-            except OSError as exc:
-                # Surfaced as this chunk's own failure (Copilot review),
-                # not swallowed: rendering ahead with a wrong-range sidecar
-                # still on disk would fail validation on every retry
-                # anyway (see that function's docstring), just less
-                # legibly than reporting the actual removal failure here.
-                result = DocResult(
-                    member_name, str(chunk_path), False, 0, 0, 0,
-                    [f"could not invalidate stale chunk sidecar: {exc.__class__.__name__}: {exc}"],
-                )
+            index_sidecar_backup = None
+    index_written = False
+    try:
+        for i, (start, end) in enumerate(ranges, start=1):
+            chunk_rows = rows[start - 1:end]
+            chunk_path = out_path.with_name(f"{out_path.stem}.chunk{i:0{chunk_width}d}{out_path.suffix}")
+            brief = test_case_brief_chunk(
+                member_name, system, chunk_rows, i, chunk_count, redact=redact, routines=routines,
+                sme_notes=sme_notes,
+            )
+            brief_hash = hashlib.sha256(brief.encode("utf-8")).hexdigest()
+            result = None
+            if _test_chunk_reuse_ok(
+                conn, prior_chunks, i, brief_hash, chunk_path, _fingerprint_cache=fingerprint_cache,
+                _valid_scenarios=valid_scenarios,
+            ):
+                result = DocResult(member_name, str(chunk_path), True, 0, 0, 0, [])
+                logger.debug("%s: chunk %d/%d reused (unchanged)", member_name, i, chunk_count)
             if result is None:
-                logger.info("%s: chunk %d/%d generating", member_name, i, chunk_count)
-                result = _generate_test_doc_from_brief(
-                    conn, member_name, brief, language, framework, chunk_path, caller,
-                    writing_rules, template, max_attempts=max_attempts,
-                    _fingerprint_cache=fingerprint_cache,
+                # See _invalidate_sidecar_if_range_changed's docstring (issue
+                # #195 review): about to regenerate this chunk index as a
+                # cache miss regardless -- if it still has an on-disk sidecar
+                # from a *prior* run whose range no longer matches this run's
+                # `chunk_rows` (boundaries moved even though the member-wide
+                # rule_candidate ordering didn't), drop it now so the
+                # about-to-run validation can't wrongly treat that
+                # wrong-range sidecar as authoritative just because the
+                # member-wide fingerprint still happens to match.
+                expected_ids = {r["scenario_name"].upper() for r in chunk_rows}
+                sidecar_backup = None
+                try:
+                    sidecar_backup = _invalidate_sidecar_if_range_changed(chunk_path, language, expected_ids)
+                except OSError as exc:
+                    # Surfaced as this chunk's own failure (Copilot review),
+                    # not swallowed: rendering ahead with a wrong-range sidecar
+                    # still on disk would fail validation on every retry
+                    # anyway (see that function's docstring), just less
+                    # legibly than reporting the actual removal failure here.
+                    result = DocResult(
+                        member_name, str(chunk_path), False, 0, 0, 0,
+                        [f"could not invalidate stale chunk sidecar: {exc.__class__.__name__}: {exc}"],
+                    )
+                if result is None:
+                    logger.info("%s: chunk %d/%d generating", member_name, i, chunk_count)
+                    result = _generate_test_doc_from_brief(
+                        conn, member_name, brief, language, framework, chunk_path, caller,
+                        writing_rules, template, max_attempts=max_attempts,
+                        _fingerprint_cache=fingerprint_cache,
+                    )
+                    if sidecar_backup is not None:
+                        # Copilot review: this chunk's render didn't validate
+                        # (no fresh sidecar was ever written to replace the one
+                        # just moved aside), possibly without writing anything
+                        # to chunk_path at all (every model call raised before
+                        # a response came back) -- restore the backup so this
+                        # chunk is never left with a manifest/body that cites
+                        # real ids but no sidecar to actually back them, rather
+                        # than leave it removed. A successful render already
+                        # wrote its own fresh sidecar via write_test_doc_with_
+                        # sidecar, so the backup is simply discarded.
+                        try:
+                            if result.ok:
+                                sidecar_backup.unlink()
+                            else:
+                                sidecar_backup.replace(sidecar_path_for(chunk_path, language))
+                        except OSError as exc:
+                            logger.warning(
+                                "%s: chunk %d/%d: could not clean up stale sidecar backup %s: %s",
+                                member_name, i, chunk_count, sidecar_backup, exc,
+                            )
+            input_tokens += result.input_tokens
+            output_tokens += result.output_tokens
+            chunk_entries.append((i, chunk_path, result))
+            chunk_state[str(i)] = {"ok": result.ok, "brief_sha256": brief_hash}
+            if result.ok:
+                logger.debug("%s: chunk %d/%d complete", member_name, i, chunk_count)
+            if not result.ok:
+                density_note = format_density_note(density_metrics[i - 1])
+                logger.warning(
+                    "%s: chunk %d/%d failed: %s -- %s", member_name, i, chunk_count,
+                    "; ".join(result.problems), density_note,
                 )
-        input_tokens += result.input_tokens
-        output_tokens += result.output_tokens
-        chunk_entries.append((i, chunk_path, result))
-        chunk_state[str(i)] = {"ok": result.ok, "brief_sha256": brief_hash}
-        if result.ok:
-            logger.debug("%s: chunk %d/%d complete", member_name, i, chunk_count)
-        if not result.ok:
-            density_note = format_density_note(density_metrics[i - 1])
-            logger.warning(
-                "%s: chunk %d/%d failed: %s -- %s", member_name, i, chunk_count,
-                "; ".join(result.problems), density_note,
-            )
-            problems.append(
-                f"chunk {i}/{chunk_count} ({chunk_path.name}) failed: "
-                + "; ".join(result.problems) + f" -- {density_note}"
-            )
+                problems.append(
+                    f"chunk {i}/{chunk_count} ({chunk_path.name}) failed: "
+                    + "; ".join(result.problems) + f" -- {density_note}"
+                )
 
-    confidence = _aggregate_chunk_confidence([p for _, p, r in chunk_entries if r.ok])
-    index_text = _render_chunk_index(member_name, system, language, framework, chunk_entries, confidence)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(index_text, encoding="utf-8")
+        confidence = _aggregate_chunk_confidence([p for _, p, r in chunk_entries if r.ok])
+        index_text = _render_chunk_index(member_name, system, language, framework, chunk_entries, confidence)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(index_text, encoding="utf-8")
+        index_written = True
+    finally:
+        if index_sidecar_backup is not None:
+            try:
+                if index_written:
+                    index_sidecar_backup.unlink()
+                else:
+                    # Copilot review: never reached the index write above
+                    # (an uncaught exception escaping this block) -- restore
+                    # the old single-document sidecar so out_path (still its
+                    # own pre-existing single-document render, untouched)
+                    # isn't left paired with no sidecar at all.
+                    index_sidecar_backup.replace(stale_index_sidecar)
+            except OSError as exc:
+                logger.warning(
+                    "%s: could not clean up stale index sidecar backup %s: %s",
+                    member_name, index_sidecar_backup, exc,
+                )
 
     # The index is built deterministically, not model-generated, but that's
     # not a reason to skip checking it -- validate_test_doc is the same

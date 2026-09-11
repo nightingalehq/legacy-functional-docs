@@ -12,6 +12,39 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-11r):**
+- Addressed the twenty-ninth Copilot review round on PR #209 (issue
+  #195):
+  1. `_invalidate_sidecar_if_range_changed` now renames a wrong-range
+     sidecar to a `.stale` sibling instead of deleting it outright, and
+     returns that backup path -- if the chunk's own re-render never gets
+     far enough to write anything at all (every model call raises before
+     a response comes back), a plain delete left `chunk_path` (its old,
+     unchanged content, whose stale manifest still cites real, resolvable
+     ids) with no sidecar at all, which `validate_test_doc` treats as an
+     embedded-fence document and can validate clean from the stale
+     manifest alone. The caller now restores the backup when the render
+     didn't succeed, and discards it once a fresh sidecar has replaced it.
+  2. The leftover single-document sidecar cleanup in
+     `_generate_member_test_doc_chunked` has the identical hole one layer
+     up: if it's removed and something between there and the index
+     write raises uncaught, `out_path` is left as its own old,
+     pre-existing single-document render with no sidecar at all. Same
+     fix -- renamed to a backup, restored in a `finally` unless the index
+     write actually completes.
+  3. `write_test_doc_with_sidecar`'s temp-then-replace write left one or
+     both `.tmp` siblings behind on every failure path (a failed content
+     write, a failed first replace) -- neither is ever read back by
+     anything, but a repeatedly-failing run would accumulate misleading
+     generated-source/markdown artifacts in the output tree. Both are now
+     removed in a `finally` regardless of outcome.
+- Six new regression tests (direct rename-not-delete checks for both
+  sidecar-invalidation call sites, an end-to-end boundary-shift-plus-
+  render-failure case, and `.tmp` cleanup on both a first-write and a
+  first-replace failure). Full suite green (1046 passed, 2 skipped) plus
+  a clean `mfdoc validate` pass against `examples/` (71/71 documents, 0
+  invalid citations of 750).
+
 **Progress (2026-09-11q):**
 - Addressed the twenty-eighth Copilot review round on PR #209 (issue
   #195):
