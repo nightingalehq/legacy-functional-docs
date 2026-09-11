@@ -12,9 +12,11 @@ a business rule without seeing its exact condition is where invention creeps in.
 
 from __future__ import annotations
 
+import bisect
 import json
 import re
 import statistics
+from dataclasses import dataclass
 
 from .citations import _cite, _rule_id, numbered_rule_candidates
 from .db import GAP_SEVERITY_ORDER_SQL
@@ -88,18 +90,31 @@ def _copycode_rule_candidates(conn, mid: int, _seen: set | None = None) -> list[
     return out
 
 
-def _branch_data_access(conn, mid: int, name: str, start_line: int, end_line: int) -> str | None:
-    """Compact citation list of every data_access row strictly between
+def _branch_data_access(acc_rows: list, acc_line_nos: list[int], name: str,
+                         start_line: int, end_line: int) -> str | None:
+    """Compact citation list of every data_access row (from `acc_rows` --
+    this member's full `data_access` result set, already fetched once by
+    `build_member_facts`/`module_brief`; see issue #183) strictly between
     `start_line` and `end_line` (inclusive of end_line, exclusive of
     start_line -- the construct's own line) -- attached to an IF/ELSE
     rule's bullet so a GET/UPDATE/DELETE inside that specific branch is
     impossible to miss when writing the branch up, rather than only
     appearing, uncorrelated, in the brief's separate "Data access"
-    section. None when nothing falls in range."""
-    rows = conn.execute(
-        "SELECT * FROM data_access WHERE member_id=? AND line_no > ? AND line_no <= ? ORDER BY line_no",
-        (mid, start_line, end_line),
-    ).fetchall()
+    section. None when nothing falls in range.
+
+    Looks up the matching slice via `bisect` on `acc_line_nos` (the same
+    `acc_rows`, already ordered by `line_no` -- module_brief's own "Data
+    access" query -- with just its `line_no` column pulled out once,
+    ahead of the per-rule loop, purely so `bisect` has something to search)
+    rather than a full linear scan of every data_access row per rule: with
+    R branch rules and A data_access rows, a per-rule linear scan is
+    O(R*A); this is O(R*log A) to find each slice's bounds plus O(k) to
+    read the k rows actually in range -- avoiding both a fresh
+    `conn.execute` per rule (the original issue #183 finding) and an
+    equivalent-cost Python scan standing in for it."""
+    lo = bisect.bisect_right(acc_line_nos, start_line)
+    hi = bisect.bisect_right(acc_line_nos, end_line)
+    rows = acc_rows[lo:hi]
     if not rows:
         return None
     return "; ".join(
@@ -250,25 +265,30 @@ def _enclosing_condition(conn, member_id: int, rule_rows: list, line_no: int) ->
     return match
 
 
-def _caller_guard_chain(conn, caller_id: int, caller_name: str, call_line_no: int,
-                         redact: Redactor = NULL_REDACTOR) -> list[str]:
-    """For a callee reachable from exactly one call site, the caller's own
-    `call_edge` rows strictly before that call (already ordered by
-    `line_no`, per `call_edge`'s own citation ordering elsewhere in this
-    module) -- the validation/confirmation/mode-gate calls the caller
-    performs before ever reaching this one, which module_brief's own
-    "Inbound callers" section previously dropped entirely by citing only the
-    call line itself (issue #151). Each preceding call is paired with its
-    innermost enclosing `rule_candidate` condition, when one exists, via
-    `_enclosing_condition` -- read-only synthesis over facts already in the
-    store, no new extraction. Returns rendered bullet lines, or an empty
-    list when there is nothing preceding this call in its own caller.
+def _caller_guard_chain_facts(conn, caller_id: int, call_line_no: int) -> list[dict]:
+    """Raw (unredacted) facts for `_render_guard_chain`: for a callee
+    reachable from exactly one call site, the caller's own `call_edge` rows
+    strictly before that call (already ordered by `line_no`, per
+    `call_edge`'s own citation ordering elsewhere in this module) -- the
+    validation/confirmation/mode-gate calls the caller performs before ever
+    reaching this one, which module_brief's own "Inbound callers" section
+    previously dropped entirely by citing only the call line itself (issue
+    #151). Each preceding call is paired with its innermost enclosing
+    `rule_candidate` condition, when one exists, via `_enclosing_condition`
+    -- read-only synthesis over facts already in the store, no new
+    extraction. Returns `[]` when there is nothing preceding this call in
+    its own caller.
 
-    `condition` is raw source text (the same field every other condition
-    rendering in this module passes through `redact` before writing to the
-    brief -- see the "Top rules"/"Candidate business rules" sections below),
-    so it goes through the same `redact` call here rather than being pasted
-    in verbatim."""
+    Deliberately returns raw rows, not rendered bullet lines: `condition`
+    is raw source text that must go through the *caller's own* `redact` at
+    render time (see `_render_guard_chain`), the same way every other
+    condition in this module is redacted only when rendered, never when
+    fetched -- `MemberFacts.guard_lines` (issue #183 review feedback) is
+    built from this function's output plus whichever `redact` a given
+    `module_brief()` call is actually using, rather than baking one
+    `redact` in at fact-gathering time and risking a mismatch if a caller
+    ever reuses a `MemberFacts` with a different `redact` than the one it
+    was built with."""
     preceding = conn.execute(
         "SELECT * FROM call_edge WHERE caller_id=? AND line_no<? ORDER BY line_no",
         (caller_id, call_line_no),
@@ -278,17 +298,35 @@ def _caller_guard_chain(conn, caller_id: int, caller_name: str, call_line_no: in
     rule_rows = conn.execute(
         "SELECT * FROM rule_candidate WHERE member_id=? ORDER BY line_no", (caller_id,)
     ).fetchall()
-    lines = []
+    facts = []
     for call in preceding:
         cond = _enclosing_condition(conn, caller_id, rule_rows, call["line_no"])
-        callee = call["callee_name"] or "UNKNOWN"
-        cite = _cite(caller_name, call["line_no"])
-        if cond and cond["condition"]:
+        facts.append({
+            "callee": call["callee_name"] or "UNKNOWN",
+            "call_kind": call["call_kind"],
+            "call_line_no": call["line_no"],
+            "condition": cond["condition"] if cond else None,
+            "cond_line_no": cond["line_no"] if cond else None,
+            "cond_construct": cond["construct"] if cond else None,
+        })
+    return facts
+
+
+def _render_guard_chain(guard_facts: list[dict], caller_name: str, redact: Redactor) -> list[str]:
+    """Render `_caller_guard_chain_facts`' raw rows into bullet lines,
+    applying `redact` here -- at render time, using whichever `redact` this
+    particular `module_brief()` call is using -- rather than at fact-gather
+    time (see `_caller_guard_chain_facts`'s docstring for why)."""
+    lines = []
+    for f in guard_facts:
+        callee = f["callee"]
+        cite = _cite(caller_name, f["call_line_no"])
+        if f["condition"]:
             lines.append(
-                f"- when `{redact(cond['condition'])}` holds {_cite(caller_name, cond['line_no'])}, "
-                f"calls `{callee}` (`{call['call_kind']}`) {cite}"
+                f"- when `{redact(f['condition'])}` holds {_cite(caller_name, f['cond_line_no'])}, "
+                f"calls `{callee}` (`{f['call_kind']}`) {cite}"
             )
-        elif cond:
+        elif f["cond_line_no"] is not None:
             # `_enclosing_condition` found a real enclosing block (a DECIDE
             # FOR CONDITION, an ELSE, ...) but that construct's own
             # `condition` text wasn't captured -- the call is still
@@ -296,8 +334,8 @@ def _caller_guard_chain(conn, caller_id: int, caller_name: str, call_line_no: in
             # quote. Saying "unconditionally" here would be wrong, not
             # merely uninformative (Copilot review on PR #151).
             lines.append(
-                f"- calls `{callee}` (`{call['call_kind']}`) {cite}, scoped inside "
-                f"`{cond['construct']}` {_cite(caller_name, cond['line_no'])} "
+                f"- calls `{callee}` (`{f['call_kind']}`) {cite}, scoped inside "
+                f"`{f['cond_construct']}` {_cite(caller_name, f['cond_line_no'])} "
                 "(guard condition not captured)"
             )
         else:
@@ -309,7 +347,7 @@ def _caller_guard_chain(conn, caller_id: int, caller_name: str, call_line_no: in
             # absence of a guard line speak for it, rather than asserting
             # "unconditionally", which claims more than this brief can back
             # (Copilot review on PR #151).
-            lines.append(f"- calls `{callee}` (`{call['call_kind']}`) {cite}")
+            lines.append(f"- calls `{callee}` (`{f['call_kind']}`) {cite}")
     return lines
 
 
@@ -625,12 +663,194 @@ def _natural_screen_field_names(conn, mid) -> set[str]:
     return {r["target"].upper() for r in rows if r["target"]}
 
 
+@dataclass
+class MemberFacts:
+    """Every whole-member fact `module_brief` needs to render everything
+    except the "Candidate business rules" section -- interface, data
+    access, calls, inbound callers, gaps, and the rest, none of which
+    depends on `rule_range` (see `module_brief`'s own docstring). Built once
+    by `build_member_facts()` and reused across every one of a chunked
+    member's per-chunk `module_brief()` calls (issue #183), instead of each
+    chunk re-running the same ~15 fact-store queries and only ever changing
+    which slice of `rules` it renders.
+
+    Fields hold raw rows (unredacted, unformatted) exactly as `module_brief`
+    used to fetch them inline -- redaction and markdown formatting still
+    happen in `module_brief` itself, at render time, so a `MemberFacts`
+    built once and reused across chunks (or reused with a *different*
+    `redact` than whatever call first built it -- see issue #183 review
+    feedback) renders identically to a fresh per-chunk fetch would have.
+    This includes `guard_facts` (the "preceding calls" facts for a callee
+    reachable from exactly one call site): unlike an earlier version of
+    this class, it is *not* pre-rendered with any particular `redact` --
+    `module_brief` renders it via `_render_guard_chain(guard_facts,
+    caller_name, redact)`, using its own caller's `redact`, every time."""
+    mid: int
+    name: str
+    m: object
+    line_count: int
+    hdr: list
+    params: list
+    views: list
+    screen_field_names: set
+    other_vars: list
+    data_area_includes: list
+    routines: list
+    acc: list
+    unused: list
+    tx: list
+    calls: list
+    inbound: list
+    guard_facts: list
+    inter: list
+    msgs: list
+    rules: list
+    copycode_rules: list
+    gaps: list
+
+
+def build_member_facts(conn, member_name: str) -> "MemberFacts | str":
+    """Fetch every whole-member fact `module_brief` needs, once, so a
+    chunked member's many `module_brief()` calls (one per chunk -- see
+    `_generate_module_doc_chunked`) can share a single fact-gather instead
+    of each repeating it (issue #183).
+
+    Returns a `MemberFacts` on success, or a rendered "ambiguous"/"no such
+    member" markdown string -- the exact same early-return shape
+    `module_brief` itself used to produce for the identical lookup failure.
+    A caller that gets a `str` back should treat it as a complete brief and
+    never call `module_brief()` with it.
+
+    Takes no `redact` -- every field, `guard_facts` included, is raw,
+    unredacted data (see `MemberFacts`'s docstring); redaction only ever
+    happens in `module_brief` at render time, using whichever `redact` that
+    particular call was given. This is what makes reusing one `MemberFacts`
+    across a member's chunks safe even if a caller (hypothetically) reused
+    it with a different `redact` per chunk -- there is no redact-dependent
+    state baked into the facts for that to go stale against."""
+    from .db import resolve_member_by_name
+
+    matches, ambiguous_libs = resolve_member_by_name(conn, member_name)
+    if ambiguous_libs:
+        libs = ", ".join(ambiguous_libs)
+        return (
+            f"# {member_name}\n\nMember name is ambiguous across libraries ({libs}). "
+            f"Re-run with a library-qualified name.\n"
+        )
+    if not matches:
+        return f"# {member_name}\n\nNo such member in the index.\n"
+    m = matches[0]
+    mid, name = m["id"], m["name"]
+
+    line_count = conn.execute(
+        "SELECT COUNT(*) FROM source_line WHERE member_id=?", (mid,)
+    ).fetchone()[0]
+
+    all_lines = conn.execute(
+        "SELECT line_no, text, is_comment FROM source_line WHERE member_id=? ORDER BY line_no",
+        (mid,),
+    ).fetchall()
+    hdr = []
+    for r in all_lines:
+        if not r["is_comment"]:
+            if hdr:
+                break
+            if r["text"].strip():
+                break
+            continue
+        body_text = r["text"].strip().lstrip("*/%! ").rstrip("*/ ").strip()
+        if len(body_text) > 3:
+            hdr.append({"line_no": r["line_no"], "text": body_text})
+
+    params = conn.execute(
+        "SELECT * FROM variable WHERE member_id=? AND scope IN ('parameter','entry') "
+        "AND name NOT LIKE 'USING %' ORDER BY line_no",
+        (mid,),
+    ).fetchall()
+
+    views = conn.execute(
+        "SELECT * FROM variable WHERE member_id=? AND scope='view' ORDER BY line_no", (mid,)
+    ).fetchall()
+
+    screen_field_names = (
+        _natural_screen_field_names(conn, mid) if m["dialect"] == "natural" else set()
+    )
+    all_other_vars = conn.execute(
+        "SELECT * FROM variable WHERE member_id=? AND scope NOT IN "
+        "('parameter','entry','view','mantis_interface') ORDER BY line_no",
+        (mid,),
+    ).fetchall()
+    data_area_includes = conn.execute(
+        "SELECT * FROM variable WHERE member_id=? AND name LIKE 'USING %' ORDER BY line_no",
+        (mid,),
+    ).fetchall()
+    other_vars = [r for r in all_other_vars if not r["name"].startswith("USING ")]
+
+    routines = fetch_routines(conn, mid)
+
+    acc = conn.execute(
+        "SELECT * FROM data_access WHERE member_id=? ORDER BY line_no", (mid,)
+    ).fetchall()
+
+    from .graph import unused_entity_fields_for_member
+
+    unused = unused_entity_fields_for_member(conn, mid)
+
+    tx = conn.execute(
+        "SELECT * FROM transaction_marker WHERE member_id=? ORDER BY line_no", (mid,)
+    ).fetchall()
+
+    calls = conn.execute(
+        "SELECT * FROM call_edge WHERE caller_id=? ORDER BY line_no", (mid,)
+    ).fetchall()
+
+    inbound = conn.execute(
+        """
+        SELECT c.id AS caller_id, c.name AS caller, ce.call_kind, ce.line_no
+          FROM call_edge ce JOIN member c ON c.id = ce.caller_id
+         WHERE UPPER(ce.callee_name)=UPPER(?) ORDER BY c.name, ce.line_no
+        """,
+        (name,),
+    ).fetchall()
+    guard_facts: list[dict] = []
+    if len(inbound) == 1:
+        only = inbound[0]
+        guard_facts = _caller_guard_chain_facts(conn, only["caller_id"], only["line_no"])
+
+    inter = conn.execute(
+        "SELECT * FROM interaction WHERE member_id=? ORDER BY line_no", (mid,)
+    ).fetchall()
+
+    msgs = conn.execute(
+        "SELECT * FROM message_ref WHERE member_id=? ORDER BY line_no", (mid,)
+    ).fetchall()
+
+    rules = conn.execute(
+        "SELECT * FROM rule_candidate WHERE member_id=? ORDER BY line_no", (mid,)
+    ).fetchall()
+
+    copycode_rules = _copycode_rule_candidates(conn, mid)
+
+    gaps = conn.execute(
+        f"SELECT * FROM gap WHERE member_id=? ORDER BY {GAP_SEVERITY_ORDER_SQL}, line_no", (mid,)
+    ).fetchall()
+
+    return MemberFacts(
+        mid=mid, name=name, m=m, line_count=line_count, hdr=hdr, params=params, views=views,
+        screen_field_names=screen_field_names, other_vars=other_vars,
+        data_area_includes=data_area_includes, routines=routines, acc=acc, unused=unused,
+        tx=tx, calls=calls, inbound=inbound, guard_facts=guard_facts, inter=inter, msgs=msgs,
+        rules=rules, copycode_rules=copycode_rules, gaps=gaps,
+    )
+
+
 def module_brief(conn, member_name: str, excerpt_rules: bool = True,
                   redact: Redactor = NULL_REDACTOR, lexicon: dict[str, str] | None = None,
                   rule_range: tuple[int, int] | None = None,
                   chunk_info: tuple[int, int] | None = None,
                   chunk_map: dict[str, int] | None = None,
-                  sme_notes: Notes | None = None) -> str:
+                  sme_notes: Notes | None = None,
+                  facts: "MemberFacts | str | None" = None) -> str:
     """`rule_range` (1-based, inclusive, over this member's own rule_candidate
     rows in the same order they're numbered in) restricts the "Candidate
     business rules" section to that slice -- everything else in the brief
@@ -657,20 +877,26 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
     over: the "Internal routines" section below annotates each routine with
     its chunk number when given, so the model can write "documented in
     chunk 15" instead of leaving a dangling forward reference for nothing to
-    ever resolve."""
-    from .db import resolve_member_by_name
+    ever resolve.
 
-    matches, ambiguous_libs = resolve_member_by_name(conn, member_name)
-    if ambiguous_libs:
-        libs = ", ".join(ambiguous_libs)
-        return (
-            f"# {member_name}\n\nMember name is ambiguous across libraries ({libs}). "
-            f"Re-run with a library-qualified name.\n"
-        )
-    if not matches:
-        return f"# {member_name}\n\nNo such member in the index.\n"
-    m = matches[0]
-    mid, name = m["id"], m["name"]
+    `facts`, when given, is a `MemberFacts` (or the "ambiguous"/"not found"
+    `str` `build_member_facts` returns for that lookup failure) already
+    built for this same `member_name` -- lets a chunked member's per-chunk
+    calls reuse one member-level fact-gather instead of re-querying it on
+    every chunk (issue #183). When omitted (the default), this function
+    builds it itself via `build_member_facts(conn, member_name)`, exactly
+    as it always fetched these facts before this parameter existed -- so
+    every call site other than the chunked-render loop is unaffected.
+    Every field of a given `facts` (raw, unredacted data -- see
+    `MemberFacts`'s own docstring) is redacted here, with *this* call's own
+    `redact`, so reusing one `MemberFacts` across chunks (or even, in
+    principle, across calls using different `redact` policies) never
+    reads stale or wrongly-redacted text."""
+    if facts is None:
+        facts = build_member_facts(conn, member_name)
+    if isinstance(facts, str):
+        return facts
+    mid, name, m = facts.mid, facts.name, facts.m
     out: list[str] = []
     add = out.append
 
@@ -682,7 +908,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
     add(f"- library: {m['library'] or 'unknown'}")
     if m["dialect"] == "natural":
         add(f"- natural_mode: {m['mode'] or 'unknown'}")
-    add(f"- line_count: {conn.execute('SELECT COUNT(*) FROM source_line WHERE member_id=?', (mid,)).fetchone()[0]}")
+    add(f"- line_count: {facts.line_count}")
     if rule_range:
         start, end = rule_range
         this_chunk, chunk_count = chunk_info or (1, 1)
@@ -705,21 +931,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
     # Only the leading contiguous comment block, and only lines with real content.
     # Rule-of-thumb separators (`*`, `****`) and lone `*` spacers add noise that
     # crowds out the two or three lines that actually say what the module is for.
-    all_lines = conn.execute(
-        "SELECT line_no, text, is_comment FROM source_line WHERE member_id=? ORDER BY line_no",
-        (mid,),
-    ).fetchall()
-    hdr = []
-    for r in all_lines:
-        if not r["is_comment"]:
-            if hdr:
-                break
-            if r["text"].strip():
-                break
-            continue
-        body_text = r["text"].strip().lstrip("*/%! ").rstrip("*/ ").strip()
-        if len(body_text) > 3:
-            hdr.append({"line_no": r["line_no"], "text": body_text})
+    hdr = facts.hdr
     if hdr:
         add("## Header comments (unverified author prose — treat as claims, not facts)")
         for r in hdr:
@@ -727,11 +939,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
         add("")
 
     # --- interfaces
-    params = conn.execute(
-        "SELECT * FROM variable WHERE member_id=? AND scope IN ('parameter','entry') "
-        "AND name NOT LIKE 'USING %' ORDER BY line_no",
-        (mid,),
-    ).fetchall()
+    params = facts.params
     if params:
         add("## Interface (parameters)")
         for r in params:
@@ -739,9 +947,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
             add(f"- {_cite(name, r['line_no'])} level {r['level'] or '-'} `{r['name']}`{spec}")
         add("")
 
-    views = conn.execute(
-        "SELECT * FROM variable WHERE member_id=? AND scope='view' ORDER BY line_no", (mid,)
-    ).fetchall()
+    views = facts.views
     if views:
         add("## Data views declared")
         for r in views:
@@ -766,19 +972,9 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
     # include, not a program variable -- keep it out of the kind-labelled
     # list below (issue #141 follow-up) and surface it in its own small
     # subsection instead of silently dropping it.
-    screen_field_names = (
-        _natural_screen_field_names(conn, mid) if m["dialect"] == "natural" else set()
-    )
-    all_other_vars = conn.execute(
-        "SELECT * FROM variable WHERE member_id=? AND scope NOT IN "
-        "('parameter','entry','view','mantis_interface') ORDER BY line_no",
-        (mid,),
-    ).fetchall()
-    data_area_includes = conn.execute(
-        "SELECT * FROM variable WHERE member_id=? AND name LIKE 'USING %' ORDER BY line_no",
-        (mid,),
-    ).fetchall()
-    other_vars = [r for r in all_other_vars if not r["name"].startswith("USING ")]
+    screen_field_names = facts.screen_field_names
+    other_vars = facts.other_vars
+    data_area_includes = facts.data_area_includes
     if other_vars:
         add("## Program variables and screen/MAP fields")
         add(
@@ -810,7 +1006,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
     # the structural grouping the "Candidate business rules" section below
     # tags each rule with, so the narrator can (and should) write one
     # subsection per routine rather than a flat list -- see writing-rules.md.
-    routines = fetch_routines(conn, mid)
+    routines = facts.routines
     if routines:
         add("## Internal routines")
         add(
@@ -847,9 +1043,12 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
         add("")
 
     # --- data access
-    acc = conn.execute(
-        "SELECT * FROM data_access WHERE member_id=? ORDER BY line_no", (mid,)
-    ).fetchall()
+    acc = facts.acc
+    # Pulled out once, ahead of the "Candidate business rules" loop below,
+    # purely so _branch_data_access's bisect lookups (issue #183 review
+    # feedback) have a plain line_no list to search rather than re-deriving
+    # one (or falling back to an O(rules * data_access) scan) on every rule.
+    acc_line_nos = [r["line_no"] for r in acc]
     if acc:
         add("## Data access (verified from source statements)")
         for r in acc:
@@ -890,9 +1089,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
     # never turns up in this member's own source is a real finding, not a
     # scanner gap -- also recorded as a `gap` row (gap_kind='unused_field')
     # by `mfdoc derive`, so it reaches the gap register too.
-    from .graph import unused_entity_fields_for_member
-
-    unused = unused_entity_fields_for_member(conn, mid)
+    unused = facts.unused
     if unused:
         add("## Unreferenced fields on entities this module touches")
         add(
@@ -911,9 +1108,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
         add("")
 
     # --- transaction markers
-    tx = conn.execute(
-        "SELECT * FROM transaction_marker WHERE member_id=? ORDER BY line_no", (mid,)
-    ).fetchall()
+    tx = facts.tx
     if tx:
         add("## Transaction boundaries")
         for r in tx:
@@ -922,9 +1117,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
         add("")
 
     # --- calls
-    calls = conn.execute(
-        "SELECT * FROM call_edge WHERE caller_id=? ORDER BY line_no", (mid,)
-    ).fetchall()
+    calls = facts.calls
     if calls:
         add("## Outbound calls")
         for r in calls:
@@ -940,14 +1133,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
                 + (f" args: `{redact(r['args'])}`" if r["args"] else ""))
         add("")
 
-    inbound = conn.execute(
-        """
-        SELECT c.id AS caller_id, c.name AS caller, ce.call_kind, ce.line_no
-          FROM call_edge ce JOIN member c ON c.id = ce.caller_id
-         WHERE UPPER(ce.callee_name)=UPPER(?) ORDER BY c.name, ce.line_no
-        """,
-        (name,),
-    ).fetchall()
+    inbound = facts.inbound
     if inbound:
         add("## Inbound callers")
         for r in inbound:
@@ -961,9 +1147,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
         # deliberately scoped to the single-caller case only.
         if len(inbound) == 1:
             only = inbound[0]
-            guard_lines = _caller_guard_chain(
-                conn, only["caller_id"], only["caller"], only["line_no"], redact
-            )
+            guard_lines = _render_guard_chain(facts.guard_facts, only["caller"], redact)
             if guard_lines:
                 add("")
                 add(
@@ -974,9 +1158,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
         add("")
 
     # --- interactions
-    inter = conn.execute(
-        "SELECT * FROM interaction WHERE member_id=? ORDER BY line_no", (mid,)
-    ).fetchall()
+    inter = facts.inter
     if inter:
         add("## User interaction points")
         for r in inter:
@@ -985,9 +1167,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
                 + (f" `{redact((r['fields'] or '')[:90])}`" if r["fields"] else ""))
         add("")
 
-    msgs = conn.execute(
-        "SELECT * FROM message_ref WHERE member_id=? ORDER BY line_no", (mid,)
-    ).fetchall()
+    msgs = facts.msgs
     if msgs:
         add("## Messages and error handling")
         for r in msgs:
@@ -997,9 +1177,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
         add("")
 
     # --- rule candidates, with exact conditions
-    rules = conn.execute(
-        "SELECT * FROM rule_candidate WHERE member_id=? ORDER BY line_no", (mid,)
-    ).fetchall()
+    rules = facts.rules
     if rules:
         add("## Candidate business rules (exact conditions — paraphrase, never invent)")
         add(
@@ -1043,14 +1221,14 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
                         f"has a paired ELSE at {_cite(name, else_line)} -- "
                         "document what happens on BOTH branches, not just this one"
                     )
-                access_summary = _branch_data_access(conn, mid, name, r["line_no"], body_end)
+                access_summary = _branch_data_access(acc, acc_line_nos, name, r["line_no"], body_end)
                 if access_summary:
                     bits.append(f"data access on the true branch: {access_summary}")
             elif r["construct"] == "ELSE" and r["pair_line_no"]:
                 bits.append(f"pairs with the IF at {_cite(name, r['pair_line_no'])}")
                 if r["end_line"]:
                     bits.append(f"else-branch extent {_cite(name, r['line_no'], r['end_line'])}")
-                    access_summary = _branch_data_access(conn, mid, name, r["line_no"], r["end_line"])
+                    access_summary = _branch_data_access(acc, acc_line_nos, name, r["line_no"], r["end_line"])
                     if access_summary:
                         bits.append(f"data access on this branch: {access_summary}")
             add("- " + " — ".join(bits))
@@ -1061,7 +1239,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
     # attributed solely to that member's own brief, and never appears when
     # briefing the module that actually includes and runs it -- a module doc
     # can look complete and still miss a validation rule it depends on.
-    for cc_id, cc_name, cc_rules in _copycode_rule_candidates(conn, mid):
+    for cc_id, cc_name, cc_rules in facts.copycode_rules:
         add(f"## Business rules from included copycode `{cc_name}`")
         for n, r in numbered_rule_candidates(cc_rules):
             # IDs are qualified with the copycode's own name and numbered
@@ -1076,9 +1254,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
             add("- " + " — ".join(bits))
         add("")
 
-    gaps = conn.execute(
-        f"SELECT * FROM gap WHERE member_id=? ORDER BY {GAP_SEVERITY_ORDER_SQL}, line_no", (mid,)
-    ).fetchall()
+    gaps = facts.gaps
     if gaps:
         add("## Known gaps for this module")
         for r in gaps:
