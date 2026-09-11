@@ -806,6 +806,58 @@ def test_module_brief_redacts_guard_chain_condition_text():
     assert "[REDACTED]" in inbound_section
 
 
+def test_module_brief_guard_chain_redacts_correctly_when_facts_are_shared_across_different_redacts():
+    """Issue #183 review feedback: `MemberFacts.guard_facts` is raw,
+    unredacted data (unlike an earlier version of this refactor, which
+    pre-rendered `guard_lines` with whichever `redact` `build_member_facts`
+    happened to be called with) -- so one `MemberFacts`, built once, must
+    render correctly redacted guard-chain text under *each* of two
+    different `redact` policies, not just whichever one happened to build
+    it. This is the scenario the review specifically asked to see covered:
+    reusing shared facts across calls that use different `redact`s must
+    never leak unredacted condition text from a stale pre-rendered line."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA
+    from mfdoc.dialects import natural
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'ORDER-CTRL', 'natural')")
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (2, 'SCHEDULE-RESET', 'natural')")
+
+    caller_src = (
+        "IF #CUST-VALID\n"
+        "  CALLNAT 'VALIDATE-CUSTOMER'\n"
+        "END-IF\n"
+        "CALLNAT 'SCHEDULE-RESET'\n"
+    )
+    caller_lines = [(i + 1, None, t) for i, t in enumerate(caller_src.splitlines())]
+    natural.extract(conn, 1, caller_lines, "ORDER-CTRL")
+
+    callee_src = "FIND (1) SCHED-VIEW WITH SCHED-KEY = 'RESET'\n  MOVE ' ' TO SCHED-VIEW.SCHED-STATUS\nEND-FIND\n"
+    callee_lines = [(i + 1, None, t) for i, t in enumerate(callee_src.splitlines())]
+    natural.extract(conn, 2, callee_lines, "SCHEDULE-RESET")
+
+    facts = build_member_facts(conn, "SCHEDULE-RESET")
+    assert facts.guard_facts, "sanity: this fixture must actually produce a guard-chain fact to redact"
+
+    redacting = lambda text: text.replace("#CUST-VALID", "[REDACTED]") if text else text
+    redacted_brief = module_brief(conn, "SCHEDULE-RESET", redact=redacting, facts=facts)
+    redacted_section = redacted_brief.split("## Inbound callers", 1)[1].split("## ", 1)[0]
+    assert "#CUST-VALID" not in redacted_section
+    assert "[REDACTED]" in redacted_section
+
+    # The exact same (already-built, already-used-with-a-different-redact)
+    # MemberFacts, rendered again with NULL_REDACTOR -- must show the real
+    # condition text, not a stale "[REDACTED]" baked in from the call above.
+    plain_brief = module_brief(conn, "SCHEDULE-RESET", redact=NULL_REDACTOR, facts=facts)
+    plain_section = plain_brief.split("## Inbound callers", 1)[1].split("## ", 1)[0]
+    assert "#CUST-VALID" in plain_section
+    assert "[REDACTED]" not in plain_section
+
+
 def test_module_brief_guard_chain_never_claims_unconditional():
     """Copilot review on PR #151: finding no enclosing `rule_candidate`
     block for a preceding call is evidence it sits in the caller's main
