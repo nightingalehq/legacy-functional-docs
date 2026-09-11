@@ -126,19 +126,25 @@ GitHub org.
   it always took `conn` and always queried regardless of `rule_range`.
   `test_case_brief_chunk`, by contrast, takes no `conn` parameter at all --
   it only ever renders from `rows`/`system`/`routines` passed in by its
-  caller. Both call sites in `testbatch.py`
-  (`_generate_member_test_doc_chunked` and `plan_test_batch`'s dry-run
-  preview) already call `fetch_test_case_rows`/`fetch_routines` exactly
-  once per member, before their `for i, (start, end) in enumerate(ranges,
-  ...)` chunk loop, and pass the same `rows`/`system`/`routines` into every
-  `test_case_brief_chunk` call across that loop -- the loop body itself
-  does zero fact-store access. This is an architectural difference from
-  `module_brief`'s pre-#183 shape, not an oversight sharing the same bug:
-  `testplan.py`'s chunk-brief builder was written as a pure function over
-  pre-fetched data from the start, so there was never a `MemberFacts`-shaped
-  gap to port #183's fix into. No behaviour or performance change; full
-  suite unaffected (944 passed, 2 skipped, same as before this
-  investigation). Closing #191 as confirmed-not-applicable.
+  caller, and its own chunk loop (in both `_generate_member_test_doc_chunked`
+  and `plan_test_batch`'s dry-run preview) calls
+  `fetch_test_case_rows`/`fetch_routines` once per member, before the `for
+  i, (start, end) in enumerate(ranges, ...)` loop, then passes the same
+  `rows`/`system`/`routines` into every `test_case_brief_chunk` call across
+  it -- the loop body itself performs zero fact-store access, which is the
+  property #183 was restoring for `module_brief`. (`plan_test_batch` does
+  fetch both twice per member overall -- once inside its earlier
+  `test_case_brief()` call, used only to fingerprint the member's full
+  brief for skip/resume, and again directly before the chunk loop -- but
+  that duplication is at most one extra fetch per *member*, not one per
+  *chunk*, so it isn't the pathology #191 is asking about.) This is an
+  architectural difference from `module_brief`'s pre-#183 shape, not an
+  oversight sharing the same bug: `testplan.py`'s chunk-brief builder was
+  written as a pure function over pre-fetched data from the start, so there
+  was never a `MemberFacts`-shaped gap to port #183's fix into. No
+  behaviour or performance change; full suite unaffected (944 passed, 2
+  skipped, same as before this investigation). Closing #191 as
+  confirmed-not-applicable.
 
 **Progress (2026-09-10e):**
 - Fixed issue #188: ported `batch.py`'s near-miss/targeted-patch mechanism
