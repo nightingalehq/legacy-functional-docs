@@ -1571,22 +1571,28 @@ def _corpus_signature(conn, language: str, framework: str, threshold: int,
       the two checks above wouldn't see that either, and a stale "nothing
       changed" skip would leave the previous run's now-wrong-shaped output
       (or count of chunk files) in place;
-    - every member's `rule_candidate` `(id, line_no)` sequence and
-      `routine` boundary rows, in the same order `test_case_brief_chunk`'s
-      routine-aware chunk planning
-      (`brief.routine_aware_chunk_ranges`/`fetch_routines`) and
-      `testplan.member_rule_fingerprint`'s BR-numbering both read them.
-      `test_case`'s own columns above only capture a *derived* rule's
-      content -- a `rule_candidate` inserted, removed, or reordered by a
-      `derive` rebuild (the same shift `member_rule_fingerprint`'s
-      per-document fingerprint exists to catch, see `validate.
-      validate_test_doc`) can, before `mfdoc test-plan` re-runs to
-      reflect it in `test_case`, leave every `test_case` row (and
-      therefore everything hashed above) untouched while chunk boundaries
-      and BR-numbering have already moved underneath. Without this, the
-      corpus-level fast path here could gate every member through
-      `corpus_unchanged` and skip straight past `_test_chunk_reuse_ok`'s
-      own per-chunk sidecar-staleness check entirely;
+    - every member's `rule_candidate` `(id, line_no, construct)` sequence
+      and `routine` boundary rows, in the same order `test_case_brief_
+      chunk`'s routine-aware chunk planning (`brief.
+      routine_aware_chunk_ranges`/`fetch_routines`) and `testplan.
+      member_rule_fingerprint`'s BR-numbering both read them (`construct`
+      included for the identical reason `member_rule_fingerprint` hashes
+      it, Copilot review: a row reclassified in place -- e.g. between a
+      branch construct and `DECIDE ON`, which `_is_branch_row` excludes --
+      changes which rows become scenarios even though `(id, line_no)`
+      alone doesn't move). `test_case`'s own columns above only capture a
+      *derived* rule's content -- a `rule_candidate` inserted, removed,
+      reordered, or reclassified by a `derive` rebuild (the same shift
+      `member_rule_fingerprint`'s per-document fingerprint exists to
+      catch, see `validate.validate_test_doc`) can, before `mfdoc
+      test-plan` re-runs to reflect it in `test_case`, leave every
+      `test_case` row (and therefore everything hashed above) untouched
+      while chunk boundaries, BR-numbering, or the scenario set itself
+      have already moved underneath. Without this, the corpus-level fast
+      path here could gate every member through `corpus_unchanged` and
+      skip straight past `_test_chunk_reuse_ok`'s own per-chunk
+      sidecar-staleness check (and the per-member fingerprint check
+      below it) entirely;
     - each `test_case` row's own `rule_candidate_id` link, not just its
       derived content -- reassigning which existing `rule_candidate` row a
       scenario points to (without inserting/removing any row, or changing
@@ -1617,11 +1623,21 @@ def _corpus_signature(conn, language: str, framework: str, threshold: int,
                       r["given_json"], r["when_json"], r["then_json"],
                       str(r["rule_candidate_id"]), r["system"] or ""))
 
+    # `construct` included (Copilot review): `member_rule_fingerprint`
+    # hashes it too, since a row reclassified in place (e.g. between a
+    # branch construct and `DECIDE ON`, which `_is_branch_row` excludes
+    # from BR-numbering) changes which rows become scenarios even though
+    # `(id, line_no)` alone doesn't move. Without it here, this corpus-
+    # level signature stays unchanged for a construct-only reclassification
+    # while `test_case` is still unchanged too, so `corpus_unchanged`
+    # would short-circuit `run_test_batch`/`plan_test_batch` before ever
+    # reaching the per-member fingerprint check that would have caught it.
     rc_rows = conn.execute(
-        "SELECT rc.id, rc.member_id, rc.line_no FROM rule_candidate rc ORDER BY rc.member_id, rc.line_no, rc.id"
+        "SELECT rc.id, rc.member_id, rc.line_no, rc.construct FROM rule_candidate rc "
+        "ORDER BY rc.member_id, rc.line_no, rc.id"
     ).fetchall()
     for r in rc_rows:
-        extra.extend((str(r["member_id"]), str(r["line_no"]), str(r["id"])))
+        extra.extend((str(r["member_id"]), str(r["line_no"]), str(r["id"]), r["construct"]))
 
     routine_rows = conn.execute(
         "SELECT member_id, name, start_line, end_line FROM routine ORDER BY member_id, start_line, name"

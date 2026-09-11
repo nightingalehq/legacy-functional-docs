@@ -274,6 +274,50 @@ def test_corpus_signature_changes_when_rule_candidate_ordering_shifts_but_test_c
     assert sig_before != sig_after
 
 
+def test_corpus_signature_changes_when_a_rule_candidate_is_reclassified_in_place(tmp_path):
+    """Copilot review follow-up: `member_rule_fingerprint` hashes
+    `construct` because a row reclassified in place (e.g. between a
+    branch construct and `DECIDE ON`, which `_is_branch_row` excludes)
+    changes which rows become scenarios even though `(id, line_no)` alone
+    doesn't move -- but that reclassification also leaves every
+    `test_case` row this signature already hashes untouched (test-plan
+    hasn't re-run yet). Without `construct` in this corpus-level query
+    too, `corpus_unchanged` would short-circuit both `run_test_batch` and
+    `plan_test_batch` before ever reaching the per-member fingerprint
+    check that would otherwise have caught it."""
+    import sqlite3
+
+    from mfdoc import testbatch
+    from mfdoc.db import SCHEMA, insert
+
+    def seed(construct: str) -> sqlite3.Connection:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(SCHEMA)
+        conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+        conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 40, 'irrelevant')")
+        rc_id = insert(
+            conn, "rule_candidate", member_id=1, line_no=10, construct=construct,
+            condition="COND-1", raw="IF COND-1",
+        )
+        insert(
+            conn, "test_case", member_id=1, kind="unit", rule_candidate_id=rc_id,
+            scenario_name="FAKEMOD:BR-001",
+            given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+            when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+            then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+            status="characterization", citation="FAKEMOD:1", confidence="verified",
+        )
+        conn.commit()
+        return conn
+
+    sig_before = testbatch._corpus_signature(seed("IF"), "python", "pytest", 999)
+    sig_after = testbatch._corpus_signature(seed("DECIDE ON"), "python", "pytest", 999)
+    assert sig_before != sig_after, (
+        "a construct-only reclassification (same id/line_no) must still change the corpus signature"
+    )
+
+
 def test_corpus_signature_changes_when_a_routine_boundary_shifts(tmp_path):
     """Copilot review follow-up on issue #195: the rule_candidate-ordering
     regression above only varies `rule_candidate` rows, never `routine`

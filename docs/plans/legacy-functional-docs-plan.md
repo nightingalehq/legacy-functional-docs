@@ -12,6 +12,20 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-12b):**
+- Addressed the thirty-third Copilot review round on PR #209 (issue
+  #195): `_corpus_signature`'s own `rule_candidate` query hashed `(id,
+  member_id, line_no)` but not `construct`, even though
+  `member_rule_fingerprint` hashes it (previous round) for exactly the
+  reason a construct-only reclassification also leaves `test_case`
+  untouched. Without it here, `corpus_unchanged` could short-circuit both
+  `run_test_batch` and `plan_test_batch` before ever reaching the
+  per-member fingerprint check that would have caught it. Added.
+- One new regression test (`_corpus_signature` changing for a
+  construct-only reclassification with unchanged `id`/`line_no`). Full
+  suite green (1054 passed, 2 skipped) plus a clean `mfdoc validate` pass
+  against `examples/` (71/71 documents, 0 invalid citations of 750).
+
 **Progress (2026-09-12):**
 - Addressed the thirty-second Copilot review round on PR #209 (issue
   #195):
