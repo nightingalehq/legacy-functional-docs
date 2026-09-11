@@ -89,15 +89,39 @@ def _esc_cell(cell: str) -> str:
     source text already contains its own literal `\\|` sequence: escaping
     only the pipe leaves the original backslash and the new one
     indistinguishable from each other to a decoder scanning left to right,
-    so `batch._unescape_brief_cell` (the matching decoder used only on this
-    rendered brief text, see its own docstring) could return a different
-    string than what was originally encoded. Escaping backslashes first
-    means every backslash a decoder later encounters is unambiguously part
-    of one escape sequence it introduced -- see
-    `test_esc_cell_round_trips_a_literal_backslash_before_a_pipe`."""
+    so `_unescape_cell` (the matching decoder, see its own docstring)
+    could return a different string than what was originally encoded.
+    Escaping backslashes first means every backslash a decoder later
+    encounters is unambiguously part of one escape sequence it introduced
+    -- see `test_esc_cell_round_trips_a_literal_backslash_before_a_pipe`."""
     if not cell:
         return cell
     return cell.replace("\\", "\\\\").replace("|", "\\|")
+
+
+# Matches, in the same left-to-right order `_esc_cell` produces them, only
+# its two actual escape sequences (`\\` for an original backslash, `\|` for
+# an original pipe) -- see `_unescape_cell`.
+_ESCAPED_TABLE_CHAR = re.compile(r"\\\\|\\\|")
+
+
+def _unescape_cell(text: str) -> str:
+    """Inverse of `_esc_cell`. A blind `text.replace("\\|", "|")` looks
+    equivalent but is *not* a correct inverse whenever the encoded text
+    contains a run of more than one backslash before a pipe (e.g. the
+    source itself already had `\\|`, which `_esc_cell` turns into `\\\\|`)
+    -- non-overlapping left-to-right replacement can consume the wrong
+    pair of characters and return a different string than what was
+    originally encoded. This regex instead substitutes each of
+    `_esc_cell`'s two escape sequences for exactly the one character it
+    stands for -- the correct, order-sensitive inverse.
+
+    Callers must only apply this to text that was actually produced by
+    `_esc_cell`/`_tbl` -- see `batch._maybe_unescape_table_row`'s own
+    docstring for why applying it unconditionally to arbitrary brief text
+    (a bullet line that was never encoded) is a bug, not just unnecessary
+    (Copilot review round 4 on PR #213)."""
+    return _ESCAPED_TABLE_CHAR.sub(lambda m: "\\" if m.group() == "\\\\" else "|", text)
 
 
 def _sme_notes_section(redact: Redactor, sme_notes: Notes | None, name: str | None) -> list[str]:
@@ -1275,7 +1299,9 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
             "`id` (`BR-nnn`) is stable across reruns -- carry it verbatim "
             "after the rule's citation. `notes`, when present, flags a "
             "paired IF/ELSE (`paired-else@CITE`/`pairs-with-if@CITE`: "
-            "document BOTH branches) plus any verified `branch-access`."
+            "document BOTH branches) plus any `branch-access` found in that "
+            "branch -- cross-check the \"Data access\" section below for "
+            "each access's own confidence before asserting it as verified."
         )
         if rule_range:
             start, end = rule_range
@@ -1365,7 +1391,17 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
     # just makes it reach mfdoc batch's headless prompts too, not only a
     # human who happens to have project.yml open alongside a chat session.
     if lexicon:
-        haystack = "\n".join(out)
+        # Scanned with each _tbl row's own table-escaping undone first
+        # (the same "- "-prefix structural rule batch.py's
+        # `_maybe_unescape_table_row` uses) -- otherwise a lexicon key
+        # containing a literal `|` or `\` would appear in `out` only in
+        # its escaped form (`\|`/doubled backslashes) after issue #185's
+        # rendering change, and `k in haystack` would silently stop
+        # matching it, dropping that term from both this section and the
+        # batch prompt it feeds (Copilot review round 4 on PR #213).
+        haystack = "\n".join(
+            line if line.lstrip().startswith("- ") else _unescape_cell(line) for line in out
+        )
         hits = [(k, v) for k, v in lexicon.items() if k in haystack]
         if hits:
             vocab = [

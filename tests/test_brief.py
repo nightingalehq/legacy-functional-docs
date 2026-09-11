@@ -31,6 +31,40 @@ def test_module_brief_surfaces_only_lexicon_terms_actually_present(indexed_db, p
         assert f"`{absent}` ->" not in brief, f"{absent} doesn't appear in MMP0100 and should be filtered out"
 
 
+def test_module_brief_surfaces_a_lexicon_term_that_contains_a_pipe():
+    """Copilot review round 4 on PR #213: a lexicon key containing a `|`
+    (rare, but a business term could legitimately be e.g. a status-code
+    disjunction) that appears inside a rendered table cell must still be
+    found -- `_esc_cell` escapes it to `\\|` in that cell, and the lexicon
+    relevance scan must see through that rendering artifact rather than
+    silently dropping the term because `k in haystack` no longer matches
+    the escaped text."""
+    import sqlite3
+
+    from mfdoc.db import SCHEMA
+    from mfdoc.dialects import mantis
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'TESTMOD', 'mantis')")
+    src = (
+        'PROGRAM "TESTMOD"\n'
+        "ENTRY MAIN\n"
+        "  IF STATUS=A|B\n"
+        "    MSG=\"flagged\"\n"
+        "  END\n"
+        "EXIT\n"
+    )
+    lines = [(i + 1, None, t) for i, t in enumerate(src.splitlines())]
+    mantis.extract(conn, 1, lines, "TESTMOD")
+
+    lexicon = {"A|B": "combined status flag"}
+    brief = module_brief(conn, "TESTMOD", redact=NULL_REDACTOR, lexicon=lexicon)
+    assert "## Business vocabulary" in brief
+    assert "`A|B` -> combined status flag" in brief
+
+
 def test_module_brief_omits_vocabulary_section_when_no_lexicon_given(indexed_db):
     """Default behaviour (no lexicon passed) must be unchanged -- this is
     additive, not a required section."""
@@ -1210,9 +1244,9 @@ def test_esc_cell_round_trips_a_literal_backslash_before_a_pipe():
     its own literal `\\|` (a backslash immediately followed by a pipe) --
     escaping just the pipe leaves the original backslash and the new one
     indistinguishable to a decoder. `_esc_cell` doubles backslashes first,
-    so the matching decoder (`batch._unescape_brief_cell`) can tell them
-    apart and recover the exact original text."""
-    from mfdoc.brief import _esc_cell
+    so the matching decoder (`_unescape_cell`) can tell them apart and
+    recover the exact original text."""
+    from mfdoc.brief import _esc_cell, _unescape_cell
 
     raw = "A " + "\\" + "|" + " B"  # one literal backslash immediately followed by a pipe
     encoded = _esc_cell(raw)
@@ -1220,9 +1254,7 @@ def test_esc_cell_round_trips_a_literal_backslash_before_a_pipe():
     # its own backslash prefix -- three backslashes in total ahead of the
     # pipe, not two.
     assert encoded == "A " + "\\" * 3 + "|" + " B"
-
-    from mfdoc.batch import _unescape_brief_cell
-    assert _unescape_brief_cell(encoded) == raw
+    assert _unescape_cell(encoded) == raw
 
 
 def test_build_member_facts_returns_ambiguous_markdown_string_like_module_brief_did():

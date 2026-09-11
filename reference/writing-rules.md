@@ -239,10 +239,15 @@ business rules, ...) render one fact per `|`-delimited row. Where a
 condition, literal, or arg value itself contains a literal `\` or `|`
 character, the brief escapes it (`\` -> `\\`, `|` -> `\|`) so the column
 boundaries stay unambiguous -- that escaping is a rendering artifact of
-*this brief*, not part of the actual source value. When quoting such a
-value in the generated document, write the real, unescaped character (`|`,
-`\`) the source actually contains, never the backslash-escaped form as it
-appears in the brief's row.
+*this brief*, not part of the actual source value: undo it first, to
+recover the real character (`|` or `\`) the source actually contains.
+Whether that recovered character then needs *its own* escaping in the
+generated document is a separate question, governed by the document's own
+format, not by anything this brief does -- e.g. if the template you're
+filling in also uses a Markdown pipe-table for this value, apply that
+table's normal `|` escaping to the recovered character; if it's plain
+prose, write the recovered character as-is. Never carry the brief's
+backslash-escaped form through unexamined into the generated document.
 
 **Inventing a not-found branch for FIND/READ/HISTOGRAM.** Statements inside a
 `FIND`/`READ`/`HISTOGRAM` block run when a record is actually read or

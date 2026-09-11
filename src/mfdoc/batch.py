@@ -30,7 +30,7 @@ from typing import Callable
 
 from . import __version__
 from .brief import (
-    MemberFacts, build_member_facts, chunk_density_metrics, fetch_routines,
+    MemberFacts, _unescape_cell, build_member_facts, chunk_density_metrics, fetch_routines,
     fetch_rule_candidate_rows, flag_density_outliers, format_density_note, module_brief,
     routine_aware_chunk_ranges, routine_for_line,
 )
@@ -548,15 +548,18 @@ def _key_tokens(text: str) -> set[str]:
     on that token alone.
 
     Deliberately does *not* know about `brief.py`'s pipe-escaping (issue
-    #185) -- `text` here is a narrated sentence just as often as a brief
-    line, and a narrated sentence never carries that rendering artifact in
-    the first place. Decoding it belongs solely to `_unescape_brief_cell`,
-    applied only to a brief line before it's tokenized (see
-    `_find_confident_citation`) -- applying it here unconditionally would
-    also "decode" a sentence that happens to contain its own literal
-    `\\|`, silently turning it into a different string than the brief's
-    own (correctly decoded) token and producing exactly the false
-    mismatch this was meant to fix (Copilot review on PR #213)."""
+    #185) -- `text` here is compared as both a narrated sentence's tokens
+    and a brief line's tokens in `_find_confident_citation`, and a
+    narrated sentence never carries that rendering artifact in the first
+    place. Decoding it belongs solely to `_maybe_unescape_table_row`,
+    applied only to a brief line before it's tokenized, and only when that
+    line is actually one of `brief._tbl`'s rows (see that function's own
+    docstring for why even that scoping matters) -- applying decoding here
+    unconditionally would also "decode" a sentence that happens to contain
+    its own literal `\\|`, silently turning it into a different string
+    than the brief's own (correctly decoded) token and producing exactly
+    the false mismatch this was meant to fix (Copilot review on PR
+    #213)."""
     tokens: set[str] = set()
     for m in _KEY_TOKEN.finditer(text):
         tok = next(g for g in m.groups() if g is not None).strip()
@@ -565,30 +568,26 @@ def _key_tokens(text: str) -> set[str]:
     return tokens
 
 
-# Reverses brief.py._esc_cell's `\` -> `\\`, `|` -> `\|` table-cell escaping
-# (issue #185), for the one purpose that needs it undone: comparing a
-# brief line's tokens against a narrated sentence's in `_find_confident_
-# citation`, where the sentence never saw (and so never reproduces) that
-# rendering artifact. A blind `text.replace("\\|", "|")` looks equivalent
-# but is *not* a correct inverse whenever the encoded text contains a run
-# of more than one backslash before a pipe (e.g. the source itself already
-# had `\|`, which `_esc_cell` turns into `\\|`) -- non-overlapping
-# left-to-right replacement can consume the wrong pair of characters and
-# return a different string than what was originally encoded. This regex
-# instead matches, in the same left-to-right order `_esc_cell` produced
-# them, only its two actual escape sequences (`\\` for an original
-# backslash, `\|` for an original pipe) and substitutes each for exactly
-# the one character it stands for -- the correct, order-sensitive inverse.
-_ESCAPED_TABLE_CHAR = re.compile(r"\\\\|\\\|")
+def _maybe_unescape_table_row(line: str) -> str:
+    """Undo `brief._esc_cell`'s pipe-table escaping (`brief._unescape_cell`)
+    -- but only when `line` is actually one of `brief._tbl`'s compact rows,
+    identified structurally by *not* starting with the `"- "` bullet prefix
+    every other cited section in `module_brief`'s output still uses
+    (header comments, data access, inbound callers, interactions, messages,
+    gaps, guard-chain summaries, ...  -- see `brief.py`'s own render calls).
+    A `_tbl` row is pipe-delimited with no leading bullet at all.
 
-
-def _unescape_brief_cell(text: str) -> str:
-    """Inverse of `brief._esc_cell`, applied to a `[[MEMBER:LINE]]`-cited
-    brief line before tokenizing it (see `_find_confident_citation`) so a
-    literal `|` or `\\` in the original source-derived cell text compares
-    equal to how a narrated sentence would naturally reproduce it, not to
-    this rendering's own internal escape artifact."""
-    return _ESCAPED_TABLE_CHAR.sub(lambda m: "\\" if m.group() == "\\\\" else "|", text)
+    Decoding a bullet line that was never `_esc_cell`-encoded is a bug, not
+    just unnecessary: real cited prose (a header comment, a data-access
+    key expression, ...) can legitimately contain its own literal `\\` or
+    `\\|` that has nothing to do with this rendering's table-escaping, and
+    blindly "decoding" it would alter that line's key tokens, either
+    missing a real auto-citation match or attaching one to a sentence
+    whose actual source value differs (Copilot review round 4 on PR
+    #213)."""
+    if line.lstrip().startswith("- "):
+        return line
+    return _unescape_cell(line)
 
 
 def _brief_cited_lines(brief: str) -> list[tuple[str, str]]:
@@ -634,7 +633,7 @@ def _find_confident_citation(sentence: str, brief_lines: list[tuple[str, str]]) 
         return None
     matches = {
         cite for cite, line in brief_lines
-        if sentence_tokens <= _key_tokens(_unescape_brief_cell(line))
+        if sentence_tokens <= _key_tokens(_maybe_unescape_table_row(line))
     }
     return matches.pop() if len(matches) == 1 else None
 

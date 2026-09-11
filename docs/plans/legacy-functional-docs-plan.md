@@ -347,6 +347,38 @@ GitHub org.
   proper odd/even backslash-run counter, plus
   `test_count_unescaped_delimiters_handles_a_trailing_encoded_backslash`
   reproducing the exact failure shape. Full suite: 964 passed, 2 skipped.
+  Round 4 found five more issues, all fixed: (1) `batch._find_confident_
+  citation` was decoding *every* cited brief line, not just `_tbl`'s own
+  rows -- an ordinary bullet line (header comments, data access, ...) that
+  happens to contain a real `\\`/`\|` unrelated to table-escaping would
+  get corrupted by that blind decode. Moved the decoder into `brief.py`
+  itself (`_unescape_cell`, paired with `_esc_cell`) and added `batch.
+  _maybe_unescape_table_row`, which only decodes a line that does *not*
+  start with the `"- "` bullet prefix every other cited section still
+  uses -- a purely structural, zero-metadata way to identify an actual
+  `_tbl` row. Added `test_find_confident_citation_never_decodes_a_bullet_
+  line`. (2) The same escaping silently broke `module_brief`'s lexicon-
+  relevance scan: a configured vocabulary term containing `|`/`\` would
+  appear in the built brief text only in its escaped form once it landed
+  inside a `_tbl` cell, so `k in haystack` stopped matching it. Fixed by
+  building that haystack with the same table-row-only decode. Added
+  `test_module_brief_surfaces_a_lexicon_term_that_contains_a_pipe`.
+  (3) `reference/writing-rules.md`'s new "undo the brief's escaping" rule
+  was itself incomplete -- it told the narrator to always write the raw,
+  unescaped character, but a generated document's *own* format (e.g. a
+  Markdown pipe-table in `templates/module.md`) may need its own escaping
+  of that same character; reworded to separate "undo this brief's
+  artifact" from "apply the destination format's own rules," which are
+  independent questions. (4) The "Candidate business rules" preamble
+  called every `branch-access` entry "verified", but `_branch_data_access`
+  (unchanged, pre-existing) never carried each row's own confidence flag
+  the way the main "Data access" section does -- reworded to point the
+  narrator at that section to check confidence, rather than asserting a
+  property the brief doesn't back. (5) A grammatically incomplete
+  docstring sentence in `batch._key_tokens`. Also reconciled the PR
+  description's test count, which had gone stale after round-1's fixes.
+  Full suite: 966 passed, 2 skipped. Fixture pipeline re-run clean: 71/71
+  documents, 0 invalid citations.
 
 **Progress (2026-09-10e):**
 - Fixed issue #188: ported `batch.py`'s near-miss/targeted-patch mechanism
