@@ -747,7 +747,23 @@ GitHub org.
   and no `MEMBER:BR-nnn` references at all -- made lazy (computed at most
   once, only if a sidecar-id or `bad_refs` check actually needs it).
   Added `test_corpus_signature_changes_when_member_system_changes`. Full
-  suite: 957 passed, 2 skipped.
+  suite: 957 passed, 2 skipped. A fifth review round raised a genuinely
+  different scenario -- `test-plan` *adding* a scenario after the old
+  sidecar's range leaves every old sidecar id still resolving
+  (`sidecar_usable` stays true), so the fresh manifest's new id then hits
+  `manifest_ids - code_ids` and reports a real "not found in sidecar"
+  problem. This is correct, not a bug: the sidecar genuinely doesn't
+  contain code for that scenario yet, so flagging it is accurate, and it
+  is not a deadlock the review's wording suggested -- `test-batch`'s retry
+  loop never reuses a chunk recorded as anything other than `ok: True`
+  (`_test_chunk_reuse_ok`), so the normal render-validate-retry cycle
+  already regenerates and re-splits the sidecar via
+  `write_test_doc_with_sidecar` on the very next attempt, the same as any
+  other validation failure -- no different handling needed. Stopping the
+  review-response cycle here (five rounds, CI green, `mergeStateStatus:
+  CLEAN`): further rounds were finding progressively narrower, lower-
+  probability edge cases already covered by pre-existing machinery rather
+  than gaps in this fix itself.
 
 **Progress (2026-09-10e):**
 - Fixed issue #188: ported `batch.py`'s near-miss/targeted-patch mechanism
