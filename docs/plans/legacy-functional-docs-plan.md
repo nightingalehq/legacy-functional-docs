@@ -153,13 +153,15 @@ GitHub org.
   it yet -- closing as "not currently safely implementable without a
   section-reorder design change", per #207's own suggested next step.
   Confirmed the budget question first: the Anthropic API's documented limit
-  is 4 `cache_control` breakpoints per request (`shared/prompt-caching.md`
-  in the bundled Claude API skill, and `anthropic_caller.py`'s own #159
-  comment); the existing project-level breakpoint uses 1, so a second,
-  member-level one would use 2 -- comfortably inside budget for every code
-  path that uses both (`AnthropicCaller.__call__`/`_content` builds one
-  `messages[0].content` list per call, chunked or not). Budget was never
-  the blocker.
+  is 4 `cache_control` breakpoints per request (per the bundled Claude API
+  skill's `shared/prompt-caching.md`; `anthropic_caller.py`'s own #159
+  comment documents today's one-leading-prefix implementation, not the
+  API's breakpoint ceiling, so it's cited below only for that, not as a
+  second source for the limit itself). The existing project-level
+  breakpoint uses 1, so a second, member-level one would use 2 --
+  comfortably inside budget for every code path that uses both
+  (`AnthropicCaller.__call__`/`_content` builds one `messages[0].content`
+  list per call, chunked or not). Budget was never the blocker.
   The structural blocker #207 already named -- `module_brief`'s section
   order renders "Business rules from included copycode" and "Known gaps"
   *after* the rule_range-dependent "Candidate business rules" section, so
@@ -207,11 +209,20 @@ GitHub org.
   change. Rather than force a narrower, riskier slice under time pressure,
   leaving this closed pending that design pass (or a narrower follow-up:
   render a purpose-built, `chunk_info`/`chunk_map`-free "shared prefix"
-  string from `MemberFacts` directly, bypassing `module_brief` entirely for
-  the cached block, and let `module_brief` keep doing what it does for the
-  rendered document body -- untried here, flagged as the least invasive
-  option for a future attempt). No code change; full suite unchanged at
-  944 passed, 2 skipped.
+  string from `MemberFacts` directly -- through the calling `module_brief`
+  call's own `redact`, same as every other `MemberFacts` field, since
+  `MemberFacts` itself is raw/unredacted -- bypassing `module_brief`
+  entirely for the cached block, and let `module_brief` keep doing what it
+  does for the rendered document body. Untried here, and incomplete as
+  stated: both `AnthropicCaller._content` and `VertexCaller` (`anthropic_
+  caller.py`/`vertex_caller.py`) currently only recognize a single leading
+  cache prefix and split a prompt into exactly one cached block plus one
+  uncached suffix -- a second, member-level tier also needs that
+  prefix-matching/content-assembly logic extended to emit a second
+  cache-controlled block, not just a new string to feed it. Flagged as the
+  least invasive option for a future attempt, but still real code in three
+  places (brief.py, anthropic_caller.py, vertex_caller.py), not a
+  drop-in). No code change; full suite unchanged at 955 passed, 2 skipped.
 
 **Progress (2026-09-10e):**
 - Fixed issue #188: ported `batch.py`'s near-miss/targeted-patch mechanism
