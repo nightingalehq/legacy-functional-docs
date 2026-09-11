@@ -225,7 +225,28 @@ def _prior_fingerprint_for(out_path: Path) -> str | None:
     resume metadata) purely to survive a validation failure that already
     needs investigating on its own -- a permanently-failing member is
     already an anomaly a human needs to look at, not a case this
-    mechanism should add complexity trying to paper over silently."""
+    mechanism should add complexity trying to paper over silently.
+
+    A second known, accepted limitation (Copilot review), specific to a
+    *chunked* member: the fingerprint this recovers (and the one
+    `write_test_doc_with_sidecar` stamps) describes the whole member's
+    `rule_candidate` ordering, not one chunk's own slice of it. If that
+    ordering is unchanged but chunk *boundaries* move on their own
+    (`options.testgen.max_scenarios_per_call` changing, or a `routine`
+    boundary shifting) -- so `chunk1` at this same path now covers a
+    different range of scenarios than it did before -- the member-wide
+    fingerprint still matches, and this chunk's stale content can be read
+    as current even though it no longer describes what "chunk1" now
+    means. A properly *chunk*-scoped fingerprint would need to describe
+    which rule range each chunk index actually covers, which depends on
+    the very chunk-planning logic (`brief.routine_aware_chunk_ranges`)
+    being evaluated at the point this function is called -- a real design
+    change (in the same category as #207/#214's caching redesign), not an
+    incremental fix, and out of scope for this one. The insertion/
+    positional-shift case this whole mechanism exists to fix (issue #195
+    itself, and every regression added for it) doesn't hit this: that
+    case shifts the member-wide ordering itself, which the fingerprint
+    already catches correctly."""
     if not out_path.exists():
         return None
     fm, _body, _err = split_frontmatter(out_path.read_text(encoding="utf-8"))
@@ -636,7 +657,7 @@ _DOC_CLAIM_COLUMNS = (
 )
 
 
-def _readonly_validate_test_doc(conn, path: Path) -> dict:
+def _readonly_validate_test_doc(conn, path: Path, _render_time: bool = False) -> dict:
     """The same result `validate_test_doc(conn, path)` returns, but leaves
     the `doc_claim` table exactly as it was before the call.
     `validate_test_doc` (via `validate.validate_doc`) deletes and
@@ -659,7 +680,7 @@ def _readonly_validate_test_doc(conn, path: Path) -> dict:
         (path_str,),
     ).fetchall()
     try:
-        return validate_test_doc(conn, path)
+        return validate_test_doc(conn, path, _render_time=_render_time)
     finally:
         conn.execute("DELETE FROM doc_claim WHERE doc_path=?", (path_str,))
         if before:
@@ -713,7 +734,25 @@ def _test_chunk_reuse_ok(conn, prior_chunks: dict | None, i: int, brief_hash: st
     would ever call `write_test_doc_with_sidecar` again to refresh it.
     Treating it as a cache miss instead forces the normal render path,
     which -- once it validates -- rewrites the sidecar with fresh content
-    the usual way."""
+    the usual way.
+
+    `_render_time=True` passed to the revalidation below (issue #195
+    review): a *legacy* chunk file (written before `test_case_fingerprint`
+    existed, so it carries none) would otherwise fall to the id-overlap
+    fallback here too, which can read a corpus change as "still current"
+    the same way it can for a fresh render -- `brief_hash` alone doesn't
+    close this, since `_generate_member_test_doc_chunked`'s per-chunk
+    hash is computed from `test_case_brief_chunk`'s content only, not from
+    `member_rule_fingerprint`, so a `rule_candidate` change elsewhere in
+    the member (this member's own resume skip already re-enters this
+    function once its own hash changes, but a *chunk* whose own brief
+    text happens to be unaffected can still reach here with a stale
+    legacy sidecar). The one-time cost: every legacy chunk gets forced
+    through a real re-render exactly once, the same transition every
+    other legacy document goes through, rather than being reused forever
+    with a sidecar that can never earn a fingerprint because nothing ever
+    calls `write_test_doc_with_sidecar` on a chunk this function keeps
+    calling reusable."""
     prior_chunk = (prior_chunks or {}).get(str(i))
     reusable = (
         isinstance(prior_chunk, dict) and prior_chunk.get("ok") is True
@@ -723,7 +762,7 @@ def _test_chunk_reuse_ok(conn, prior_chunks: dict | None, i: int, brief_hash: st
     if not reusable:
         return False
     validator = _readonly_validate_test_doc if readonly else validate_test_doc
-    result = validator(conn, chunk_path)
+    result = validator(conn, chunk_path, _render_time=True)
     return result["ok"] and not result.get("sidecar_stale")
 
 
@@ -800,6 +839,18 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
         except OSError:
             # Best-effort, same as _prune_stale_chunk_files above -- a file
             # some other process is holding open must not abort the batch.
+            # Accepted residual risk (Copilot review): if this unlink
+            # genuinely fails (a lock, a permission-restricted directory),
+            # `_render_time=True` on the index's own validation below only
+            # protects *this* run's in-process check -- a later standalone
+            # `mfdoc test-validate` sweep (not render-time) would still
+            # find the leftover file and could cross-check against it.
+            # Not escalated to a hard failure here for the same reason
+            # `_prune_stale_chunk_files` doesn't: a filesystem-level lock
+            # is exactly the kind of transient condition that shouldn't
+            # abort an otherwise-successful chunked render over cosmetic
+            # cleanup, and the next successful cleanup attempt (any
+            # future chunked render of this member) removes it then.
             pass
     for i, (start, end) in enumerate(ranges, start=1):
         chunk_rows = rows[start - 1:end]
@@ -966,18 +1017,28 @@ def _corpus_signature(conn, language: str, framework: str, threshold: int,
       and BR-numbering have already moved underneath. Without this, the
       corpus-level fast path here could gate every member through
       `corpus_unchanged` and skip straight past `_test_chunk_reuse_ok`'s
-      own per-chunk sidecar-staleness check entirely.
+      own per-chunk sidecar-staleness check entirely;
+    - each `test_case` row's own `rule_candidate_id` link, not just its
+      derived content -- reassigning which existing `rule_candidate` row a
+      scenario points to (without inserting/removing any row, or changing
+      that scenario's own stored columns) is a narrower case than the
+      point above, but the same principle: `test_case_brief_chunk`'s
+      routine-aware chunk layout is keyed off this link
+      (`rule_line_no`/`fetch_test_case_rows`), so a change here can move
+      what a chunk renders even when nothing else this function already
+      hashes would show it.
     """
     rows = conn.execute(
         "SELECT tc.scenario_name, tc.status, tc.citation, tc.given_json, tc.when_json, "
-        "       tc.then_json, m.system "
+        "       tc.then_json, tc.rule_candidate_id, m.system "
         "FROM test_case tc JOIN member m ON m.id = tc.member_id "
         "ORDER BY tc.scenario_name"
     ).fetchall()
     extra = [language, framework, str(threshold)]
     for r in rows:
         extra.extend((r["scenario_name"], r["status"], r["citation"],
-                      r["given_json"], r["when_json"], r["then_json"], r["system"] or ""))
+                      r["given_json"], r["when_json"], r["then_json"],
+                      str(r["rule_candidate_id"]), r["system"] or ""))
 
     rc_rows = conn.execute(
         "SELECT rc.id, rc.member_id, rc.line_no FROM rule_candidate rc ORDER BY rc.member_id, rc.line_no, rc.id"
@@ -1118,6 +1179,22 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
         # global one, which this alone doesn't fix) would still wrongly
         # treat the member as unchanged and skip re-rendering, leaving a
         # stale sidecar in place indefinitely.
+        #
+        # Known, accepted narrower gap (Copilot review): `member_rule_
+        # fingerprint` hashes `rule_candidate`'s own `(id, line_no)` set,
+        # not which `test_case` row's `rule_candidate_id` points at which
+        # one -- a hypothetical rebuild that *relinks* an existing
+        # `test_case` row to a *different* existing `rule_candidate` row,
+        # with every other column (both rows' own content, the
+        # rule_candidate set/ordering itself) byte-identical, wouldn't
+        # move either this fingerprint or `brief` above. Not fixed here:
+        # `build_member_test_cases` derives `rule_candidate_id` and every
+        # other `test_case` column together, positionally, from the same
+        # `numbered_rule_candidates()` pass, so a relink with literally
+        # nothing else different isn't a shape the real derive/test-plan
+        # pipeline produces -- closing it would mean hashing
+        # `fetch_test_case_rows`' relationship data on a purely
+        # theoretical case this per-member skip has no real pathway to.
         brief = test_case_brief(conn, name, redact=redact, sme_notes=sme_notes)
         rule_fp = member_rule_fingerprint(conn, name) or ""
         brief_hash = hashlib.sha256(f"{brief}\x00{threshold}\x00{rule_fp}".encode("utf-8")).hexdigest()

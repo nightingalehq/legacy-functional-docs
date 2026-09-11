@@ -506,6 +506,45 @@ GitHub org.
   fingerprinting`. Full suite: 1013 passed, 2 skipped; bundled fixture
   pipeline unchanged.
 
+  A sixteenth review round found the identical legacy-deadlock shape from
+  round 14 reachable through one more, different door: `_test_chunk_
+  reuse_ok`'s own revalidation of a cached chunk didn't pass
+  `_render_time=True`, so a *legacy* chunk file (no `test_case_
+  fingerprint`, written before this fix existed) whose own `brief_sha256`
+  happens to still match (its own routine's content is unaffected by a
+  `rule_candidate` change elsewhere in the member) could still fall to
+  the id-overlap fallback here too and be read as "still current" --
+  reused forever, since nothing would ever call `write_test_doc_with_
+  sidecar` on a chunk this function keeps calling reusable. Fixed by
+  threading `_render_time=True` through `_test_chunk_reuse_ok`'s
+  revalidation (both the real and `readonly`/dry-run paths, via a new
+  `_readonly_validate_test_doc(..., _render_time=...)` parameter) -- the
+  one-time cost is the same transition every other legacy artifact goes
+  through: a legacy chunk gets forced through one real re-render, then
+  carries a real fingerprint from then on. Also added `tc.
+  rule_candidate_id` to `_corpus_signature`'s hashed `test_case` columns
+  (a cheap, clearly-justified addition): the link a scenario's chunk
+  placement is actually keyed off, not just that scenario's own derived
+  content. Two points documented as accepted, out-of-scope limitations
+  rather than fixed, each explained in the relevant function's own
+  docstring: (1) the leftover-sidecar `unlink()`'s best-effort failure
+  mode (matching `_prune_stale_chunk_files`'s own established risk
+  profile, not escalated to a hard failure for the same reason); (2) the
+  member-wide fingerprint is too coarse to catch a *chunk-boundary-only*
+  drift (chunking threshold or routine-boundary changes with the
+  underlying `rule_candidate` ordering unchanged) -- closing that
+  properly would need a fingerprint scoped to each chunk's own rule
+  range, which depends on the very chunk-planning logic being evaluated
+  at that point: a real design change in the same category as #207/
+  #214's caching redesign, not an incremental fix, and confirmed not to
+  affect the actual issue #195 scenario (a positional shift always moves
+  the member-wide ordering the existing fingerprint already catches).
+  Added `test_chunk_reuse_forces_a_re_render_for_a_legacy_chunk_with_no_
+  fingerprint` and
+  `test_corpus_signature_changes_when_a_test_case_relinks_to_a_different_
+  rule_candidate`. Full suite: 1015 passed, 2 skipped; bundled fixture
+  pipeline unchanged.
+
 **Progress (2026-09-11):**
 - Fixed issue #199: `mfdoc doc-drift`'s existing checks (issue #161) caught
   system-wide/module-scoped drift but nothing keyed on a single dialect --

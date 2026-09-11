@@ -268,6 +268,48 @@ def test_corpus_signature_changes_when_a_routine_boundary_shifts(tmp_path):
     assert sig_before != sig_after
 
 
+def test_corpus_signature_changes_when_a_test_case_relinks_to_a_different_rule_candidate(tmp_path):
+    """Copilot review follow-up on issue #195: `_corpus_signature` hashed
+    each `test_case`'s own derived content, but not which `rule_candidate`
+    row it's actually linked to via `rule_candidate_id` -- the same link
+    `fetch_test_case_rows`/`test_case_brief_chunk`'s routine-aware chunk
+    layout reads. Holds every other input constant and only changes which
+    of two existing `rule_candidate` rows the one `test_case` row points
+    at."""
+    import sqlite3
+
+    from mfdoc import testbatch
+    from mfdoc.db import SCHEMA, insert
+
+    def seed(linked_rc_index: int) -> sqlite3.Connection:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(SCHEMA)
+        conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+        conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 40, 'irrelevant')")
+        rc_ids = [
+            insert(
+                conn, "rule_candidate", member_id=1, line_no=line_no, construct="IF",
+                condition=f"COND-{n}", raw=f"IF COND-{n}",
+            )
+            for n, line_no in enumerate((10, 20), start=1)
+        ]
+        insert(
+            conn, "test_case", member_id=1, kind="unit", rule_candidate_id=rc_ids[linked_rc_index],
+            scenario_name="FAKEMOD:BR-001",
+            given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+            when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+            then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+            status="characterization", citation="FAKEMOD:1", confidence="verified",
+        )
+        conn.commit()
+        return conn
+
+    sig_before = testbatch._corpus_signature(seed(0), "python", "pytest", 999)
+    sig_after = testbatch._corpus_signature(seed(1), "python", "pytest", 999)
+    assert sig_before != sig_after
+
+
 def test_run_test_batch_does_not_reuse_state_or_file_across_frameworks(tmp_path):
     """Running the same member/language for two different frameworks must
     produce two separate output files and two separate resume-state
@@ -2305,15 +2347,109 @@ def test_chunk_reuse_treats_a_stale_sidecar_as_a_cache_miss(tmp_path, monkeypatc
 
     monkeypatch.setattr(
         testbatch, "validate_test_doc",
-        lambda conn, path, _text=None: {"ok": True, "sidecar_stale": True, "problems": []},
+        lambda conn, path, _text=None, _prior_fingerprint=None, _render_time=False: {"ok": True, "sidecar_stale": True, "problems": []},
     )
     assert testbatch._test_chunk_reuse_ok(None, prior_chunks, 1, "same-hash", chunk_path) is False
 
     monkeypatch.setattr(
         testbatch, "validate_test_doc",
-        lambda conn, path, _text=None: {"ok": True, "sidecar_stale": False, "problems": []},
+        lambda conn, path, _text=None, _prior_fingerprint=None, _render_time=False: {"ok": True, "sidecar_stale": False, "problems": []},
     )
     assert testbatch._test_chunk_reuse_ok(None, prior_chunks, 1, "same-hash", chunk_path) is True
+
+
+def test_chunk_reuse_forces_a_re_render_for_a_legacy_chunk_with_no_fingerprint(tmp_path):
+    """Copilot review follow-up on issue #195: a *legacy* chunk file (no
+    `test_case_fingerprint` anywhere -- written before this fix existed)
+    whose own cached `brief_sha256` still matches (its own routine's
+    content is unaffected) must still be forced through a real re-render
+    if the corpus has shifted elsewhere in the member -- `brief_hash`
+    alone can't see a `rule_candidate` change outside this chunk's own
+    range, and without `_test_chunk_reuse_ok` passing `_render_time=True`
+    into its revalidation, a legacy chunk's old ids remaining a
+    coincidental subset of the current valid set would read as "still
+    current" via the id-overlap fallback, reusing a chunk that can never
+    earn a real fingerprint because nothing ever re-renders it."""
+    from mfdoc import testbatch
+    import sqlite3
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 40, 'irrelevant')")
+    rc1 = insert(
+        conn, "rule_candidate", member_id=1, line_no=10, construct="IF",
+        condition="COND-1", raw="IF COND-1",
+    )
+    insert(
+        conn, "test_case", member_id=1, kind="unit", rule_candidate_id=rc1,
+        scenario_name="FAKEMOD:BR-001",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+        then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:1", confidence="verified",
+    )
+    conn.commit()
+
+    # A legacy chunk file: no test_case_fingerprint, written directly
+    # (never through write_test_doc_with_sidecar).
+    chunk_path = tmp_path / "FAKEMOD.chunk1.md"
+    chunk_path.write_text(
+        """---
+title: "FAKEMOD -- generated tests (python)"
+doc_type: generated_test
+system: MOM
+module: FAKEMOD
+language: python
+framework: pytest
+generated_by: legacy-functional-docs 0.1.0
+generated_at: "2026-01-01"
+review_status: draft
+reviewers: []
+confidence_summary:
+  verified: 1
+  inferred: 0
+  unresolved: 0
+sources: ["FAKEMOD"]
+---
+
+# FAKEMOD -- generated tests
+
+See [`FAKEMOD.chunk1.py`](./FAKEMOD.chunk1.py) for the generated test source.
+
+## Scenarios covered
+
+- FAKEMOD:BR-001
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "FAKEMOD.chunk1.py").write_text(
+        "def test_one():\n    # FAKEMOD:BR-001\n    ...\n", encoding="utf-8",
+    )
+
+    # A rule inserted elsewhere in the member -- this chunk's own brief
+    # text is unaffected, so its cached brief_sha256 would still match.
+    rc2 = insert(
+        conn, "rule_candidate", member_id=1, line_no=20, construct="IF",
+        condition="COND-2", raw="IF COND-2",
+    )
+    insert(
+        conn, "test_case", member_id=1, kind="unit", rule_candidate_id=rc2,
+        scenario_name="FAKEMOD:BR-002",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+        then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:1", confidence="verified",
+    )
+    conn.commit()
+
+    prior_chunks = {"1": {"ok": True, "brief_sha256": "unchanged-hash"}}
+    assert testbatch._test_chunk_reuse_ok(conn, prior_chunks, 1, "unchanged-hash", chunk_path) is False, (
+        "a legacy chunk with no fingerprint must not be reused once the "
+        "corpus has shifted, even if its own cached brief hash matches"
+    )
 
 
 def test_chunk_resume_regenerates_a_reused_chunk_that_fails_revalidation(tmp_path):
