@@ -753,13 +753,43 @@ def test_find_confident_citation_matches_through_briefs_escaped_pipe():
     rendering escapes a literal `|` inside a condition/literal cell as
     `\\|` so it can't be misread as a column boundary -- but a narrated
     sentence quoting that same condition has no reason to reproduce that
-    rendering artifact. `_key_tokens` must unescape `\\|` back to `|`
-    before comparing, or a fact whose source text contains a literal `|`
-    would never get a confident-citation match here, silently costing this
-    pass's whole "save a model call" purpose for exactly those facts."""
+    rendering artifact. `_find_confident_citation` must decode the brief
+    line's own escaping (`_unescape_brief_cell`) before comparing tokens,
+    or a fact whose source text contains a literal `|` would never get a
+    confident-citation match here, silently costing this pass's whole
+    "save a model call" purpose for exactly those facts."""
     brief_lines = [("[[MMP0100:12]]", "[[MMP0100:12]]|0|`IF`|`A \\| B`")]
     sentence = "The module checks whether `A | B` holds."
     assert batch_mod._find_confident_citation(sentence, brief_lines) == "[[MMP0100:12]]"
+
+
+def test_find_confident_citation_still_matches_when_source_already_has_a_backslash_pipe():
+    """Second-round Copilot review on PR #213: a naive `\\|` -> `|` decode
+    is not a correct inverse of `_esc_cell` when the *original* source text
+    already contained its own literal `\\|` (a backslash immediately
+    followed by a pipe) -- `_esc_cell` doubles that backslash too (issue
+    #185's `_esc_cell` docstring), so `_unescape_brief_cell` must undo
+    escaping in the same order `_esc_cell` applied it, not just strip every
+    `\\|` substring. A sentence quoting the *decoded* original text (with
+    its own single backslash-pipe intact) must still match."""
+    from mfdoc.brief import _esc_cell
+
+    raw = "A " + "\\" + "|" + " B"  # one literal backslash immediately followed by a pipe
+    encoded = _esc_cell(raw)
+    assert encoded == "A " + "\\" * 3 + "|" + " B"
+    assert batch_mod._unescape_brief_cell(encoded) == raw  # round-trips exactly
+
+    brief_lines = [("[[MMP0100:12]]", f"[[MMP0100:12]]|0|`IF`|`{encoded}`")]
+    sentence = f"The module checks whether `{raw}` holds."
+    assert batch_mod._find_confident_citation(sentence, brief_lines) == "[[MMP0100:12]]"
+
+
+def test_key_tokens_does_not_alter_a_sentences_own_literal_backslash_pipe():
+    """`_key_tokens` must never decode brief.py's table-escaping itself --
+    only `_find_confident_citation` does that, and only to the brief side
+    (see `_unescape_brief_cell`). A narrated sentence that happens to
+    quote a literal `\\|` of its own must keep it exactly as written."""
+    assert batch_mod._key_tokens("checks `A \\| B`") == {"A \\| B"}
 
 
 def test_splice_citation_wrapped_sentence_declines():

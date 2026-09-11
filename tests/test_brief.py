@@ -1163,6 +1163,27 @@ def test_tbl_escapes_a_literal_pipe_in_cell_content():
     assert many_rows[2] == "[[X:2]]|`C`"
 
 
+def test_esc_cell_round_trips_a_literal_backslash_before_a_pipe():
+    """Second-round Copilot review on PR #213: a naive "escape the pipe
+    only" scheme is not reversible when the source text already contains
+    its own literal `\\|` (a backslash immediately followed by a pipe) --
+    escaping just the pipe leaves the original backslash and the new one
+    indistinguishable to a decoder. `_esc_cell` doubles backslashes first,
+    so the matching decoder (`batch._unescape_brief_cell`) can tell them
+    apart and recover the exact original text."""
+    from mfdoc.brief import _esc_cell
+
+    raw = "A " + "\\" + "|" + " B"  # one literal backslash immediately followed by a pipe
+    encoded = _esc_cell(raw)
+    # The backslash is doubled first, then the (still-unescaped) pipe gets
+    # its own backslash prefix -- three backslashes in total ahead of the
+    # pipe, not two.
+    assert encoded == "A " + "\\" * 3 + "|" + " B"
+
+    from mfdoc.batch import _unescape_brief_cell
+    assert _unescape_brief_cell(encoded) == raw
+
+
 def test_build_member_facts_returns_ambiguous_markdown_string_like_module_brief_did():
     """Same early-return preservation as the not-found case above, but for
     a genuinely ambiguous name -- two distinct members sharing one bare

@@ -547,20 +547,48 @@ def _key_tokens(text: str) -> set[str]:
     value it's compared against (or vice versa) is deliberately not a match
     on that token alone.
 
-    A `\\|` is unescaped back to a bare `|` before a token is kept --
-    `brief.py`'s compact table rendering (issue #185) escapes a literal `|`
-    inside a cell's own condition/literal/arg text so it can't be misread
-    as a column boundary, but a narrated sentence quoting that same
-    condition has no reason to reproduce that rendering artifact (and
-    won't). Comparing the two verbatim would make a fact whose source text
-    happens to contain `|` never match here, defeating this pass's own
-    "save a model call" purpose for exactly those facts."""
+    Deliberately does *not* know about `brief.py`'s pipe-escaping (issue
+    #185) -- `text` here is a narrated sentence just as often as a brief
+    line, and a narrated sentence never carries that rendering artifact in
+    the first place. Decoding it belongs solely to `_unescape_brief_cell`,
+    applied only to a brief line before it's tokenized (see
+    `_find_confident_citation`) -- applying it here unconditionally would
+    also "decode" a sentence that happens to contain its own literal
+    `\\|`, silently turning it into a different string than the brief's
+    own (correctly decoded) token and producing exactly the false
+    mismatch this was meant to fix (Copilot review on PR #213)."""
     tokens: set[str] = set()
     for m in _KEY_TOKEN.finditer(text):
         tok = next(g for g in m.groups() if g is not None).strip()
         if tok:
-            tokens.add(tok.replace("\\|", "|"))
+            tokens.add(tok)
     return tokens
+
+
+# Reverses brief.py._esc_cell's `\` -> `\\`, `|` -> `\|` table-cell escaping
+# (issue #185), for the one purpose that needs it undone: comparing a
+# brief line's tokens against a narrated sentence's in `_find_confident_
+# citation`, where the sentence never saw (and so never reproduces) that
+# rendering artifact. A blind `text.replace("\\|", "|")` looks equivalent
+# but is *not* a correct inverse whenever the encoded text contains a run
+# of more than one backslash before a pipe (e.g. the source itself already
+# had `\|`, which `_esc_cell` turns into `\\|`) -- non-overlapping
+# left-to-right replacement can consume the wrong pair of characters and
+# return a different string than what was originally encoded. This regex
+# instead matches, in the same left-to-right order `_esc_cell` produced
+# them, only its two actual escape sequences (`\\` for an original
+# backslash, `\|` for an original pipe) and substitutes each for exactly
+# the one character it stands for -- the correct, order-sensitive inverse.
+_ESCAPED_TABLE_CHAR = re.compile(r"\\\\|\\\|")
+
+
+def _unescape_brief_cell(text: str) -> str:
+    """Inverse of `brief._esc_cell`, applied to a `[[MEMBER:LINE]]`-cited
+    brief line before tokenizing it (see `_find_confident_citation`) so a
+    literal `|` or `\\` in the original source-derived cell text compares
+    equal to how a narrated sentence would naturally reproduce it, not to
+    this rendering's own internal escape artifact."""
+    return _ESCAPED_TABLE_CHAR.sub(lambda m: "\\" if m.group() == "\\\\" else "|", text)
 
 
 def _brief_cited_lines(brief: str) -> list[tuple[str, str]]:
@@ -606,7 +634,7 @@ def _find_confident_citation(sentence: str, brief_lines: list[tuple[str, str]]) 
         return None
     matches = {
         cite for cite, line in brief_lines
-        if sentence_tokens <= _key_tokens(line)
+        if sentence_tokens <= _key_tokens(_unescape_brief_cell(line))
     }
     return matches.pop() if len(matches) == 1 else None
 

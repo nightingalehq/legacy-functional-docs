@@ -79,11 +79,25 @@ def _tbl(headers: list[str], rows: list[list[str]]) -> list[str]:
 
 
 def _esc_cell(cell: str) -> str:
-    """`cell`, with a literal `|` escaped so it can never be misread as a
-    markdown table column boundary -- the one character a table cell can't
-    safely contain unescaped that free-form source text (a condition, a
-    literal, an arg string) could otherwise carry."""
-    return cell.replace("|", "\\|") if cell else cell
+    """`cell`, with `\\` and `|` escaped so a literal `|` can never be
+    misread as a markdown table column boundary -- the one character a
+    table cell can't safely contain unescaped that free-form source text
+    (a condition, a literal, an arg string) could otherwise carry.
+
+    Backslashes are doubled *first*, then pipes are escaped -- doing pipes
+    first (an earlier version of this function) is not reversible when the
+    source text already contains its own literal `\\|` sequence: escaping
+    only the pipe leaves the original backslash and the new one
+    indistinguishable from each other to a decoder scanning left to right,
+    so `batch._unescape_brief_cell` (the matching decoder used only on this
+    rendered brief text, see its own docstring) could return a different
+    string than what was originally encoded. Escaping backslashes first
+    means every backslash a decoder later encounters is unambiguously part
+    of one escape sequence it introduced -- see
+    `test_esc_cell_round_trips_a_literal_backslash_before_a_pipe`."""
+    if not cell:
+        return cell
+    return cell.replace("\\", "\\\\").replace("|", "\\|")
 
 
 def _sme_notes_section(redact: Redactor, sme_notes: Notes | None, name: str | None) -> list[str]:

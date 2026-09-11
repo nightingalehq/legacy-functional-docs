@@ -275,8 +275,10 @@ GitHub org.
   synthetic single-purpose test fixtures (most under ~2KB, 1-2 facts per
   section -- not enough rows to amortize a table's own overhead) but a net
   reduction on the larger, more rule-dense members that stand in for a
-  real module's chunked brief (MMP0100 +2.9%, MMP0400 +1.3%, ORDENQ +6.0%,
-  PRODSCHED +1.1%), for a ~1.0% overall reduction across all 17 -- and, per
+  real module's chunked brief (char-count reduction of 2.9% for MMP0100,
+  1.3% for MMP0400, 6.0% for ORDENQ, 1.1% for PRODSCHED -- all reported as
+  positive reduction magnitudes here, not signed deltas, to avoid the "+"
+  reading as growth), for a ~1.0% overall reduction across all 17 -- and, per
   the design intent noted in `brief._tbl`'s own docstring, the saving
   should grow with a chunk's rule/fact count on a real engagement's larger
   briefs, which this bundled fixture set is too small to fully represent.
@@ -302,6 +304,32 @@ GitHub org.
   fixtures re-run clean: 71/71 documents, 0 invalid citations -- no
   regression (this checks generated docs, not briefs, since briefs aren't
   committed, but confirms nothing else broke).
+  Two rounds of Copilot PR review caught real correctness gaps in the
+  pipe-escaping this rendering needed: round 1, `batch._key_tokens`'s
+  auto-citation token matcher compared a narrated sentence's tokens
+  against a brief line's verbatim, so a fact whose condition/literal
+  contains a real `|` never matched once `brief._esc_cell` started
+  escaping it -- silently costing this pass's whole "save a model call"
+  purpose for exactly those facts (also fixed a test that miscounted
+  escaped pipes as column boundaries, and softened `_tbl`'s "never
+  longer" docstring claim to the true amortized-over-row-count property).
+  Round 2 found the round-1 fix itself wasn't correct for the rarer case
+  where the *original* source text already contained its own literal
+  `\|` -- `_esc_cell` only escaped the pipe, which isn't a reversible
+  scheme once a pre-existing backslash is in play, so `batch._key_tokens`'s
+  naive `\|` -> `|` strip could decode the brief's token and the
+  sentence's token to two different strings. Fixed by making `_esc_cell`
+  escape `\` before `|` (a properly invertible scheme) and moving the
+  decode out of `_key_tokens` entirely into a new `batch._unescape_
+  brief_cell`, applied only to the brief-line side of the comparison in
+  `_find_confident_citation` -- `_key_tokens` itself no longer knows
+  anything about this rendering's escaping, so a narrated sentence's own
+  literal backslash/pipe is never altered. Added
+  `test_esc_cell_round_trips_a_literal_backslash_before_a_pipe`
+  (tests/test_brief.py) and
+  `test_find_confident_citation_still_matches_when_source_already_has_a_backslash_pipe`/
+  `test_key_tokens_does_not_alter_a_sentences_own_literal_backslash_pipe`
+  (tests/test_batch.py). Full suite: 963 passed, 2 skipped.
 
 **Progress (2026-09-10e):**
 - Fixed issue #188: ported `batch.py`'s near-miss/targeted-patch mechanism
