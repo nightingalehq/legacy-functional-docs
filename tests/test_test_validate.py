@@ -120,22 +120,33 @@ def test_stale_sidecar_from_renumbering_is_treated_as_absent(indexed_db, tmp_pat
 
 
 def test_current_sidecar_still_cross_checked_against_manifest(indexed_db, tmp_path):
-    """A sidecar whose BR-ids *do* match current `test_case` rows is still
-    authoritative -- the staleness guard must not swallow a genuine
-    manifest/sidecar mismatch."""
+    """A sidecar whose BR-ids *do* all match current `test_case` rows is
+    still authoritative -- the staleness guard must not swallow a genuine
+    manifest/sidecar mismatch. `MMP0100:BR-001` is a real, current
+    `test_case` scenario, distinct from the manifest's `BR-004` -- so the
+    `all(...)` staleness check finds a fully-resolving (not stale) sidecar
+    whose content genuinely disagrees with the manifest, exercising the
+    cross-check branch rather than the `not code_ids` short-circuit."""
     conn = indexed_db
     testplan.run_all(conn, member_name="MMP0100")
     path = tmp_path / "MMP0100.md"
     sidecar = tmp_path / "MMP0100.py"
-    # Manifest claims BR-004; sidecar's real content only has BR-... nothing
-    # (a genuine drift, not a renumbering) -- BR-004 is a real, current id.
+    # Manifest claims BR-004; sidecar's real content only has BR-001 -- a
+    # genuine drift (e.g. hand-edited manifest), not a renumbering, since
+    # both ids are real and current.
     path.write_text(SIDECAR_DOC, encoding="utf-8")
-    sidecar.write_text("def test_placeholder():\n    ...\n", encoding="utf-8")
+    sidecar.write_text(
+        "def test_something_else():\n    # MMP0100:BR-001\n    ...\n",
+        encoding="utf-8",
+    )
     result = validate_test_doc(conn, path)
     assert result["sidecar_stale"] is False
     assert not result["ok"]
     assert any(
         "BR-004" in p and "not found in" in p for p in result["problems"]
+    )
+    assert any(
+        "BR-001" in p and "missing from" in p for p in result["problems"]
     )
 
 

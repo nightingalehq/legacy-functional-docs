@@ -968,11 +968,23 @@ def validate_test_doc(conn, path: Path, _text: str | None = None) -> dict:
     matching any current `test_case` row (issue #195). Comparing that
     numbering against a freshly generated manifest would then report every
     id in the sidecar as missing, even though nothing about the current run
-    is wrong. This is detected by checking whether the sidecar's own BR-ids
-    resolve against `test_case` at all -- if it has BR-ids and *none* of
-    them do, the sidecar is treated as though it weren't there (same as no
-    sidecar on disk) rather than authoritative; `result["sidecar_stale"]`
-    reports this without it counting toward `problems`/`ok`.
+    is wrong. This is detected by checking whether *every* one of the
+    sidecar's own BR-ids resolves against `test_case` -- if it has BR-ids
+    and *any* of them don't, the sidecar is treated as though it weren't
+    there (same as no sidecar on disk) rather than authoritative;
+    `result["sidecar_stale"]` reports this without it counting toward
+    `problems`/`ok`. Requiring *all* (not just one) to fail to resolve
+    would under-detect a partial positional shift -- e.g. old
+    `{BR-001, BR-002, BR-003}` renumbered to `{BR-002, BR-003, BR-004}`
+    still has two overlapping ids by coincidence, which is still exactly
+    the same staleness this guard exists to catch. The trade-off: a
+    sidecar with one genuinely invented/malformed id mixed in among
+    otherwise-current ones is also treated as stale rather than flagged
+    directly -- accepted here since `test-batch`'s retry loop re-validates
+    a freshly rendered chunk against the (also freshly written) manifest
+    on every attempt regardless, so a real invented id still surfaces via
+    `body`'s own scenario references, just not via the sidecar cross-check
+    specifically.
     """
     result = validate_doc(conn, path, _text=_text)
     fm, body = result.pop("_fm"), result.pop("_body")
@@ -999,12 +1011,19 @@ def validate_test_doc(conn, path: Path, _text: str | None = None) -> dict:
         # manifest then produces a "not found" for every id in the sidecar,
         # not because anything about this run is actually wrong -- just
         # because the sidecar predates the renumbering. Detect that by
-        # checking whether the sidecar's own BR-ids resolve against
-        # `test_case` at all: if it has BR-ids and none of them do, treat
-        # the sidecar as though it weren't there (fall back to scanning
-        # `body` directly below) rather than as authoritative -- the same
-        # treatment already given to "no sidecar on disk".
-        sidecar_usable = not code_ids or any(
+        # checking whether *every* one of the sidecar's own BR-ids resolves
+        # against `test_case`: if it has BR-ids and any of them don't,
+        # treat the sidecar as though it weren't there (fall back to
+        # scanning `body` directly below) rather than as authoritative --
+        # the same treatment already given to "no sidecar on disk".
+        # Deliberately `all(...)`, not `any(...)`: a partial positional
+        # shift (old {BR-001, BR-002, BR-003} renumbered to {BR-002,
+        # BR-003, BR-004}) still leaves some ids coincidentally overlapping
+        # with `test_case`'s current numbering, which `any(...)` would
+        # wrongly read as "still current" and cross-check anyway --
+        # producing the exact false "not found" this guard exists to
+        # prevent, just for a subset of ids instead of all of them.
+        sidecar_usable = not code_ids or all(
             conn.execute(
                 "SELECT 1 FROM test_case WHERE UPPER(scenario_name)=UPPER(?)", (sid,)
             ).fetchone()

@@ -592,7 +592,19 @@ def _test_chunk_reuse_ok(conn, prior_chunks: dict | None, i: int, brief_hash: st
     `validate_test_doc` directly, so a dry-run's reuse check can't leave
     the `doc_claim` table changed even though it makes no model call and
     writes no file -- the real chunked-render path leaves this False, so
-    its own revalidation keeps refreshing `doc_claim` exactly as before."""
+    its own revalidation keeps refreshing `doc_claim` exactly as before.
+
+    A chunk whose sidecar `validate_test_doc` reports as `sidecar_stale`
+    (issue #195) is deliberately never reusable, even when `ok` comes back
+    True: `ok=True` there only means the staleness was tolerated by
+    falling back to scanning the document body, not that the on-disk
+    sidecar source itself is still accurate. Reusing it verbatim would
+    leave that stale sidecar (and its now-wrong BR-nnn comments) on disk
+    indefinitely across every future resumed/dry-run pass, since nothing
+    would ever call `write_test_doc_with_sidecar` again to refresh it.
+    Treating it as a cache miss instead forces the normal render path,
+    which -- once it validates -- rewrites the sidecar with fresh content
+    the usual way."""
     prior_chunk = (prior_chunks or {}).get(str(i))
     reusable = (
         isinstance(prior_chunk, dict) and prior_chunk.get("ok") is True
@@ -602,7 +614,8 @@ def _test_chunk_reuse_ok(conn, prior_chunks: dict | None, i: int, brief_hash: st
     if not reusable:
         return False
     validator = _readonly_validate_test_doc if readonly else validate_test_doc
-    return validator(conn, chunk_path)["ok"]
+    result = validator(conn, chunk_path)
+    return result["ok"] and not result.get("sidecar_stale")
 
 
 def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None, rows: list,

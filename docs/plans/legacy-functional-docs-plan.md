@@ -654,23 +654,47 @@ GitHub org.
   `validate.py` (the two modules deliberately don't import each other's
   narrate-vs-validate concerns beyond the existing `testlang.py` shim).
   `validate_test_doc` (`src/mfdoc/validate.py`) now checks, before treating
-  a sidecar as authoritative, whether *any* of the sidecar's own BR-ids
-  resolve against a current `test_case` row; if it has BR-ids and none do,
-  it falls back to scanning `body` directly -- the same treatment already
-  given to "no sidecar on disk" -- rather than cross-checking the stale
-  content against the fresh manifest. This is deliberately not counted
-  toward `problems`/`ok` (a stale sidecar isn't a defect in the document
-  being validated, and gets overwritten with fresh content the next time
-  this validation actually succeeds); reported instead via a new
-  `result["sidecar_stale"]` field for a caller that wants to know. Added
-  `test_stale_sidecar_from_renumbering_is_treated_as_absent` (simulates the
-  renumbering by writing a sidecar whose only BR-id doesn't exist in
-  `test_case`, asserts no false "not found" problems and `ok` is true) and
-  `test_current_sidecar_still_cross_checked_against_manifest` (a sidecar
-  whose content doesn't reference the renumbering signal at all must still
-  be compared against the manifest as before, confirming the guard doesn't
-  swallow a genuine mismatch) to `tests/test_test_validate.py`. Full suite:
-  940 passed, 2 skipped.
+  a sidecar as authoritative, whether *every* one of the sidecar's own
+  BR-ids resolves against a current `test_case` row; if it has BR-ids and
+  any of them don't, it falls back to scanning `body` directly -- the same
+  treatment already given to "no sidecar on disk" -- rather than
+  cross-checking the stale content against the fresh manifest. This is
+  deliberately not counted toward `problems`/`ok` (a stale sidecar isn't a
+  defect in the document being validated, and gets overwritten with fresh
+  content the next time this validation actually succeeds); reported
+  instead via a new `result["sidecar_stale"]` field for a caller that wants
+  to know. Added `test_stale_sidecar_from_renumbering_is_treated_as_absent`
+  (simulates the renumbering by writing a sidecar whose only BR-id doesn't
+  exist in `test_case`, asserts no false "not found" problems and `ok` is
+  true) and `test_current_sidecar_still_cross_checked_against_manifest` (a
+  sidecar whose content genuinely disagrees with the manifest, using a
+  different but still-current BR-id, must still be flagged, confirming the
+  guard doesn't swallow a real mismatch) to `tests/test_test_validate.py`.
+  Copilot PR review caught three real gaps in the first pass, addressed
+  here: (1) the initial `any(...)` staleness check missed a *partial*
+  positional shift (e.g. old `{BR-001, BR-002, BR-003}` renumbered to
+  `{BR-002, BR-003, BR-004}` still has coincidental overlap) -- changed to
+  `all(...)`, documented in `validate_test_doc`'s docstring along with the
+  accepted trade-off this creates (a lone invented/malformed id mixed
+  into an otherwise-current sidecar is now also treated as stale rather
+  than flagged directly by the sidecar cross-check specifically, though it
+  still surfaces via the body-scan fallback's own `bad_refs` check); (2)
+  `_test_chunk_reuse_ok` (`testbatch.py`) was calling `validate_test_doc`
+  for its cache-reuse check but only reading `result["ok"]` -- a chunk
+  whose sidecar the staleness guard tolerated (`ok=True` via the body
+  fallback) would then be reused verbatim forever, leaving the actually
+  stale `.py`/`.nsp` sidecar on disk with no path back to
+  `write_test_doc_with_sidecar` ever refreshing it; now also checks
+  `not result.get("sidecar_stale")`, forcing a real re-render (which
+  rewrites the sidecar normally once it validates) instead of a reuse.
+  Added `test_chunk_reuse_treats_a_stale_sidecar_as_a_cache_miss` to
+  `tests/test_test_batch.py`. (3) the original
+  `test_current_sidecar_still_cross_checked_against_manifest` used a
+  sidecar with no BR-ids at all, so the `any(...)`/`all(...)` branch was
+  never exercised -- rewritten to use `MMP0100:BR-001` (confirmed via the
+  bundled fixture's own `test_case` rows), a real, current, but different
+  id from the manifest's `BR-004`, actually exercising the cross-check.
+  Full suite: 954 passed, 2 skipped.
 
 **Progress (2026-09-10e):**
 - Fixed issue #188: ported `batch.py`'s near-miss/targeted-patch mechanism

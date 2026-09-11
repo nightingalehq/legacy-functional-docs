@@ -1546,6 +1546,36 @@ def test_chunk_resume_always_regenerates_a_previously_failed_chunk(tmp_path):
     assert second.chunk_state["2"]["ok"] is True
 
 
+def test_chunk_reuse_treats_a_stale_sidecar_as_a_cache_miss(tmp_path, monkeypatch):
+    """Issue #195 review follow-up: `_test_chunk_reuse_ok` must not reuse a
+    chunk verbatim just because `validate_test_doc` came back `ok=True` --
+    `ok=True` alone can mean the sidecar staleness guard tolerated a stale
+    on-disk sidecar by falling back to scanning the document body, not that
+    the sidecar source itself is still accurate. Reusing it verbatim would
+    leave that stale `.py`/`.nsp` file (with its now-wrong BR-nnn comments)
+    on disk forever, since nothing would ever call
+    `write_test_doc_with_sidecar` again to refresh it. `sidecar_stale` in
+    the result must therefore force a cache miss (a normal re-render),
+    which -- once it validates -- rewrites the sidecar the usual way."""
+    from mfdoc import testbatch
+
+    chunk_path = tmp_path / "FAKEMOD.chunk1.md"
+    chunk_path.write_text("irrelevant -- validate_test_doc is faked below", encoding="utf-8")
+    prior_chunks = {"1": {"ok": True, "brief_sha256": "same-hash"}}
+
+    monkeypatch.setattr(
+        testbatch, "validate_test_doc",
+        lambda conn, path, _text=None: {"ok": True, "sidecar_stale": True, "problems": []},
+    )
+    assert testbatch._test_chunk_reuse_ok(None, prior_chunks, 1, "same-hash", chunk_path) is False
+
+    monkeypatch.setattr(
+        testbatch, "validate_test_doc",
+        lambda conn, path, _text=None: {"ok": True, "sidecar_stale": False, "problems": []},
+    )
+    assert testbatch._test_chunk_reuse_ok(None, prior_chunks, 1, "same-hash", chunk_path) is True
+
+
 def test_chunk_resume_regenerates_a_reused_chunk_that_fails_revalidation(tmp_path):
     """The other half of the reuse guard: a chunk the prior run recorded as
     clean, but whose cached file no longer validates (its content was
