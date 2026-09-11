@@ -207,8 +207,8 @@ GitHub org.
   "real output-shape change... needing its own design pass, tests, and a
   fresh pipeline validation run" #207 flagged as more than a caching-only
   change. Rather than force a narrower, riskier slice under time pressure,
-  leaving this closed pending that design pass (or a narrower follow-up:
-  render a purpose-built, `chunk_info`/`chunk_map`-free "shared prefix"
+  leaving this closed pending that design pass. A narrower follow-up also
+  exists: render a purpose-built, `chunk_info`/`chunk_map`-free "shared prefix"
   string from `MemberFacts` directly -- through the calling `module_brief`
   call's own `redact`, same as every other `MemberFacts` field, since
   `MemberFacts` itself is raw/unredacted -- bypassing `module_brief`
@@ -237,7 +237,7 @@ GitHub org.
      all, unless a future preview also wants to estimate the new
      breakpoint's savings, which would be separate work again.)
   Flagged as the least invasive option for a future attempt, with its own
-  tests, not as something either of these bullets makes trivial).
+  tests, not as something either of these bullets makes trivial.
   No code change; full suite unchanged at 955 passed, 2 skipped.
 
 **Progress (2026-09-10e):**
