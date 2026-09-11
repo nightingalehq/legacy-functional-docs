@@ -399,6 +399,53 @@ GitHub org.
   is the same, already-necessary fallback (2) exists for. Full suite:
   1008 passed, 2 skipped.
 
+  A thirteenth review round found four more real gaps and two test-
+  coverage gaps, all addressed here. Real fixes: (1) `member_rule_
+  fingerprint`'s query added its own `, id` tie-break for same-line
+  `rule_candidate` rows, but `build_member_test_cases`/`brief.
+  fetch_rule_candidate_rows` (the actual numbering source, used
+  identically across every other BR-numbering consumer in the codebase)
+  never has one -- same-line rows are explicitly supported, and adding a
+  tie-break only on the fingerprinting side made it describe a different
+  ordering than the one that actually produced the scenario IDs. Removed
+  the added tie-break to match the established `ORDER BY line_no`
+  convention exactly, rather than inventing a second, disagreeing one.
+  (2) `write_test_doc_with_sidecar` always fingerprinted `[member_name]`,
+  but `validate_test_doc` recomputes from the document's own `sources`
+  list, which can legitimately name more than one member -- mismatching
+  by construction for any such document. Now parses the document's own
+  `sources` at write time (falling back to `[member_name]` only if it
+  can't be parsed) so both sides hash the same input. (3) A member
+  growing past the chunking threshold between runs leaves its prior
+  single-document sidecar on disk; `_prune_stale_chunk_files` only
+  removes `.chunk<N>` files, deliberately, so the chunked index document
+  at the same `out_path` (which never gets its own sidecar -- each chunk
+  gets its own) could have its aggregated manifest cross-checked against
+  that unrelated leftover content via `sidecar_path_for`'s purely
+  path-based lookup. Now removed explicitly, unconditionally, right
+  before a chunked render begins. (4) A malformed-but-technically-a-list
+  `sources` entry with stray whitespace (e.g. `["FAKEMOD "]`) failed
+  `resolve_member_by_name`'s exact match and fell through to the weaker
+  fallback -- now stripped before fingerprinting. One point accepted as a
+  documented, not fixed, limitation: `_prior_fingerprint_for` has nothing
+  to recover across a fresh invocation following one that exhausted every
+  retry (the last invalid candidate on disk never got a fingerprint
+  stamped) -- closing this would mean persisting the fingerprint
+  separately in resume state purely to survive a failure that already
+  needs human investigation on its own, not something this mechanism
+  should add complexity trying to paper over silently.
+  Test coverage gaps closed: `test_corpus_signature_changes_when_a_
+  routine_boundary_shifts` (the existing rule-ordering regression never
+  varied a `routine` row on its own); `test_run_test_batch_pool_loop_
+  rerender_after_an_insertion_is_not_falsely_rejected` (the critical
+  end-to-end regression only exercised `generate_member_test_doc`, not
+  `run_test_batch`'s separate inline pool-loop path, which duplicates the
+  same `_prior_fingerprint_for`/`validate_test_doc` calls independently);
+  `test_chunked_index_removes_a_leftover_single_doc_sidecar` (confirmed
+  by hand to fail -- the leftover file staying on disk -- without fix
+  (3), and pass with it). Full suite: 1011 passed, 2 skipped; bundled
+  fixture pipeline unchanged.
+
 **Progress (2026-09-11):**
 - Fixed issue #199: `mfdoc doc-drift`'s existing checks (issue #161) caught
   system-wide/module-scoped drift but nothing keyed on a single dialect --

@@ -171,13 +171,27 @@ def member_rule_fingerprint(conn, member_name: str) -> str | None:
     `test_case` rows -- an id-overlap check alone cannot tell a real shift
     apart from one where the old id set, by coincidence or because the
     insertion/removal happened entirely *after* the sidecar's own range,
-    remains a literal subset of the current one."""
+    remains a literal subset of the current one.
+
+    `ORDER BY line_no` only, deliberately matching `brief.
+    fetch_rule_candidate_rows`/`build_member_test_cases`'s own query
+    verbatim (both `SELECT * FROM rule_candidate WHERE member_id=? ORDER
+    BY line_no`, no secondary tie-break) -- same-line rows are explicitly
+    supported (natural.py can record more than one rule_candidate per
+    source line), and this fingerprint exists to describe *the same
+    ordering* `numbered_rule_candidates()` actually numbers from, not a
+    different, independently-invented one. Adding a tie-break here that
+    the numbering side doesn't also use would make this fingerprint
+    describe an ordering that isn't the one that actually produced the
+    scenario IDs -- SQLite's own row order for tied `line_no` values is
+    the load-bearing assumption every other BR-numbering consumer already
+    depends on, not something this function should second-guess alone."""
     rows, ambiguous = resolve_member_by_name(conn, member_name)
     if ambiguous or not rows:
         return None
     mid = rows[0]["id"]
     rc_rows = conn.execute(
-        "SELECT id, line_no FROM rule_candidate WHERE member_id=? ORDER BY line_no, id", (mid,)
+        "SELECT id, line_no FROM rule_candidate WHERE member_id=? ORDER BY line_no", (mid,)
     ).fetchall()
     joined = "|".join(f"{r['id']}:{r['line_no']}" for r in rc_rows)
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]

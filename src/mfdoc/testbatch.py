@@ -108,9 +108,11 @@ def write_test_doc_with_sidecar(conn, member_name: str, out_path: Path, doc_text
     would no longer see.
 
     Also stamps a `test_case_fingerprint` field into the rewritten front
-    matter, from `testplan.doc_rule_fingerprint(conn, [member_name])` --
-    the exact `rule_candidate` ordering that determined this render's
-    `BR-nnn` numbering, at the moment the sidecar is written. This is what
+    matter, from `testplan.doc_rule_fingerprint(conn, sources)` (`sources`
+    parsed from this document's own front matter, normally just
+    `[member_name]`) -- the exact `rule_candidate` ordering that
+    determined this render's `BR-nnn` numbering, at the moment the sidecar
+    is written. This is what
     lets `validate_test_doc` later detect a genuine positional renumbering
     directly (issue #195), rather than only inferring staleness from
     whether the sidecar's own ids happen to still resolve against current
@@ -153,13 +155,24 @@ def write_test_doc_with_sidecar(conn, member_name: str, out_path: Path, doc_text
         body, count=1,
     ).rstrip()
     manifest = "\n\n## Scenarios covered\n\n" + "\n".join(f"- {sid}" for sid in scenario_ids) + "\n"
-    # doc_rule_fingerprint, not member_rule_fingerprint directly, even
-    # though this is (today) always exactly one member -- validate.py's
-    # validate_test_doc recomputes via doc_rule_fingerprint(conn,
-    # fm["sources"]) to also cover a document naming more than one source
-    # member, and the two sides must hash the same way or every comparison
-    # mismatches by construction, not because anything actually changed.
-    fingerprint = doc_rule_fingerprint(conn, [member_name])
+    # Fingerprinted from the document's *own* parsed `sources` list, not
+    # bare `[member_name]`: `validate_test_doc` recomputes via
+    # `doc_rule_fingerprint(conn, fm["sources"])` at validation time, and a
+    # document whose front matter legitimately names more than one source
+    # member (`doc_rule_fingerprint`/the validator's own front-matter
+    # contract both allow this) would otherwise be stamped from a
+    # single-member hash here but compared against a multi-member one
+    # there -- mismatching by construction on every single validation,
+    # not because anything about the corpus ever changed. Falls back to
+    # `[member_name]` only when this document's own `sources` can't be
+    # parsed as a non-empty list of strings (front matter missing/
+    # malformed -- the same "leave it out" trade-off as an unresolvable
+    # fingerprint below, not a case worth failing this write over).
+    doc_fm, _doc_body, _doc_err = split_frontmatter(doc_text)
+    doc_sources = doc_fm.get("sources") if doc_fm is not None else None
+    if not (isinstance(doc_sources, list) and doc_sources and all(isinstance(s, str) for s in doc_sources)):
+        doc_sources = [member_name]
+    fingerprint = doc_rule_fingerprint(conn, doc_sources)
     if fingerprint is not None:
         front_matter_block = front_matter_block.rstrip("\n") + f'\ntest_case_fingerprint: "{fingerprint}"\n'
     out_path.write_text(f"---{front_matter_block}---{prose}{manifest}", encoding="utf-8")
@@ -191,7 +204,22 @@ def _prior_fingerprint_for(out_path: Path) -> str | None:
     loop's own first pass. Callers thread the result through every
     `validate_test_doc(..., _prior_fingerprint=...)` call in one render
     attempt (the prior document doesn't change mid-retry -- only the
-    candidate text does)."""
+    candidate text does).
+
+    Known, accepted residual gap: if a *previous invocation* (not just a
+    prior attempt within the current one) exhausted every retry and left
+    an invalid candidate on disk -- `out_path`'s last write on that run --
+    that candidate never validated, so `write_test_doc_with_sidecar` never
+    ran and no fingerprint was ever stamped. A fresh invocation's call to
+    this function then genuinely has nothing to recover, and (if the
+    corpus has *also* shifted in the meantime) is exposed to the same
+    stale-old-sidecar risk this whole mechanism exists to close. Accepted
+    rather than fixed here: closing it would mean persisting the
+    fingerprint separately from the document itself (e.g. in `--state`
+    resume metadata) purely to survive a validation failure that already
+    needs investigating on its own -- a permanently-failing member is
+    already an anomaly a human needs to look at, not a case this
+    mechanism should add complexity trying to paper over silently."""
     if not out_path.exists():
         return None
     fm, _body, _err = split_frontmatter(out_path.read_text(encoding="utf-8"))
@@ -740,6 +768,28 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
         f"{out_path.stem}.chunk{n:0{chunk_width}d}{out_path.suffix}" for n in range(1, chunk_count + 1)
     }
     _prune_stale_chunk_files(out_path, expected_chunk_names)
+    # A leftover sidecar from a *prior single-document* render of this same
+    # member (issue #195 review): the index document at `out_path` never
+    # gets its own sidecar -- each chunk gets its own
+    # (`out_path.chunk{N}.py`, split independently below) -- but
+    # `sidecar_path_for(out_path, language)` is purely path-based and can't
+    # tell an index doc from a single-doc one, so a member that grows past
+    # the chunking threshold between runs would otherwise leave its old
+    # single-doc sidecar sitting right where the index doc's own
+    # (irrelevant) "sidecar" would be looked up, and `validate_test_doc`
+    # would cross-check the index's aggregated manifest against that
+    # unrelated leftover content. Removed here, unconditionally, before
+    # the index is ever written -- `_prune_stale_chunk_files` above only
+    # ever touches `.chunk<N>` files, deliberately, so this is a separate
+    # cleanup step, not something to fold into it.
+    stale_index_sidecar = sidecar_path_for(out_path, language)
+    if stale_index_sidecar is not None and stale_index_sidecar.exists():
+        try:
+            stale_index_sidecar.unlink()
+        except OSError:
+            # Best-effort, same as _prune_stale_chunk_files above -- a file
+            # some other process is holding open must not abort the batch.
+            pass
     for i, (start, end) in enumerate(ranges, start=1):
         chunk_rows = rows[start - 1:end]
         chunk_path = out_path.with_name(f"{out_path.stem}.chunk{i:0{chunk_width}d}{out_path.suffix}")

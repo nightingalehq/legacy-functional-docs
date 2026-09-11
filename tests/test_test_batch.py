@@ -224,6 +224,50 @@ def test_corpus_signature_changes_when_rule_candidate_ordering_shifts_but_test_c
     assert sig_before != sig_after
 
 
+def test_corpus_signature_changes_when_a_routine_boundary_shifts(tmp_path):
+    """Copilot review follow-up on issue #195: the rule_candidate-ordering
+    regression above only varies `rule_candidate` rows, never `routine`
+    boundaries -- a future edit could drop the `routine` terms from
+    `_corpus_signature` without any existing test noticing. This holds
+    every `test_case`/`rule_candidate` input constant and changes only one
+    `routine` row's `end_line` (the same boundary
+    `brief.routine_aware_chunk_ranges`/`fetch_routines` use to decide
+    chunk grouping), confirming the signature moves from that alone."""
+    import sqlite3
+
+    from mfdoc import testbatch
+    from mfdoc.db import SCHEMA, insert
+
+    def seed(end_line: int) -> sqlite3.Connection:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(SCHEMA)
+        conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+        conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 40, 'irrelevant')")
+        rc_id = insert(
+            conn, "rule_candidate", member_id=1, line_no=10, construct="IF",
+            condition="COND-1", raw="IF COND-1",
+        )
+        insert(
+            conn, "test_case", member_id=1, kind="unit", rule_candidate_id=rc_id,
+            scenario_name="FAKEMOD:BR-001",
+            given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+            when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+            then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+            status="characterization", citation="FAKEMOD:1", confidence="verified",
+        )
+        insert(
+            conn, "routine", member_id=1, name="SUB-A", kind="natural_subroutine",
+            start_line=5, end_line=end_line,
+        )
+        conn.commit()
+        return conn
+
+    sig_before = testbatch._corpus_signature(seed(15), "python", "pytest", 999)
+    sig_after = testbatch._corpus_signature(seed(25), "python", "pytest", 999)
+    assert sig_before != sig_after
+
+
 def test_run_test_batch_does_not_reuse_state_or_file_across_frameworks(tmp_path):
     """Running the same member/language for two different frameworks must
     produce two separate output files and two separate resume-state
@@ -721,6 +765,103 @@ Covers the module as a whole [[FAKEMOD:1]].
         "a genuinely correct response must validate clean on the first "
         "attempt, not be falsely rejected against the stale old sidecar "
         "and consume a retry"
+    )
+
+
+def test_run_test_batch_pool_loop_rerender_after_an_insertion_is_not_falsely_rejected(tmp_path):
+    """Copilot review follow-up: the previous test exercises
+    `generate_member_test_doc`/`_generate_test_doc_from_brief`, but
+    `run_test_batch`'s own separate inline `ThreadPoolExecutor` loop for
+    non-chunked members (the ordinary `mfdoc test-batch` path most real
+    runs actually take, per issue #188's own review history) duplicates
+    the same `_prior_fingerprint_for` capture and `validate_test_doc`
+    calls independently -- it needs its own regression, not just implicit
+    coverage from the other path."""
+    from mfdoc import testbatch
+    import sqlite3
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 40, 'irrelevant')")
+    rc1 = insert(
+        conn, "rule_candidate", member_id=1, line_no=10, construct="IF",
+        condition="COND-1", raw="IF COND-1",
+    )
+    insert(
+        conn, "test_case", member_id=1, kind="unit", rule_candidate_id=rc1,
+        scenario_name="FAKEMOD:BR-001",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+        then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:1", confidence="verified",
+    )
+    conn.commit()
+
+    def doc_text(ids: list[str]) -> str:
+        fence = "\n".join(
+            f"def test_{i.split('-')[-1]}():\n    # FAKEMOD:{i} [[FAKEMOD:1]]\n    pass" for i in ids
+        )
+        return f"""---
+title: "FAKEMOD -- generated tests"
+doc_type: generated_test
+system: "MOM"
+generated_by: mfdoc
+generated_at: "2026-01-01"
+review_status: draft
+confidence_summary:
+  verified: {len(ids)}
+language: python
+framework: pytest
+sources: ["FAKEMOD"]
+---
+
+# FAKEMOD tests
+
+Covers the module as a whole [[FAKEMOD:1]].
+
+```python
+{fence}
+```
+"""
+
+    out_dir = tmp_path / "out"
+    first_ids = ["BR-001"]
+    summary1 = testbatch.run_test_batch(
+        conn, ["FAKEMOD"], "python", "pytest", out_dir,
+        lambda prompt: ModelResponse(text=doc_text(first_ids), input_tokens=1, output_tokens=2),
+        "writing rules text", "template text",
+    )
+    assert summary1.ok == 1, summary1.results[0].problems
+
+    rc2 = insert(
+        conn, "rule_candidate", member_id=1, line_no=20, construct="IF",
+        condition="COND-2", raw="IF COND-2",
+    )
+    insert(
+        conn, "test_case", member_id=1, kind="unit", rule_candidate_id=rc2,
+        scenario_name="FAKEMOD:BR-002",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+        then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:1", confidence="verified",
+    )
+    conn.commit()
+
+    summary2 = testbatch.run_test_batch(
+        conn, ["FAKEMOD"], "python", "pytest", out_dir,
+        lambda prompt: ModelResponse(
+            text=doc_text(["BR-001", "BR-002"]), input_tokens=1, output_tokens=2,
+        ),
+        "writing rules text", "template text",
+    )
+    assert summary2.ok == 1, summary2.results[0].problems
+    assert summary2.results[0].attempts == 1, (
+        "a genuinely correct response through run_test_batch's own pool "
+        "loop must validate clean on the first attempt, not be falsely "
+        "rejected against the stale old sidecar"
     )
 
 
@@ -1692,6 +1833,61 @@ def test_run_test_batch_threshold_change_is_not_masked_by_resume_state(tmp_path)
     assert summary2.ok == 1
     assert (out_dir / "natural" / "python" / "pytest" / "FAKEMOD.chunk1.md").exists()
     assert "chunked" in single_path.read_text(encoding="utf-8")
+
+
+def test_chunked_index_removes_a_leftover_single_doc_sidecar(tmp_path):
+    """Copilot review follow-up on issue #195: a member that grows past
+    the chunking threshold between runs leaves its *prior single-document*
+    sidecar (`FAKEMOD.py`) on disk -- `_prune_stale_chunk_files` only ever
+    removes `.chunk<N>` files, deliberately, and the chunked index document
+    at that same `out_path` never gets its own sidecar (each chunk gets
+    its own). `sidecar_path_for` is purely path-based, though, so without
+    removing that leftover file, the index document's own aggregated
+    manifest would be cross-checked against unrelated old single-doc
+    content -- a fingerprint on the index document alone can't fix this,
+    since the *old sidecar itself* has no fingerprint field to update, and
+    would still be found "usable" by the legacy id-overlap fallback
+    whenever its old ids happen to still resolve."""
+    from mfdoc import testbatch
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_scenarios(conn, 4)
+
+    caller = _chunk_aware_caller("python", "pytest")
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+    docs_dir = out_dir / "natural" / "python" / "pytest"
+
+    # First run: single document -- write_test_doc_with_sidecar creates
+    # FAKEMOD.py, referencing the same ids the (identical) index would
+    # later aggregate, so a naive test wouldn't distinguish "removed" from
+    # "still there but coincidentally matches".
+    summary1 = testbatch.run_test_batch(
+        conn, ["FAKEMOD"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path,
+        max_scenarios_per_call=10,
+    )
+    assert summary1.ok == 1
+    leftover_sidecar = docs_dir / "FAKEMOD.py"
+    assert leftover_sidecar.exists()
+
+    # Second run: lower threshold forces chunking. Must validate clean --
+    # the leftover single-doc sidecar must not be cross-checked against
+    # the new chunked index's own manifest.
+    summary2 = testbatch.run_test_batch(
+        conn, ["FAKEMOD"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path,
+        max_scenarios_per_call=2,
+    )
+    assert summary2.ok == 1, summary2.results[0].problems
+    assert not leftover_sidecar.exists(), (
+        "the prior single-doc sidecar must be removed once this out_path "
+        "becomes a chunked index -- it no longer describes anything real"
+    )
 
 
 def test_resolve_max_scenarios_per_call():
