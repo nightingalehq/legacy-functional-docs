@@ -59,6 +59,86 @@ def test_invented_scenario_id_is_flagged(indexed_db, tmp_path):
     assert any("BR-999" in p for p in result["problems"])
 
 
+SIDECAR_DOC = """---
+title: "MMP0100 -- generated tests (python)"
+doc_type: generated_test
+system: MOM
+module: MMP0100
+language: python
+framework: pytest
+generated_by: legacy-functional-docs 0.1.0
+generated_at: "2026-01-01"
+review_status: draft
+reviewers: []
+confidence_summary:
+  verified: 1
+  inferred: 0
+  unresolved: 0
+sources: ["MMP0100"]
+---
+
+# MMP0100 -- generated tests
+
+See [`MMP0100.py`](./MMP0100.py) for the generated test source.
+
+## Scenarios covered
+
+- MMP0100:BR-004
+"""
+
+
+def test_stale_sidecar_from_renumbering_is_treated_as_absent(indexed_db, tmp_path):
+    """Issue #195: `write_test_doc_with_sidecar` only overwrites the on-disk
+    sidecar after a *successful* validation. If a `classify-rules`/`derive`
+    rebuild renumbers `rule_candidate` rows (and therefore `test_case`'s
+    BR-ids) after that sidecar was last written, the sidecar's own BR-ids no
+    longer match anything current -- a freshly generated manifest citing the
+    *new*, correct numbering must not be flagged as "not found in the
+    sidecar" just because the sidecar on disk predates the renumbering. The
+    sidecar's BR-ids (BR-999) matching nothing in `test_case` is exactly the
+    signal that lets `validate_test_doc` tell an actually-stale sidecar
+    apart from a real mismatch."""
+    conn = indexed_db
+    testplan.run_all(conn, member_name="MMP0100")
+    path = tmp_path / "MMP0100.md"
+    sidecar = tmp_path / "MMP0100.py"
+    path.write_text(SIDECAR_DOC, encoding="utf-8")
+    # Simulates the old numbering the sidecar was written under, before a
+    # rule_candidate renumbering -- BR-999 does not exist in test_case.
+    sidecar.write_text(
+        "def test_rejects_unconfirmed_order():\n"
+        "    # MMP0100:BR-999\n"
+        "    ...\n",
+        encoding="utf-8",
+    )
+    result = validate_test_doc(conn, path)
+    assert result["sidecar_stale"] is True
+    assert result["ok"], result["problems"]
+    assert result["invalid_scenario_refs"] == 0
+    assert not any("BR-999" in p for p in result["problems"])
+    assert not any("not found in" in p for p in result["problems"])
+
+
+def test_current_sidecar_still_cross_checked_against_manifest(indexed_db, tmp_path):
+    """A sidecar whose BR-ids *do* match current `test_case` rows is still
+    authoritative -- the staleness guard must not swallow a genuine
+    manifest/sidecar mismatch."""
+    conn = indexed_db
+    testplan.run_all(conn, member_name="MMP0100")
+    path = tmp_path / "MMP0100.md"
+    sidecar = tmp_path / "MMP0100.py"
+    # Manifest claims BR-004; sidecar's real content only has BR-... nothing
+    # (a genuine drift, not a renumbering) -- BR-004 is a real, current id.
+    path.write_text(SIDECAR_DOC, encoding="utf-8")
+    sidecar.write_text("def test_placeholder():\n    ...\n", encoding="utf-8")
+    result = validate_test_doc(conn, path)
+    assert result["sidecar_stale"] is False
+    assert not result["ok"]
+    assert any(
+        "BR-004" in p and "not found in" in p for p in result["problems"]
+    )
+
+
 def test_missing_language_or_framework_front_matter_is_flagged(indexed_db, tmp_path):
     conn = indexed_db
     testplan.run_all(conn, member_name="MMP0100")

@@ -959,6 +959,20 @@ def validate_test_doc(conn, path: Path, _text: str | None = None) -> dict:
     really contains. No sidecar on disk (older embedded-fence documents, or
     an unrecognised language) falls back to scanning `body` directly,
     exactly as before this feature existed.
+
+    The sidecar is only rewritten after a *successful* validation
+    (`testbatch.write_test_doc_with_sidecar`), so it can itself go stale: if
+    something upstream of `test-plan` renumbers `rule_candidate` rows after
+    the sidecar was last written (a `classify-rules` re-run, a `derive`
+    rebuild), every BR-id it contains shifts positionally and stops
+    matching any current `test_case` row (issue #195). Comparing that
+    numbering against a freshly generated manifest would then report every
+    id in the sidecar as missing, even though nothing about the current run
+    is wrong. This is detected by checking whether the sidecar's own BR-ids
+    resolve against `test_case` at all -- if it has BR-ids and *none* of
+    them do, the sidecar is treated as though it weren't there (same as no
+    sidecar on disk) rather than authoritative; `result["sidecar_stale"]`
+    reports this without it counting toward `problems`/`ok`.
     """
     result = validate_doc(conn, path, _text=_text)
     fm, body = result.pop("_fm"), result.pop("_body")
@@ -970,13 +984,41 @@ def validate_test_doc(conn, path: Path, _text: str | None = None) -> dict:
                 problems.append(f"front matter missing required key: {key}")
 
     sidecar = sidecar_path_for(path, fm.get("language")) if fm is not None else None
+    sidecar_usable = False
     if sidecar is not None and sidecar.exists():
-        manifest_ids = {
-            f"{m.group('member').upper()}:BR-{m.group('n')}" for m in BR_REF.finditer(body)
-        }
         code_ids = {
             f"{m.group('member').upper()}:BR-{m.group('n')}"
             for m in BR_REF.finditer(sidecar.read_text(encoding="utf-8"))
+        }
+        # Staleness guard (issue #195): the sidecar is only rewritten after a
+        # *successful* validation, so if something upstream of `test-plan`
+        # renumbers `rule_candidate` rows after the sidecar was last written
+        # (a `classify-rules` re-run, a `derive` rebuild), every BR-id in it
+        # shifts positionally and stops matching any current `test_case`
+        # row. Comparing that stale numbering against a freshly generated
+        # manifest then produces a "not found" for every id in the sidecar,
+        # not because anything about this run is actually wrong -- just
+        # because the sidecar predates the renumbering. Detect that by
+        # checking whether the sidecar's own BR-ids resolve against
+        # `test_case` at all: if it has BR-ids and none of them do, treat
+        # the sidecar as though it weren't there (fall back to scanning
+        # `body` directly below) rather than as authoritative -- the same
+        # treatment already given to "no sidecar on disk".
+        sidecar_usable = not code_ids or any(
+            conn.execute(
+                "SELECT 1 FROM test_case WHERE UPPER(scenario_name)=UPPER(?)", (sid,)
+            ).fetchone()
+            for sid in code_ids
+        )
+        # Deliberately not appended to `problems`/`ok`: a stale sidecar isn't
+        # a defect in *this* document -- it's leftover state from before an
+        # upstream renumbering, and `write_test_doc_with_sidecar` will
+        # overwrite it with fresh content the next time this validation
+        # actually succeeds. Reported separately so a caller that wants to
+        # know can, without it counting toward pass/fail.
+    if sidecar is not None and sidecar.exists() and sidecar_usable:
+        manifest_ids = {
+            f"{m.group('member').upper()}:BR-{m.group('n')}" for m in BR_REF.finditer(body)
         }
         scan_ids = code_ids
         for sid in sorted(manifest_ids - code_ids):
@@ -1000,6 +1042,7 @@ def validate_test_doc(conn, path: Path, _text: str | None = None) -> dict:
 
     result["problems"] = problems
     result["invalid_scenario_refs"] = bad_refs
+    result["sidecar_stale"] = sidecar is not None and sidecar.exists() and not sidecar_usable
     result["ok"] = not problems
     return result
 

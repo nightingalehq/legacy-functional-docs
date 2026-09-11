@@ -631,6 +631,47 @@ GitHub org.
   suite: 967 passed, 2 skipped. Fixture pipeline re-run clean: 71/71
   documents, 0 invalid citations.
 
+**Progress (2026-09-11f):**
+- Fixed issue #195: `validate_test_doc`'s on-disk `.nsp`/`.py`/etc. sidecar
+  check (added for the test-batch narrate path) treated the sidecar as
+  authoritative whenever it existed, but `write_test_doc_with_sidecar` only
+  overwrites it after a *successful* validation. If something upstream of
+  `test-plan` renumbers `rule_candidate` rows after the sidecar was last
+  written (a `classify-rules` re-run, a `derive` rebuild -- a known,
+  accepted trade-off of positional BR-ids, not itself a defect), every
+  BR-id shifts positionally, and the stale on-disk sidecar (old numbering)
+  gets compared against a freshly generated manifest (new numbering) --
+  producing dozens of false "not found" problems per chunk, identical
+  across retries. Went with option 2 from the issue (treat a sidecar as
+  absent whenever its own BR-id set doesn't reference any currently-valid
+  `test_case` row) over option 1 (regenerate the sidecar before comparing
+  on `--state ""`): it fixes the staleness at its actual source --
+  `validate_test_doc`'s comparison itself -- rather than only the no-resume
+  entry point, so a resumed run hitting the same staleness (a
+  `classify-rules` re-run between an earlier chunk's successful write and
+  a later chunk's validation, without a full `--state ""` restart) is
+  covered too, and it needs no new call into `testbatch.py` from
+  `validate.py` (the two modules deliberately don't import each other's
+  narrate-vs-validate concerns beyond the existing `testlang.py` shim).
+  `validate_test_doc` (`src/mfdoc/validate.py`) now checks, before treating
+  a sidecar as authoritative, whether *any* of the sidecar's own BR-ids
+  resolve against a current `test_case` row; if it has BR-ids and none do,
+  it falls back to scanning `body` directly -- the same treatment already
+  given to "no sidecar on disk" -- rather than cross-checking the stale
+  content against the fresh manifest. This is deliberately not counted
+  toward `problems`/`ok` (a stale sidecar isn't a defect in the document
+  being validated, and gets overwritten with fresh content the next time
+  this validation actually succeeds); reported instead via a new
+  `result["sidecar_stale"]` field for a caller that wants to know. Added
+  `test_stale_sidecar_from_renumbering_is_treated_as_absent` (simulates the
+  renumbering by writing a sidecar whose only BR-id doesn't exist in
+  `test_case`, asserts no false "not found" problems and `ok` is true) and
+  `test_current_sidecar_still_cross_checked_against_manifest` (a sidecar
+  whose content doesn't reference the renumbering signal at all must still
+  be compared against the manifest as before, confirming the guard doesn't
+  swallow a genuine mismatch) to `tests/test_test_validate.py`. Full suite:
+  940 passed, 2 skipped.
+
 **Progress (2026-09-10e):**
 - Fixed issue #188: ported `batch.py`'s near-miss/targeted-patch mechanism
   (issue #131, generalized by #170) to `testbatch.py`'s test-generation
