@@ -1126,6 +1126,8 @@ def test_module_brief_renders_candidate_rules_as_a_table_with_all_columns(indexe
     id, citation, depth, construct, routine, condition, literals, and any
     branch/data-access notes -- must still be present, just as table
     columns instead of an em-dash-joined sentence."""
+    import re
+
     brief = module_brief(indexed_db, "MMP0100", redact=NULL_REDACTOR)
     rules_section = brief.split(
         "## Candidate business rules (exact conditions", 1
@@ -1137,9 +1139,14 @@ def test_module_brief_renders_candidate_rules_as_a_table_with_all_columns(indexe
     body_rows = rule_lines[1:]
     assert body_rows, "MMP0100 fixture must have at least one rule candidate"
     assert any("MMP0100:BR-001" in l for l in body_rows)
-    # Every surviving row has exactly as many pipes as the header does.
-    expected_pipes = rule_lines[0].count("|")
-    assert all(l.count("|") == expected_pipes for l in body_rows)
+    # Every surviving row has exactly as many *unescaped* pipes as the
+    # header does -- an escaped `\|` inside a condition/literal cell (see
+    # test_tbl_escapes_a_literal_pipe_in_cell_content) is real cell
+    # content, not a column boundary, and must not be counted as one (a
+    # naive `str.count("|")` would overcount and fail a perfectly valid row
+    # whose source text happens to contain a literal `|`).
+    expected_pipes = len(re.findall(r"(?<!\\)\|", rule_lines[0]))
+    assert all(len(re.findall(r"(?<!\\)\|", l)) == expected_pipes for l in body_rows)
 
 
 def test_tbl_escapes_a_literal_pipe_in_cell_content():

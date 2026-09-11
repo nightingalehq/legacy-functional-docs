@@ -748,6 +748,20 @@ def test_find_confident_citation_ambiguous_declines():
     assert batch_mod._find_confident_citation(sentence, brief_lines) is None
 
 
+def test_find_confident_citation_matches_through_briefs_escaped_pipe():
+    """Copilot review on PR #213 (issue #185): brief.py's compact table
+    rendering escapes a literal `|` inside a condition/literal cell as
+    `\\|` so it can't be misread as a column boundary -- but a narrated
+    sentence quoting that same condition has no reason to reproduce that
+    rendering artifact. `_key_tokens` must unescape `\\|` back to `|`
+    before comparing, or a fact whose source text contains a literal `|`
+    would never get a confident-citation match here, silently costing this
+    pass's whole "save a model call" purpose for exactly those facts."""
+    brief_lines = [("[[MMP0100:12]]", "[[MMP0100:12]]|0|`IF`|`A \\| B`")]
+    sentence = "The module checks whether `A | B` holds."
+    assert batch_mod._find_confident_citation(sentence, brief_lines) == "[[MMP0100:12]]"
+
+
 def test_splice_citation_wrapped_sentence_declines():
     """A sentence that doesn't appear verbatim in the document text (e.g.
     because it was wrapped across source lines, so the joined single-line

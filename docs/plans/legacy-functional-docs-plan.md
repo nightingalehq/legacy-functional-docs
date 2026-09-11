@@ -280,6 +280,16 @@ GitHub org.
   the design intent noted in `brief._tbl`'s own docstring, the saving
   should grow with a chunk's rule/fact count on a real engagement's larger
   briefs, which this bundled fixture set is too small to fully represent.
+  Confirmed that scaling claim directly (Copilot review on PR #213, since
+  CLAUDE.md's client-content rule rules out using any real engagement
+  brief for this): built one synthetic, invented-content-only member
+  sized like a real engagement's chunked brief (20 parameters, 15
+  variables, 25 outbound calls, 30 IF-conditioned rule candidates -- never
+  committed as a fixture, just an ad-hoc measurement) and compared old vs.
+  new `module_brief()` output on it: 19.3% fewer characters (1812 -> 1462
+  rough chars/4 tokens), consistent with the "saving grows with row
+  count" design rationale and a much closer stand-in for what a real
+  chunk actually looks like than this repo's tiny regression fixtures.
   Every naturally-tabular section keeps every citation, condition,
   literal, and branch/data-access fact the old prose rendering had --
   this is a pure rendering-density change, not a content reduction (per

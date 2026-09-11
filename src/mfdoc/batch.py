@@ -545,12 +545,21 @@ def _key_tokens(text: str) -> set[str]:
     quoted literal `'CONF'` and the bare word `CONF` are never treated as
     the same token. An assertion that names the field but not the literal
     value it's compared against (or vice versa) is deliberately not a match
-    on that token alone."""
+    on that token alone.
+
+    A `\\|` is unescaped back to a bare `|` before a token is kept --
+    `brief.py`'s compact table rendering (issue #185) escapes a literal `|`
+    inside a cell's own condition/literal/arg text so it can't be misread
+    as a column boundary, but a narrated sentence quoting that same
+    condition has no reason to reproduce that rendering artifact (and
+    won't). Comparing the two verbatim would make a fact whose source text
+    happens to contain `|` never match here, defeating this pass's own
+    "save a model call" purpose for exactly those facts."""
     tokens: set[str] = set()
     for m in _KEY_TOKEN.finditer(text):
         tok = next(g for g in m.groups() if g is not None).strip()
         if tok:
-            tokens.add(tok)
+            tokens.add(tok.replace("\\|", "|"))
     return tokens
 
 

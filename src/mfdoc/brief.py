@@ -37,10 +37,17 @@ def _tbl(headers: list[str], rows: list[list[str]]) -> list[str]:
     the original bullet-per-row prose on this repo's small bundled
     fixtures (most sections here are only 1-5 rows -- not enough rows for
     the "labels stated once" saving to outrun the decoration's fixed
-    cost). This bare `col|col` form has no such floor: a single header
-    line plus one minimal-punctuation line per row is never longer than
-    the equivalent prose bullet, and the saving grows with row count on a
-    real (larger) engagement's briefs.
+    cost). This bare `col|col` form has a much lower floor -- a single
+    header line plus one minimal-punctuation line per row -- but it is not
+    a strict "never longer than the old bullet" guarantee: a table with
+    exactly one row still pays that one header line, which can make a
+    single-fact section a few characters longer than the equivalent prose
+    bullet was (this module's own before/after measurement on the bundled
+    fixtures shows this on some of its tiniest, single-fact members). What
+    *is* true is that the saving is amortized, not per-row -- the header
+    cost is paid once per table, not once per row, so it grows with row
+    count and dominates on any real engagement's larger, rule-dense
+    chunks, which is what this issue is optimizing for.
 
     Every cell is pre-formatted by the caller (already `redact`ed, already
     `_cite`d) and passed through `_esc_cell` here so a `|` that happens to
