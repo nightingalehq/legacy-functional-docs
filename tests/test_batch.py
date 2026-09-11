@@ -1852,6 +1852,39 @@ def test_run_batch_chunks_a_large_member_and_still_batches_small_ones(indexed_db
     assert summary.failed == 0
 
 
+def test_run_batch_gathers_a_chunked_members_facts_exactly_once(indexed_db, tmp_path, monkeypatch):
+    """Issue #183 review feedback: run_batch's own routing/hashing pass
+    already builds a MemberFacts for every member (to fingerprint its
+    brief and decide chunked vs. not) -- for a member that turns out to
+    need chunking, that same MemberFacts must be threaded through to the
+    chunk-rendering path, not gathered a second time there. This is the
+    orchestration-boundary check the review asked for: the existing
+    chunked-path tests only exercise module_brief(facts=...) directly and
+    would not catch a regression where run_batch stopped passing `facts`
+    through and _generate_module_doc_chunked silently rebuilt it instead."""
+    calls: dict[str, int] = {}
+    real_build_member_facts = batch_mod.build_member_facts
+
+    def counting_build_member_facts(conn, member_name):
+        calls[member_name] = calls.get(member_name, 0) + 1
+        return real_build_member_facts(conn, member_name)
+
+    monkeypatch.setattr(batch_mod, "build_member_facts", counting_build_member_facts)
+
+    members = batch_mod.select_batch_members(indexed_db)
+    assert "MMP0100" in members
+    caller = FakeCaller()
+    summary = batch_mod.run_batch(
+        indexed_db, members, tmp_path / "out", caller, "rules", "template",
+        max_rules_per_call=1,
+    )
+    assert summary.failed == 0
+    assert calls.get("MMP0100") == 1, (
+        "MMP0100 chunks under max_rules_per_call=1 -- its whole-member facts "
+        f"must be gathered exactly once by run_batch, not {calls.get('MMP0100')} times"
+    )
+
+
 def test_run_batch_chunking_prunes_stale_legacy_chunk_files(indexed_db, tmp_path):
     """A rerun after the unpadded->padded chunk-filename migration (or any
     rerun whose chunk width changes) must not leave old-named chunk files

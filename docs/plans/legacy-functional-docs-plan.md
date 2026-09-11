@@ -316,7 +316,7 @@ GitHub org.
   though none of that content depends on `rule_range` -- for a member split
   into 16-30 chunks, the same fixed queries and the same large rendered
   text ran/were resent 16-30 times over. Split `module_brief` into
-  `build_member_facts(conn, member_name, redact)` (runs every whole-member
+  `build_member_facts(conn, member_name)` (runs every whole-member
   query once, returning a `MemberFacts` of raw rows) and `module_brief`
   itself, now optionally taking a `facts=` param and skipping every query
   it covers when given. `_generate_module_doc_chunked` and `plan_batch`
@@ -370,6 +370,40 @@ GitHub org.
     new `_render_guard_chain(facts, caller_name, redact)` using its own
     caller's `redact` every time, the same as every other field. Full
     suite: 913 passed, 2 skipped.
+  - A second Copilot review round, arriving after PR #206 had already
+    merged, caught the following (landed as its own immediate follow-up PR
+    rather than reopening #206): (4) `run_batch`'s initial per-member
+    `module_brief()` call (used only to
+    fingerprint the brief for resume/skip) was itself still building a
+    `MemberFacts` and discarding it, rather than being the one place that
+    builds it and hands it forward to the chunked path -- restructured
+    so `run_batch`/`plan_batch` each build exactly one `MemberFacts` per
+    member and thread it through both the initial brief and (for a
+    chunked member) `generate_module_doc`; (5) `_generate_module_doc_chunked`
+    itself still called `fetch_routines()` before ever looking at a
+    caller-supplied `member_facts`, even though `member_facts.routines`
+    already has the same rows -- reordered to resolve `member_facts` first
+    and reuse `.routines` from it (`plan_batch`'s own chunk-range
+    computation got the same fix); (6) a stale progress-log line and a
+    docstring both still described `build_member_facts` as taking a
+    `redact` argument, or `generate_module_doc` as never passing `facts`
+    to the non-chunked path -- both corrected to match (5)'s actual code;
+    (7) added an orchestration-boundary test
+    (`test_run_batch_gathers_a_chunked_members_facts_exactly_once`,
+    `tests/test_batch.py`) asserting `run_batch` itself -- not just
+    `module_brief(facts=...)` directly -- gathers a chunked member's facts
+    exactly once, plus a redaction-safety regression test
+    (`test_module_brief_guard_chain_redacts_correctly_when_facts_are_shared_across_different_redacts`,
+    `tests/test_brief.py`) proving one shared `MemberFacts` renders
+    correctly under two different `redact` policies in a row, with no
+    stale leakage either direction. Noted, but deliberately not changed,
+    a raised memory-tradeoff finding: `to_run_chunked` now holds one
+    `MemberFacts` per pending chunked member for the duration of the
+    non-chunked pool's run, trading some peak memory for not re-gathering
+    those facts later -- accepted as consistent with `briefs`' existing
+    same-shaped tradeoff for non-chunked members, documented inline rather
+    than restructured. Full suite: 946 passed, 2 skipped; bundled fixture
+    pipeline still 71/71 documents clean, 0 invalid citations.
 
 **Progress (2026-09-10c):**
 - Fixed issue #184: `citations._rule_id(member_name, n)` is a pure

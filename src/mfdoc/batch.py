@@ -1535,7 +1535,18 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
     second time (issue #183 review feedback). When omitted (the default,
     e.g. `generate_module_doc` called directly, not via `run_batch`), this
     function builds its own, exactly as before this parameter existed."""
-    routines = fetch_routines(conn, rule_rows[0]["member_id"])
+    # Resolved up front (not just before the chunk loop below) so `routines`
+    # -- needed immediately after, for chunk-range computation and
+    # chunk_map -- can come from `member_facts.routines` too, rather than
+    # this function's own `fetch_routines()` call always running even when
+    # a caller-supplied `member_facts` already has the same rows (issue
+    # #183 review feedback).
+    if member_facts is None:
+        member_facts = build_member_facts(conn, member_name)
+    routines = (
+        member_facts.routines if isinstance(member_facts, MemberFacts)
+        else fetch_routines(conn, rule_rows[0]["member_id"])
+    )
     ranges = routine_aware_chunk_ranges(
         [r["line_no"] for r in rule_rows], routines, chunk_size,
     )
@@ -1601,17 +1612,13 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
         f"{out_path.stem}.chunk{n:0{chunk_width}d}{out_path.suffix}" for n in range(1, chunk_count + 1)
     }
     _prune_stale_chunk_files(out_path, expected_chunk_names)
-    # Built once for the whole member (issue #183) -- every whole-member
-    # section module_brief() renders (interface, data access, calls,
-    # inbound callers, gaps, ...) is identical across this member's chunks,
-    # since none of it depends on rule_range. Sharing one fact-gather here
-    # instead of letting each chunk's own module_brief() call re-run those
-    # ~15 fact-store queries is the whole point of this loop no longer
-    # calling module_brief() with facts=None. Reuse the caller-supplied one
-    # (run_batch's own routing/hashing pass already built one for this
-    # member) rather than gathering a second time when one is given.
-    if member_facts is None:
-        member_facts = build_member_facts(conn, member_name)
+    # `member_facts` was already resolved above (before `routines`) --
+    # every whole-member section module_brief() renders (interface, data
+    # access, calls, inbound callers, gaps, ...) is identical across this
+    # member's chunks, since none of it depends on rule_range, so sharing
+    # one fact-gather here instead of letting each chunk's own
+    # module_brief() call re-run those ~15 fact-store queries is the whole
+    # point of this loop no longer calling module_brief() with facts=None.
     for i, (start, end) in enumerate(ranges, start=1):
         chunk_path = out_path.with_name(f"{out_path.stem}.chunk{i:0{chunk_width}d}{out_path.suffix}")
         brief = module_brief(
@@ -1794,9 +1801,11 @@ def generate_module_doc(conn, member_name: str, out_path: Path, caller: ModelCal
     brief and decide chunked vs. not) before ever reaching this function,
     so passing it through here means a member that turns out to be chunked
     doesn't have its whole-member facts gathered a second time (issue #183
-    review feedback). Used for the chunked path only; the non-chunked path
-    below builds its own single `module_brief()` call regardless, since
-    that call already needs the full brief text, not just its facts."""
+    review feedback). Reused on both branches below: the chunked path
+    passes it straight through to `_generate_module_doc_chunked` as
+    `member_facts`, and the non-chunked path passes it to `module_brief`
+    itself (`facts=facts`) -- either way, this function never gathers
+    whole-member facts itself when a caller already built them."""
     rows, ambiguous_libs = fetch_rule_candidate_rows(conn, member_name)
     threshold = _resolve_max_rules_per_call(max_rules_per_call)
     if not ambiguous_libs and rows and len(rows) > threshold:
@@ -2074,6 +2083,19 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
     # then discarding it.
     briefs: dict[str, str] = {}
     to_run: list[tuple[str, str, Path, str]] = []
+    # Each entry's MemberFacts (issue #183) is kept alive from this routing
+    # pass until the sequential to_run_chunked loop near the end of this
+    # function consumes it -- i.e. for as long as the to_run thread pool
+    # below is running, for every member that turns out to need chunking.
+    # This trades some peak memory (one MemberFacts per pending chunked
+    # member, held simultaneously) for not re-gathering those same facts a
+    # second time once that member's chunk loop actually starts (Copilot
+    # review on PR #206) -- the same "hold what you'll need until you use
+    # it" shape `briefs` above already has for non-chunked members' full
+    # rendered brief text. Accepted as-is for now (a chunked member's
+    # MemberFacts is one member's worth of raw rows, not multiplied by its
+    # chunk count); revisit only if a real run's chunked-member count made
+    # this measurably worse than `briefs`' existing footprint.
     to_run_chunked: list[tuple[str, str, Path, str, MemberFacts | str]] = []
 
     for name in members:
@@ -2418,7 +2440,16 @@ def plan_batch(conn, members: list[str], out_dir: Path,
             plans.append(MemberPlan(name, "render"))
             continue
 
-        routines = fetch_routines(conn, rows[0]["member_id"])
+        # Reuse member_facts.routines (already fetched above) rather than a
+        # second fetch_routines() call for the same member (issue #183
+        # review feedback) -- falls back to a fresh fetch only in the
+        # (here, already-ruled-out-in-practice) case where member_facts
+        # turned out to be the "ambiguous"/"not found" str, not a
+        # MemberFacts, since that carries no routines to reuse.
+        routines = (
+            member_facts.routines if isinstance(member_facts, MemberFacts)
+            else fetch_routines(conn, rows[0]["member_id"])
+        )
         ranges = routine_aware_chunk_ranges([r["line_no"] for r in rows], routines, threshold)
         chunk_count = len(ranges)
         chunk_width = len(str(chunk_count))
