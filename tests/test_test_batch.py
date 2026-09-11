@@ -4212,6 +4212,69 @@ def test_chunk_boundary_shift_restores_the_old_sidecar_when_the_rerender_fails(t
     )
 
 
+def test_chunk_boundary_shift_restores_the_old_sidecar_when_the_rerender_writes_no_sidecar(tmp_path):
+    """Copilot review follow-up: `result.ok` alone doesn't prove a fresh
+    sidecar now exists -- `write_test_doc_with_sidecar` silently returns
+    without writing one when the validated candidate's own code fence
+    has no `MEMBER:BR-nnn` references at all (an edge case, but a real
+    one: `validate_test_doc` has nothing to flag as invalid in that
+    shape either). The chunk loop must check the real sidecar path
+    directly rather than trust `ok`, restoring the backup in this case
+    too instead of deleting it and leaving the chunk with no sidecar at
+    all."""
+    from mfdoc import testbatch
+
+    conn = _sqlite_conn()
+    _seed_fakemod_scenarios(conn, 4)
+
+    out_path = tmp_path / "FAKEMOD.md"
+    first = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, _chunk_aware_caller("python", "pytest"),
+        "writing rules text", "template text", max_scenarios_per_call=2,
+    )
+    assert first.ok is True
+    chunk1_sidecar = tmp_path / "FAKEMOD.chunk1.py"
+    old_sidecar_text = chunk1_sidecar.read_text(encoding="utf-8")
+
+    def no_br_refs_caller(prompt: str) -> ModelResponse:
+        text = """---
+title: "FAKEMOD — generated tests"
+doc_type: generated_test
+system: "MOM"
+generated_by: mfdoc
+generated_at: "2026-09-02"
+review_status: draft
+confidence_summary:
+  verified: 0
+language: python
+framework: pytest
+sources: ["FAKEMOD"]
+---
+
+# FAKEMOD tests
+
+Covers the module as a whole [[FAKEMOD:1]].
+
+```python
+def test_placeholder():
+    pass
+```
+"""
+        return ModelResponse(text=text, input_tokens=1, output_tokens=2)
+
+    second = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, no_br_refs_caller,
+        "writing rules text", "template text", max_scenarios_per_call=1,
+        prior_chunks=first.chunk_state,
+    )
+    assert second.ok is True, second.problems
+    assert chunk1_sidecar.exists(), "the old sidecar must be restored, not left missing"
+    assert chunk1_sidecar.read_text(encoding="utf-8") == old_sidecar_text
+    assert not chunk1_sidecar.with_name(chunk1_sidecar.name + ".stale").exists(), (
+        "the backup must not be left behind once restored"
+    )
+
+
 def _sqlite_conn():
     import sqlite3
 

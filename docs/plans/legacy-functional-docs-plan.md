@@ -12,6 +12,25 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-11s):**
+- Addressed the thirtieth Copilot review round on PR #209 (issue #195):
+  the chunk-loop cleanup added last round trusted `result.ok` as proof
+  that `write_test_doc_with_sidecar` had written a fresh sidecar to
+  replace the one just moved aside -- but that function silently returns
+  without writing one when the validated candidate's own code fence has
+  no `MEMBER:BR-nnn` references at all (nothing for `validate_test_doc`
+  to flag as invalid in that shape either), and no caller captures its
+  return value. An accepted render in that shape deleted the backup
+  anyway, leaving the chunk with no sidecar at all -- the exact failure
+  this whole mechanism exists to prevent, just reached through an
+  accepted render instead of a failed one. Now checks whether a real
+  sidecar actually exists at the expected path directly, rather than
+  inferring it from `ok`.
+- One new regression test reproducing the no-BR-references shape end to
+  end. Full suite green (1047 passed, 2 skipped) plus a clean `mfdoc
+  validate` pass against `examples/` (71/71 documents, 0 invalid
+  citations of 750).
+
 **Progress (2026-09-11r):**
 - Addressed the twenty-ninth Copilot review round on PR #209 (issue
   #195):

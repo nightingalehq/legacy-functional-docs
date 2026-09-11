@@ -1290,21 +1290,29 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
                         _fingerprint_cache=fingerprint_cache,
                     )
                     if sidecar_backup is not None:
-                        # Copilot review: this chunk's render didn't validate
-                        # (no fresh sidecar was ever written to replace the one
-                        # just moved aside), possibly without writing anything
-                        # to chunk_path at all (every model call raised before
-                        # a response came back) -- restore the backup so this
-                        # chunk is never left with a manifest/body that cites
-                        # real ids but no sidecar to actually back them, rather
-                        # than leave it removed. A successful render already
-                        # wrote its own fresh sidecar via write_test_doc_with_
-                        # sidecar, so the backup is simply discarded.
+                        # Copilot review: `result.ok` alone doesn't prove a
+                        # fresh sidecar now exists -- write_test_doc_with_
+                        # sidecar returns (silently, uncaptured by every
+                        # caller) without writing one when the validated
+                        # candidate's code fence has no `MEMBER:BR-nnn`
+                        # references at all, so an accepted render can
+                        # still leave nothing at the real sidecar path.
+                        # Checked directly rather than trusted from `ok`:
+                        # only a real, freshly-written sidecar justifies
+                        # discarding the backup; anything else (a failed
+                        # render, or one that validated without ever
+                        # writing a sidecar) restores it, so this chunk is
+                        # never left with a manifest/body that cites real
+                        # ids but no sidecar to actually back them.
+                        # Same `language`, same `chunk_path` as the call that
+                        # produced this backup in the first place -- always
+                        # resolves to a real path here, never None.
+                        fresh_sidecar = sidecar_path_for(chunk_path, language)
                         try:
-                            if result.ok:
+                            if fresh_sidecar.exists():
                                 sidecar_backup.unlink()
                             else:
-                                sidecar_backup.replace(sidecar_path_for(chunk_path, language))
+                                sidecar_backup.replace(fresh_sidecar)
                         except OSError as exc:
                             logger.warning(
                                 "%s: chunk %d/%d: could not clean up stale sidecar backup %s: %s",
