@@ -165,26 +165,30 @@ GitHub org.
   *after* the rule_range-dependent "Candidate business rules" section, so
   a chunked member's brief is `[shared A][chunk-specific][shared B]`, not
   `[shared][chunk-specific]` -- turned out to have a second layer #207
-  didn't call out, found by tracing `module_brief` end to end. Precision
-  matters here, so two distinct facts, not one conflated claim:
-  1. **The text a cache breakpoint on "shared A" would have to *lead with*
-     varies per chunk, even though "shared A" itself (header comments
-     through "Messages and error handling") does not.** `module_brief`
-     renders two things *before* "shared A": the "PARTIAL BRIEF" note
-     (`rule_range` branch: "chunk `{this_chunk}` of `{chunk_count}`" --
-     different text on every chunk) and, when a project configures
-     `options.narrative.lexicon`, the "Business vocabulary" section
-     (spliced in at `vocab_insert_at`, right after the intro -- *before*
-     "shared A" starts -- but computed by scanning the fully rendered
-     brief, chunk-specific rules included, so its presence/content also
-     varies per chunk). Anthropic's prompt cache matches on the *whole*
-     byte prefix leading up to a breakpoint, not just the text inside the
-     block the breakpoint marks -- so even placing the intro+vocab text in
-     its own uncached block ahead of a "shared A" cache breakpoint doesn't
-     help: a cache write from one chunk's request still can't be read by
-     another chunk's request, because everything preceding the breakpoint
-     (intro included) must match byte-for-byte first, and here it doesn't.
-  2. **"Shared A" itself also varies**, independent of (1): its own
+  didn't call out, found by tracing `module_brief` end to end. `module_brief`'s
+  own *section layout* puts "shared A" (header comments through "Messages
+  and error handling") ahead of every rule_range-dependent section, exactly
+  as #207 assumed -- but the *text* module_brief actually renders inside
+  and ahead of that span still varies per chunk, two different ways:
+  1. **What precedes "shared A" varies.** `module_brief` renders two things
+     *before* "shared A": the "PARTIAL BRIEF" note (`rule_range` branch:
+     "chunk `{this_chunk}` of `{chunk_count}`" -- different text on every
+     chunk) and, when a project configures `options.narrative.lexicon`,
+     the "Business vocabulary" section (spliced in at `vocab_insert_at`,
+     right after the intro -- *before* "shared A" starts -- but computed
+     by scanning everything rendered to `out` so far, which by that point
+     already includes the chunk-specific "Candidate business rules"
+     section (only the later "SME notes" section is excluded) -- so a
+     lexicon hit set, and thus this section's presence/content, can also
+     vary chunk to chunk whenever a chunk-specific term differs).
+     Anthropic's prompt cache matches on the *whole* byte prefix leading
+     up to a breakpoint, not just the text inside the block the
+     breakpoint marks -- so even placing the intro+vocab text in its own
+     uncached block ahead of a "shared A" cache breakpoint doesn't help: a
+     cache write from one chunk's request still can't be read by another
+     chunk's request, because everything preceding the breakpoint (intro
+     included) must match byte-for-byte first, and here it doesn't.
+  2. **"Shared A" itself also varies, independent of (1).** Its own
      "Internal routines" section annotates a routine with `**[documented
      in chunk N]**` only when that routine's chunk differs from
      `chunk_info`'s current chunk -- so which routines get annotated (and
