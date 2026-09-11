@@ -968,16 +968,23 @@ def member_shared_prefix(facts: "MemberFacts", redact: Redactor = NULL_REDACTOR)
     "SME notes" section (an uncited add-on `module_brief` appends itself,
     not a `MemberFacts` field).
 
-    `module_brief` keeps rendering the full per-chunk document body exactly
-    as before, unchanged -- this is a separate, additional string a caller
-    prepends ahead of it (see batch.py's `_generate_module_doc_chunked` and
-    `build_member_prompt_cache_prefix`), not a replacement for anything
-    `module_brief` itself does. It duplicates facts `module_brief`'s own
-    per-chunk text still renders in full, on purpose: the saving comes from
-    the cache *hit* on this block across a member's chunks, not from
-    removing these facts from `module_brief`'s own (still uncached)
-    per-chunk output -- see issue #214's "out of scope" note on why this
-    doesn't also restructure `module_brief`'s own section order.
+    A caller prepends this string ahead of `module_brief`'s own per-chunk
+    output (see batch.py's `_generate_module_doc_chunked` and
+    `build_member_prompt_cache_prefix`) -- **not** merely alongside an
+    unchanged `module_brief` render: passing this same string back into
+    `module_brief` as its own `shared_prefix` argument (issue #214, added
+    after an initial "just add it as extra text" version was found to
+    double a chunk's real request size -- a cache hit only changes what
+    gets billed, never how many tokens are actually in the request) makes
+    `module_brief` skip re-rendering every section this string already
+    covers. The two together cover the same facts a single, unshared
+    `module_brief` call would -- split across two blocks (one of them
+    cached) instead of duplicated. `module_brief`'s own docstring covers
+    exactly which sections that skip applies to and which it never touches
+    (`shared_prefix` param). This function itself doesn't change based on
+    whether its output ends up used that way or not -- it always renders
+    the same chunk-invariant text either way; what changes is only whether
+    the caller also tells `module_brief` about it.
 
     Every field of `facts` is raw/unredacted (see `MemberFacts`'s own
     docstring) -- redacted here with the caller's own `redact`, the same
