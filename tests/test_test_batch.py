@@ -617,6 +617,113 @@ def test_generate_member_test_doc_stamps_fingerprint_and_detects_a_later_inserti
     assert revalidated["ok"], revalidated["problems"]
 
 
+def test_rerender_after_an_insertion_is_not_falsely_rejected_against_the_old_sidecar(tmp_path):
+    """Copilot review follow-up on issue #195 -- the critical case: without
+    `_prior_fingerprint_for` threading the *previous* render's fingerprint
+    into the validation of a freshly-generated candidate (whose own front
+    matter never carries `test_case_fingerprint` -- only `write_test_doc_
+    with_sidecar` adds it, after that validation succeeds), the render
+    loop's own validation of a genuinely-fine new response would fall back
+    to the id-overlap heuristic and falsely reject it: the old sidecar's
+    id (`BR-001`) stays a literal subset of the post-insertion valid set
+    (`{BR-001, BR-002}`), so it reads as "still current" and gets
+    cross-checked against the fresh manifest -- which now legitimately
+    also lists `BR-002` -- producing a false "listed in manifest but not
+    found in sidecar" problem for a response that was actually correct.
+    This is the exact scenario issue #195 exists to fix, reproduced
+    through the real render/retry path end to end, not just a later
+    standalone re-validation."""
+    from mfdoc import testbatch
+    import sqlite3
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 40, 'irrelevant')")
+    rc1 = insert(
+        conn, "rule_candidate", member_id=1, line_no=10, construct="IF",
+        condition="COND-1", raw="IF COND-1",
+    )
+    insert(
+        conn, "test_case", member_id=1, kind="unit", rule_candidate_id=rc1,
+        scenario_name="FAKEMOD:BR-001",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+        then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:1", confidence="verified",
+    )
+    conn.commit()
+
+    def doc_text(ids: list[str]) -> str:
+        fence = "\n".join(
+            f"def test_{i.split('-')[-1]}():\n    # FAKEMOD:{i} [[FAKEMOD:1]]\n    pass" for i in ids
+        )
+        return f"""---
+title: "FAKEMOD -- generated tests"
+doc_type: generated_test
+system: "MOM"
+generated_by: mfdoc
+generated_at: "2026-01-01"
+review_status: draft
+confidence_summary:
+  verified: {len(ids)}
+language: python
+framework: pytest
+sources: ["FAKEMOD"]
+---
+
+# FAKEMOD tests
+
+Covers the module as a whole [[FAKEMOD:1]].
+
+```python
+{fence}
+```
+"""
+
+    out_path = tmp_path / "FAKEMOD.md"
+    first = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path,
+        lambda prompt: ModelResponse(text=doc_text(["BR-001"]), input_tokens=1, output_tokens=2),
+        "writing rules text", "template text",
+    )
+    assert first.ok is True, first.problems
+
+    # A derive rebuild + a real mfdoc test-plan re-run: a new rule (and its
+    # test_case row) exist now, but the sidecar/fingerprint from the first
+    # render above haven't been refreshed yet -- this run's re-render is
+    # exactly what's supposed to refresh them.
+    rc2 = insert(
+        conn, "rule_candidate", member_id=1, line_no=20, construct="IF",
+        condition="COND-2", raw="IF COND-2",
+    )
+    insert(
+        conn, "test_case", member_id=1, kind="unit", rule_candidate_id=rc2,
+        scenario_name="FAKEMOD:BR-002",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+        then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:1", confidence="verified",
+    )
+    conn.commit()
+
+    second = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path,
+        lambda prompt: ModelResponse(
+            text=doc_text(["BR-001", "BR-002"]), input_tokens=1, output_tokens=2,
+        ),
+        "writing rules text", "template text",
+    )
+    assert second.ok is True, second.problems
+    assert second.attempts == 1, (
+        "a genuinely correct response must validate clean on the first "
+        "attempt, not be falsely rejected against the stale old sidecar "
+        "and consume a retry"
+    )
+
+
 def test_sidecar_present_cross_checks_manifest_against_real_code(tmp_path):
     from mfdoc.validate import validate_test_doc
     import sqlite3

@@ -163,6 +163,38 @@ def write_test_doc_with_sidecar(conn, member_name: str, out_path: Path, doc_text
     return sidecar_path
 
 
+def _prior_fingerprint_for(out_path: Path) -> str | None:
+    """The `test_case_fingerprint` a *previous* successful render already
+    stamped at `out_path`, read before this run's own first write to that
+    path -- `None` if the path doesn't exist yet (nothing to compare
+    against, a genuinely fresh render) or carries no such field (an older
+    document, or a fresh render's own front matter never gets one stamped
+    into it by the model -- only `write_test_doc_with_sidecar` adds it,
+    after validation succeeds).
+
+    Why this matters (issue #195 review): `_generate_test_doc_from_brief`/
+    `run_test_batch`'s retry loops write the model's freshly-generated
+    candidate text straight over `out_path` *before* calling
+    `validate_test_doc` on it -- so by the time that validation runs, any
+    fingerprint the *previous* render had stamped is already gone from
+    disk, even though the (still on-disk, not-yet-overwritten) sidecar
+    file right next to it is exactly what that old fingerprint was
+    recorded against. Without capturing it here, first, `validate_test_doc`
+    would see a candidate document with no `test_case_fingerprint` of its
+    own and fall back to the weaker id-overlap heuristic for precisely the
+    validation this issue is actually about -- the fingerprint fix would
+    then only ever apply to a document's *second* validation onward (e.g.
+    a later `mfdoc test-validate`/dry-run reuse check), never the render
+    loop's own first pass. Callers thread the result through every
+    `validate_test_doc(..., _prior_fingerprint=...)` call in one render
+    attempt (the prior document doesn't change mid-retry -- only the
+    candidate text does)."""
+    if not out_path.exists():
+        return None
+    fm, _body, _err = split_frontmatter(out_path.read_text(encoding="utf-8"))
+    return fm.get("test_case_fingerprint") if fm is not None else None
+
+
 def select_test_batch_members(conn) -> list[str]:
     """Members with at least one derived test_case row -- run `mfdoc
     test-plan` first; this never derives facts itself."""
@@ -333,7 +365,15 @@ def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: 
     failing for any other reason, or where the patch attempt itself doesn't
     resolve everything (including the patch model call itself raising, the
     same exception risk as the main call above), falls straight through to
-    the existing full-retry loop unchanged."""
+    the existing full-retry loop unchanged.
+
+    Captures `_prior_fingerprint_for(out_path)` once, before this call's
+    first write to `out_path` -- see that function's docstring (issue #195
+    review): every `validate_test_doc` call below passes it through, since
+    a freshly-generated candidate's own front matter never carries
+    `test_case_fingerprint` itself, and by the time validation runs
+    `out_path` has already been overwritten with that candidate."""
+    prior_fingerprint = _prior_fingerprint_for(out_path)
     retry_note = None
     input_tokens = output_tokens = 0
     problems: list[str] = []
@@ -355,7 +395,7 @@ def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: 
         text = _fix_generated_by_version(response.text)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(text, encoding="utf-8")
-        result = validate_test_doc(conn, out_path)
+        result = validate_test_doc(conn, out_path, _prior_fingerprint=prior_fingerprint)
         if result["ok"]:
             write_test_doc_with_sidecar(conn, member_name, out_path, text, language)
             return DocResult(member_name, str(out_path), True, attempt, input_tokens, output_tokens, [])
@@ -371,7 +411,9 @@ def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: 
                 auto = _auto_cite_uncited_assertions(brief, text, uncited)
                 if auto is not None:
                     candidate_text, remaining_uncited = auto
-                    candidate_result = validate_test_doc(conn, out_path, _text=candidate_text)
+                    candidate_result = validate_test_doc(
+                        conn, out_path, _text=candidate_text, _prior_fingerprint=prior_fingerprint,
+                    )
                     if candidate_result["ok"]:
                         logger.info(
                             "%s: %d near-miss uncited assertion(s) auto-cited from the "
@@ -429,7 +471,7 @@ def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: 
                 output_tokens += patch_response.output_tokens
                 text = _fix_generated_by_version(patch_response.text)
                 out_path.write_text(text, encoding="utf-8")
-                result = validate_test_doc(conn, out_path)
+                result = validate_test_doc(conn, out_path, _prior_fingerprint=prior_fingerprint)
                 if result["ok"]:
                     write_test_doc_with_sidecar(conn, member_name, out_path, text, language)
                     return DocResult(
@@ -1064,9 +1106,15 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
             input_tokens, output_tokens = response.input_tokens, response.output_tokens
 
             out_path.parent.mkdir(parents=True, exist_ok=True)
+            # Captured before this call's first write to out_path -- see
+            # _prior_fingerprint_for's docstring (issue #195 review): a
+            # freshly-generated candidate's own front matter never carries
+            # test_case_fingerprint itself, and out_path is about to be
+            # overwritten with it.
+            prior_fingerprint = _prior_fingerprint_for(out_path)
             final_text = _fix_generated_by_version(response.text)
             out_path.write_text(final_text, encoding="utf-8")
-            validation = validate_test_doc(conn, out_path)
+            validation = validate_test_doc(conn, out_path, _prior_fingerprint=prior_fingerprint)
 
             # Issue #188 review: this pool loop is the ordinary `mfdoc
             # test-batch` path for every non-chunked member -- the common
@@ -1088,7 +1136,9 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
                     auto = _auto_cite_uncited_assertions(briefs[name], final_text, uncited)
                     if auto is not None:
                         candidate_text, remaining_uncited = auto
-                        candidate_result = validate_test_doc(conn, out_path, _text=candidate_text)
+                        candidate_result = validate_test_doc(
+                            conn, out_path, _text=candidate_text, _prior_fingerprint=prior_fingerprint,
+                        )
                         if candidate_result["ok"]:
                             logger.info(
                                 "%s: %d near-miss uncited assertion(s) auto-cited from the "
@@ -1144,7 +1194,7 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
                         output_tokens += patch_response.output_tokens
                         final_text = _fix_generated_by_version(patch_response.text)
                         out_path.write_text(final_text, encoding="utf-8")
-                        validation = validate_test_doc(conn, out_path)
+                        validation = validate_test_doc(conn, out_path, _prior_fingerprint=prior_fingerprint)
                         if validation["ok"]:
                             patched = True
                         else:
@@ -1188,7 +1238,7 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
                     output_tokens += retry_response.output_tokens
                     final_text = _fix_generated_by_version(retry_response.text)
                     out_path.write_text(final_text, encoding="utf-8")
-                    validation = validate_test_doc(conn, out_path)
+                    validation = validate_test_doc(conn, out_path, _prior_fingerprint=prior_fingerprint)
                     attempts = 2
             elif not validation["ok"] and initial_exc_problem is not None:
                 # This response already came from the exception-triggered

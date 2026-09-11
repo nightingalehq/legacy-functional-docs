@@ -319,6 +319,48 @@ GitHub org.
   fixture pipeline (`ingest`/`derive`/`coverage`/`validate --docs
   examples`) unchanged from before this change.
 
+  A further review round found the actual critical gap in the above: the
+  fingerprint check only ever fired once a document already carried its
+  own stamped `test_case_fingerprint` -- but the *first* validation of a
+  freshly-generated candidate (the render/retry loop's own call, right
+  after the model responds and before `write_test_doc_with_sidecar` ever
+  runs) sees a document whose front matter has no such field at all (the
+  model was never asked to produce one), because `out_path` gets
+  overwritten with that candidate text *before* `validate_test_doc` reads
+  it -- destroying whatever fingerprint the *previous* successful render
+  had stamped there, at exactly the moment it would have been needed to
+  detect staleness in the old sidecar sitting untouched right next to it.
+  This meant the fingerprint fix, as first landed, protected only a
+  document's *second* validation onward (a later `mfdoc test-validate`
+  run, or a dry-run reuse check) -- never the render loop's own first
+  pass, which is the actual validation issue #195 is about. Confirmed by
+  hand: a temporary sanity check that made the new capture always return
+  `None` reproduced the exact pre-fix false "not found" failure end to
+  end, through the real render/retry path.
+  Fixed with `testbatch._prior_fingerprint_for(out_path)`: read *before*
+  the render loop's first write to `out_path` this call, from whatever
+  document (if any) is already there from a previous successful render,
+  and threaded through every `validate_test_doc(..., _prior_fingerprint=
+  ...)` call in both retry loops (`_generate_test_doc_from_brief`, and
+  `run_test_batch`'s separate inline pool-loop path for non-chunked
+  members). `validate_test_doc` now falls back to `_prior_fingerprint`
+  only when the document being validated carries no `test_case_
+  fingerprint` of its own. Also fixed, same round: a malformed `sources`
+  front-matter value (e.g. a non-string list element -- already flagged
+  separately in `problems` by `validate_doc`'s own checks) could make
+  `doc_rule_fingerprint`'s `sorted(..., key=str.upper)` raise, turning a
+  front-matter contract violation into an unhandled `mfdoc test-validate`
+  crash; guarded to leave the fingerprint unavailable (falls through to
+  the ID-overlap fallback) instead. Added
+  `test_rerender_after_an_insertion_is_not_falsely_rejected_against_the_
+  old_sidecar`, reproducing the exact end-to-end scenario: a first
+  successful render, a rule inserted afterward (simulating a `derive`
+  rebuild + `test-plan` re-run before the sidecar refreshes), then a
+  second render whose genuinely-correct response must validate clean on
+  the first attempt rather than being falsely rejected against the old,
+  now-stale sidecar. Full suite: 980 passed, 2 skipped; bundled fixture
+  pipeline unchanged.
+
 **Progress (2026-09-11):**
 - Fixed issue #199: `mfdoc doc-drift`'s existing checks (issue #161) caught
   system-wide/module-scoped drift but nothing keyed on a single dialect --

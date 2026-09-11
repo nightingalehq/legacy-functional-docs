@@ -941,7 +941,8 @@ def validate_doc(conn, path: Path, outcome_field=OUTCOME_FIELD, _text: str | Non
     }
 
 
-def validate_test_doc(conn, path: Path, _text: str | None = None) -> dict:
+def validate_test_doc(conn, path: Path, _text: str | None = None,
+                       _prior_fingerprint: str | None = None) -> dict:
     """`validate_doc` plus the checks specific to a generated test file:
     `language`/`framework` front matter, and that every bare `MEMBER:BR-nnn`
     reference names a scenario that actually exists in test_case -- the
@@ -1020,6 +1021,29 @@ def validate_test_doc(conn, path: Path, _text: str | None = None) -> dict:
     sidecar's ids didn't resolve, for a caller or a human reading a `mfdoc
     test-validate` report who wants to tell "genuine renumbering" apart
     from "one bad id" in that fallback case.
+
+    `_prior_fingerprint`, from `testbatch._prior_fingerprint_for`: the
+    fingerprint a *previous* successful render already stamped at `path`,
+    for a caller validating a freshly-generated candidate that has just
+    overwritten that same path -- the candidate's own front matter never
+    carries `test_case_fingerprint` itself (only `write_test_doc_with_
+    sidecar` adds it, after validation succeeds), so without this the
+    fingerprint check above would have nothing to compare against on
+    exactly the validation this issue is about (the render/retry loop's
+    own first pass, not a later re-check of an already-fully-written
+    document) and would silently fall through to the weaker ID-overlap
+    fallback every time. Used only when the document being validated
+    itself carries no `test_case_fingerprint` of its own.
+
+    A malformed `sources` front-matter value (not a list of plain strings
+    -- `validate_doc`'s own `_out_of_scope_sources`/`REQUIRED_FRONTMATTER`
+    checks already flag this in `problems`) must never make the
+    fingerprint lookup itself raise: `doc_rule_fingerprint` is only ever
+    called after confirming every element is a string, and any other
+    shape leaves `fp` as `None` -- caught here, not treated as "no
+    fingerprint available" as a matter of course, so this can't turn a
+    front-matter contract violation into an unhandled crash in `mfdoc
+    test-validate`.
     """
     result = validate_doc(conn, path, _text=_text)
     fm, body = result.pop("_fm"), result.pop("_body")
@@ -1049,13 +1073,32 @@ def validate_test_doc(conn, path: Path, _text: str | None = None) -> dict:
             }
         return _valid_scenarios_cache
 
-    stored_fingerprint = fm.get("test_case_fingerprint") if fm is not None else None
+    # The document's own stamped fingerprint, if any -- falling back to
+    # `_prior_fingerprint` (the previous successful render's, captured by
+    # the caller before overwriting `path` with a fresh candidate) only
+    # when this document carries none of its own. A freshly-generated
+    # candidate never has one yet (only `write_test_doc_with_sidecar`
+    # stamps it, after validation succeeds), so without this fallback the
+    # fingerprint check below would have nothing to compare against on
+    # exactly the render/retry loop's own first validation of a chunk.
+    stored_fingerprint = (fm.get("test_case_fingerprint") if fm is not None else None) or _prior_fingerprint
     _current_fingerprint_cache: list = []  # 0 or 1 element -- memoized None is valid too
 
     def current_fingerprint() -> str | None:
         if not _current_fingerprint_cache:
             sources = fm.get("sources") if fm is not None else None
-            fp = doc_rule_fingerprint(conn, sources) if sources else None
+            # A malformed `sources` (not a list of plain strings --
+            # already flagged separately in `problems` by validate_doc's
+            # own front-matter checks) must never make this raise:
+            # `doc_rule_fingerprint`'s `sorted(..., key=str.upper)` would
+            # otherwise crash on a non-string element (e.g. `sources:
+            # [123]`), turning a front-matter contract violation into an
+            # unhandled `mfdoc test-validate` crash instead of just
+            # leaving the fingerprint unavailable and falling through to
+            # the ID-overlap fallback below.
+            fp = None
+            if isinstance(sources, list) and sources and all(isinstance(s, str) for s in sources):
+                fp = doc_rule_fingerprint(conn, sources)
             _current_fingerprint_cache.append(fp)
         return _current_fingerprint_cache[0]
 
