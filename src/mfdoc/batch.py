@@ -1716,6 +1716,25 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
     # call), there is no second call left to ever read the cache entry this
     # breakpoint would write -- prepending shared_prefix there is a pure
     # cache-write cost with no matching read, not a saving.
+    #
+    # A member-level breakpoint is only useful *behind* the existing
+    # project-level one (see AnthropicCaller.set_member_cache_prefixes --
+    # `_content` matches a member prefix against the text left after the
+    # project prefix is stripped, never against the whole prompt). `run_
+    # batch` registers the project-level prefix once, up front, via `_apply_
+    # cache_prefixes` -- but `generate_module_doc`/this function are also a
+    # public, direct call path (tests, a one-off script) that never goes
+    # through `run_batch` at all, so a caller built fresh for that path has
+    # no project-level prefix registered yet. Without this, `_content`'s
+    # outer prefix match would simply fail for every prompt (no cache_
+    # control applied to *anything*, project or member tier), while this
+    # function still prepended shared_prefix's text into every chunk's
+    # brief for zero caching benefit (Copilot review round 3 on PR #215).
+    # Calling `_apply_cache_prefixes` here too -- idempotent, since it's the
+    # same `writing_rules`/`template`/`index_template` for every call in one
+    # project -- guarantees the project tier is always active before the
+    # member tier is even considered, regardless of which path got here.
+    _apply_cache_prefixes(caller, writing_rules, template, index_template)
     set_member_cache_prefixes = getattr(caller, "set_member_cache_prefixes", None)
     shared_prefix = (
         member_shared_prefix(member_facts, redact)
@@ -1737,19 +1756,28 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
         chunk_brief = module_brief(
             conn, member_name, redact=redact, lexicon=lexicon,
             rule_range=(start, end), chunk_info=(i, chunk_count), chunk_map=chunk_map,
-            sme_notes=sme_notes, facts=member_facts,
+            sme_notes=sme_notes, facts=member_facts, shared_prefix=shared_prefix,
         )
-        # `shared_prefix` (when this member resolved to a real MemberFacts)
-        # is prepended ahead of every chunk's own module_brief() text, with
-        # the same separator build_member_prompt_cache_prefix expects to
-        # find -- this is what makes the registered member-level cache
-        # prefix above an actual literal prefix of this brief, on every
-        # chunk, not just a string that happens to be byte-identical
-        # somewhere inside it. Deliberately redundant with what
-        # module_brief() itself still renders in full below (issue #214's
-        # "out of scope" note): the caching win comes from the cache *hit*
-        # on this leading copy across chunks, not from removing these facts
-        # from module_brief()'s own per-chunk text.
+        # `shared_prefix` (when this member resolved to a real MemberFacts
+        # and a member-level cache tier is active) is prepended ahead of
+        # every chunk's own module_brief() text, with the same separator
+        # build_member_prompt_cache_prefix expects to find -- this is what
+        # makes the registered member-level cache prefix above an actual
+        # literal prefix of this brief, on every chunk, not just a string
+        # that happens to be byte-identical somewhere inside it.
+        #
+        # This is *not* duplicate content: `chunk_brief` above was given
+        # this same `shared_prefix`, so module_brief() already skipped
+        # re-rendering every whole-member section it covers (issue #214,
+        # Copilot review round 3 on PR #215) -- sending the same facts
+        # twice per chunk would inflate every chunk's actual request size
+        # regardless of any cache hit (a cache hit only changes billing,
+        # never how many tokens are in the request), which could turn an
+        # already-large member's chunk into a context-limit failure, the
+        # exact case chunking exists to prevent. `shared_prefix` +
+        # `chunk_brief` together cover the same facts a single unshared
+        # module_brief() call would, just split across two blocks instead
+        # of duplicated.
         brief = (
             shared_prefix + "\n\n---\n\n" + chunk_brief if shared_prefix is not None
             else chunk_brief
@@ -2637,7 +2665,7 @@ def plan_batch(conn, members: list[str], out_dir: Path,
             chunk_brief = module_brief(
                 conn, name, redact=redact, lexicon=lexicon,
                 rule_range=(start, end), chunk_info=(i, chunk_count), chunk_map=chunk_map,
-                sme_notes=sme_notes, facts=member_facts,
+                sme_notes=sme_notes, facts=member_facts, shared_prefix=shared_prefix,
             )
             preview_brief = (
                 shared_prefix + "\n\n---\n\n" + chunk_brief if shared_prefix is not None else chunk_brief

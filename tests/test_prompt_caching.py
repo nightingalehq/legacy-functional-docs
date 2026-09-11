@@ -186,10 +186,14 @@ class _MemberCacheAwareFakeCaller:
 
     def __init__(self):
         self.member_registered: list[list[str]] = []
+        self.project_registered: list[list[str]] = []
         self.prompts_seen: list[str] = []
 
     def set_member_cache_prefixes(self, prefixes) -> None:
         self.member_registered.append(list(prefixes))
+
+    def set_cache_prefixes(self, prefixes) -> None:
+        self.project_registered.append(list(prefixes))
 
     def __call__(self, prompt):
         self.prompts_seen.append(prompt)
@@ -297,6 +301,15 @@ def test_generate_module_doc_chunked_registers_one_member_prefix_before_the_chun
     )
     assert result.chunked is True
     assert caller.member_registered == [[expected_prefix]]
+    # Copilot review round 3 on PR #215: generate_module_doc is a public,
+    # direct call path (like this test) that never goes through run_batch's
+    # own _apply_cache_prefixes -- without also registering the project-
+    # level prefix here, a fresh caller would have no project tier active,
+    # AnthropicCaller._content's outer match would fail for every prompt,
+    # and no cache_control would ever be applied to anything at all, project
+    # or member tier, even though shared_prefix's text is still (correctly,
+    # per the dedup fix) the only copy of those facts in the prompt.
+    assert caller.project_registered, "project-level prefix must also be registered on this path"
 
     # And every per-chunk prompt (not the narrative-reconciliation call)
     # actually starts with the registered member-level prefix, right after
@@ -305,6 +318,52 @@ def test_generate_module_doc_chunked_registers_one_member_prefix_before_the_chun
     assert chunk_prompts, "expected at least one per-chunk prompt"
     for prompt in chunk_prompts:
         assert expected_prefix in prompt
+
+
+def test_generate_module_doc_chunked_does_not_duplicate_shared_facts_in_the_actual_prompt():
+    """The core of Copilot review round 3 on PR #215: a cache hit only
+    changes billing, not how many tokens are in the request -- so a
+    chunk's own module_brief() text must not still carry the same whole-
+    member facts shared_prefix already sent. Checked here at the full
+    prompt-assembly level (not just module_brief's own output), so a
+    regression in how batch.py wires shared_prefix through would be
+    caught even if module_brief's own unit tests still passed."""
+    from mfdoc.db import SCHEMA
+
+    from mfdoc.db import insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_rules(conn, 5)  # -> 3 chunks with max_rules_per_call=2
+    # A whole-member fact FAKEMOD's own fixture otherwise has none of --
+    # without this, there'd be nothing for the dedup fix to actually
+    # deduplicate, and this test would pass even with the pre-fix
+    # duplicated-content behavior.
+    insert(
+        conn, "call_edge", caller_id=1, callee_name="OTHERMOD", call_kind="CALLNAT",
+        line_no=1, resolved=False,
+    )
+    conn.commit()
+
+    caller = _MemberCacheAwareFakeCaller()
+    result = generate_module_doc(
+        conn, "FAKEMOD", _tmp_out_path(), caller, "writing rules text", "template text",
+        max_rules_per_call=2,
+    )
+    assert result.chunked is True
+    chunk_prompts = [p for p in caller.prompts_seen if "# Fact brief:" in p]
+    assert chunk_prompts, "expected at least one per-chunk prompt"
+    for prompt in chunk_prompts:
+        # "## Outbound calls" is a whole-member section shared_prefix
+        # already covers -- it must appear at most once in the whole
+        # prompt (via shared_prefix), never a second time via this chunk's
+        # own trimmed module_brief() text.
+        assert prompt.count("## Outbound calls") == 1
+        # "## Candidate business rules" is the one section every chunk's
+        # own module_brief() text must still carry (it's the whole reason a
+        # chunk exists) -- shared_prefix never renders it.
+        assert prompt.count("## Candidate business rules") == 1
 
 
 def _tmp_out_path():

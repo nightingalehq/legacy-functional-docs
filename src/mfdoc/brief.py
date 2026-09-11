@@ -1248,7 +1248,8 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
                   chunk_info: tuple[int, int] | None = None,
                   chunk_map: dict[str, int] | None = None,
                   sme_notes: Notes | None = None,
-                  facts: "MemberFacts | str | None" = None) -> str:
+                  facts: "MemberFacts | str | None" = None,
+                  shared_prefix: str | None = None) -> str:
     """`rule_range` (1-based, inclusive, over this member's own rule_candidate
     rows in the same order they're numbered in) restricts the "Candidate
     business rules" section to that slice -- everything else in the brief
@@ -1289,7 +1290,49 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
     `MemberFacts`'s own docstring) is redacted here, with *this* call's own
     `redact`, so reusing one `MemberFacts` across chunks (or even, in
     principle, across calls using different `redact` policies) never
-    reads stale or wrongly-redacted text."""
+    reads stale or wrongly-redacted text.
+
+    `shared_prefix`, when given, is this exact member's own `member_shared_
+    prefix(facts, redact)` output (issue #214) -- a caller sending it ahead
+    of this call (as a separate, cached block; see batch.py's
+    `_generate_module_doc_chunked`) means every whole-member section that
+    string already carries would otherwise be sent *twice* in the same
+    request: once via `shared_prefix`, once again via this function's own
+    rendering of the identical facts. A cache hit only changes what gets
+    billed, not how many tokens are actually in the request -- so without
+    this parameter, "add a cached block" would silently double a chunk's
+    non-rule content on every call, which can turn an already-large
+    member's chunk (the exact case chunking exists to keep within a
+    model's context window) into one that no longer fits (Copilot review
+    on PR #215). When given (non-empty), this function skips re-rendering
+    every section `shared_prefix` already covers -- Header comments,
+    Interface, Data views, Program variables/screen fields, Data areas
+    included, Data access, Unreferenced fields, Transaction boundaries,
+    Outbound calls, Inbound callers, User interaction points, Messages,
+    Business rules from included copycode, and Known gaps -- so the total
+    content actually sent (`shared_prefix` + this function's trimmed
+    output) covers the same facts as an unshared call would, just split
+    across two blocks instead of duplicated. Never skips: the top metadata
+    lines, the PARTIAL BRIEF note, "Internal routines" (kept in full here
+    even though `shared_prefix` also has an unannotated copy -- this
+    section's own `[documented in chunk N]` annotations are chunk-
+    dependent, so it can't be the shared, chunk-invariant copy;
+    `shared_prefix`'s own docstring covers why it's still worth carrying
+    there anyway, for a caller not built with `shared_prefix` support at
+    all), "Candidate business rules" (the whole reason a chunk exists),
+    and "SME notes".
+
+    The lexicon-relevance scan (see below) is folded in too: since it scans
+    `out`'s own rendered text for a hit, skipping sections would otherwise
+    silently drop a lexicon term that only appears in one of them --
+    `shared_prefix`'s raw text is included in the scanned haystack instead,
+    so the same set of terms matches as an unshared call would find (this
+    is a plain substring inclusion, not undoing `shared_prefix`'s own
+    `_esc_cell` table-encoding first, unlike `out`'s own table rows below
+    -- a lexicon term that exists *only* inside an escaped `|` or backslash
+    table cell within `shared_prefix` is the one narrow case this can still
+    miss; considered acceptable given how rare a literal `|` or backslash
+    inside a cited field name or condition is)."""
     if facts is None:
         facts = build_member_facts(conn, member_name)
     if isinstance(facts, str):
@@ -1346,7 +1389,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
     # Rule-of-thumb separators (`*`, `****`) and lone `*` spacers add noise that
     # crowds out the two or three lines that actually say what the module is for.
     hdr = facts.hdr
-    if hdr:
+    if hdr and not shared_prefix:
         add("## Header comments (unverified author prose — treat as claims, not facts)")
         for r in hdr:
             add(f"- {_cite(name, r['line_no'])} `{redact(r['text'][:160])}`")
@@ -1354,7 +1397,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
 
     # --- interfaces
     params = facts.params
-    if params:
+    if params and not shared_prefix:
         add("## Interface (parameters)")
         add("")
         rows = []
@@ -1365,7 +1408,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
         add("")
 
     views = facts.views
-    if views:
+    if views and not shared_prefix:
         add("## Data views declared")
         add("")
         rows = [
@@ -1395,7 +1438,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
     screen_field_names = facts.screen_field_names
     other_vars = facts.other_vars
     data_area_includes = facts.data_area_includes
-    if other_vars:
+    if other_vars and not shared_prefix:
         add("## Program variables and screen/MAP fields")
         add(
             "Kind distinguishes a screen/MAP-bound field (a value the operator "
@@ -1413,7 +1456,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
             rows.append([_cite(name, r["line_no"]), kind, f"`{r['name']}`", spec, bound])
         add_tbl(_tbl(["citation", "kind", "name", "spec", "bound_to"], rows))
         add("")
-    if data_area_includes:
+    if data_area_includes and not shared_prefix:
         add("## Data areas included")
         add(
             "A `DEFINE DATA ... USING` data area (LDA/PDA/GDA) this member "
@@ -1475,7 +1518,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
     # feedback) have a plain line_no list to search rather than re-deriving
     # one (or falling back to an O(rules * data_access) scan) on every rule.
     acc_line_nos = [r["line_no"] for r in acc]
-    if acc:
+    if acc and not shared_prefix:
         add("## Data access (verified from source statements)")
         for r in acc:
             key = f" key/where: `{redact(r['key_expr'])}`" if r["key_expr"] else ""
@@ -1516,7 +1559,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
     # scanner gap -- also recorded as a `gap` row (gap_kind='unused_field')
     # by `mfdoc derive`, so it reaches the gap register too.
     unused = facts.unused
-    if unused:
+    if unused and not shared_prefix:
         add("## Unreferenced fields on entities this module touches")
         add(
             "Present on the corresponding screen/table but never found, as a whole "
@@ -1535,7 +1578,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
 
     # --- transaction markers
     tx = facts.tx
-    if tx:
+    if tx and not shared_prefix:
         add("## Transaction boundaries")
         for r in tx:
             add(f"- {_cite(name, r['line_no'])} `{r['marker']}`"
@@ -1544,7 +1587,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
 
     # --- calls
     calls = facts.calls
-    if calls:
+    if calls and not shared_prefix:
         add("## Outbound calls")
         add("")
         rows = []
@@ -1563,7 +1606,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
         add("")
 
     inbound = facts.inbound
-    if inbound:
+    if inbound and not shared_prefix:
         add("## Inbound callers")
         for r in inbound:
             add(f"- {_cite(r['caller'], r['line_no'])} `{r['call_kind']}` from `{r['caller']}`")
@@ -1588,7 +1631,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
 
     # --- interactions
     inter = facts.inter
-    if inter:
+    if inter and not shared_prefix:
         add("## User interaction points")
         for r in inter:
             add(f"- {_cite(name, r['line_no'])} `{r['kind']}`"
@@ -1597,7 +1640,7 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
         add("")
 
     msgs = facts.msgs
-    if msgs:
+    if msgs and not shared_prefix:
         add("## Messages and error handling")
         for r in msgs:
             add(f"- {_cite(name, r['line_no'])} `{r['kind']}`"
@@ -1673,26 +1716,27 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
     # attributed solely to that member's own brief, and never appears when
     # briefing the module that actually includes and runs it -- a module doc
     # can look complete and still miss a validation rule it depends on.
-    for cc_id, cc_name, cc_rules in facts.copycode_rules:
-        add(f"## Business rules from included copycode `{cc_name}`")
-        add("")
-        cc_rows = []
-        for n, r in numbered_rule_candidates(cc_rules):
-            # IDs are qualified with the copycode's own name and numbered
-            # from its own row order -- the same ID a direct brief of
-            # cc_name would show, since the rule "lives" there regardless
-            # of which including module's brief surfaces it.
-            cond_cell = f"`{redact(r['condition'])}`" if r["condition"] else ""
-            lit_cell = f"`{redact(r['literals'])}`" if r["literals"] else ""
-            cc_rows.append([
-                f"**{_rule_id(cc_name, n)}**", _cite(cc_name, r["line_no"]), str(r["depth"]),
-                f"`{r['construct']}`", cond_cell, lit_cell,
-            ])
-        add_tbl(_tbl(["id", "citation", "depth", "construct", "condition", "literals"], cc_rows))
-        add("")
+    if not shared_prefix:
+        for cc_id, cc_name, cc_rules in facts.copycode_rules:
+            add(f"## Business rules from included copycode `{cc_name}`")
+            add("")
+            cc_rows = []
+            for n, r in numbered_rule_candidates(cc_rules):
+                # IDs are qualified with the copycode's own name and numbered
+                # from its own row order -- the same ID a direct brief of
+                # cc_name would show, since the rule "lives" there regardless
+                # of which including module's brief surfaces it.
+                cond_cell = f"`{redact(r['condition'])}`" if r["condition"] else ""
+                lit_cell = f"`{redact(r['literals'])}`" if r["literals"] else ""
+                cc_rows.append([
+                    f"**{_rule_id(cc_name, n)}**", _cite(cc_name, r["line_no"]), str(r["depth"]),
+                    f"`{r['construct']}`", cond_cell, lit_cell,
+                ])
+            add_tbl(_tbl(["id", "citation", "depth", "construct", "condition", "literals"], cc_rows))
+            add("")
 
     gaps = facts.gaps
-    if gaps:
+    if gaps and not shared_prefix:
         add("## Known gaps for this module")
         for r in gaps:
             loc = _cite(name, r["line_no"]) if r["line_no"] else _cite(name, None)
@@ -1721,6 +1765,18 @@ def module_brief(conn, member_name: str, excerpt_rules: bool = True,
             _unescape_cell(line) if i in table_line_idxs else line
             for i, line in enumerate(out)
         )
+        # `shared_prefix` (issue #214), when given, covers every whole-
+        # member section this call skipped rendering into `out` above --
+        # folded into the haystack raw (not re-run through the same
+        # table_line_idxs decode, since it's not one of this call's own
+        # `out` lines) so a lexicon term that only appears in one of those
+        # skipped sections still gets found, matching what an unshared call
+        # would have hit. Not a full undo of `shared_prefix`'s own _esc_cell
+        # table encoding -- a term that exists only inside an escaped `|`/`\`
+        # table cell there is the one case this can still miss; see
+        # module_brief's own `shared_prefix` docstring.
+        if shared_prefix:
+            haystack = shared_prefix + "\n" + haystack
         hits = [(k, v) for k, v in lexicon.items() if k in haystack]
         if hits:
             vocab = [

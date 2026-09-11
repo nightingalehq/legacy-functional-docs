@@ -90,3 +90,49 @@ def test_batch_command_dry_run_reports_a_plan_and_makes_no_model_calls(
     assert "corpus signature:" in out
     assert "MMP0100" in out
     assert not (tmp_path / "out").exists(), "--dry-run must not write any output"
+
+
+def test_batch_command_dry_run_member_cache_capable_reflects_caller_not_just_provider(
+    derive_result, cli_args, tmp_path, monkeypatch,
+):
+    """Issue #214, Copilot review round 3 on PR #215: _build_model_caller
+    checks `--caller fake-echo` before it ever looks at `--provider` --
+    `--caller fake-echo --provider anthropic` builds the no-op fake-echo
+    callable, which has no set_member_cache_prefixes hook at all. plan_
+    batch's `member_cache_capable` must reflect that (False), not just
+    `--provider`'s own value (which alone would say True here) -- otherwise
+    the dry-run preview hashes as if a member-level prefix would be
+    registered for a run that, via --caller fake-echo, never builds a
+    caller capable of one."""
+    project_dir = Path(cli_args.config).parent
+    if not (project_dir / "reference").exists():
+        shutil.copytree(REPO_ROOT / "reference", project_dir / "reference")
+        shutil.copytree(REPO_ROOT / "templates", project_dir / "templates")
+
+    from mfdoc import batch as batch_mod
+
+    seen = {}
+    real_plan_batch = batch_mod.plan_batch
+
+    def spying_plan_batch(*args, **kwargs):
+        seen["member_cache_capable"] = kwargs.get("member_cache_capable")
+        return real_plan_batch(*args, **kwargs)
+
+    monkeypatch.setattr(batch_mod, "plan_batch", spying_plan_batch)
+
+    args = SimpleNamespace(
+        config=cli_args.config, out=str(tmp_path / "out"), members="MMP0100",
+        state="", dry_run=True, caller="fake-echo", provider="anthropic",
+    )
+    rc = cli.cmd_batch(args)
+    assert rc == 0
+    assert seen["member_cache_capable"] is False
+
+    seen.clear()
+    args = SimpleNamespace(
+        config=cli_args.config, out=str(tmp_path / "out2"), members="MMP0100",
+        state="", dry_run=True, caller="anthropic", provider="anthropic",
+    )
+    rc = cli.cmd_batch(args)
+    assert rc == 0
+    assert seen["member_cache_capable"] is True
