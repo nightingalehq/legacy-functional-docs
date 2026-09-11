@@ -774,7 +774,23 @@ GitHub org.
   test count (957) had drifted from the PR description's (956) again as
   the fix iterated -- both now read 962. Added
   `test_cmd_test_validate_surfaces_a_tolerated_stale_sidecar`
-  (`tests/test_cli.py`). Full suite: 962 passed, 2 skipped.
+  (`tests/test_cli.py`). Full suite: 962 passed, 2 skipped. A seventh round
+  repeated the same "no persisted generation signature" limitation from a
+  different angle (an inserted/appended rule leaving an old sidecar fully
+  contained in the current valid set, so `code_ids <= valid_scenarios()`
+  reads it as current when it's actually from before the insertion) --
+  this is the identical, already-documented trade-off of an ID-overlap
+  heuristic with no persisted per-run content signature to check against
+  instead (see `validate_test_doc`'s own docstring and this log's prior
+  entries), not a new gap this round surfaced. Stopping the review-
+  response cycle here: seven rounds, CI green, `mergeStateStatus: CLEAN`,
+  and the last two rounds have restated one already-acknowledged, already-
+  documented limitation rather than finding new ones. A real fix for that
+  specific limitation -- a persisted `test_case`-generation fingerprint
+  `validate_test_doc` could compare against directly, instead of inferring
+  staleness from ID-set overlap -- is real follow-up work, not a fix
+  this PR is withholding; noted here as a candidate for a future issue
+  rather than expanding this one further.
 
 **Progress (2026-09-10e):**
 - Fixed issue #188: ported `batch.py`'s near-miss/targeted-patch mechanism
