@@ -431,6 +431,61 @@ See [`MMP0100.py`](./MMP0100.py) for the generated test source.
     assert any("BR-999" in p for p in result["problems"])
 
 
+def test_malformed_sources_does_not_crash_the_fingerprint_lookup(indexed_db, tmp_path):
+    """Copilot review follow-up on issue #195: `sources` containing a
+    non-string element (e.g. `[123]`, a genuine front-matter contract
+    violation `validate_doc`'s own checks already flag separately) must
+    not make `doc_rule_fingerprint`'s `sorted(..., key=str.upper)` raise
+    and crash `mfdoc test-validate`. A sidecar present with a stored
+    (now-unusable) fingerprint exercises the actual code path the guard
+    protects -- the malformed `sources` value must simply leave the
+    fingerprint unavailable and fall through to the ID-overlap fallback,
+    not propagate an exception."""
+    conn = indexed_db
+    testplan.run_all(conn, member_name="MMP0100")
+    path = tmp_path / "MMP0100.md"
+    sidecar = tmp_path / "MMP0100.py"
+    path.write_text(
+        """---
+title: "MMP0100 -- generated tests (python)"
+doc_type: generated_test
+system: MOM
+module: MMP0100
+language: python
+framework: pytest
+generated_by: legacy-functional-docs 0.1.0
+generated_at: "2026-01-01"
+review_status: draft
+reviewers: []
+confidence_summary:
+  verified: 1
+  inferred: 0
+  unresolved: 0
+sources: [123]
+test_case_fingerprint: "deadbeefcafef00d"
+---
+
+# MMP0100 -- generated tests
+
+See [`MMP0100.py`](./MMP0100.py) for the generated test source.
+
+## Scenarios covered
+
+- MMP0100:BR-004
+""",
+        encoding="utf-8",
+    )
+    sidecar.write_text("def test_one():\n    # MMP0100:BR-004\n    ...\n", encoding="utf-8")
+
+    result = validate_test_doc(conn, path)  # must not raise
+    # validate_doc's own front-matter check correctly flags the malformed
+    # `sources` shape itself -- this test's actual concern is that
+    # *reaching* that result didn't require crashing inside the
+    # fingerprint lookup along the way.
+    assert any("sources must be a list of strings" in p for p in result["problems"])
+    assert result["sidecar_stale"] is False
+
+
 def test_current_sidecar_still_cross_checked_against_manifest(indexed_db, tmp_path):
     """A sidecar whose BR-ids *do* all match current `test_case` rows is
     still authoritative -- the staleness guard must not swallow a genuine

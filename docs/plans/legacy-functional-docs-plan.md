@@ -378,6 +378,27 @@ GitHub org.
   `test_run_test_batch_per_member_skip_sees_a_rule_candidate_only_change`.
   Full suite: 981 passed, 2 skipped.
 
+  A twelfth review round raised two quick, real fixes and one
+  documentation-only point, addressed here: `sources` containing
+  whitespace-padded member names (e.g. `["FAKEMOD "]`) fell through to the
+  weaker ID-overlap fallback because `resolve_member_by_name`'s exact
+  match doesn't find a member literally named with trailing whitespace --
+  `doc_rule_fingerprint`'s inputs are now stripped first. The malformed-
+  `sources` crash guard from the previous round had no regression test
+  actually exercising `validate_test_doc`'s own code path (existing tests
+  covered `validate_doc`/tree partitioning, not this one) -- added
+  `test_malformed_sources_does_not_crash_the_fingerprint_lookup`. And: a
+  document/sidecar pair written *before* this fingerprint field existed
+  has no migration path -- there's nothing in today's fact store to
+  reconstruct what the `rule_candidate` ordering *was* at that earlier
+  write time, which is what a retroactive fingerprint would need.
+  Documented explicitly in `validate_test_doc`'s docstring as a one-time,
+  self-resolving transition (a pre-existing document stays on the weaker
+  ID-overlap fallback until its own next successful render stamps a real
+  fingerprint), not a persistent gap -- no code change needed, since this
+  is the same, already-necessary fallback (2) exists for. Full suite:
+  1008 passed, 2 skipped.
+
 **Progress (2026-09-11):**
 - Fixed issue #199: `mfdoc doc-drift`'s existing checks (issue #161) caught
   system-wide/module-scoped drift but nothing keyed on a single dialect --

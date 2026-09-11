@@ -1010,6 +1010,20 @@ def validate_test_doc(conn, path: Path, _text: str | None = None,
        existing at all; every document `write_test_doc_with_sidecar`
        writes from here on gets the exact check instead.
 
+    No migration path exists (or is algorithmically possible) for a
+    document/sidecar pair written before this field existed: there is
+    nothing to reconstruct the `rule_candidate` ordering *as it was* at
+    that earlier write time from today's fact store alone, which is
+    exactly what a fingerprint would need to be computed retroactively.
+    A pre-existing document therefore stays on the weaker fallback (2)
+    until its *next* successful render -- at which point
+    `write_test_doc_with_sidecar` stamps a real fingerprint and every
+    validation from then on gets the exact check. This is a one-time,
+    self-resolving transition, not a persistent gap: `testbatch.
+    _prior_fingerprint_for` (the render loop's own reuse of a prior
+    fingerprint before overwriting the file) has nothing to read for
+    such a document either, for the identical reason.
+
     Either way, `result["sidecar_stale"]` reports the outcome without it
     counting toward `problems`/`ok` -- a stale sidecar isn't a defect in
     *this* document, and gets overwritten with fresh content the next time
@@ -1098,7 +1112,12 @@ def validate_test_doc(conn, path: Path, _text: str | None = None,
             # the ID-overlap fallback below.
             fp = None
             if isinstance(sources, list) and sources and all(isinstance(s, str) for s in sources):
-                fp = doc_rule_fingerprint(conn, sources)
+                # Stripped: `resolve_member_by_name`'s lookup is an exact
+                # `UPPER(name)=UPPER(?)` match, so `sources: ["FAKEMOD "]`
+                # (stray whitespace, however it got there) would otherwise
+                # fail to resolve and silently fall back to the weaker
+                # id-overlap check instead of the exact fingerprint one.
+                fp = doc_rule_fingerprint(conn, [s.strip() for s in sources])
             _current_fingerprint_cache.append(fp)
         return _current_fingerprint_cache[0]
 
