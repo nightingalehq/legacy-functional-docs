@@ -318,6 +318,45 @@ def write_test_doc_with_sidecar(conn, member_name: str, out_path: Path, doc_text
         out_tmp.unlink(missing_ok=True)
 
 
+def _write_test_doc_with_sidecar_or_invalidate(conn, member_name: str, out_path: Path, doc_text: str,
+                                                language: str) -> Path | None:
+    """`write_test_doc_with_sidecar`, plus removing any leftover sidecar
+    from a *prior* render of this same path when this one doesn't produce
+    a replacement (Copilot review): that function silently returns `None`
+    without writing anything whenever the validated candidate's code
+    fence has no `MEMBER:BR-nnn` references at all -- a real, valid shape
+    (not an error) -- and every one of its call sites in this module
+    ignored that return value, single-document paths included. Left
+    alone, a member re-rendered into that shape would still have its
+    *previous* render's sidecar sitting on disk, now paired with a
+    document that no longer references any of it -- the same "old sidecar
+    survives a new, incompatible document" mismatch the chunked path's
+    own equivalent cleanup exists to prevent, just reached by a single-
+    document member losing all its BR references between renders instead
+    of a chunk boundary shifting.
+
+    Best-effort on that removal, logged rather than raised: this runs
+    after the new document has already validated and been written
+    successfully, so a stale-sidecar cleanup failure here is real but
+    strictly less severe than this render's own outcome -- the same
+    trade-off `_prune_stale_test_chunk_files` makes for its own leftover
+    files, not the harder failure `_invalidate_sidecar_if_range_changed`
+    guards (there, the removal happens *before* the render that depends
+    on it; here, after one that has already succeeded on its own terms)."""
+    written = write_test_doc_with_sidecar(conn, member_name, out_path, doc_text, language)
+    if written is None:
+        stale = sidecar_path_for(out_path, language)
+        if stale is not None and stale.exists():
+            try:
+                stale.unlink()
+            except OSError as exc:
+                logger.warning(
+                    "%s: could not remove stale sidecar %s for a document that no longer "
+                    "references it: %s", member_name, stale, exc,
+                )
+    return written
+
+
 def _prior_fingerprint_for(out_path: Path) -> str | None:
     """The `test_case_fingerprint` a *previous* successful render already
     stamped at `out_path`, read before this run's own first write to that
@@ -772,7 +811,7 @@ def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: 
             _fingerprint_cache=_fingerprint_cache,
         )
         if result["ok"]:
-            write_test_doc_with_sidecar(conn, member_name, out_path, text, language)
+            _write_test_doc_with_sidecar_or_invalidate(conn, member_name, out_path, text, language)
             return DocResult(member_name, str(out_path), True, attempt, input_tokens, output_tokens, [])
 
         if _is_near_miss(result):
@@ -797,7 +836,7 @@ def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: 
                             member_name, len(uncited) - len(remaining_uncited),
                         )
                         out_path.write_text(candidate_text, encoding="utf-8")
-                        write_test_doc_with_sidecar(conn, member_name, out_path, candidate_text, language)
+                        _write_test_doc_with_sidecar_or_invalidate(conn, member_name, out_path, candidate_text, language)
                         return DocResult(
                             member_name, str(out_path), True, attempt, input_tokens,
                             output_tokens, [],
@@ -852,7 +891,7 @@ def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: 
                     _fingerprint_cache=_fingerprint_cache,
                 )
                 if result["ok"]:
-                    write_test_doc_with_sidecar(conn, member_name, out_path, text, language)
+                    _write_test_doc_with_sidecar_or_invalidate(conn, member_name, out_path, text, language)
                     return DocResult(
                         member_name, str(out_path), True, attempt, input_tokens, output_tokens, [],
                     )
@@ -1284,40 +1323,59 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
                     )
                 if result is None:
                     logger.info("%s: chunk %d/%d generating", member_name, i, chunk_count)
-                    result = _generate_test_doc_from_brief(
-                        conn, member_name, brief, language, framework, chunk_path, caller,
-                        writing_rules, template, max_attempts=max_attempts,
-                        _fingerprint_cache=fingerprint_cache,
-                    )
-                    if sidecar_backup is not None:
-                        # Copilot review: `result.ok` alone doesn't prove a
-                        # fresh sidecar now exists -- write_test_doc_with_
-                        # sidecar returns (silently, uncaptured by every
-                        # caller) without writing one when the validated
-                        # candidate's code fence has no `MEMBER:BR-nnn`
-                        # references at all, so an accepted render can
-                        # still leave nothing at the real sidecar path.
-                        # Checked directly rather than trusted from `ok`:
-                        # only a real, freshly-written sidecar justifies
-                        # discarding the backup; anything else (a failed
-                        # render, or one that validated without ever
-                        # writing a sidecar) restores it, so this chunk is
-                        # never left with a manifest/body that cites real
-                        # ids but no sidecar to actually back them.
-                        # Same `language`, same `chunk_path` as the call that
-                        # produced this backup in the first place -- always
-                        # resolves to a real path here, never None.
-                        fresh_sidecar = sidecar_path_for(chunk_path, language)
-                        try:
-                            if fresh_sidecar.exists():
-                                sidecar_backup.unlink()
-                            else:
-                                sidecar_backup.replace(fresh_sidecar)
-                        except OSError as exc:
-                            logger.warning(
-                                "%s: chunk %d/%d: could not clean up stale sidecar backup %s: %s",
-                                member_name, i, chunk_count, sidecar_backup, exc,
-                            )
+                    try:
+                        result = _generate_test_doc_from_brief(
+                            conn, member_name, brief, language, framework, chunk_path, caller,
+                            writing_rules, template, max_attempts=max_attempts,
+                            _fingerprint_cache=fingerprint_cache,
+                        )
+                    finally:
+                        # In a `finally`, not just after a normal return
+                        # (Copilot review): `_generate_test_doc_from_brief`
+                        # can itself raise -- write_test_doc_with_sidecar's
+                        # own temp-write/replace failure propagates
+                        # uncaught -- which used to skip this cleanup
+                        # entirely and strand the backup at `.stale` with
+                        # no sidecar at the real path either.
+                        if sidecar_backup is not None:
+                            # `result.ok` alone doesn't prove a fresh sidecar
+                            # now exists -- write_test_doc_with_sidecar
+                            # returns (silently, uncaptured by every caller)
+                            # without writing one when the validated
+                            # candidate's code fence has no `MEMBER:BR-nnn`
+                            # references at all, so an accepted render can
+                            # still leave nothing at the real sidecar path.
+                            # Checked directly rather than trusted from `ok`.
+                            #
+                            # Three outcomes, not two (Copilot review): a
+                            # real fresh sidecar means discard the backup
+                            # (the common case); no sidecar but the render
+                            # still validated `ok=True` is a *legitimate*
+                            # no-BR-references shape -- restoring the old,
+                            # unrelated backup there would pair an accepted,
+                            # correctly-refless document with a stale
+                            # sidecar a later validation would then wrongly
+                            # flag as a genuine mismatch, so this also
+                            # discards rather than restores; only a render
+                            # that didn't succeed at all (`ok=False`, or an
+                            # exception with no `result` ever produced)
+                            # restores the backup, so this chunk isn't left
+                            # with a manifest/body citing real ids but no
+                            # sidecar to actually back them.
+                            # Same `language`, same `chunk_path` as the call
+                            # that produced this backup in the first place --
+                            # always resolves to a real path here, never None.
+                            fresh_sidecar = sidecar_path_for(chunk_path, language)
+                            try:
+                                if fresh_sidecar.exists() or (result is not None and result.ok):
+                                    sidecar_backup.unlink()
+                                else:
+                                    sidecar_backup.replace(fresh_sidecar)
+                            except OSError as exc:
+                                logger.warning(
+                                    "%s: chunk %d/%d: could not clean up stale sidecar backup %s: %s",
+                                    member_name, i, chunk_count, sidecar_backup, exc,
+                                )
             input_tokens += result.input_tokens
             output_tokens += result.output_tokens
             chunk_entries.append((i, chunk_path, result))
@@ -1953,7 +2011,7 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
                 }
 
             if validation["ok"]:
-                write_test_doc_with_sidecar(conn, name, out_path, final_text, language)
+                _write_test_doc_with_sidecar_or_invalidate(conn, name, out_path, final_text, language)
 
             member_cleanup_problems = cleanup_problems_by_name.get(name, [])
             result = DocResult(

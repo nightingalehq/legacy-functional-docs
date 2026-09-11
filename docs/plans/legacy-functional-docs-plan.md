@@ -12,6 +12,45 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-11t):**
+- Addressed the thirty-first Copilot review round on PR #209 (issue
+  #195):
+  1. The chunk-loop sidecar-backup cleanup ran only after
+     `_generate_test_doc_from_brief` returned normally -- if that call
+     itself raised (`write_test_doc_with_sidecar`'s own temp-write/replace
+     failure propagates uncaught), the cleanup was skipped entirely,
+     stranding the backup at `.stale` with nothing at the real sidecar
+     path either. Now in a `finally`. Also corrected the "no fresh
+     sidecar, so restore" branch: an *accepted* (`ok=True`) render with no
+     sidecar written is a legitimate no-BR-references shape, not a
+     failure -- restoring the old, unrelated backup there would pair a
+     correctly-refless accepted document with a stale sidecar a later
+     validation would then wrongly flag as a real mismatch. Only a render
+     that didn't succeed at all now restores; an accepted refless one
+     discards, same as a real fresh sidecar does.
+  2. The single-document render paths (`_generate_test_doc_from_brief`'s
+     three call sites, `run_test_batch`'s pool loop) all ignored
+     `write_test_doc_with_sidecar`'s `None` return the identical way the
+     chunked path used to -- a member re-rendered into a no-BR-references
+     shape kept its *previous* render's sidecar sitting on disk, paired
+     with a document that no longer references it. New
+     `_write_test_doc_with_sidecar_or_invalidate` wraps every call site,
+     removing a stale leftover sidecar whenever this call doesn't produce
+     a replacement.
+  3. `member_rule_fingerprint` hashed only `(id, line_no)` -- a `derive`/
+     dialect-scanner change that reclassifies an existing row's
+     `construct` (e.g. between a branch construct and `DECIDE ON`, which
+     `_is_branch_row` excludes from BR-numbering) left that row's `(id,
+     line_no)` pair completely unchanged while still shifting every later
+     positional id, the same consequence an inserted/removed row has.
+     `construct` is now hashed alongside.
+- Four new regression tests (both outcomes of the corrected three-way
+  chunk cleanup, an exception-during-render case, the single-document
+  wrapper's own removal/no-op behavior, and the construct-reclassification
+  fingerprint change). Full suite green (1051 passed, 2 skipped) plus a
+  clean `mfdoc validate` pass against `examples/` (71/71 documents, 0
+  invalid citations of 750).
+
 **Progress (2026-09-11s):**
 - Addressed the thirtieth Copilot review round on PR #209 (issue #195):
   the chunk-loop cleanup added last round trusted `result.ok` as proof

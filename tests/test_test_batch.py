@@ -826,6 +826,75 @@ def test_generate_member_test_doc_writes_sidecar_and_slims_md(tmp_path):
     assert revalidated["ok"], revalidated["problems"]
 
 
+def test_write_test_doc_with_sidecar_or_invalidate_removes_a_stale_sidecar_when_none_is_written(tmp_path):
+    """Copilot review follow-up on issue #195's fix: `write_test_doc_with_
+    sidecar` silently returns `None` without writing anything when the
+    validated candidate's own code fence has no `MEMBER:BR-nnn`
+    references at all -- a real, valid shape, not an error. Every call
+    site in the single-document render path used to ignore that return
+    value entirely, leaving a *previous* render's sidecar sitting on
+    disk, now paired with a document that no longer references any of it
+    -- the same "old sidecar survives an incompatible new document"
+    mismatch the chunked path's own boundary-shift cleanup exists to
+    prevent. `_write_test_doc_with_sidecar_or_invalidate` wraps every
+    call site with this cleanup."""
+    from mfdoc import testbatch
+
+    out_path = tmp_path / "FAKEMOD.md"
+    sidecar_path = tmp_path / "FAKEMOD.py"
+    sidecar_path.write_text("# leftover from a prior render with real BR refs\n", encoding="utf-8")
+
+    doc_text_no_br_refs = (
+        "---\nsources: [\"FAKEMOD\"]\nlanguage: python\n---\n\n"
+        "# FAKEMOD tests\n\n"
+        "```python\ndef test_placeholder():\n    pass\n```\n"
+    )
+    written = testbatch._write_test_doc_with_sidecar_or_invalidate(
+        None, "FAKEMOD", out_path, doc_text_no_br_refs, "python",
+    )
+    assert written is None, "no BR references in the fence -- nothing should be split out"
+    assert not sidecar_path.exists(), (
+        "the stale sidecar from a previous render must be removed, not left orphaned "
+        "next to a document that no longer references any of it"
+    )
+
+
+def test_write_test_doc_with_sidecar_or_invalidate_leaves_a_fresh_sidecar_alone(tmp_path):
+    """The other half: when this call *does* produce a fresh sidecar (real
+    `MEMBER:BR-nnn` references in the fence), nothing extra gets removed
+    -- the new sidecar it just wrote is exactly what should be there."""
+    from mfdoc import testbatch
+    from mfdoc.db import SCHEMA, insert
+    import sqlite3
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    rc1 = _insert_rc(conn, 1, 10)
+    insert(
+        conn, "test_case", member_id=1, kind="unit", rule_candidate_id=rc1,
+        scenario_name="FAKEMOD:BR-001",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "COND", "citation": "[[FAKEMOD:10]]"}',
+        then_json='{"citation": "[[FAKEMOD:10]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:10", confidence="verified",
+    )
+    conn.commit()
+
+    out_path = tmp_path / "FAKEMOD.md"
+    doc_text = (
+        "---\nsources: [\"FAKEMOD\"]\n---\n\n# FAKEMOD tests\n\n"
+        "```python\ndef test_one():\n    # FAKEMOD:BR-001\n    ...\n```\n"
+    )
+    written = testbatch._write_test_doc_with_sidecar_or_invalidate(
+        conn, "FAKEMOD", out_path, doc_text, "python",
+    )
+    assert written is not None
+    assert written.exists()
+    assert "FAKEMOD:BR-001" in written.read_text(encoding="utf-8")
+
+
 def test_prior_fingerprint_for_does_not_crash_on_malformed_front_matter(tmp_path):
     """Copilot review follow-up on issue #195: a previous failed render
     can leave arbitrary YAML between the `---` markers on `out_path` --
@@ -4212,16 +4281,20 @@ def test_chunk_boundary_shift_restores_the_old_sidecar_when_the_rerender_fails(t
     )
 
 
-def test_chunk_boundary_shift_restores_the_old_sidecar_when_the_rerender_writes_no_sidecar(tmp_path):
+def test_chunk_boundary_shift_discards_the_old_sidecar_when_the_rerender_writes_no_sidecar(tmp_path):
     """Copilot review follow-up: `result.ok` alone doesn't prove a fresh
     sidecar now exists -- `write_test_doc_with_sidecar` silently returns
     without writing one when the validated candidate's own code fence
     has no `MEMBER:BR-nnn` references at all (an edge case, but a real
     one: `validate_test_doc` has nothing to flag as invalid in that
-    shape either). The chunk loop must check the real sidecar path
-    directly rather than trust `ok`, restoring the backup in this case
-    too instead of deleting it and leaving the chunk with no sidecar at
-    all."""
+    shape either). The backup must be *discarded* in this case, not
+    restored: this render genuinely, correctly validated with no
+    references at all, and restoring the old, unrelated backup would
+    pair that legitimately-refless accepted document with a stale
+    sidecar a later validation would then wrongly flag as a real
+    mismatch -- an accepted render's own manifest and its sidecar must
+    end up consistent with *each other*, not artificially reunited with
+    whatever used to be there before."""
     from mfdoc import testbatch
 
     conn = _sqlite_conn()
@@ -4268,6 +4341,54 @@ def test_placeholder():
         prior_chunks=first.chunk_state,
     )
     assert second.ok is True, second.problems
+    assert not chunk1_sidecar.exists(), (
+        "no sidecar should be left at all -- the accepted document genuinely has no BR references"
+    )
+    assert not chunk1_sidecar.with_name(chunk1_sidecar.name + ".stale").exists(), (
+        "the backup must be discarded, not left behind"
+    )
+
+
+def test_chunk_render_restores_the_old_sidecar_if_write_test_doc_with_sidecar_itself_raises(
+    tmp_path, monkeypatch,
+):
+    """Copilot review follow-up: `_generate_test_doc_from_brief` can itself
+    raise -- `write_test_doc_with_sidecar`'s own temp-write/replace
+    failure propagates uncaught rather than being swallowed into a
+    `DocResult` -- which must not skip the backup cleanup entirely and
+    strand it at `.stale` with nothing at the real sidecar path either."""
+    import pytest
+
+    from mfdoc import testbatch
+
+    conn = _sqlite_conn()
+    _seed_fakemod_scenarios(conn, 4)
+
+    out_path = tmp_path / "FAKEMOD.md"
+    first = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, _chunk_aware_caller("python", "pytest"),
+        "writing rules text", "template text", max_scenarios_per_call=2,
+    )
+    assert first.ok is True
+    chunk1_sidecar = tmp_path / "FAKEMOD.chunk1.py"
+    old_sidecar_text = chunk1_sidecar.read_text(encoding="utf-8")
+
+    real_write_text = Path.write_text
+
+    def exploding_write_text(self, content, *args, **kwargs):
+        if self.suffix == ".tmp" and ".chunk1." in self.name:
+            raise OSError("simulated: disk full while splitting the sidecar")
+        return real_write_text(self, content, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", exploding_write_text)
+
+    with pytest.raises(OSError):
+        testbatch.generate_member_test_doc(
+            conn, "FAKEMOD", "python", "pytest", out_path, _chunk_aware_caller("python", "pytest"),
+            "writing rules text", "template text", max_scenarios_per_call=1,
+            prior_chunks=first.chunk_state,
+        )
+
     assert chunk1_sidecar.exists(), "the old sidecar must be restored, not left missing"
     assert chunk1_sidecar.read_text(encoding="utf-8") == old_sidecar_text
     assert not chunk1_sidecar.with_name(chunk1_sidecar.name + ".stale").exists(), (

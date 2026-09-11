@@ -190,15 +190,27 @@ def member_rule_fingerprint(conn, member_name: str) -> str | None:
     fingerprint stale for no real reason (Copilot review). Naming `id`
     here, not leaving it implicit, is what makes it *this* function's own
     explicit contract instead of an accident of whatever plan SQLite picks
-    today."""
+    today.
+
+    `construct` is hashed alongside `(id, line_no)` too (Copilot review):
+    `build_member_test_cases` only numbers *branch* rows
+    (`_is_branch_row`, which reads `construct`) into `BR-nnn` scenarios --
+    a `derive`/dialect-scanner change that reclassifies an existing row's
+    `construct` (e.g. between a branch construct and `DECIDE ON`, which
+    `_is_branch_row` excludes) leaves this row's own `(id, line_no)` pair
+    completely unchanged while still shifting every later positional
+    BR-nnn id, the identical consequence an inserted/removed/reordered row
+    has. Without this, that reclassification would leave the fingerprint
+    unchanged and let a now-wrong-numbered sidecar keep looking
+    authoritative indefinitely."""
     rows, ambiguous = resolve_member_by_name(conn, member_name)
     if ambiguous or not rows:
         return None
     mid = rows[0]["id"]
     rc_rows = conn.execute(
-        "SELECT id, line_no FROM rule_candidate WHERE member_id=? ORDER BY line_no, id", (mid,)
+        "SELECT id, line_no, construct FROM rule_candidate WHERE member_id=? ORDER BY line_no, id", (mid,)
     ).fetchall()
-    joined = "|".join(f"{r['id']}:{r['line_no']}" for r in rc_rows)
+    joined = "|".join(f"{r['id']}:{r['line_no']}:{r['construct']}" for r in rc_rows)
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
 
 

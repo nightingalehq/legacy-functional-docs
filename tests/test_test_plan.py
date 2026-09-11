@@ -248,6 +248,37 @@ def test_member_rule_fingerprint_breaks_line_no_ties_with_id():
     )
 
 
+def test_member_rule_fingerprint_changes_when_a_row_is_reclassified_out_of_branch_status():
+    """Copilot review follow-up: `build_member_test_cases` only numbers
+    *branch* rows (`_is_branch_row`, which reads `construct`) into BR-nnn
+    scenarios. A `derive`/dialect-scanner change that reclassifies an
+    existing row's `construct` (e.g. from a branch construct to `DECIDE
+    ON`, which `_is_branch_row` excludes) leaves that row's own `(id,
+    line_no)` pair completely unchanged while still shifting every later
+    positional BR-nnn id -- the same consequence an inserted/removed row
+    has, and the fingerprint must move too, not just when `(id, line_no)`
+    itself changes."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'x')")
+    rc = insert(conn, "rule_candidate", member_id=1, line_no=1, construct="IF", raw="x")
+    conn.commit()
+
+    fp_before = testplan.member_rule_fingerprint(conn, "FAKEMOD")
+    assert fp_before is not None
+
+    conn.execute("UPDATE rule_candidate SET construct='DECIDE ON' WHERE id=?", (rc,))
+    conn.commit()
+    fp_after = testplan.member_rule_fingerprint(conn, "FAKEMOD")
+
+    assert fp_after != fp_before, (
+        "reclassifying a row out of branch-row status must change the fingerprint "
+        "even though its own (id, line_no) pair is unchanged"
+    )
+
+
 def test_member_test_case_aligned_with_rule_candidate():
     """Copilot review follow-up on issue #195's fix: aligned when every
     current rule_candidate branch row already has a test_case row (the
