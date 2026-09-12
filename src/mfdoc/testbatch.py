@@ -32,7 +32,6 @@ from .batch import (
     _load_state,
     _localized_findings,
     _output_subdir,
-    _prune_stale_chunk_files,
     _save_state,
     _skip_result,
 )
@@ -42,7 +41,10 @@ from .brief import (
 )
 from .redact import NULL_REDACTOR, Redactor
 from .testlang import sidecar_path_for
-from .testplan import fetch_test_case_rows, test_case_brief, test_case_brief_chunk
+from .testplan import (
+    doc_rule_fingerprint, fetch_test_case_rows, member_rule_fingerprint,
+    member_test_case_aligned_with_rule_candidate, test_case_brief, test_case_brief_chunk,
+)
 from .validate import BR_REF, split_frontmatter, validate_test_doc
 
 # Same progress/diagnostic logger idea as batch.py -- see that module's
@@ -94,7 +96,96 @@ def extract_code_fence(body: str, language: str) -> str | None:
     return matches[0]
 
 
-def write_test_doc_with_sidecar(out_path: Path, doc_text: str, language: str) -> Path | None:
+# The key itself, not just the value, matched optionally quoted (single or
+# double) -- YAML permits a quoted mapping key (`"test_case_fingerprint":
+# ...`) with exactly the same meaning as a bare one, and `yaml.safe_load`
+# parses both into the identical dict key. A model echoing/hallucinating
+# this field can just as easily quote the key as not; matching only the
+# bare form would let a quoted-key copy survive this strip untouched,
+# recoverable by a later `_prior_fingerprint_for` call as a false trusted
+# prior -- exactly the leak this whole mechanism exists to close (Copilot
+# review, round 52). `\s*` before the colon for the same reason
+# (Copilot review, round 54): YAML permits whitespace between a mapping
+# key and its `:`, which `yaml.safe_load` again treats identically to no
+# whitespace at all -- the same untrusted-copy leak, just one more
+# syntactically-valid spelling of it. `^[ \t]*` allows the key line
+# itself to be indented too (Copilot review, round 55): every one of
+# these documents' front matter is a flat, single-level mapping (no key
+# in it is ever legitimately indented), but a model producing malformed/
+# indented YAML by mistake is exactly the kind of untrusted shape this
+# strip has to handle regardless of how well-formed the surrounding
+# document otherwise is -- an indented key is still the same `dict` key
+# once `yaml.safe_load` (or a human) parses it, just one more spelling a
+# bare `^` at true line-start would have missed entirely.
+_TEST_CASE_FINGERPRINT_FIELD = re.compile(r"(?m)^[ \t]*[\"']?test_case_fingerprint[\"']?\s*:.*\n(?:[ \t].*\n?)*")
+
+
+def _strip_stamped_fingerprint_field(front_matter_block: str) -> str:
+    """Removes any `test_case_fingerprint` key -- and, for a YAML block
+    scalar/sequence value, its own indented continuation lines -- from a
+    document's front matter block text. This field is only ever supposed
+    to be stamped by `write_test_doc_with_sidecar`, after a successful
+    validation; anything already present in a candidate the model
+    produced is untrusted (echoed/hallucinated from the brief or a prior
+    template) and must never survive into what's left on disk, in either
+    of two shapes (Copilot review):
+
+    - `write_test_doc_with_sidecar` calls this before conditionally
+      stamping a trusted value of its own onto an *accepted* candidate.
+    - `_generate_test_doc_from_brief`'s own give-up path (issue #195
+      round 43 review) calls this on a final, never-validated candidate
+      before leaving it on disk: `_prior_fingerprint_for` trusts whatever
+      `test_case_fingerprint` it finds at a path as a genuinely-stamped
+      prior, with no way to tell that apart from a raw, failed
+      candidate's own leftover field -- a later invocation recovering
+      that untrusted value as `_prior_fingerprint` could make an actually
+      stale sidecar look authoritative again, recreating the exact
+      manifest/sidecar retry deadlock this whole mechanism exists to
+      prevent."""
+    return _TEST_CASE_FINGERPRINT_FIELD.sub("", front_matter_block)
+
+
+def _strip_fingerprint_from_a_failed_candidate(out_path: Path) -> str | None:
+    """Best-effort cleanup for a document at `out_path` that a render just
+    gave up on after exhausting every attempt: if the raw, never-
+    validated candidate its last attempt left on disk happens to carry
+    its own `test_case_fingerprint`, strip it in place. Returns a problem
+    string on failure (surfaced as this render's own failure, not
+    swallowed), `None` on success or when there was nothing to strip.
+
+    Why (Copilot review, issue #195 round 43): `write_test_doc_with_
+    sidecar` never runs for a candidate that never validates, so nothing
+    else ever strips this field from it -- and `_prior_fingerprint_for`
+    has no way to tell a genuinely-stamped prior apart from this leftover
+    once a *later* invocation reads this same path back. Left untouched,
+    a coincidentally-matching (or simply copied-from-the-brief)
+    hallucinated value could make an actually stale sidecar look
+    authoritative again on that later run, recreating the exact
+    manifest/sidecar retry deadlock this whole mechanism exists to
+    prevent."""
+    if not out_path.exists():
+        return None
+    try:
+        final_text = out_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return f"could not read the failed candidate to strip its leftover fingerprint: {exc}"
+    if not final_text.startswith("---"):
+        return None
+    parts = final_text.split("---", 2)
+    if len(parts) < 3:
+        return None
+    stripped_fm = _strip_stamped_fingerprint_field(parts[1])
+    if stripped_fm == parts[1]:
+        return None
+    try:
+        out_path.write_text(f"---{stripped_fm}---{parts[2]}", encoding="utf-8")
+    except OSError as exc:
+        return f"could not strip an untrusted leftover fingerprint from the failed candidate: {exc}"
+    return None
+
+
+def write_test_doc_with_sidecar(conn, member_name: str, out_path: Path, doc_text: str,
+                                 language: str) -> Path | None:
     """Given a response that has already validated ok, split its one code
     fence out to a sibling source file (`{member}.py`/`{member}.java`, per
     `language`) and rewrite `out_path` to reference it plus a `## Scenarios
@@ -102,6 +193,44 @@ def write_test_doc_with_sidecar(out_path: Path, doc_text: str, language: str) ->
     what lets `validate_test_doc` keep checking every MEMBER:BR-nnn
     reference once the actual code has moved somewhere its body-only scan
     would no longer see.
+
+    Also stamps a `test_case_fingerprint` field into the rewritten front
+    matter, from `testplan.doc_rule_fingerprint(conn, sources)` (`sources`
+    parsed from this document's own front matter, normally just
+    `[member_name]`) -- the exact `rule_candidate` ordering that
+    determined this render's `BR-nnn` numbering, at the moment the sidecar
+    is written. This is what
+    lets `validate_test_doc` later detect a genuine positional renumbering
+    directly (issue #195), rather than only inferring staleness from
+    whether the sidecar's own ids happen to still resolve against current
+    `test_case` rows -- a check an inserted-but-not-yet-shifted-past rule
+    can slip past (see `member_rule_fingerprint`'s docstring). Only stamped
+    when every source member's `test_case` rows are currently aligned with
+    its `rule_candidate` rows (`testplan.member_test_case_aligned_with_
+    rule_candidate`, Copilot review) -- otherwise this render's own content
+    already predates a `rule_candidate` change `mfdoc test-plan` hasn't
+    caught up to yet, and stamping the *current* rule_candidate fingerprint
+    onto that still-old-numbered content would bake in a fingerprint this
+    sidecar's own content doesn't actually reflect (see that function's
+    docstring for the exact false-positive this reintroduces at the write
+    side). `conn` is
+    only ever used for this fingerprint lookup; omitted (left out of
+    front matter entirely) whenever the document's own `sources` can't be
+    parsed as a non-empty list of strings -- missing/malformed front
+    matter, or a syntactically valid but empty `sources: []` (a shape
+    `validate_doc`'s own front-matter check doesn't flag as malformed, so
+    it can't be assumed away). Deliberately *not* substituted with
+    `[member_name]` in that case (an earlier version of this fix did):
+    `validate_test_doc`'s own recomputation always reads the document's
+    *own* `sources` value verbatim, with no such substitution, so a
+    fingerprint derived from a fabricated `[member_name]` here could never
+    be reproduced by that recomputation -- permanently pushing such a
+    document onto the weaker id-overlap fallback despite carrying what
+    looks like a valid stamped value. `member_name` itself is otherwise
+    unused inside this function now (kept in the signature purely for
+    caller-side clarity/API consistency across its several call sites,
+    and because a future use -- e.g. logging which member a write
+    concerns -- shouldn't need a signature change to add).
 
     Returns the sidecar path written, or None if no split was performed
     (unrecognised language, front matter missing, fence not exactly one,
@@ -125,17 +254,515 @@ def write_test_doc_with_sidecar(out_path: Path, doc_text: str, language: str) ->
     if not scenario_ids:
         return None
 
-    sidecar_path.parent.mkdir(parents=True, exist_ok=True)
-    sidecar_path.write_text(code, encoding="utf-8")
-
     fence_pattern = re.compile(r"```" + re.escape(language) + r"\n.*?```", re.S)
     prose = fence_pattern.sub(
         f"See [`{sidecar_path.name}`](./{sidecar_path.name}) for the generated test source.",
         body, count=1,
     ).rstrip()
     manifest = "\n\n## Scenarios covered\n\n" + "\n".join(f"- {sid}" for sid in scenario_ids) + "\n"
-    out_path.write_text(f"---{front_matter_block}---{prose}{manifest}", encoding="utf-8")
-    return sidecar_path
+    # Fingerprinted from the document's *own* parsed `sources` list, not
+    # bare `[member_name]`: `validate_test_doc` recomputes via
+    # `doc_rule_fingerprint(conn, fm["sources"])` at validation time, and a
+    # document whose front matter legitimately names more than one source
+    # member (`doc_rule_fingerprint`/the validator's own front-matter
+    # contract both allow this) would otherwise be stamped from a
+    # single-member hash here but compared against a multi-member one
+    # there -- mismatching by construction on every single validation,
+    # not because anything about the corpus ever changed. `fingerprint`
+    # below is left unset entirely -- not substituted with `[member_name]`
+    # -- when this document's own `sources` can't be parsed as a
+    # non-empty list of strings (front matter missing/malformed): see
+    # this function's own docstring above for why a fabricated
+    # `[member_name]` fallback here would only push the document onto the
+    # weaker id-overlap check permanently instead.
+    #
+    # `isinstance(doc_fm, dict)`, not just `is not None` (Copilot review):
+    # `split_frontmatter` can return a truthy scalar or list for
+    # syntactically-valid-but-non-mapping YAML between the `---` markers
+    # (e.g. a bare `sources` string with no `key:` at all) -- `yaml.
+    # safe_load`'s `or {}` only substitutes for a *falsy* parse (`None`/
+    # `""`/`[]`), not a truthy non-dict one, so `.get` on it would raise
+    # instead of just leaving `fingerprint` unset. This is computed --
+    # and can raise, absent this guard -- before either on-disk file
+    # below is written, so a malformed-YAML crash here can never leave a
+    # freshly split sidecar paired with an `out_path` that was never
+    # rewritten to reference it (see this function's write order below).
+    doc_fm, _doc_body, _doc_err = split_frontmatter(doc_text)
+    doc_sources = doc_fm.get("sources") if isinstance(doc_fm, dict) else None
+    fingerprint = None
+    if isinstance(doc_sources, list) and doc_sources and all(isinstance(s, str) for s in doc_sources):
+        # Stripped, matching validate.py's read-side handling of the same
+        # field exactly -- both sides must normalize identically, or a
+        # `sources` entry with incidental whitespace resolves on one side
+        # and not the other, silently skipping the fingerprint stamp.
+        #
+        # Deliberately *not* substituted with `[member_name]` when
+        # `sources` is missing, malformed, or (a valid but unusable shape)
+        # an empty list (Copilot review): `validate_test_doc`'s own
+        # recomputation always reads the document's *own* `sources` value
+        # verbatim, with no such substitution -- a fingerprint stamped
+        # from a fabricated `[member_name]` here could never be
+        # reproduced by that recomputation for a document whose `sources`
+        # is genuinely `[]` (a syntactically valid list, so it isn't
+        # caught by `validate_doc`'s own malformed-shape check either),
+        # permanently pushing that document onto the weaker fallback
+        # despite carrying what looks like a valid stamped value. Leaving
+        # `fingerprint` as `None` here instead keeps write and read
+        # consistent by construction: neither side can compute one for a
+        # document with no real `sources` to work from.
+        doc_sources = [s.strip() for s in doc_sources]
+        # Only when every source member's current `test_case` rows already
+        # reflect its current `rule_candidate` rows (Copilot review): this
+        # document's own content was rendered from whatever `test_case`
+        # rows were current when `test_case_brief` built its prompt, which
+        # can predate a `rule_candidate` change `mfdoc test-plan` hasn't
+        # caught up to yet (the exact state `run_test_batch`'s per-member
+        # resume-skip regression exercises -- a rule_candidate row appears
+        # with no corresponding test_case row yet). Stamping the *current*
+        # rule_candidate fingerprint onto that still-old-numbered content
+        # bakes in a fingerprint describing a corpus state this sidecar
+        # doesn't actually reflect; since rule_candidate itself doesn't
+        # move again until the next derive/classify-rules run, that
+        # fingerprint keeps matching every later recomputation even after
+        # test-plan catches up and a fresh render's manifest carries the
+        # new/renumbered ids -- making the stale sidecar look current and
+        # rejecting those new ids as "missing from sidecar" on every retry.
+        # Leaving `fingerprint` unset here instead falls back to the
+        # weaker id-overlap check until a `test-plan` run realigns things
+        # and a subsequent render can stamp a fingerprint that actually
+        # describes what it's attached to.
+        if all(member_test_case_aligned_with_rule_candidate(conn, s) for s in doc_sources):
+            fingerprint = doc_rule_fingerprint(conn, doc_sources)
+    # Strip any `test_case_fingerprint` the candidate's own front matter
+    # already carried, unconditionally -- not only when a trusted one is
+    # about to replace it (Copilot review): this field is only ever
+    # supposed to be stamped here, by this function, after a successful
+    # validation, so one already present in a freshly-generated candidate
+    # is the model echoing/hallucinating it from the brief or a prior
+    # template, never a value to trust. Left in place, an untrusted value
+    # surviving into the written document could coincidentally match a
+    # *later* corpus state once `test-plan` catches up, at which point
+    # `validate_test_doc`'s fallback (no `_prior_fingerprint` -- a
+    # standalone `mfdoc test-validate` run) would read it as genuine and
+    # treat a sidecar it was never actually validated against as
+    # authoritative -- reintroducing the exact false-manifest-mismatch
+    # failure this whole mechanism exists to prevent. Applied even when
+    # `fingerprint` stays `None` below (nothing trusted to stamp instead).
+    #
+    # Also consumes any indented continuation lines after the key
+    # (Copilot review): a YAML block scalar (`test_case_fingerprint: |`)
+    # or block sequence carries its actual content on the following
+    # indented lines, not on the key's own line -- stripping only that
+    # first line would leave those continuation lines behind, either
+    # producing malformed YAML (an indented block with no key of its own)
+    # or silently attaching them to whatever key precedes this one.
+    front_matter_block = _strip_stamped_fingerprint_field(front_matter_block)
+    if fingerprint is not None:
+        front_matter_block = front_matter_block.rstrip("\n") + f'\ntest_case_fingerprint: "{fingerprint}"\n'
+
+    # Both on-disk writes deferred to here, after every step above that
+    # can still bail out (None) or -- pre-Copilot-review -- raise: writing
+    # the sidecar before this point risked leaving a freshly-split sidecar
+    # on disk while `out_path` itself was never rewritten to reference it
+    # (e.g. because a later step raised), a mismatched pair no different
+    # in effect from the staleness this whole mechanism exists to prevent.
+    #
+    # Written to `.tmp` siblings first, then replaced into place with a
+    # best-effort rollback if the second replace fails (Copilot review):
+    # two plain `write_text` calls in sequence left a window where the
+    # sidecar write had already succeeded and `out_path`'s own write then
+    # failed (disk-full, a permissions change mid-run), leaving a new
+    # sidecar paired with the *old* document -- a genuine mismatch
+    # `validate_test_doc` would cross-check as real drift. Content is
+    # fully written to the temp files -- the only place a disk-full/
+    # permissions failure can realistically still occur -- *before*
+    # either final path is touched at all, so that failure mode leaves
+    # both original files completely untouched. `Path.replace` (not
+    # `Path.rename`) is used for both: same-filesystem, atomic at the OS
+    # level on POSIX *and* Windows (unlike `rename`, which Windows refuses
+    # outright when the destination already exists), needing only a
+    # directory-entry update with content already allocated.
+    #
+    # The two `replace` calls are still not one atomic transaction across
+    # both files -- if the process is killed, or the second `replace`
+    # itself fails, between them, the sidecar has already moved but the
+    # document hasn't. Snapshotting the sidecar's own pre-existing bytes
+    # first and restoring them (or removing the just-placed sidecar, if
+    # there was nothing to restore) in that specific failure lets this
+    # return to the same paired state (old/old, or nothing/nothing) it
+    # started from, rather than leaving a real, harder-to-diagnose
+    # mismatch on disk -- a true multi-file transaction (a journal or
+    # generation-marker protocol readers check before trusting either
+    # file) would close the remaining sliver of this window too, but is
+    # more machinery than a single-process batch tool's residual risk
+    # here (an OS-level kill or out-of-space error occurring in the
+    # instant between two directory-entry updates) currently justifies.
+    sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+    sidecar_tmp = sidecar_path.with_name(sidecar_path.name + ".tmp")
+    out_tmp = out_path.with_name(out_path.name + ".tmp")
+    try:
+        sidecar_tmp.write_text(code, encoding="utf-8")
+        out_tmp.write_text(f"---{front_matter_block}---{prose}{manifest}", encoding="utf-8")
+        sidecar_backup = sidecar_path.read_bytes() if sidecar_path.exists() else None
+        sidecar_tmp.replace(sidecar_path)
+        try:
+            out_tmp.replace(out_path)
+        except OSError:
+            if sidecar_backup is None:
+                sidecar_path.unlink(missing_ok=True)
+            else:
+                # `Path.replace`, not a plain `write_bytes` onto
+                # `sidecar_path` directly (Copilot review): the latter
+                # isn't atomic -- an interrupted or failed rollback write
+                # could leave a truncated sidecar next to the old
+                # document, the identical mismatch this whole rollback
+                # exists to avoid, just one step further down. Restoring
+                # through a temp file plus an atomic replace keeps this
+                # rollback itself a single directory-entry update, same
+                # as every other write in this function.
+                sidecar_rollback_tmp = sidecar_path.with_name(sidecar_path.name + ".rollback.tmp")
+                try:
+                    sidecar_rollback_tmp.write_bytes(sidecar_backup)
+                    sidecar_rollback_tmp.replace(sidecar_path)
+                finally:
+                    sidecar_rollback_tmp.unlink(missing_ok=True)
+            raise
+        return sidecar_path
+    finally:
+        # Every failure path above can leave one or both `.tmp` siblings
+        # behind (Copilot review): `sidecar_tmp`/`out_tmp` survive a failed
+        # write to either of them, and `out_tmp` also survives its own
+        # failed `replace` (already handled above, but that handling
+        # rolls back `sidecar_path`, not this leftover temp file). Neither
+        # path is ever read back by anything -- `sidecar_path_for` only
+        # ever resolves the real extension, never `.tmp` -- so this is
+        # cosmetic in the same sense `_prune_stale_test_chunk_files`'
+        # cleanup is, but a failed run repeated enough times would
+        # otherwise accumulate misleading generated-source/markdown
+        # artifacts in the output tree that no validation ever looks at.
+        sidecar_tmp.unlink(missing_ok=True)
+        out_tmp.unlink(missing_ok=True)
+
+
+def _write_test_doc_with_sidecar_or_invalidate(conn, member_name: str, out_path: Path, doc_text: str,
+                                                language: str) -> tuple[Path | None, str | None]:
+    """`write_test_doc_with_sidecar`, plus removing any leftover sidecar
+    from a *prior* render of this same path when this one doesn't produce
+    a replacement (Copilot review): that function silently returns `None`
+    without writing anything whenever the validated candidate's code
+    fence has no `MEMBER:BR-nnn` references at all -- a real, valid shape
+    (not an error) -- and every one of its call sites in this module
+    ignored that return value, single-document paths included. Left
+    alone, a member re-rendered into that shape would still have its
+    *previous* render's sidecar sitting on disk, now paired with a
+    document that no longer references any of it -- the same "old sidecar
+    survives a new, incompatible document" mismatch the chunked path's
+    own equivalent cleanup exists to prevent, just reached by a single-
+    document member losing all its BR references between renders instead
+    of a chunk boundary shifting.
+
+    Returns `(sidecar_path_or_None, cleanup_problem_or_None)`: a failed
+    removal is logged *and* returned as a problem string (Copilot review)
+    -- not swallowed into a bare log line -- so every caller folds it into
+    this member's own render result instead of reporting `ok=True`/a clean
+    resumable state while a stale sidecar (that a later standalone
+    `mfdoc test-validate` sweep, or this same member's next resumed run
+    via its recorded `state["ok"]`, would trust as still current) remains
+    on disk next to a document that no longer references any of it."""
+    written = write_test_doc_with_sidecar(conn, member_name, out_path, doc_text, language)
+    cleanup_problem = None
+    if written is None:
+        stale = sidecar_path_for(out_path, language)
+        if stale is not None and stale.exists():
+            try:
+                stale.unlink()
+            except OSError as exc:
+                cleanup_problem = (
+                    f"could not remove stale sidecar {stale} for a document that no longer "
+                    f"references it: {exc.__class__.__name__}: {exc}"
+                )
+                logger.warning("%s: %s", member_name, cleanup_problem)
+    return written, cleanup_problem
+
+
+def _prior_fingerprint_for(out_path: Path) -> str | None:
+    """The `test_case_fingerprint` a *previous* successful render already
+    stamped at `out_path`, read before this run's own first write to that
+    path -- `None` if the path doesn't exist yet (nothing to compare
+    against, a genuinely fresh render) or carries no such field (an older
+    document, or a fresh render's own front matter never gets one stamped
+    into it by the model -- only `write_test_doc_with_sidecar` adds it,
+    after validation succeeds).
+
+    Why this matters (issue #195 review): `_generate_test_doc_from_brief`/
+    `run_test_batch`'s retry loops write the model's freshly-generated
+    candidate text straight over `out_path` *before* calling
+    `validate_test_doc` on it -- so by the time that validation runs, any
+    fingerprint the *previous* render had stamped is already gone from
+    disk, even though the (still on-disk, not-yet-overwritten) sidecar
+    file right next to it is exactly what that old fingerprint was
+    recorded against. Without capturing it here, first, `validate_test_doc`
+    would see a candidate document with no `test_case_fingerprint` of its
+    own and fall back to the weaker id-overlap heuristic for precisely the
+    validation this issue is actually about -- the fingerprint fix would
+    then only ever apply to a document's *second* validation onward (e.g.
+    a later `mfdoc test-validate`/dry-run reuse check), never the render
+    loop's own first pass. Callers thread the result through every
+    `validate_test_doc(..., _prior_fingerprint=...)` call in one render
+    attempt (the prior document doesn't change mid-retry -- only the
+    candidate text does).
+
+    Known, accepted residual gap: if a *previous invocation* (not just a
+    prior attempt within the current one) exhausted every retry and left
+    an invalid candidate on disk -- `out_path`'s last write on that run --
+    that candidate never validated, so `write_test_doc_with_sidecar` never
+    ran and no fingerprint was ever stamped. A fresh invocation's call to
+    this function then genuinely has nothing to recover, and (if the
+    corpus has *also* shifted in the meantime) is exposed to the same
+    stale-old-sidecar risk this whole mechanism exists to close. Accepted
+    rather than fixed here: closing it would mean persisting the
+    fingerprint separately from the document itself (e.g. in `--state`
+    resume metadata) purely to survive a validation failure that already
+    needs investigating on its own -- a permanently-failing member is
+    already an anomaly a human needs to look at, not a case this
+    mechanism should add complexity trying to paper over silently.
+
+    A second known, accepted limitation (Copilot review), specific to a
+    *chunked* member: the fingerprint this recovers (and the one
+    `write_test_doc_with_sidecar` stamps) describes the whole member's
+    `rule_candidate` ordering, not one chunk's own slice of it. If that
+    ordering is unchanged but chunk *boundaries* move on their own
+    (`options.testgen.max_scenarios_per_call` changing, or a `routine`
+    boundary shifting) -- so `chunk1` at this same path now covers a
+    different range of scenarios than it did before -- the member-wide
+    fingerprint still matches, and this chunk's stale content can be read
+    as current even though it no longer describes what "chunk1" now
+    means. A properly *chunk*-scoped fingerprint would need to describe
+    which rule range each chunk index actually covers, which depends on
+    the very chunk-planning logic (`brief.routine_aware_chunk_ranges`)
+    being evaluated at the point this function is called -- a real design
+    change (in the same category as #207/#214's caching redesign), not an
+    incremental fix, and out of scope for this one. The insertion/
+    positional-shift case this whole mechanism exists to fix (issue #195
+    itself, and every regression added for it) doesn't hit this: that
+    case shifts the member-wide ordering itself, which the fingerprint
+    already catches correctly."""
+    if not out_path.exists():
+        return None
+    fm, _body, _err = split_frontmatter(out_path.read_text(encoding="utf-8"))
+    # A previous failed render can leave arbitrary YAML on disk between
+    # the `---` markers -- a bare scalar or list is valid YAML but not a
+    # mapping (`yaml.safe_load`'s `or {}` in `split_frontmatter` only
+    # substitutes for a *falsy* result, e.g. `None`/`""`/`[]`, not a
+    # truthy non-dict one like a non-empty string or list) -- and `.get`
+    # on anything but a dict raises. This is exactly the "invalid prior
+    # candidate on disk" case this function's own docstring already
+    # expects to see; must return `None` (nothing usable to recover), not
+    # crash the render this function is trying to help succeed.
+    if not isinstance(fm, dict):
+        return None
+    return fm.get("test_case_fingerprint")
+
+
+def _prune_stale_test_chunk_files(out_path: Path, expected_names: set[str], language: str) -> list[str]:
+    """`batch._prune_stale_chunk_files`, extended for test-batch's own
+    chunk sidecars: a stale `{stem}.chunk<N>{suffix}` file gets its
+    matching `.chunk<N>.py`/`.nsp`/... sidecar removed alongside it,
+    since that shared helper only knows about the `.md`-shaped chunk
+    index files module docs use and has no concept of a sidecar at all.
+
+    Used two ways (Copilot review, issue #195): the normal chunked path
+    (`expected_names` names this run's real chunk files, same as before)
+    *and* the single-document path a member falls back to once its
+    `test_case` count drops back under the chunking threshold
+    (`expected_names=set()`, since a single-document render has no
+    chunks of its own at all) -- without the second call, a member that
+    shrinks below the threshold between runs would leave every one of its
+    old `.chunk<N>.md`/sidecar pairs on disk indefinitely: nothing in the
+    single-document path ever revisits them, but a full tree walk
+    (`mfdoc test-validate`, `validate_tests_tree`) still finds and
+    validates them independently, where their now-orphaned manifests/
+    sidecars can still produce the exact false staleness failures this
+    whole mechanism exists to prevent -- just for files nothing renders
+    into any more, rather than ones actively being resumed.
+
+    Returns any removal-failure messages, logged here and also handed back
+    to the caller (Copilot review) -- a leftover obsolete chunk document
+    is exactly the kind of artifact `validate_tests_tree` still walks and
+    validates independently, so a caller reporting this render/skip as a
+    clean `ok=True` while one remains would be misleading; every call site
+    folds this into its own result's `problems` instead of only logging
+    and moving on. Still best-effort in the sense that a removal failure
+    here never aborts the loop early or blocks this member's own
+    render/skip outcome -- only whether that outcome gets reported as
+    fully clean."""
+    if not out_path.parent.is_dir():
+        return []
+    problems: list[str] = []
+    pattern = re.compile(rf"^{re.escape(out_path.stem)}\.chunk\d+{re.escape(out_path.suffix)}$")
+    for candidate in list(out_path.parent.iterdir()):
+        if not candidate.is_file() or candidate.name in expected_names:
+            continue
+        if not pattern.match(candidate.name):
+            continue
+        sidecar = sidecar_path_for(candidate, language)
+        try:
+            candidate.unlink()
+        except OSError as exc:
+            # Best-effort in the sense described above -- a file some
+            # other process is holding open must not abort an otherwise-
+            # successful run. Logged *and* returned (Copilot review): a
+            # leftover orphan here can still surface as a confusing
+            # stale-manifest failure the next time something walks the
+            # output tree, so both a human reading logs and this render's
+            # own reported outcome get a trail back to why it's still
+            # there.
+            msg = f"could not remove orphaned chunk file {candidate}: {exc}"
+            logger.warning(msg)
+            problems.append(msg)
+            continue
+        if sidecar is not None and sidecar.exists():
+            try:
+                sidecar.unlink()
+            except OSError as exc:
+                msg = f"could not remove orphaned chunk sidecar {sidecar}: {exc}"
+                logger.warning(msg)
+                problems.append(msg)
+    return problems
+
+
+def _invalidate_sidecar_if_range_changed(chunk_path: Path, language: str,
+                                          expected_ids: set[str]) -> Path | None:
+    """Rename `chunk_path`'s existing sidecar out of the way if its own
+    `MEMBER:BR-nnn` content no longer matches `expected_ids` -- this chunk
+    index's current row range, from this run's freshly recomputed
+    `routine_aware_chunk_ranges` -- before this chunk is (re)rendered.
+    Returns the backup path it was renamed to, or `None` if nothing needed
+    invalidating.
+
+    Closes a narrower gap than the full chunk-scoped-fingerprint redesign
+    `_prior_fingerprint_for`'s docstring already declines to do (Copilot
+    review, issue #195): `write_test_doc_with_sidecar` stamps a
+    *member*-wide `test_case_fingerprint` (the whole member's
+    `rule_candidate` `(id, line_no)` ordering), not one scoped to which
+    scenario range a given chunk *index* covers. If that member-wide
+    ordering is unchanged but chunk boundaries move on their own (a
+    `max_scenarios_per_call` change, or a `routine` boundary shifting) --
+    so `chunk1` at this same path now covers a different range of
+    scenarios than it did before -- the stamped fingerprint still matches
+    a freshly computed one, and `validate_test_doc`'s authoritative
+    fingerprint check (case 1: an exact match short-circuits everything
+    else) would otherwise read the *old*, now-differently-scoped sidecar
+    as still current -- cross-checking a freshly-generated candidate's
+    ids against a sidecar for the wrong range, which can fail validation
+    on every retry (the corpus hasn't actually changed) since
+    `write_test_doc_with_sidecar` only ever refreshes the sidecar after a
+    *successful* validation.
+
+    Doesn't require re-deriving what chunk boundaries *should* be at
+    validation time the way a real chunk-scoped fingerprint would (the
+    "real design change...out of scope" `_prior_fingerprint_for` already
+    flags): this call site already has this run's authoritative range for
+    chunk `i` in hand (`chunk_rows`, from the very `ranges` this render
+    loop just computed), so it can compare that directly against what's
+    already on disk and drop the sidecar outright when they disagree --
+    the same effect `validate_test_doc`'s own bypass has for a *legacy*
+    sidecar with no fingerprint context at all (see its docstring), just
+    triggered here for a *range-shifted* sidecar instead of a fingerprint-
+    less one. A dropped sidecar is unconditionally correct to discard: it
+    is about to be re-rendered as a cache miss regardless (a caller only
+    reaches here when `_test_chunk_reuse_ok` already said no), and
+    `write_test_doc_with_sidecar` recreates a fresh, correctly-scoped one
+    the moment that render validates.
+
+    No-op if this chunk has no sidecar yet (a fresh render, nothing to
+    invalidate) or if its content already matches `expected_ids` (nothing
+    changed for this index -- the common case).
+
+    Renamed to a `.stale` sibling rather than deleted outright (Copilot
+    review): the caller renders this chunk immediately afterward, and if
+    that render never gets far enough to write anything at all (every
+    model call raises before a single response comes back), a plain
+    delete here would leave the *old*, otherwise-unchanged `chunk_path`
+    on disk with no sidecar at all -- `validate_test_doc` would then fall
+    back to scanning `chunk_path`'s own body, whose old `## Scenarios
+    covered` manifest still cites real, resolvable `test_case` ids, and
+    report the pair `ok=True` even though the actual generated test
+    source file has vanished. The caller restores this backup when the
+    render didn't succeed, and removes it once a fresh sidecar has been
+    written in its place; either way, this chunk always has *some*
+    sidecar next to it on disk when this function returns, or the render
+    that follows is what determines whether a fresh one gets written.
+
+    Raises `OSError` if the rename fails, unlike this module's other
+    best-effort cleanup helpers (`_prune_stale_test_chunk_files`'s own
+    swallowed `OSError`s): those only ever risk leaving an orphaned file
+    an unrelated future tree validation might flag, cosmetic in the sense
+    that nothing currently *authoritative* is left behind. Here, a
+    wrong-range sidecar left in place is worse than that: its member-wide
+    `test_case_fingerprint` still matches (`rule_candidate` itself hasn't
+    changed, only chunk boundaries have), so `validate_test_doc`'s exact-
+    fingerprint check treats it as authoritative regardless of its actual
+    (wrong-range) content -- cross-checking the fresh candidate about to
+    be rendered against the wrong sidecar and failing on every retry, not
+    a one-time cosmetic leftover (Copilot review). The caller catches this
+    and reports it as this chunk's own failure instead of silently
+    rendering into a validation it cannot pass."""
+    sidecar = sidecar_path_for(chunk_path, language)
+    if sidecar is None or not sidecar.exists():
+        return None
+    on_disk_ids = {
+        f"{m.group('member').upper()}:BR-{m.group('n')}"
+        for m in BR_REF.finditer(sidecar.read_text(encoding="utf-8"))
+    }
+    if on_disk_ids == expected_ids:
+        return None
+    backup = sidecar.with_name(sidecar.name + ".stale")
+    sidecar.replace(backup)
+    return backup
+
+
+def _invalidate_chunk_pair_if_range_changed(chunk_path: Path, language: str,
+                                             expected_ids: set[str]) -> tuple[Path | None, Path | None]:
+    """Same range-changed staleness check as `_invalidate_sidecar_if_range_
+    changed`, but backs up `chunk_path` itself alongside its sidecar
+    (Copilot review): the caller's render immediately afterward always
+    overwrites `chunk_path` on every attempt of `_generate_test_doc_from_
+    brief`'s own retry loop (`out_path.write_text(text)` runs before that
+    attempt is validated), regardless of whether that particular attempt
+    ultimately validates. Restoring only the old sidecar next to whatever
+    candidate the failed render most recently left behind would still
+    produce the exact mismatched pair this whole mechanism exists to
+    prevent -- just one step later than the fingerprint check alone can
+    see. Backing up the document too, under the identical restore-on-
+    failure/discard-on-success rule the caller already applies to the
+    sidecar backup, keeps the two consistent with each other in every
+    outcome.
+
+    Returns `(chunk_backup, sidecar_backup)`, both `None` if nothing
+    needed invalidating (no sidecar yet, or its content already matches
+    `expected_ids` -- the common case, where `chunk_path` is left
+    completely untouched here). If backing up `chunk_path` itself fails
+    after the sidecar was already renamed away, the sidecar rename is
+    rolled back before re-raising, so a partial invalidation never leaves
+    the sidecar and document out of sync with each other on disk."""
+    sidecar_backup = _invalidate_sidecar_if_range_changed(chunk_path, language, expected_ids)
+    if sidecar_backup is None:
+        return None, None
+    if not chunk_path.exists():
+        return None, sidecar_backup
+    chunk_backup = chunk_path.with_name(chunk_path.name + ".stale")
+    try:
+        chunk_path.replace(chunk_backup)
+    except OSError:
+        sidecar = sidecar_path_for(chunk_path, language)
+        if sidecar is not None:
+            try:
+                sidecar_backup.replace(sidecar)
+            except OSError:
+                pass
+        raise
+    return chunk_backup, sidecar_backup
 
 
 def select_test_batch_members(conn) -> list[str]:
@@ -272,7 +899,8 @@ def build_localized_test_patch_prompt(
 
 def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: str, framework: str,
                                    out_path: Path, caller: ModelCaller, writing_rules: str,
-                                   template: str, max_attempts: int = 2) -> DocResult:
+                                   template: str, max_attempts: int = 2,
+                                   _fingerprint_cache: dict | None = None) -> DocResult:
     """Call -> validate -> retry-once loop, given an already-built brief --
     the part of generate_member_test_doc that doesn't care whether `brief`
     covers a member's whole test_case set or just one chunk of it, shared
@@ -308,11 +936,42 @@ def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: 
     failing for any other reason, or where the patch attempt itself doesn't
     resolve everything (including the patch model call itself raising, the
     same exception risk as the main call above), falls straight through to
-    the existing full-retry loop unchanged."""
+    the existing full-retry loop unchanged.
+
+    Captures `_prior_fingerprint_for(out_path)` once, before this call's
+    first write to `out_path` -- see that function's docstring (issue #195
+    review): every `validate_test_doc` call below passes it through, since
+    a freshly-generated candidate's own front matter never carries
+    `test_case_fingerprint` itself, and by the time validation runs
+    `out_path` has already been overwritten with that candidate.
+
+    `_fingerprint_cache`, from a chunked caller sharing one dict across
+    every chunk's own call to this function (Copilot review on issue
+    #195's fix): every attempt below validates the same `member_name`, so
+    without a cache this member's `rule_candidate` set would be re-queried
+    and re-hashed from scratch on every attempt and every chunk. Defaults
+    to a fresh dict scoped to just this call when the caller has nothing
+    to share, so this function's own retry attempts still benefit even
+    outside a chunked run."""
+    if _fingerprint_cache is None:
+        _fingerprint_cache = {}
+    prior_fingerprint = _prior_fingerprint_for(out_path)
     retry_note = None
     input_tokens = output_tokens = 0
     problems: list[str] = []
     attempt = 0
+    # Tracks whether *this invocation* ever actually overwrote `out_path`
+    # with a candidate (Copilot review): if every model call raises
+    # before a single response comes back, `out_path` is left exactly as
+    # it was before this call -- for a re-render of an already-successful
+    # document, that's the *prior* render's own known-good content, still
+    # carrying a legitimately-stamped, trustworthy `test_case_fingerprint`
+    # of its own. The give-up path's cleanup below must not strip that:
+    # doing so on an untouched, already-good document would downgrade a
+    # perfectly valid stamped fingerprint to the weaker id-overlap
+    # fallback on every future validation, for a failure that was never
+    # this document's own.
+    wrote_a_candidate = False
     for attempt in range(1, max_attempts + 1):
         prompt = build_test_prompt(brief, writing_rules, template, language, framework, retry_note)
         try:
@@ -330,10 +989,19 @@ def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: 
         text = _fix_generated_by_version(response.text)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(text, encoding="utf-8")
-        result = validate_test_doc(conn, out_path)
+        wrote_a_candidate = True
+        result = validate_test_doc(
+            conn, out_path, _prior_fingerprint=prior_fingerprint, _render_time=True,
+            _fingerprint_cache=_fingerprint_cache,
+        )
         if result["ok"]:
-            write_test_doc_with_sidecar(out_path, text, language)
-            return DocResult(member_name, str(out_path), True, attempt, input_tokens, output_tokens, [])
+            _, cleanup_problem = _write_test_doc_with_sidecar_or_invalidate(
+                conn, member_name, out_path, text, language,
+            )
+            return DocResult(
+                member_name, str(out_path), cleanup_problem is None, attempt, input_tokens, output_tokens,
+                [cleanup_problem] if cleanup_problem else [],
+            )
 
         if _is_near_miss(result):
             uncited, reversed_findings = _localized_findings(result)
@@ -346,7 +1014,10 @@ def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: 
                 auto = _auto_cite_uncited_assertions(brief, text, uncited)
                 if auto is not None:
                     candidate_text, remaining_uncited = auto
-                    candidate_result = validate_test_doc(conn, out_path, _text=candidate_text)
+                    candidate_result = validate_test_doc(
+                        conn, out_path, _text=candidate_text, _prior_fingerprint=prior_fingerprint,
+                        _render_time=True, _fingerprint_cache=_fingerprint_cache,
+                    )
                     if candidate_result["ok"]:
                         logger.info(
                             "%s: %d near-miss uncited assertion(s) auto-cited from the "
@@ -354,10 +1025,12 @@ def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: 
                             member_name, len(uncited) - len(remaining_uncited),
                         )
                         out_path.write_text(candidate_text, encoding="utf-8")
-                        write_test_doc_with_sidecar(out_path, candidate_text, language)
+                        _, cleanup_problem = _write_test_doc_with_sidecar_or_invalidate(
+                            conn, member_name, out_path, candidate_text, language,
+                        )
                         return DocResult(
-                            member_name, str(out_path), True, attempt, input_tokens,
-                            output_tokens, [],
+                            member_name, str(out_path), cleanup_problem is None, attempt, input_tokens,
+                            output_tokens, [cleanup_problem] if cleanup_problem else [],
                         )
                     if _is_near_miss(candidate_result):
                         logger.info(
@@ -404,11 +1077,17 @@ def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: 
                 output_tokens += patch_response.output_tokens
                 text = _fix_generated_by_version(patch_response.text)
                 out_path.write_text(text, encoding="utf-8")
-                result = validate_test_doc(conn, out_path)
+                result = validate_test_doc(
+                    conn, out_path, _prior_fingerprint=prior_fingerprint, _render_time=True,
+                    _fingerprint_cache=_fingerprint_cache,
+                )
                 if result["ok"]:
-                    write_test_doc_with_sidecar(out_path, text, language)
+                    _, cleanup_problem = _write_test_doc_with_sidecar_or_invalidate(
+                        conn, member_name, out_path, text, language,
+                    )
                     return DocResult(
-                        member_name, str(out_path), True, attempt, input_tokens, output_tokens, [],
+                        member_name, str(out_path), cleanup_problem is None, attempt, input_tokens, output_tokens,
+                        [cleanup_problem] if cleanup_problem else [],
                     )
                 logger.warning(
                     "%s: targeted patch attempt did not resolve validation (%d problem(s)); "
@@ -422,6 +1101,25 @@ def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: 
         )
         problems = problems + result["problems"]
         retry_note = "\n".join(f"- {p}" for p in problems)
+    # Every attempt exhausted with nothing validating: see
+    # `_strip_fingerprint_from_a_failed_candidate`'s own docstring (Copilot
+    # review, issue #195 round 43) -- the raw candidate the last attempt
+    # left at `out_path` never passed through `write_test_doc_with_
+    # sidecar`'s own stamping, so a `test_case_fingerprint` it happens to
+    # carry survives untouched unless stripped here.
+    #
+    # `wrote_a_candidate` guards this (Copilot review, round 44): if
+    # every model call above raised and `out_path` was never touched this
+    # invocation, it still holds whatever was there before this call --
+    # for a re-render of an already-successful document, that's the prior
+    # render's own known-good content with a legitimately-stamped,
+    # trustworthy fingerprint. Stripping it in that case would mutate a
+    # known-good document over a failure that was never its own, forcing
+    # every future validation back onto the weaker id-overlap fallback.
+    if wrote_a_candidate:
+        cleanup_problem = _strip_fingerprint_from_a_failed_candidate(out_path)
+        if cleanup_problem:
+            problems = problems + [cleanup_problem]
     return DocResult(member_name, str(out_path), False, attempt, input_tokens, output_tokens, problems)
 
 
@@ -527,7 +1225,10 @@ _DOC_CLAIM_COLUMNS = (
 )
 
 
-def _readonly_validate_test_doc(conn, path: Path) -> dict:
+def _readonly_validate_test_doc(conn, path: Path, *, _render_time: bool = False,
+                                 _prior_fingerprint: str | None = None,
+                                 _fingerprint_cache: dict | None = None,
+                                 _valid_scenarios=None) -> dict:
     """The same result `validate_test_doc(conn, path)` returns, but leaves
     the `doc_claim` table exactly as it was before the call.
     `validate_test_doc` (via `validate.validate_doc`) deletes and
@@ -550,7 +1251,10 @@ def _readonly_validate_test_doc(conn, path: Path) -> dict:
         (path_str,),
     ).fetchall()
     try:
-        return validate_test_doc(conn, path)
+        return validate_test_doc(
+            conn, path, _render_time=_render_time, _prior_fingerprint=_prior_fingerprint,
+            _fingerprint_cache=_fingerprint_cache, _valid_scenarios=_valid_scenarios,
+        )
     finally:
         conn.execute("DELETE FROM doc_claim WHERE doc_path=?", (path_str,))
         if before:
@@ -562,8 +1266,131 @@ def _readonly_validate_test_doc(conn, path: Path) -> dict:
         conn.commit()
 
 
+def _lazy_valid_scenarios(conn):
+    """A zero-arg, lazily-memoized callable for `validate_test_doc`'s
+    `_valid_scenarios` parameter -- the same one-scan-per-caller sharing
+    `validate_tests_tree` already does, extended to chunk-reuse callers
+    (Copilot review): every reusable chunk's revalidation can force
+    `valid_scenarios()`'s full `test_case` scan (the legacy-sidecar
+    id-overlap fallback needs it before reuse can even be decided), so a
+    chunked member's own resume/dry-run pass without this shares nothing
+    across its chunks -- O(chunk_count * corpus_size) for exactly the
+    reuse path meant to be cheap. Memoized here, not just passed as a bare
+    lambda, so the scan itself still only runs once regardless of how many
+    chunks call it."""
+    cache: list[set[str]] = []
+
+    def get() -> set[str]:
+        if not cache:
+            cache.append({row["scenario_name"].upper() for row in conn.execute("SELECT scenario_name FROM test_case")})
+        return cache[0]
+
+    return get
+
+
+def _split_doc_missing_its_sidecar(doc_path: Path, language: str) -> bool:
+    """Whether `doc_path` was previously *split* (its body already turned
+    into prose + a `## Scenarios covered` manifest by `write_test_doc_
+    with_sidecar`, its actual test source moved out to a sibling file) but
+    that sidecar has since gone missing on disk -- deleted out from under
+    this tool, or lost to some other bug.
+
+    Shared by `_test_chunk_reuse_ok` (a per-chunk reuse decision) and
+    `run_test_batch`/`plan_test_batch`'s own member-level resume skip
+    (Copilot review: the identical hole one layer up -- a previously
+    successful *single-document* split output losing its sidecar while
+    the database and resume state stay otherwise unchanged left `prior_ok`
+    true and the corpus-level fast path skipped without ever checking for
+    it): `validate_test_doc` falls back to scanning the document's own
+    body when a sidecar is missing, and a stale manifest's ids still
+    resolve against `test_case` just fine even though the file that
+    actually contains the generated test code doesn't exist at all.
+    Treating that as still "reusable"/"unchanged" would carry the
+    missing-source problem forward indefinitely, since nothing would ever
+    call `write_test_doc_with_sidecar` again to recreate it.
+
+    `## Scenarios covered` (the manifest heading that function writes) is
+    what tells a genuinely split document apart from one that's still
+    embedded (own code fence directly, whether because it has no BR
+    references at all or because `language` isn't one `sidecar_path_for`
+    recognises) -- an embedded document legitimately has no sidecar, and
+    that's a completely normal, still-current state, not a missing
+    artifact. `False` (nothing missing) whenever `doc_path` doesn't exist
+    at all -- a caller's own existence check is what decides whether that
+    counts as reusable in the first place, not this function.
+
+    A chunk *index* document (`_generate_member_test_doc_chunked`'s own
+    `_render_chunk_index` output, always at the member's un-suffixed
+    `out_path`) also carries a `## Scenarios covered` section -- its own
+    aggregate across every chunk -- but, by design, never gets a sidecar
+    of its own at all (each chunk gets its own instead). Without
+    excluding it, every unchanged chunked member's index would be
+    misread as a split document missing its sidecar on every single
+    resume (Copilot review), forcing a full chunk/index rebuild instead
+    of the fast corpus/member skip. `## Chunks` is the section heading
+    unique to that index template -- a real split document, single or
+    per-chunk, never has one -- so it's checked first and excludes the
+    index case before the `## Scenarios covered` check below ever runs."""
+    if not doc_path.exists():
+        return False
+    sidecar = sidecar_path_for(doc_path, language)
+    if sidecar is None or sidecar.exists():
+        return False
+    text = doc_path.read_text(encoding="utf-8")
+    if "## Chunks" in text:
+        return False
+    return "## Scenarios covered" in text
+
+
+def _chunked_member_missing_a_chunk_file(out_path: Path, prior_chunks, language: str) -> bool:
+    """Whether any chunk a chunked member's prior successful run recorded
+    (`prior["chunks"]`, keyed by chunk index as a string -- see
+    `_generate_member_test_doc_chunked`'s own `chunk_state`) is now
+    missing on disk, or missing its sidecar (`_split_doc_missing_its_
+    sidecar`) if that chunk was split.
+
+    Guards the identical member-level resume-skip fast path
+    `_split_doc_missing_its_sidecar` guards for a single-document member
+    (Copilot review): that check alone only ever looks at `out_path`
+    itself, which for a chunked member is the deterministic *index*
+    document -- one that, by design, never has its own sidecar and is
+    deliberately excluded from that check. Nothing there (or in
+    `corpus_unchanged`/`prior_ok`'s other conditions) ever verifies that
+    the chunk files the index *references* are actually still present.
+    Left unguarded, a chunk file deleted out from under this tool (or
+    lost to some other bug) while the database, resume state, and index
+    itself stay otherwise unchanged would leave `run_test_batch` skipping
+    this member indefinitely -- `validate_test_doc` never resolves a
+    markdown link, so the index's own validation has no way to notice a
+    linked chunk file is gone.
+
+    Chunk file names are reconstructed the same way
+    `_generate_member_test_doc_chunked` computed them originally --
+    `chunk_width` from the *count* of recorded chunks, matching that
+    function's own `len(str(chunk_count))` -- so this only needs the
+    prior state dict, not a fresh `routine_aware_chunk_ranges` call.
+    `False` (nothing missing) for anything that isn't a chunked member's
+    prior state (`prior_chunks` not a non-empty dict) -- a single-document
+    member has no chunks to check here at all."""
+    if not isinstance(prior_chunks, dict) or not prior_chunks:
+        return False
+    chunk_width = len(str(len(prior_chunks)))
+    for key in prior_chunks:
+        try:
+            i = int(key)
+        except (TypeError, ValueError):
+            continue
+        chunk_path = out_path.with_name(f"{out_path.stem}.chunk{i:0{chunk_width}d}{out_path.suffix}")
+        if not chunk_path.exists():
+            return True
+        if _split_doc_missing_its_sidecar(chunk_path, language):
+            return True
+    return False
+
+
 def _test_chunk_reuse_ok(conn, prior_chunks: dict | None, i: int, brief_hash: str,
-                          chunk_path: Path, readonly: bool = False) -> bool:
+                          chunk_path: Path, language: str, readonly: bool = False,
+                          _fingerprint_cache: dict | None = None, _valid_scenarios=None) -> bool:
     """Whether chunk `i` can be reused verbatim -- no model call -- given a
     prior run's chunk_state and this chunk's freshly-computed brief hash:
     the prior run must have recorded this exact chunk as clean (`ok` True)
@@ -592,7 +1419,62 @@ def _test_chunk_reuse_ok(conn, prior_chunks: dict | None, i: int, brief_hash: st
     `validate_test_doc` directly, so a dry-run's reuse check can't leave
     the `doc_claim` table changed even though it makes no model call and
     writes no file -- the real chunked-render path leaves this False, so
-    its own revalidation keeps refreshing `doc_claim` exactly as before."""
+    its own revalidation keeps refreshing `doc_claim` exactly as before.
+
+    A chunk whose sidecar `validate_test_doc` reports as `sidecar_stale`
+    (issue #195) is deliberately never reusable, even when `ok` comes back
+    True: `ok=True` there only means the staleness was tolerated by
+    falling back to scanning the document body, not that the on-disk
+    sidecar source itself is still accurate. Reusing it verbatim would
+    leave that stale sidecar (and its now-wrong BR-nnn comments) on disk
+    indefinitely across every future resumed/dry-run pass, since nothing
+    would ever call `write_test_doc_with_sidecar` again to refresh it.
+    Treating it as a cache miss instead forces the normal render path,
+    which -- once it validates -- rewrites the sidecar with fresh content
+    the usual way.
+
+    `_render_time=True` passed to the revalidation below (issue #195
+    review): a *legacy* chunk file (written before `test_case_fingerprint`
+    existed, so it carries none) would otherwise fall to the id-overlap
+    fallback here too, which can read a corpus change as "still current"
+    the same way it can for a fresh render -- `brief_hash` alone doesn't
+    close this, since `_generate_member_test_doc_chunked`'s per-chunk
+    hash is computed from `test_case_brief_chunk`'s content only, not from
+    `member_rule_fingerprint`, so a `rule_candidate` change elsewhere in
+    the member (this member's own resume skip already re-enters this
+    function once its own hash changes, but a *chunk* whose own brief
+    text happens to be unaffected can still reach here with a stale
+    legacy sidecar). The one-time cost: every legacy chunk gets forced
+    through a real re-render exactly once, the same transition every
+    other legacy document goes through, rather than being reused forever
+    with a sidecar that can never earn a fingerprint because nothing ever
+    calls `write_test_doc_with_sidecar` on a chunk this function keeps
+    calling reusable.
+
+    `_fingerprint_cache`, from the caller (the chunk loop's own shared
+    dict, or a dry-run's per-member one -- Copilot review): every reusable
+    chunk's revalidation here recomputes this member's fingerprint from
+    scratch without it, making the intended cache-hit path itself cost
+    O(chunks * rules) -- exactly the redundant work this cache exists to
+    eliminate everywhere else it's threaded through.
+
+    `_valid_scenarios`, the same idea applied to `validate_test_doc`'s own
+    `test_case` scenario-name scan (Copilot review): the legacy-sidecar
+    id-overlap fallback (no fingerprint at all -- see above) forces that
+    scan before this function can even decide reuse is unavailable, and
+    without a shared provider every chunk pays for its own full-corpus
+    `SELECT` -- the exact O(document_count * corpus_size) cost
+    `validate_tests_tree` already avoids by sharing one, just not yet
+    reaching this reuse path. A caller with nothing to share (a single,
+    unchunked member) leaves this unset and keeps the prior per-call
+    cost.
+
+    `result["ok"] and not result.get("sidecar_stale")` alone isn't enough
+    (Copilot review): see `_split_doc_missing_its_sidecar`'s own docstring
+    -- a split chunk document whose sidecar has since gone missing still
+    validates `ok=True` (`validate_test_doc` falls back to scanning the
+    body), so that's checked directly here too, not inferred from
+    validation."""
     prior_chunk = (prior_chunks or {}).get(str(i))
     reusable = (
         isinstance(prior_chunk, dict) and prior_chunk.get("ok") is True
@@ -602,7 +1484,27 @@ def _test_chunk_reuse_ok(conn, prior_chunks: dict | None, i: int, brief_hash: st
     if not reusable:
         return False
     validator = _readonly_validate_test_doc if readonly else validate_test_doc
-    return validator(conn, chunk_path)["ok"]
+    result = validator(
+        conn, chunk_path,
+        # Read explicitly and passed through as the trusted prior, rather
+        # than relying on `validate_test_doc`'s own internal fallback to
+        # the document's stamped field (Copilot review, round 42): that
+        # fallback is now suppressed whenever `_render_time=True`, since
+        # for a *freshly generated candidate* (`_generate_test_doc_from_
+        # brief`'s own validation) any stamped field it carries is never
+        # trustworthy -- the model could only have echoed/hallucinated
+        # it. This call is the opposite case: `chunk_path` here is
+        # existing, previously-*validated* content nothing has touched
+        # this call, so its own stamped fingerprint (if any) genuinely is
+        # the last successful render's -- `_prior_fingerprint_for` reads
+        # exactly that value the same way the render loop's own retry
+        # calls already do before their first overwrite.
+        _render_time=True, _prior_fingerprint=_prior_fingerprint_for(chunk_path),
+        _fingerprint_cache=_fingerprint_cache, _valid_scenarios=_valid_scenarios,
+    )
+    if not (result["ok"] and not result.get("sidecar_stale")):
+        return False
+    return not _split_doc_missing_its_sidecar(chunk_path, language)
 
 
 def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None, rows: list,
@@ -651,51 +1553,300 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
     chunk_entries: list[tuple[int, Path, DocResult]] = []
     problems: list[str] = []
     chunk_state: dict[str, dict] = {}
+    # Shared across every chunk's own call below (and the index doc's
+    # validation further down) -- every chunk validates the same
+    # `member_name`, so without this each one would independently re-query
+    # and re-hash this member's entire `rule_candidate` set from scratch
+    # via `validate_test_doc`'s own fingerprint check (Copilot review on
+    # issue #195's fix; see that function's `_fingerprint_cache` docstring).
+    fingerprint_cache: dict = {}
+    # Same sharing, for validate_test_doc's own test_case scenario scan
+    # (Copilot review; see _lazy_valid_scenarios's docstring) -- the
+    # legacy-sidecar id-overlap fallback in _test_chunk_reuse_ok's own
+    # revalidation can force that scan per chunk without this.
+    valid_scenarios = _lazy_valid_scenarios(conn)
 
     chunk_width = len(str(chunk_count))
     expected_chunk_names = {
         f"{out_path.stem}.chunk{n:0{chunk_width}d}{out_path.suffix}" for n in range(1, chunk_count + 1)
     }
-    _prune_stale_chunk_files(out_path, expected_chunk_names)
-    for i, (start, end) in enumerate(ranges, start=1):
-        chunk_rows = rows[start - 1:end]
-        chunk_path = out_path.with_name(f"{out_path.stem}.chunk{i:0{chunk_width}d}{out_path.suffix}")
-        brief = test_case_brief_chunk(
-            member_name, system, chunk_rows, i, chunk_count, redact=redact, routines=routines,
-            sme_notes=sme_notes,
-        )
-        brief_hash = hashlib.sha256(brief.encode("utf-8")).hexdigest()
-        result = None
-        if _test_chunk_reuse_ok(conn, prior_chunks, i, brief_hash, chunk_path):
-            result = DocResult(member_name, str(chunk_path), True, 0, 0, 0, [])
-            logger.debug("%s: chunk %d/%d reused (unchanged)", member_name, i, chunk_count)
-        if result is None:
-            logger.info("%s: chunk %d/%d generating", member_name, i, chunk_count)
-            result = _generate_test_doc_from_brief(
-                conn, member_name, brief, language, framework, chunk_path, caller,
-                writing_rules, template, max_attempts=max_attempts,
+    # Deferred until after the new index has actually been committed
+    # (Copilot review), not run here up front: if a chunked-to-chunked
+    # rerender shrinks `chunk_count` (e.g. the threshold was raised), the
+    # extra chunk files this prunes are still referenced by the *old*
+    # index currently on disk at `out_path` -- pruning them before that
+    # index is replaced would leave it (if anything later in this
+    # function raises uncaught) pointing at chunk files that no longer
+    # exist. See the `index_written` flag below for where this actually
+    # runs, mirroring the identical fix already made for the single-
+    # document shrink-back path in `generate_member_test_doc`.
+    # A leftover sidecar from a *prior single-document* render of this same
+    # member (issue #195 review): the index document at `out_path` never
+    # gets its own sidecar -- each chunk gets its own
+    # (`out_path.chunk{N}.py`, split independently below) -- but
+    # `sidecar_path_for(out_path, language)` is purely path-based and can't
+    # tell an index doc from a single-doc one, so a member that grows past
+    # the chunking threshold between runs would otherwise leave its old
+    # single-doc sidecar sitting right where the index doc's own
+    # (irrelevant) "sidecar" would be looked up, and `validate_test_doc`
+    # would cross-check the index's aggregated manifest against that
+    # unrelated leftover content. Removed here, unconditionally, before
+    # the index is ever written -- `_prune_stale_chunk_files` above only
+    # ever touches `.chunk<N>` files, deliberately, so this is a separate
+    # cleanup step, not something to fold into it.
+    # Renamed to a `.stale` sibling, not deleted outright (Copilot review):
+    # every path below that reaches the index write further down
+    # overwrites `out_path` unconditionally, regardless of individual
+    # chunk failures -- but if something in between raises an exception
+    # this function doesn't itself catch (escaping uncaught, all the way
+    # out of a run_test_batch/plan_test_batch call), `out_path` never gets
+    # there at all and is left exactly as it was: the *old* single-
+    # document render, with its sidecar already gone. Restored in the
+    # `finally` below unless the index write actually completes.
+    stale_index_sidecar = sidecar_path_for(out_path, language)
+    index_sidecar_backup = None
+    if stale_index_sidecar is not None and stale_index_sidecar.exists():
+        try:
+            index_sidecar_backup = stale_index_sidecar.with_name(stale_index_sidecar.name + ".stale")
+            stale_index_sidecar.replace(index_sidecar_backup)
+        except OSError as exc:
+            # Not merely cosmetic (Copilot review): unlike a leftover
+            # `.chunk<N>` file (nothing currently authoritative reads it
+            # again), this exact path is what `sidecar_path_for(out_path,
+            # language)` resolves to for the index document too -- if it's
+            # still here, a later standalone `mfdoc test-validate` sweep
+            # (not this render's own `_render_time=True` in-process check)
+            # would cross-check the index's aggregate manifest against
+            # this unrelated leftover content, reproducing the exact
+            # false missing-id failures this whole mechanism exists to
+            # prevent. Recorded as a problem (marks this render `ok=False`
+            # rather than reporting clean while the stale sidecar remains)
+            # instead of aborting the batch outright -- a filesystem-level
+            # lock is still the kind of transient condition that shouldn't
+            # stop every other member/chunk in this run from completing.
+            problems.append(f"could not remove stale single-document sidecar {stale_index_sidecar}: {exc}")
+            index_sidecar_backup = None
+    index_written = False
+    # Every chunk whose boundary shift produced a `chunk_backup`/
+    # `sidecar_backup` pair (below) records its outcome here instead of
+    # deciding discard-vs-restore on the spot (Copilot review, round 55):
+    # a chunk render can complete and validate cleanly, yet the *index*
+    # covering every chunk can still fail to commit afterward (an
+    # exception from `_render_chunk_index`, or the index's own atomic
+    # replace) -- discarding this chunk's backup immediately, before that
+    # index commit is known to have succeeded, would leave the *old*
+    # index (untouched, since its own write never landed) on disk
+    # pointing at chunk files whose content/ranges have already moved on,
+    # a mismatch nothing would ever detect. Deferred entries are only
+    # acted on once, in this function's own outer `finally` below, once
+    # `index_written` is known: every entry discards on `index_written`
+    # and its own chunk's success, and restores otherwise -- including
+    # every *already-succeeded* chunk when the index itself never
+    # committed, so the whole chunked member rolls back together rather
+    # than partially.
+    deferred_chunk_backups: list[tuple[Path, Path | None, Path | None, bool]] = []
+    try:
+        for i, (start, end) in enumerate(ranges, start=1):
+            chunk_rows = rows[start - 1:end]
+            chunk_path = out_path.with_name(f"{out_path.stem}.chunk{i:0{chunk_width}d}{out_path.suffix}")
+            brief = test_case_brief_chunk(
+                member_name, system, chunk_rows, i, chunk_count, redact=redact, routines=routines,
+                sme_notes=sme_notes,
             )
-        input_tokens += result.input_tokens
-        output_tokens += result.output_tokens
-        chunk_entries.append((i, chunk_path, result))
-        chunk_state[str(i)] = {"ok": result.ok, "brief_sha256": brief_hash}
-        if result.ok:
-            logger.debug("%s: chunk %d/%d complete", member_name, i, chunk_count)
-        if not result.ok:
-            density_note = format_density_note(density_metrics[i - 1])
-            logger.warning(
-                "%s: chunk %d/%d failed: %s -- %s", member_name, i, chunk_count,
-                "; ".join(result.problems), density_note,
-            )
-            problems.append(
-                f"chunk {i}/{chunk_count} ({chunk_path.name}) failed: "
-                + "; ".join(result.problems) + f" -- {density_note}"
-            )
+            brief_hash = hashlib.sha256(brief.encode("utf-8")).hexdigest()
+            result = None
+            if _test_chunk_reuse_ok(
+                conn, prior_chunks, i, brief_hash, chunk_path, language,
+                _fingerprint_cache=fingerprint_cache, _valid_scenarios=valid_scenarios,
+            ):
+                result = DocResult(member_name, str(chunk_path), True, 0, 0, 0, [])
+                logger.debug("%s: chunk %d/%d reused (unchanged)", member_name, i, chunk_count)
+            if result is None:
+                # See _invalidate_sidecar_if_range_changed's docstring (issue
+                # #195 review): about to regenerate this chunk index as a
+                # cache miss regardless -- if it still has an on-disk sidecar
+                # from a *prior* run whose range no longer matches this run's
+                # `chunk_rows` (boundaries moved even though the member-wide
+                # rule_candidate ordering didn't), drop it now so the
+                # about-to-run validation can't wrongly treat that
+                # wrong-range sidecar as authoritative just because the
+                # member-wide fingerprint still happens to match.
+                expected_ids = {r["scenario_name"].upper() for r in chunk_rows}
+                sidecar_backup = None
+                chunk_backup = None
+                try:
+                    chunk_backup, sidecar_backup = _invalidate_chunk_pair_if_range_changed(
+                        chunk_path, language, expected_ids,
+                    )
+                except OSError as exc:
+                    # Surfaced as this chunk's own failure (Copilot review),
+                    # not swallowed: rendering ahead with a wrong-range sidecar
+                    # still on disk would fail validation on every retry
+                    # anyway (see that function's docstring), just less
+                    # legibly than reporting the actual removal failure here.
+                    result = DocResult(
+                        member_name, str(chunk_path), False, 0, 0, 0,
+                        [f"could not invalidate stale chunk sidecar: {exc.__class__.__name__}: {exc}"],
+                    )
+                if result is None:
+                    logger.info("%s: chunk %d/%d generating", member_name, i, chunk_count)
+                    try:
+                        result = _generate_test_doc_from_brief(
+                            conn, member_name, brief, language, framework, chunk_path, caller,
+                            writing_rules, template, max_attempts=max_attempts,
+                            _fingerprint_cache=fingerprint_cache,
+                        )
+                    finally:
+                        # In a `finally`, not just after a normal return
+                        # (Copilot review): `_generate_test_doc_from_brief`
+                        # can itself raise -- write_test_doc_with_sidecar's
+                        # own temp-write/replace failure propagates
+                        # uncaught -- which used to skip this cleanup
+                        # entirely and strand the backup at `.stale` with
+                        # no sidecar at the real path either.
+                        #
+                        # `result.ok` alone doesn't prove a fresh sidecar now
+                        # exists -- write_test_doc_with_sidecar returns
+                        # (silently, uncaptured by every caller) without
+                        # writing one when the validated candidate's code
+                        # fence has no `MEMBER:BR-nnn` references at all, so
+                        # an accepted render can still leave nothing at the
+                        # real sidecar path. Recorded here, not decided here
+                        # (Copilot review, round 55): whether this chunk's
+                        # backup(s) actually get discarded or restored isn't
+                        # knowable yet -- it also depends on whether the
+                        # *index* covering every chunk goes on to commit
+                        # successfully after this loop finishes, which is
+                        # exactly what this function's own outer `finally`
+                        # resolves once `index_written` is known. See
+                        # `deferred_chunk_backups`'s own comment above for
+                        # why immediate discard was wrong.
+                        if sidecar_backup is not None or chunk_backup is not None:
+                            deferred_chunk_backups.append((
+                                chunk_path, chunk_backup, sidecar_backup,
+                                result is not None and result.ok,
+                            ))
+            input_tokens += result.input_tokens
+            output_tokens += result.output_tokens
+            chunk_entries.append((i, chunk_path, result))
+            chunk_state[str(i)] = {"ok": result.ok, "brief_sha256": brief_hash}
+            if result.ok:
+                logger.debug("%s: chunk %d/%d complete", member_name, i, chunk_count)
+            if not result.ok:
+                density_note = format_density_note(density_metrics[i - 1])
+                logger.warning(
+                    "%s: chunk %d/%d failed: %s -- %s", member_name, i, chunk_count,
+                    "; ".join(result.problems), density_note,
+                )
+                problems.append(
+                    f"chunk {i}/{chunk_count} ({chunk_path.name}) failed: "
+                    + "; ".join(result.problems) + f" -- {density_note}"
+                )
 
-    confidence = _aggregate_chunk_confidence([p for _, p, r in chunk_entries if r.ok])
-    index_text = _render_chunk_index(member_name, system, language, framework, chunk_entries, confidence)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(index_text, encoding="utf-8")
+        confidence = _aggregate_chunk_confidence([p for _, p, r in chunk_entries if r.ok])
+        index_text = _render_chunk_index(member_name, system, language, framework, chunk_entries, confidence)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        # Written to a `.tmp` sibling first, then replaced atomically
+        # (Copilot review), not a direct `write_text` onto `out_path`: a
+        # failed/truncated write straight to `out_path` (disk-full mid-
+        # write) would leave a partial index there while the `finally`
+        # below still restores `index_sidecar_backup` (since
+        # `index_written` is only set after this line) -- pairing that
+        # restored old sidecar with a *broken* new index instead of the
+        # old, still-intact single-document render this rollback exists
+        # to get back to.
+        index_tmp = out_path.with_name(out_path.name + ".tmp")
+        try:
+            index_tmp.write_text(index_text, encoding="utf-8")
+            index_tmp.replace(out_path)
+        finally:
+            index_tmp.unlink(missing_ok=True)
+        index_written = True
+        # Only now, with the new (possibly smaller) index actually
+        # committed, is it safe to remove any `.chunk<N>` files this run
+        # no longer produces (Copilot review) -- see the comment where
+        # `expected_chunk_names` was computed above for why running this
+        # any earlier could leave a still-current index pointing at files
+        # that no longer exist.
+        problems.extend(_prune_stale_test_chunk_files(out_path, expected_chunk_names, language))
+    finally:
+        if index_sidecar_backup is not None:
+            try:
+                if index_written:
+                    index_sidecar_backup.unlink()
+                else:
+                    # Copilot review: never reached the index write above
+                    # (an uncaught exception escaping this block) -- restore
+                    # the old single-document sidecar so out_path (still its
+                    # own pre-existing single-document render, untouched)
+                    # isn't left paired with no sidecar at all.
+                    index_sidecar_backup.replace(stale_index_sidecar)
+            except OSError as exc:
+                logger.warning(
+                    "%s: could not clean up stale index sidecar backup %s: %s",
+                    member_name, index_sidecar_backup, exc,
+                )
+        # Resolve every deferred per-chunk backup now that `index_written`
+        # is known (Copilot review, round 55): a chunk discards its own
+        # backup only if *both* that chunk's own render succeeded *and*
+        # the index covering every chunk actually committed -- if the
+        # index never committed (this function raised before reaching its
+        # write, or the write/replace itself failed), every already-
+        # succeeded chunk's backup is restored too, right alongside any
+        # chunk that failed on its own, so the whole chunked member rolls
+        # back together instead of leaving new chunk content paired with
+        # an old index that no longer matches it.
+        for chunk_path, chunk_backup, sidecar_backup, chunk_ok in deferred_chunk_backups:
+            discard = index_written and chunk_ok
+            if sidecar_backup is not None:
+                fresh_sidecar = sidecar_path_for(chunk_path, language)
+                try:
+                    if discard:
+                        sidecar_backup.unlink()
+                    else:
+                        sidecar_backup.replace(fresh_sidecar)
+                except OSError as exc:
+                    logger.warning(
+                        "%s: could not clean up stale sidecar backup %s: %s",
+                        member_name, sidecar_backup, exc,
+                    )
+            if chunk_backup is not None:
+                try:
+                    if discard:
+                        chunk_backup.unlink()
+                    else:
+                        chunk_backup.replace(chunk_path)
+                except OSError as exc:
+                    logger.warning(
+                        "%s: could not clean up stale chunk document backup %s: %s",
+                        member_name, chunk_backup, exc,
+                    )
+            elif not discard:
+                # `chunk_backup` is `None` here yet this entry still exists
+                # in `deferred_chunk_backups` (its append condition requires
+                # at least one of the two backups to be non-`None`) -- the
+                # only way that combination happens is
+                # `_invalidate_chunk_pair_if_range_changed` finding an
+                # orphan sidecar with wrong-range ids but no `chunk_path`
+                # document to back up at all (Copilot review, round 56):
+                # there was nothing there before this render, so there is
+                # no backup to restore *from* -- but the render since then
+                # may well have written a fresh (possibly never-validated,
+                # possibly validated-but-index-uncommitted) candidate to
+                # `chunk_path` in the meantime. Restoring only the sidecar
+                # above and leaving that candidate in place would pair the
+                # just-restored old sidecar with a document that didn't
+                # exist when this run started -- exactly the mismatched
+                # on-disk pair a later validation/resume could misread.
+                # Since nothing should be there, remove whatever is there
+                # now instead of leaving it.
+                try:
+                    chunk_path.unlink(missing_ok=True)
+                except OSError as exc:
+                    logger.warning(
+                        "%s: could not remove an orphaned chunk document with no original to restore %s: %s",
+                        member_name, chunk_path, exc,
+                    )
 
     # The index is built deterministically, not model-generated, but that's
     # not a reason to skip checking it -- validate_test_doc is the same
@@ -703,7 +1854,19 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
     # tool) is judged against, and a bug in _render_chunk_index deserves
     # the same loud, reported failure a bad model response gets, not a
     # silent `ok=True` because no chunk happened to fail.
-    index_validation = validate_test_doc(conn, out_path)
+    #
+    # `_render_time=True` here too (issue #195 review): the leftover
+    # single-doc sidecar this function just tried to remove above is
+    # best-effort (an OSError there is swallowed, same as
+    # `_prune_stale_chunk_files`) -- if that unlink somehow failed, this
+    # index document (which never gets its own fingerprint, being
+    # deterministic rather than model-authored) would otherwise still be
+    # exposed to the exact stale-sidecar cross-check this whole mechanism
+    # exists to bypass at render time.
+    index_validation = validate_test_doc(
+        conn, out_path, _render_time=True, _fingerprint_cache=fingerprint_cache,
+        _valid_scenarios=valid_scenarios,
+    )
     if not index_validation["ok"]:
         problems = problems + [f"index document: {p}" for p in index_validation["problems"]]
 
@@ -731,7 +1894,27 @@ def generate_member_test_doc(conn, member_name: str, language: str, framework: s
     through to the original single-call path unchanged (test_case_brief
     already reports both as prose in the brief itself, which the model then
     fails to turn into a valid document -- existing, unchanged behaviour,
-    not something this change alters)."""
+    not something this change alters).
+
+    A member that *shrinks* back under the chunking threshold between
+    runs (issue #195 review) is cleaned up here symmetrically to the
+    chunked path's own cleanup: any `.chunk<N>{suffix}` file (and its
+    sidecar) left over from a prior chunked render of this same member is
+    now orphaned -- this single-document path never revisits or
+    overwrites them, but a full tree walk (`mfdoc test-validate`) still
+    finds and validates them independently, where their stale manifests/
+    sidecars can produce the exact false staleness failures this whole
+    mechanism exists to prevent.
+
+    That cleanup runs *after* this render succeeds, not before (Copilot
+    review): the orphaned `.chunk<N>` files are this member's *last
+    successful* chunked output -- removing them first and only then
+    attempting the new single-document render would destroy that last
+    known-good result before the replacement has actually landed, so a
+    model timeout or validation failure here would leave `out_path` as a
+    stale *index* document (still naming chunks that no longer exist)
+    with nothing behind it at all, rather than the harmless "orphaned
+    file nothing currently reads" state this cleanup exists to tidy up."""
     system, rows, ambiguous_libs = fetch_test_case_rows(conn, member_name)
     threshold = _resolve_max_scenarios_per_call(max_scenarios_per_call)
     if not ambiguous_libs and rows and len(rows) > threshold:
@@ -742,10 +1925,20 @@ def generate_member_test_doc(conn, member_name: str, language: str, framework: s
         )
 
     brief = test_case_brief(conn, member_name, redact=redact, sme_notes=sme_notes)
-    return _generate_test_doc_from_brief(
+    result = _generate_test_doc_from_brief(
         conn, member_name, brief, language, framework, out_path, caller, writing_rules,
         template, max_attempts=max_attempts,
     )
+    if result.ok:
+        cleanup_problems = _prune_stale_test_chunk_files(out_path, set(), language)
+        if cleanup_problems:
+            # A leftover obsolete `.chunk<N>` document/sidecar this render
+            # never revisits -- `validate_tests_tree` still walks and
+            # validates it independently (Copilot review), so this render
+            # must not report `ok=True` while one remains.
+            result.problems = result.problems + cleanup_problems
+            result.ok = False
+    return result
 
 
 @dataclass
@@ -766,26 +1959,112 @@ def _corpus_signature(conn, language: str, framework: str, threshold: int,
 
     - language/framework this run targets, since the same test_case rows
       render to a different file per target;
-    - every test_case's (scenario_name, status), since a human promoting a
+    - every test_case's full content (scenario_name, status, citation, and
+      the given/when/then JSON blobs), since a human promoting a
       test-overlay.yml entry past `draft` (which testplan.py folds into
       test_case.status on the next `mfdoc test-plan`) changes what
       test_case_brief() renders for that scenario without touching any
       source_file -- the source-only signature above can't see that on its
-      own, and this run's corpus-level skip must not treat it as unchanged;
+      own, and this run's corpus-level skip must not treat it as unchanged.
+      Hashing more than just (scenario_name, status) matters for issue
+      #195's staleness guard too: a `classify-rules`/`derive` rebuild that
+      happens to reassign the *same* `scenario_name` strings to
+      *different* underlying `rule_candidate` rows (same count, same
+      positional BR-numbering, different citation/condition/source
+      excerpt behind each id) would leave (scenario_name, status) pairs
+      unchanged even though the corpus genuinely changed underneath --
+      `corpus_unchanged` would then wrongly gate every member through the
+      fast skip path in `run_test_batch`/`plan_test_batch` below, bypassing
+      `_test_chunk_reuse_ok`'s own per-chunk sidecar-staleness check
+      entirely and never refreshing a sidecar that predates the rebuild.
+      Including `citation` and the three JSON blobs closes that gap: any
+      change to what a scenario actually asserts moves this signature,
+      regardless of whether its `scenario_name` also moved;
+    - each test_case's member's `system` (`test_case_brief()` includes it
+      in the rendered header per `testplan.render_test_case_brief`), since
+      re-ingesting after only a `project.yml`/source `system:` relabel
+      changes what the brief -- and therefore the rendered document --
+      says without touching any `test_case` row itself;
     - the effective max_scenarios_per_call threshold, since raising or
       lowering it can flip a member between the single-doc and chunked
       output shapes without any test_case row or status changing at all --
       the two checks above wouldn't see that either, and a stale "nothing
       changed" skip would leave the previous run's now-wrong-shaped output
-      (or count of chunk files) in place.
+      (or count of chunk files) in place;
+    - every member's `rule_candidate` `(id, line_no, construct)` sequence
+      and `routine` boundary rows, in the same order `test_case_brief_
+      chunk`'s routine-aware chunk planning (`brief.
+      routine_aware_chunk_ranges`/`fetch_routines`) and `testplan.
+      member_rule_fingerprint`'s BR-numbering both read them (`construct`
+      included for the identical reason `member_rule_fingerprint` hashes
+      it, Copilot review: a row reclassified in place -- e.g. between a
+      branch construct and `DECIDE ON`, which `_is_branch_row` excludes --
+      changes which rows become scenarios even though `(id, line_no)`
+      alone doesn't move). `test_case`'s own columns above only capture a
+      *derived* rule's content -- a `rule_candidate` inserted, removed,
+      reordered, or reclassified by a `derive` rebuild (the same shift
+      `member_rule_fingerprint`'s per-document fingerprint exists to
+      catch, see `validate.validate_test_doc`) can, before `mfdoc
+      test-plan` re-runs to reflect it in `test_case`, leave every
+      `test_case` row (and therefore everything hashed above) untouched
+      while chunk boundaries, BR-numbering, or the scenario set itself
+      have already moved underneath. Without this, the corpus-level fast
+      path here could gate every member through `corpus_unchanged` and
+      skip straight past `_test_chunk_reuse_ok`'s own per-chunk
+      sidecar-staleness check (and the per-member fingerprint check
+      below it) entirely;
+    - each `test_case` row's own `rule_candidate_id` link, not just its
+      derived content -- reassigning which existing `rule_candidate` row a
+      scenario points to (without inserting/removing any row, or changing
+      that scenario's own stored columns) is a narrower case than the
+      point above, but the same principle: `test_case_brief_chunk`'s
+      routine-aware chunk layout is keyed off this link
+      (`rule_line_no`/`fetch_test_case_rows`), so a change here can move
+      what a chunk renders even when nothing else this function already
+      hashes would show it.
     """
-    status_rows = conn.execute(
-        "SELECT scenario_name, status FROM test_case ORDER BY scenario_name"
+    # `tc.member_id, tc.id` (Copilot review): `scenario_name` alone isn't
+    # unique -- a bare member name can collide across libraries
+    # (`member` is unique on `(name, library, dialect)`, not name alone),
+    # and `test_case.scenario_name` is built from that bare name. Without
+    # a deterministic tie-break, two equal `scenario_name` values leave
+    # their relative order to SQLite's unspecified tie behaviour, changing
+    # this digest -- and forcing an unnecessary full rerender on the next
+    # resume -- even when nothing in the corpus actually moved.
+    rows = conn.execute(
+        "SELECT tc.scenario_name, tc.status, tc.citation, tc.given_json, tc.when_json, "
+        "       tc.then_json, tc.rule_candidate_id, m.system "
+        "FROM test_case tc JOIN member m ON m.id = tc.member_id "
+        "ORDER BY tc.scenario_name, tc.member_id, tc.id"
     ).fetchall()
     extra = [language, framework, str(threshold)]
-    for r in status_rows:
-        extra.append(r["scenario_name"])
-        extra.append(r["status"])
+    for r in rows:
+        extra.extend((r["scenario_name"], r["status"], r["citation"],
+                      r["given_json"], r["when_json"], r["then_json"],
+                      str(r["rule_candidate_id"]), r["system"] or ""))
+
+    # `construct` included (Copilot review): `member_rule_fingerprint`
+    # hashes it too, since a row reclassified in place (e.g. between a
+    # branch construct and `DECIDE ON`, which `_is_branch_row` excludes
+    # from BR-numbering) changes which rows become scenarios even though
+    # `(id, line_no)` alone doesn't move. Without it here, this corpus-
+    # level signature stays unchanged for a construct-only reclassification
+    # while `test_case` is still unchanged too, so `corpus_unchanged`
+    # would short-circuit `run_test_batch`/`plan_test_batch` before ever
+    # reaching the per-member fingerprint check that would have caught it.
+    rc_rows = conn.execute(
+        "SELECT rc.id, rc.member_id, rc.line_no, rc.construct FROM rule_candidate rc "
+        "ORDER BY rc.member_id, rc.line_no, rc.id"
+    ).fetchall()
+    for r in rc_rows:
+        extra.extend((str(r["member_id"]), str(r["line_no"]), str(r["id"]), r["construct"]))
+
+    routine_rows = conn.execute(
+        "SELECT member_id, name, start_line, end_line FROM routine ORDER BY member_id, start_line, name"
+    ).fetchall()
+    for r in routine_rows:
+        extra.extend((str(r["member_id"]), r["name"], str(r["start_line"]), str(r["end_line"])))
+
     return _base_corpus_signature(conn, redact=redact, sme_notes=sme_notes, extra=extra)
 
 
@@ -879,6 +2158,16 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
     briefs: dict[str, str] = {}
     to_run: list[tuple[str, str, Path]] = []
     to_run_chunked: list[tuple[str, str, Path]] = []
+    # Populated at dispatch time below (single-document members only --
+    # `to_run_chunked` members get identical cleanup, and identical
+    # problem-folding, inside generate_member_test_doc/_generate_member_
+    # test_doc_chunked itself) and folded into that member's own final
+    # DocResult once it's built further down (Copilot review): a leftover
+    # obsolete `.chunk<N>` document/sidecar this dispatch-time cleanup
+    # couldn't remove is exactly the kind of artifact `validate_tests_tree`
+    # still walks and validates independently, so this member's own result
+    # must not report `ok=True` while one remains.
+    cleanup_problems_by_name: dict[str, list[str]] = {}
 
     state_keys: dict[str, str] = {}
     for name in members:
@@ -887,7 +2176,26 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
         state_keys[name] = key
         out_path = out_dir / subdir / language / framework / f"{name}.md"
         prior = state.get(key)
-        prior_ok = isinstance(prior, dict) and prior.get("ok") and out_path.exists()
+        prior_ok = (
+            isinstance(prior, dict) and prior.get("ok") and out_path.exists()
+            # Copilot review: a previously successful *split* single-
+            # document output (its actual test source moved to a sidecar)
+            # can lose that sidecar file while the database and this
+            # resume state stay otherwise unchanged -- `corpus_unchanged`
+            # alone can't see that, and unlike `_test_chunk_reuse_ok` on
+            # the chunked path, nothing else here would ever notice the
+            # executable source is gone. A chunked member's own `out_path`
+            # (the deterministic index, never itself split) trivially
+            # passes this check regardless -- each chunk's own sidecar is
+            # `_test_chunk_reuse_ok`'s concern, not this member-level one.
+            and not _split_doc_missing_its_sidecar(out_path, language)
+            # Copilot review: for a chunked member this fast path only
+            # ever looked at the index above -- it never confirmed the
+            # chunk files (or their sidecars) the index links to are
+            # still on disk. `prior.get("chunks")` is `None` for a
+            # single-document member, so this is a no-op there.
+            and not _chunked_member_missing_a_chunk_file(out_path, prior.get("chunks"), language)
+        )
 
         if corpus_unchanged and prior_ok:
             logger.debug("skip %s: unchanged (corpus signature match, resumed)", name)
@@ -902,8 +2210,36 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
         # single-doc and chunked output shapes, and the per-member skip
         # must not treat that as "nothing changed" (see _corpus_signature's
         # docstring for the same reasoning at the corpus level).
+        #
+        # `member_rule_fingerprint` folded in too (issue #195 review): a
+        # `derive` rebuild that inserts/reorders this member's own
+        # `rule_candidate` rows before `mfdoc test-plan` re-runs leaves
+        # `test_case_brief()`'s output (and therefore `brief` above)
+        # completely unchanged -- it only ever reads `test_case`, never
+        # `rule_candidate` directly -- so without this, this per-member
+        # skip (a *different* resume layer from `_corpus_signature`'s
+        # global one, which this alone doesn't fix) would still wrongly
+        # treat the member as unchanged and skip re-rendering, leaving a
+        # stale sidecar in place indefinitely.
+        #
+        # Known, accepted narrower gap (Copilot review): `member_rule_
+        # fingerprint` hashes `rule_candidate`'s own `(id, line_no)` set,
+        # not which `test_case` row's `rule_candidate_id` points at which
+        # one -- a hypothetical rebuild that *relinks* an existing
+        # `test_case` row to a *different* existing `rule_candidate` row,
+        # with every other column (both rows' own content, the
+        # rule_candidate set/ordering itself) byte-identical, wouldn't
+        # move either this fingerprint or `brief` above. Not fixed here:
+        # `build_member_test_cases` derives `rule_candidate_id` and every
+        # other `test_case` column together, positionally, from the same
+        # `numbered_rule_candidates()` pass, so a relink with literally
+        # nothing else different isn't a shape the real derive/test-plan
+        # pipeline produces -- closing it would mean hashing
+        # `fetch_test_case_rows`' relationship data on a purely
+        # theoretical case this per-member skip has no real pathway to.
         brief = test_case_brief(conn, name, redact=redact, sme_notes=sme_notes)
-        brief_hash = hashlib.sha256(f"{brief}\x00{threshold}".encode("utf-8")).hexdigest()
+        rule_fp = member_rule_fingerprint(conn, name) or ""
+        brief_hash = hashlib.sha256(f"{brief}\x00{threshold}\x00{rule_fp}".encode("utf-8")).hexdigest()
         if prior_ok and prior.get("brief_sha256") == brief_hash:
             logger.debug("skip %s: unchanged (brief hash match, resumed)", name)
             results.append(_skip_result(name, out_path, prior))
@@ -913,6 +2249,22 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
         if not ambiguous_libs and rows and len(rows) > threshold:
             to_run_chunked.append((name, brief_hash, out_path))
         else:
+            # This member is going through the single-document pool loop
+            # below, not _generate_member_test_doc_chunked -- a member
+            # that shrunk back under the threshold since a prior chunked
+            # render (issue #195 review) needs the identical leftover-
+            # chunk-file cleanup that path already gets, since this
+            # dispatch loop (run_test_batch's own, not
+            # generate_member_test_doc's) never calls that function at
+            # all for a non-chunked member. Deferred until that render
+            # actually succeeds, in the pool result loop below (Copilot
+            # review) -- not run here at dispatch time: the orphaned
+            # `.chunk<N>` files are this member's *last successful*
+            # chunked output, and removing them before the new render has
+            # even been attempted would destroy that last known-good
+            # result if the new attempt then fails (a model timeout or a
+            # validation failure), leaving out_path a stale index
+            # document with nothing behind it at all.
             briefs[name] = brief
             to_run.append((name, brief_hash, out_path))
 
@@ -962,7 +2314,8 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
                     )
                     result = DocResult(
                         name, str(out_path), False, 2, 0, 0,
-                        [initial_exc_problem, f"retry model call raised {exc2.__class__.__name__}: {exc2}"],
+                        [initial_exc_problem, f"retry model call raised {exc2.__class__.__name__}: {exc2}"]
+                        + cleanup_problems_by_name.get(name, []),
                     )
                     results.append(result)
                     state[state_keys[name]] = {
@@ -974,9 +2327,28 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
             input_tokens, output_tokens = response.input_tokens, response.output_tokens
 
             out_path.parent.mkdir(parents=True, exist_ok=True)
+            # Captured before this call's first write to out_path -- see
+            # _prior_fingerprint_for's docstring (issue #195 review): a
+            # freshly-generated candidate's own front matter never carries
+            # test_case_fingerprint itself, and out_path is about to be
+            # overwritten with it.
+            prior_fingerprint = _prior_fingerprint_for(out_path)
+            # Shared across every validate_test_doc call below for this one
+            # member (initial, auto-cite candidate, patch, retry) -- up to
+            # four independent re-queries/re-hashes of the same member's
+            # `rule_candidate` set otherwise (Copilot review on issue
+            # #195's fix; see validate_test_doc's `_fingerprint_cache`
+            # docstring). Scoped to this member alone: nothing else in this
+            # loop iteration needs a name it could collide with, and
+            # `as_completed`'s body runs on this one thread, so no
+            # concurrent access to guard against.
+            fingerprint_cache: dict = {}
             final_text = _fix_generated_by_version(response.text)
             out_path.write_text(final_text, encoding="utf-8")
-            validation = validate_test_doc(conn, out_path)
+            validation = validate_test_doc(
+                conn, out_path, _prior_fingerprint=prior_fingerprint, _render_time=True,
+                _fingerprint_cache=fingerprint_cache,
+            )
 
             # Issue #188 review: this pool loop is the ordinary `mfdoc
             # test-batch` path for every non-chunked member -- the common
@@ -998,7 +2370,10 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
                     auto = _auto_cite_uncited_assertions(briefs[name], final_text, uncited)
                     if auto is not None:
                         candidate_text, remaining_uncited = auto
-                        candidate_result = validate_test_doc(conn, out_path, _text=candidate_text)
+                        candidate_result = validate_test_doc(
+                            conn, out_path, _text=candidate_text, _prior_fingerprint=prior_fingerprint,
+                            _render_time=True, _fingerprint_cache=fingerprint_cache,
+                        )
                         if candidate_result["ok"]:
                             logger.info(
                                 "%s: %d near-miss uncited assertion(s) auto-cited from the "
@@ -1054,7 +2429,10 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
                         output_tokens += patch_response.output_tokens
                         final_text = _fix_generated_by_version(patch_response.text)
                         out_path.write_text(final_text, encoding="utf-8")
-                        validation = validate_test_doc(conn, out_path)
+                        validation = validate_test_doc(
+                            conn, out_path, _prior_fingerprint=prior_fingerprint, _render_time=True,
+                            _fingerprint_cache=fingerprint_cache,
+                        )
                         if validation["ok"]:
                             patched = True
                         else:
@@ -1098,7 +2476,10 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
                     output_tokens += retry_response.output_tokens
                     final_text = _fix_generated_by_version(retry_response.text)
                     out_path.write_text(final_text, encoding="utf-8")
-                    validation = validate_test_doc(conn, out_path)
+                    validation = validate_test_doc(
+                        conn, out_path, _prior_fingerprint=prior_fingerprint, _render_time=True,
+                        _fingerprint_cache=fingerprint_cache,
+                    )
                     attempts = 2
             elif not validation["ok"] and initial_exc_problem is not None:
                 # This response already came from the exception-triggered
@@ -1110,12 +2491,34 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
                     "problems": [initial_exc_problem] + list(validation["problems"]),
                 }
 
+            member_cleanup_problems = cleanup_problems_by_name.get(name, [])
             if validation["ok"]:
-                write_test_doc_with_sidecar(out_path, final_text, language)
+                _, cleanup_problem = _write_test_doc_with_sidecar_or_invalidate(
+                    conn, name, out_path, final_text, language,
+                )
+                if cleanup_problem:
+                    member_cleanup_problems = member_cleanup_problems + [cleanup_problem]
+                # Only now that this member's own render has actually
+                # succeeded (Copilot review) -- see the dispatch-time
+                # comment above for why this can't run any earlier.
+                member_cleanup_problems = member_cleanup_problems + _prune_stale_test_chunk_files(
+                    out_path, set(), language,
+                )
+            if not validation["ok"]:
+                # This loop's own give-up path (Copilot review, issue #195
+                # round 43) -- same gap `_generate_test_doc_from_brief`'s
+                # own give-up path closes, see `_strip_fingerprint_from_a_
+                # failed_candidate`'s docstring: `out_path` still holds
+                # this attempt's raw, never-validated candidate, which
+                # never passed through `write_test_doc_with_sidecar`'s own
+                # stamping.
+                fingerprint_cleanup_problem = _strip_fingerprint_from_a_failed_candidate(out_path)
+                if fingerprint_cleanup_problem:
+                    member_cleanup_problems = member_cleanup_problems + [fingerprint_cleanup_problem]
 
             result = DocResult(
-                name, str(out_path), validation["ok"], attempts, input_tokens, output_tokens,
-                validation.get("problems", []),
+                name, str(out_path), validation["ok"] and not member_cleanup_problems, attempts,
+                input_tokens, output_tokens, list(validation.get("problems", [])) + member_cleanup_problems,
             )
             results.append(result)
             state[state_keys[name]] = {
@@ -1134,11 +2537,38 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
     for name, brief_hash, out_path in to_run_chunked:
         prior = state.get(state_keys[name])
         prior_chunks = prior.get("chunks") if isinstance(prior, dict) else None
-        result = generate_member_test_doc(
-            conn, name, language, framework, out_path, caller, writing_rules, template,
-            redact=redact, max_scenarios_per_call=threshold, prior_chunks=prior_chunks,
-            sme_notes=sme_notes,
-        )
+        try:
+            result = generate_member_test_doc(
+                conn, name, language, framework, out_path, caller, writing_rules, template,
+                redact=redact, max_scenarios_per_call=threshold, prior_chunks=prior_chunks,
+                sme_notes=sme_notes,
+            )
+        except Exception as exc:
+            # A member large enough to chunk touches the filesystem many
+            # more times than a single-document render (one write/replace
+            # per chunk, plus the index) -- several of those now raise on
+            # failure rather than swallowing it (issue #195's own several
+            # review rounds), so a real, if rare, failure here (a
+            # transient filesystem error mid-render) must not be allowed
+            # to escape uncaught and abort every *other* member's progress
+            # in this same batch (Copilot review): this loop has no
+            # surrounding try/except of its own, so an uncaught exception
+            # here would propagate all the way out of run_test_batch,
+            # discarding every already-checkpointed member's result along
+            # with it. Reported as this member's own failure instead --
+            # `state["ok"]` stays unset/False, so the next run's resume
+            # check doesn't trust whatever partial output this attempt
+            # left behind, and re-derives each chunk's own reuse decision
+            # from scratch via `_test_chunk_reuse_ok` rather than assuming
+            # anything about this failed attempt's mixed result.
+            logger.error(
+                "%s: chunked render raised %s: %s", name, exc.__class__.__name__, exc,
+                exc_info=True,
+            )
+            result = DocResult(
+                name, str(out_path), False, 0, 0, 0,
+                [f"chunked render raised {exc.__class__.__name__}: {exc}"],
+            )
         results.append(result)
         state[state_keys[name]] = {
             "ok": result.ok, "attempts": result.attempts, "brief_sha256": brief_hash,
@@ -1274,6 +2704,11 @@ def plan_test_batch(conn, members: list[str], language: str, framework: str, out
         _corpus_signature(conn, language, framework, threshold, redact, sme_notes) if state_path else None
     )
     corpus_unchanged = bool(state_path) and state.get("_corpus_sha256") == corpus_sig
+    # Shared across every member's chunk-reuse check below, not just within
+    # one member (Copilot review; see _lazy_valid_scenarios's docstring) --
+    # a --matrix dry-run over many chunked members would otherwise pay for
+    # this scan once per member instead of once for the whole preview.
+    valid_scenarios = _lazy_valid_scenarios(conn)
 
     plans: list[TestMemberPlan] = []
     for name in members:
@@ -1281,14 +2716,28 @@ def plan_test_batch(conn, members: list[str], language: str, framework: str, out
         key = f"{subdir.as_posix()}::{name}::{language}::{framework}"
         out_path = out_dir / subdir / language / framework / f"{name}.md"
         prior = state.get(key)
-        prior_ok = isinstance(prior, dict) and prior.get("ok") and out_path.exists()
+        # Mirrors run_test_batch's own prior_ok exactly, including the
+        # split-document sidecar existence check (Copilot review) -- a
+        # dry-run reporting "skip" for a member the real run would
+        # actually re-render (because its sidecar has gone missing) would
+        # be a preview that doesn't match reality.
+        prior_ok = (
+            isinstance(prior, dict) and prior.get("ok") and out_path.exists()
+            and not _split_doc_missing_its_sidecar(out_path, language)
+            and not _chunked_member_missing_a_chunk_file(out_path, prior.get("chunks"), language)
+        )
 
         if corpus_unchanged and prior_ok:
             plans.append(TestMemberPlan(name, "skip"))
             continue
 
         brief = test_case_brief(conn, name, redact=redact, sme_notes=sme_notes)
-        brief_hash = hashlib.sha256(f"{brief}\x00{threshold}".encode("utf-8")).hexdigest()
+        # Must match run_test_batch's own per-member brief_hash exactly
+        # (rule_fp included, issue #195 review) -- a dry-run preview using
+        # a differently-computed hash could report "skip" for a member the
+        # real run would actually re-render, or vice versa.
+        rule_fp = member_rule_fingerprint(conn, name) or ""
+        brief_hash = hashlib.sha256(f"{brief}\x00{threshold}\x00{rule_fp}".encode("utf-8")).hexdigest()
         if prior_ok and prior.get("brief_sha256") == brief_hash:
             plans.append(TestMemberPlan(name, "skip"))
             continue
@@ -1305,6 +2754,11 @@ def plan_test_batch(conn, members: list[str], language: str, framework: str, out
         chunk_width = len(str(chunk_count))
         prior_chunks = prior.get("chunks") if isinstance(prior, dict) else None
         chunks_reusable = 0
+        # Shared across every chunk of this one member below, the same
+        # reason `_generate_member_test_doc_chunked` shares one (Copilot
+        # review): every chunk's reuse check revalidates against the same
+        # member's fingerprint.
+        fingerprint_cache: dict = {}
         for i, (start, end) in enumerate(ranges, start=1):
             chunk_path = out_path.with_name(f"{out_path.stem}.chunk{i:0{chunk_width}d}{out_path.suffix}")
             chunk_rows = rows[start - 1:end]
@@ -1313,7 +2767,10 @@ def plan_test_batch(conn, members: list[str], language: str, framework: str, out
                 sme_notes=sme_notes,
             )
             chunk_hash = hashlib.sha256(chunk_brief.encode("utf-8")).hexdigest()
-            if _test_chunk_reuse_ok(conn, prior_chunks, i, chunk_hash, chunk_path, readonly=True):
+            if _test_chunk_reuse_ok(
+                conn, prior_chunks, i, chunk_hash, chunk_path, language, readonly=True,
+                _fingerprint_cache=fingerprint_cache, _valid_scenarios=valid_scenarios,
+            ):
                 chunks_reusable += 1
 
         plans.append(TestMemberPlan(

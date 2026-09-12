@@ -1661,6 +1661,16 @@ def cmd_test_validate(args) -> int:
               f"invalid_scenario_refs={r.get('invalid_scenario_refs', 0)}")
         for p in r["problems"]:
             print(f"       - {p}")
+        # Advisory only -- never counted toward `problems`/`ok` (issue
+        # #195: a stale sidecar isn't a defect in this document, and
+        # write_test_doc_with_sidecar refreshes it on the next successful
+        # render), but a human reading this report should still be able to
+        # see it happened, rather than a tolerated staleness looking
+        # identical to a genuinely clean document.
+        if r.get("sidecar_stale"):
+            unresolved = ", ".join(r.get("sidecar_unresolved_ids") or []) or "none"
+            print(f"       ! sidecar looks stale (unresolved ids: {unresolved}) -- "
+                  f"tolerated here, will refresh on the next successful render")
     print(f"\n{res['documents_ok']}/{res['documents']} documents clean, "
           f"{res['invalid_citations']} invalid citations of {res['total_citations']}, "
           f"{res['invalid_scenario_refs']} invalid scenario refs")

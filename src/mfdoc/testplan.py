@@ -16,6 +16,7 @@ that can get a generated doc can also get a generated test plan.
 
 from __future__ import annotations
 
+import hashlib
 import json
 
 from .citations import _cite, _rule_id, numbered_rule_candidates
@@ -149,6 +150,190 @@ def _branch_excerpt(conn, mid: int, name: str, header_line: int, body_lines: lis
     }
 
 
+def member_rule_fingerprint(conn, member_name: str) -> str | None:
+    """A fingerprint of exactly the input that determines this member's
+    `BR-nnn` numbering and which rows contribute a scenario at all:
+    `rule_candidate`'s own `(id, line_no, construct)` for every row,
+    ordered by `line_no` -- the same ordering `build_member_test_cases`
+    feeds through `numbered_rule_candidates()` (which assigns an ordinal
+    to *every* row positionally, branch or not) before filtering with
+    `_is_branch_row` to decide which of those ordinals actually become a
+    `BR-nnn` scenario. `None` if `member_name` doesn't resolve to exactly
+    one member (unknown, or ambiguous across libraries) -- a caller with no
+    real member to fingerprint, not an error this function should raise.
+
+    Deliberately over `rule_candidate`, not `test_case`: a `derive` rebuild
+    can insert, remove, or reorder `rule_candidate` rows for a member
+    without `mfdoc test-plan` having re-run yet to reflect that in
+    `test_case`. Comparing this fingerprint (recorded at sidecar-write time
+    by `testbatch.write_test_doc_with_sidecar`, in the document's own front
+    matter) against a freshly computed one is what lets `validate.
+    validate_test_doc` detect a genuine positional shift directly (issue
+    #195's staleness guard) instead of inferring it from whether an old
+    sidecar's `BR-nnn` ids happen to still resolve against current
+    `test_case` rows -- an id-overlap check alone cannot tell a real shift
+    apart from one where the old id set, by coincidence or because the
+    insertion/removal happened entirely *after* the sidecar's own range,
+    remains a literal subset of the current one.
+
+    `ORDER BY line_no, id`, deliberately matching `brief.
+    fetch_rule_candidate_rows`/`build_member_test_cases`'s own query
+    verbatim (all three `SELECT * FROM rule_candidate WHERE member_id=?
+    ORDER BY line_no, id`) -- same-line rows are explicitly supported
+    (natural.py can record more than one rule_candidate per source line),
+    and this fingerprint exists to describe *the same ordering*
+    `numbered_rule_candidates()` actually numbers from, not a different,
+    independently-invented one. `id` (the row's own insertion-order
+    primary key) is the explicit tie-break already used elsewhere for
+    this exact table (`graph.py`/`structural.py`'s own `rule_candidate`
+    queries) -- bare `ORDER BY line_no` leaves same-line rows' relative
+    order to SQLite's unspecified tie behaviour, which a later query-plan
+    or index change could alter with no fact actually changing, silently
+    reordering every tied id and marking every existing sidecar's
+    fingerprint stale for no real reason (Copilot review). Naming `id`
+    here, not leaving it implicit, is what makes it *this* function's own
+    explicit contract instead of an accident of whatever plan SQLite picks
+    today.
+
+    `construct` is hashed alongside `(id, line_no)` too (Copilot review):
+    `build_member_test_cases` only turns *branch* rows (`_is_branch_row`,
+    which reads `construct`) into `BR-nnn` scenarios -- ordinals are
+    assigned to every row *before* that filter runs, so a `derive`/
+    dialect-scanner change that reclassifies an existing row's `construct`
+    (e.g. between a branch construct and `DECIDE ON`, which
+    `_is_branch_row` excludes) does *not* shift any other row's ordinal;
+    it only adds or removes *that one row's own* scenario from the set
+    `test_case` should have, leaving every other id exactly where it was.
+    That's still a real change this fingerprint must catch: without
+    `construct`, the row's own `(id, line_no)` pair is unaffected by a
+    construct-only reclassification, so the fingerprint would stay
+    unchanged and let a sidecar/manifest that still includes (or still
+    lacks) that one now-stale scenario keep looking authoritative
+    indefinitely -- the same effect `member_test_case_aligned_with_rule_
+    candidate`'s own exact-equality check exists to catch on the write
+    side."""
+    rows, ambiguous = resolve_member_by_name(conn, member_name)
+    if ambiguous or not rows:
+        return None
+    mid = rows[0]["id"]
+    rc_rows = conn.execute(
+        "SELECT id, line_no, construct FROM rule_candidate WHERE member_id=? ORDER BY line_no, id", (mid,)
+    ).fetchall()
+    joined = "|".join(f"{r['id']}:{r['line_no']}:{r['construct']}" for r in rc_rows)
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
+
+
+def doc_rule_fingerprint(conn, member_names: list[str]) -> str | None:
+    """`member_rule_fingerprint`, combined across every member a generated
+    test document's `sources` front matter names (normally exactly one,
+    but not guaranteed) -- `None` if *any* of them doesn't resolve (same
+    "don't guess" contract as the single-member version), since a partial
+    fingerprint would be worse than none: a caller falling back to a
+    weaker staleness signal for a document it can't fully fingerprint is
+    safer than this function silently fingerprinting only part of it."""
+    parts = []
+    for name in sorted(member_names, key=str.upper):
+        fp = member_rule_fingerprint(conn, name)
+        if fp is None:
+            return None
+        parts.append(f"{name.upper()}={fp}")
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+def member_test_case_aligned_with_rule_candidate(conn, member_name: str) -> bool:
+    """Whether `member_name`'s current `rule_candidate_id`-linked `test_case`
+    rows exactly match its *current* `rule_candidate` rows -- False
+    whenever a `derive`/`classify-rules` rebuild has inserted, removed, or
+    reordered a `rule_candidate` row for this member since `mfdoc
+    test-plan` last ran, and `test_case` hasn't caught up yet (a
+    currently-unresolvable member counts as misaligned too: nothing to
+    compare against).
+
+    Exists to guard `testbatch.write_test_doc_with_sidecar`'s fingerprint
+    stamp (Copilot review on issue #195's fix): that fingerprint is a pure
+    function of `rule_candidate`, computed *at write time* -- but the
+    document just rendered (and the sidecar this stamps it onto) was built
+    from whatever `test_case` rows `test_case_brief` fed the model, which
+    can predate a `rule_candidate` change test-plan hasn't caught up to
+    yet. Stamping the *current* rule_candidate fingerprint onto that
+    still-old-numbered content bakes in a fingerprint that describes a
+    corpus state the sidecar doesn't actually reflect; once `mfdoc
+    test-plan` does catch up and a later render produces a manifest with
+    the new/renumbered ids, that stamped fingerprint (unchanged, since
+    rule_candidate itself hasn't moved again) still matches the current
+    recomputation, making the stale sidecar look current and the new
+    manifest's ids get rejected -- the same class of false positive issue
+    #195 exists to close, reintroduced at the write side instead of the
+    read side.
+
+    Exact equality of the `{rule_candidate_id: scenario_name}` mapping on
+    both sides, not a one-directional subset check (Copilot review on an
+    earlier version of this function, which only checked "every expected
+    id has a matching test_case row" and missed the opposite direction):
+    a `derive` rebuild can *remove* a `rule_candidate` row before
+    `test-plan` re-runs just as easily as it can insert one -- `test_case`
+    then still carries a `unit` row linked to that now-gone
+    `rule_candidate_id`, which the model's `test_case_brief`-driven
+    render still cites. Stamping a fingerprint computed from the smaller,
+    already-shrunk `rule_candidate` set in that state has the identical
+    consequence as the missing-id case: once `test-plan` removes that
+    stale `test_case` row too, the fingerprint (unchanged, since
+    `rule_candidate` itself doesn't move again) still matches, and the
+    new, now-shorter manifest gets rejected against a sidecar that still
+    cites the long-gone id. Equality also subsumes the reorder case a
+    prior round added `rule_candidate_id` linkage for: a name-set match
+    with a differing `rule_candidate_id` for the same key already fails
+    the dict comparison.
+
+    Only `unit`-kind, `rule_candidate_id`-linked `test_case` rows are
+    compared -- the only rows `build_member_test_cases` derives
+    one-for-one from a branch `rule_candidate` row (`_is_branch_row`), via
+    the same `numbered_rule_candidates` ordinal every other BR-numbering
+    consumer uses. An overlay-sourced `unit` row with no such link
+    (`rule_candidate_id IS NULL`) is excluded from `current` entirely --
+    it carries no positional relationship to `rule_candidate` to compare
+    against, and would only add noise (a false mismatch on every check)
+    here."""
+    rows, ambiguous = resolve_member_by_name(conn, member_name)
+    if ambiguous or not rows:
+        return False
+    mid = rows[0]["id"]
+    # `rows[0]["name"]`, not the raw `member_name` argument -- scenario_name
+    # is built from the member's own canonical (stored-case) name
+    # (`build_member_test_cases`'s own `name` param, always `m["name"]`
+    # from the resolved row), and `_rule_id` does no case normalization of
+    # its own -- comparing against a differently-cased `member_name` here
+    # would report every scenario as "misaligned" even when it isn't.
+    canonical_name = rows[0]["name"]
+    rc_rows = conn.execute(
+        "SELECT * FROM rule_candidate WHERE member_id=? ORDER BY line_no, id", (mid,)
+    ).fetchall()
+    expected = {
+        r["id"]: _rule_id(canonical_name, n)
+        for n, r in numbered_rule_candidates(rc_rows) if _is_branch_row(r)
+    }
+    current_rows = conn.execute(
+        "SELECT scenario_name, rule_candidate_id FROM test_case "
+        "WHERE member_id=? AND kind='unit' AND rule_candidate_id IS NOT NULL", (mid,)
+    ).fetchall()
+    # A dict comprehension keyed by rule_candidate_id would silently keep
+    # only the *last* row for a given id and never notice two `unit` rows
+    # sharing one (Copilot review): nothing in the schema enforces that
+    # link's uniqueness (unlike rule_theme's own `UNIQUE(rule_candidate_id)`
+    # -- see db.py), so a duplicate is a real, if unusual, misalignment
+    # `build_member_test_cases`'s one-row-per-branch-row contract never
+    # produces on its own -- collapsing it here instead of detecting it
+    # would let `write_test_doc_with_sidecar` stamp a fingerprint onto
+    # content this function never actually confirmed is one-for-one.
+    current: dict[int, str] = {}
+    for row in current_rows:
+        rc_id = row["rule_candidate_id"]
+        if rc_id in current:
+            return False
+        current[rc_id] = row["scenario_name"]
+    return expected == current
+
+
 def build_member_test_cases(conn, mid: int, name: str, overlay: dict | None = None) -> list[dict]:
     """Deterministically derive test_case rows for one member. Returns the
     rows inserted (as dicts) for callers that want to report on this run
@@ -166,7 +351,7 @@ def build_member_test_cases(conn, mid: int, name: str, overlay: dict | None = No
     given = {"parameters": params, "mocks": mocks}
 
     rules = conn.execute(
-        "SELECT * FROM rule_candidate WHERE member_id=? ORDER BY line_no", (mid,)
+        "SELECT * FROM rule_candidate WHERE member_id=? ORDER BY line_no, id", (mid,)
     ).fetchall()
 
     inserted: list[dict] = []

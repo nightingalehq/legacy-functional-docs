@@ -738,6 +738,12 @@ def thematic_rules_register(conn, redact: Redactor = NULL_REDACTOR) -> str:
     resolved_ids = list(id_to_name)
 
     id_placeholders = ",".join("?" * len(resolved_ids))
+    # `, rc.id` (Copilot review on issue #195's fix): feeds
+    # numbered_rule_candidates() below via groupby, same tie-break
+    # contract rules_register()/module_brief() now both use -- without it
+    # a same-line pair of rule_candidate rows could number differently
+    # here than in rules_register(), even though the comment below already
+    # claims "matching rules_register()'s numbering exactly".
     rule_rows = (
         conn.execute(
             f"""
@@ -746,7 +752,7 @@ def thematic_rules_register(conn, redact: Redactor = NULL_REDACTOR) -> str:
               FROM rule_candidate rc
               LEFT JOIN rule_theme rt ON rt.rule_candidate_id = rc.id
              WHERE rc.member_id IN ({id_placeholders})
-             ORDER BY rc.member_id, rc.line_no
+             ORDER BY rc.member_id, rc.line_no, rc.id
             """,
             resolved_ids,
         ).fetchall()
@@ -754,13 +760,14 @@ def thematic_rules_register(conn, redact: Redactor = NULL_REDACTOR) -> str:
         else []
     )
 
-    # Sequence numbers assigned in member_id/line_no order (matching
+    # Sequence numbers assigned in member_id/line_no/id order (matching
     # rules_register()'s numbering exactly) -- theme grouping happens only
     # in the second pass below, after every rule_id is already fixed.
-    # `rule_rows` is already ORDER BY rc.member_id, rc.line_no above, so each
-    # member's rows form one contiguous run -- numbered_rule_candidates()
-    # (the same ordinal assignment rules_register() itself uses) is applied
-    # per run via groupby, rather than a hand-rolled running counter.
+    # `rule_rows` is already ORDER BY rc.member_id, rc.line_no, rc.id above,
+    # so each member's rows form one contiguous run -- numbered_rule_
+    # candidates() (the same ordinal assignment rules_register() itself
+    # uses) is applied per run via groupby, rather than a hand-rolled
+    # running counter.
     by_theme: dict[str, list[str]] = {}
     source_counts_by_theme: dict[str, dict[str, int]] = {}
     total = 0

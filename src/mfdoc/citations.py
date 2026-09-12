@@ -21,8 +21,9 @@ def numbered_rule_candidates(rows: Iterable) -> Iterator[tuple[int, object]]:
     reimplementing `enumerate(rows, start=1)`.
 
     `rows` must already be exactly one member's `rule_candidate` rows, in
-    the order `_rule_id`'s ordinal is defined against -- source-line order
-    (`ORDER BY line_no`; see `brief.fetch_rule_candidate_rows`). This
+    the order `_rule_id`'s ordinal is defined against -- source-line order,
+    `id` breaking ties (`ORDER BY line_no, id`; see
+    `brief.fetch_rule_candidate_rows`). This
     function does no querying or reordering of its own: it is deliberately
     just the "assign ordinals to already-fetched rows" step, so a caller
     that already holds those rows for some other reason (rendering a

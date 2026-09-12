@@ -61,6 +61,22 @@ def test_validator_rejects_unknown_member(indexed_db, tmp_path):
     assert any("is not in the index" in p for p in result["problems"])
 
 
+def test_validator_rejects_non_mapping_front_matter_instead_of_crashing(indexed_db, tmp_path):
+    """Copilot review follow-up on issue #195's fix: `yaml.safe_load` parses
+    syntactically valid YAML between the `---` markers into a truthy
+    non-mapping just as readily as a mapping (a bare list here) --
+    `split_frontmatter`'s `or {}` only substitutes for a falsy parse, not a
+    truthy non-dict one. Every caller treats a non-`None` `fm` as a mapping
+    with no shape check of its own, so this used to reach `validate_doc`'s
+    own `fm.get(...)` as an unhandled `AttributeError` instead of the
+    malformed-front-matter problem this document should actually report."""
+    doc = tmp_path / "doc.md"
+    doc.write_text("---\n- a\n- b\n---\n\nThe program moves the field [[MMP0100:1]].\n", encoding="utf-8")
+    result = validate_doc(indexed_db, doc)
+    assert not result["ok"]
+    assert any("front matter is not a mapping" in p for p in result["problems"])
+
+
 def test_validator_rejects_missing_frontmatter_key(indexed_db, tmp_path):
     bad_fm = GOOD_FRONTMATTER.replace("doc_type: module\n", "")
     doc = tmp_path / "doc.md"

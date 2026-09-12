@@ -12,6 +12,989 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-12v):**
+- Addressed the fifty-sixth Copilot review round on PR #209 (issue #195):
+  round 55's deferred chunk-backup rollback had a gap of its own.
+  `_invalidate_chunk_pair_if_range_changed` returns `(None,
+  sidecar_backup)` for an orphan sidecar -- wrong-range ids on disk with
+  no `chunk_path` document at all to back up -- since there's nothing to
+  restore *from*. But the render that follows still writes its own fresh
+  candidate straight to `chunk_path` before validating it regardless, and
+  restoring only the sidecar (when that render then fails, or the
+  covering index never commits) used to leave that candidate in place:
+  a document that didn't exist when the run started, now mismatched with
+  the just-restored old sidecar. Added a branch to the deferred-backup
+  resolution loop that removes whatever now sits at `chunk_path` in
+  exactly this case (`chunk_backup is None`, not discarding) instead of
+  leaving it.
+- One new regression test, confirmed to fail without the fix. Full suite
+  green (1084 passed, 2 skipped) plus a clean `mfdoc validate` pass
+  against `examples/` (71/71 documents, 0 invalid citations of 750).
+
+**Progress (2026-09-12u):**
+- Addressed the fifty-fifth Copilot review round on PR #209 (issue #195),
+  two findings:
+  1. **Critical:** in `_generate_member_test_doc_chunked`, a chunk whose
+     boundary shifted and re-rendered successfully had its old
+     document/sidecar backup discarded immediately, *before* the index
+     covering every chunk (built only after the whole per-chunk loop
+     finishes) was known to have committed. If `_render_chunk_index` or
+     the index's own atomic replace then failed, the *old* index was left
+     on disk (untouched, since the new one never landed) while that
+     chunk's content had already moved on -- an index pointing at
+     semantically mismatched chunks that nothing would ever detect or
+     roll back. Reworked to defer every per-chunk backup's discard/
+     restore decision into this function's own outer `finally`, once
+     `index_written` is known: a chunk's backup now discards only when
+     *both* its own render succeeded *and* the index actually committed;
+     otherwise every already-succeeded chunk's backup is restored too, so
+     the whole chunked member rolls back together rather than partially.
+  2. `testbatch._TEST_CASE_FINGERPRINT_FIELD`'s strip regex required the
+     key at true line-start -- but a give-up candidate
+     (`_strip_fingerprint_from_a_failed_candidate`, round 43) is
+     never-validated, untrusted text that can carry this key indented to
+     any level. Added `^[ \t]*` to match an indented key too (an
+     already-*validated* document's front matter can never actually have
+     this shape -- inconsistent indentation breaks its YAML parse
+     entirely -- so this only ever matters on the give-up path, exactly
+     where the text is guaranteed untrusted).
+- Two new regression tests, each confirmed to fail without its fix. Full
+  suite green (1083 passed, 2 skipped) plus a clean `mfdoc validate` pass
+  against `examples/` (71/71 documents, 0 invalid citations of 750).
+
+**Progress (2026-09-12t):**
+- Addressed the fifty-fourth Copilot review round on PR #209 (issue #195),
+  two findings:
+  1. `testbatch._TEST_CASE_FINGERPRINT_FIELD`'s strip regex required the
+     key to be followed immediately by `:`, but YAML permits whitespace
+     between a mapping key and its colon (`test_case_fingerprint : ...`)
+     with the same meaning -- `yaml.safe_load` parses both identically.
+     Added `\s*` before the colon, same rationale as the round-52
+     quoted-key fix.
+  2. A chunked member's index document (`## Chunks`) has no sidecar of
+     its own -- each chunk has its own instead -- so it's excluded from
+     the round-53 missing-sidecar check. But a linked chunk file deleted
+     entirely left nothing for `mfdoc test-validate`'s tree walk to visit
+     at all, and the index's own aggregate `## Scenarios covered` ids
+     (computed from the chunk's content at write time, not read back at
+     validation time) still resolved against `test_case` regardless --
+     reporting the index clean despite a missing chunk. Added a
+     `CHUNK_LINK` check that confirms every chunk file the index's
+     `## Chunks` section names is still actually present on disk.
+- Two new regression tests, each confirmed to fail without its fix. Full
+  suite green (1081 passed, 2 skipped) plus a clean `mfdoc validate` pass
+  against `examples/` (71/71 documents, 0 invalid citations of 750).
+
+**Progress (2026-09-12s):**
+- Addressed the fifty-third Copilot review round on PR #209 (issue #195):
+  a document with a known/recognised `language` (a sidecar is expected)
+  that had actually been split (`## Scenarios covered` manifest in place
+  of the code fence) but whose sidecar file was deleted or never written
+  back was falling through to `validate_test_doc`'s body-scan fallback,
+  which only ever checks the manifest's own ids against `test_case` --
+  reporting `ok=True` even though the real test source the manifest
+  describes doesn't exist at all. Added an explicit check (mirroring the
+  same `## Scenarios covered`/`## Chunks` signal
+  `testbatch._split_doc_missing_its_sidecar` already uses for its own,
+  different resume-fast-path purpose) that flags a missing sidecar for a
+  known-language split document directly, before the fallback runs.
+- One new regression test, confirmed to fail without the fix. Full suite
+  green (1079 passed, 2 skipped) plus a clean `mfdoc validate` pass
+  against `examples/` (71/71 documents, 0 invalid citations of 750).
+
+**Progress (2026-09-12r):**
+- Addressed the fifty-second Copilot review round on PR #209 (issue #195):
+  `testbatch._TEST_CASE_FINGERPRINT_FIELD`'s strip regex only matched a
+  bare `test_case_fingerprint:` key -- YAML permits a quoted mapping key
+  (`"test_case_fingerprint": ...`) with exactly the same meaning
+  (`yaml.safe_load` parses both into the identical dict key), and a model
+  echoing/hallucinating this field can just as easily quote the key as
+  not. Left unstripped, a quoted-key copy would survive the give-up-path/
+  write_test_doc_with_sidecar rewrite untouched and be recoverable by a
+  later `_prior_fingerprint_for` call as a false trusted prior -- the same
+  leak the round-41 fix closed for the bare-key form. Widened the regex
+  to match an optionally single- or double-quoted key.
+- One new regression test, confirmed to fail without the fix. Full suite
+  green (1078 passed, 2 skipped) plus a clean `mfdoc validate` pass
+  against `examples/` (71/71 documents, 0 invalid citations of 750).
+
+**Progress (2026-09-12q):**
+- Addressed the fifty-first Copilot review round on PR #209 (issue #195).
+  One valid finding: round 49's new `docs/guides/architecture.md`
+  paragraph claimed both stale-sidecar-completeness exceptions apply only
+  to a standalone `mfdoc test-validate` check (`_render_time=False`), but
+  `validate.py`'s dropped-still-valid-scenario completeness check
+  (`legacy_bypass_still_valid_ids - scan_ids`) actually runs unconditionally
+  -- only the untraceable-body check is standalone-only (gated `not
+  _render_time`). Corrected the doc to distinguish the two.
+  A second finding (the progress-log heading `2026-09-12p` being flagged as
+  an invalid/typo'd date) is a false positive: this file's own established
+  convention, unbroken across a dozen-plus prior entries in this same
+  session (`...m`, `...n`, `...o`, `...p`), is a lettered suffix for
+  multiple same-day entries -- `p` correctly continues it. Left as-is;
+  replied via PR comment rather than renaming an intentional, consistent
+  heading.
+- No code changes this round (doc-only). Full suite still green (1077
+  passed, 2 skipped); `mfdoc validate` against `examples/` still clean
+  (71/71 documents, 0 invalid citations of 750).
+
+**Progress (2026-09-12p):**
+- Addressed the fiftieth Copilot review round on PR #209 (issue #195):
+  round 49's `stored_fingerprint_is_present`-less fix (`stored_fingerprint
+  is not None`) still couldn't distinguish a document with no
+  `test_case_fingerprint` field at all from one explicitly carrying
+  `test_case_fingerprint: null` -- `dict.get` reads both back as `None`.
+  An explicit null was therefore still silently handed the weaker
+  id-overlap fallback meant only for documents that never had this field.
+  Added `stored_fingerprint_is_present`, computed from key presence
+  (`"test_case_fingerprint" in fm`) rather than the value itself, and used
+  it in place of the value's own `is not None` check at both gate sites --
+  an explicit null is now compared like any other present value (and,
+  since no computed fingerprint is ever `None`, correctly reported as a
+  mismatch/stale rather than bypassed).
+- One new regression test, confirmed to fail without the fix. Full suite
+  green (1077 passed, 2 skipped) plus a clean `mfdoc validate` pass
+  against `examples/` (71/71 documents, 0 invalid citations of 750).
+
+**Progress (2026-09-12o):**
+- Addressed the forty-ninth Copilot review round on PR #209 (issue #195),
+  three findings (a fourth, repeating the "MMP0100/MOM is client content"
+  claim from round 46, is a false positive already answered by PR comment:
+  both are this repo's own pre-existing, invented fixture names, used
+  across 24+ files on `main` before this PR touched anything -- not
+  rewritten again here):
+  1. Round 45's non-string-`language` check used `fm.get("language") is
+     not None`, which can't distinguish "key absent" from "key present
+     with an explicit `language: null`" -- both return `None` from
+     `dict.get`. An explicit null therefore still silently took the
+     sidecar-bypass path a real, unrecognised string language legitimately
+     gets. Changed to key off presence (`"language" in fm`) instead.
+  2. `stored_fingerprint`'s fingerprint-vs-fallback branch was gated on
+     truthiness, not presence -- an explicitly stored but empty/invalid
+     `test_case_fingerprint: ""` was treated the same as "no fingerprint
+     at all" and routed to the weaker id-overlap fallback, which can
+     report a false manifest/sidecar mismatch for a sidecar whose ids
+     remain a coincidental subset after an insertion. Changed both gating
+     conditions to `is not None`, so a present-but-invalid value is
+     compared (and correctly reported as a mismatch) instead of bypassed.
+  3. `docs/guides/architecture.md`'s new staleness-is-advisory paragraph
+     (added last round) didn't mention the two cases that *do* turn a
+     stale/dropped sidecar into a hard `problems` entry for a standalone
+     `mfdoc test-validate` check (the untraceable-body case, and the
+     dropped-still-valid-scenario completeness check). Documented both.
+- Two new regression tests, each confirmed to fail without its fix. Full
+  suite green (1076 passed, 2 skipped) plus a clean `mfdoc validate` pass
+  against `examples/` (71/71 documents, 0 invalid citations of 750).
+
+**Progress (2026-09-12n):**
+- Addressed the forty-fifth Copilot review round on PR #209 (issue #195),
+  two findings:
+  1. `testlang.sidecar_path_for` returns `None` for a non-string
+     `language` the same way it does for a merely-unrecognised language
+     string (both "no sidecar to check"), but those aren't the same case:
+     a malformed, non-string `language` on a previously-split document
+     (manifest body, real code in the sidecar) silently fell back to
+     scanning that manifest, which can report `ok=True` even when the
+     actual sidecar file is missing or tampered with. Fixed in
+     `validate_test_doc`: a present-but-non-string `language` is now
+     flagged directly in `problems`, before any sidecar bypass decision
+     is made. Updated the one existing test that had asserted `ok=True`
+     for this shape (it was exercising exactly the gap this closes) and
+     added a new one using the sidecar-doc fixture with no `.py` file on
+     disk, confirming this no longer silently passes.
+  2. `docs/guides/architecture.md`'s §4 (Validate) described only the
+     manifest/sidecar cross-check, not the `test_case_fingerprint`
+     staleness contract added across rounds 40-44 of this same PR.
+     Expanded that section with the fingerprint-comparison /
+     id-overlap-fallback decision order and why staleness is advisory
+     (`result["sidecar_stale"]`) rather than a hard failure.
+- Two regression tests added/updated, both confirmed to fail without the
+  fix. Full suite green (1074 passed, 2 skipped) plus a clean `mfdoc
+  validate` pass against `examples/` (71/71 documents, 0 invalid citations
+  of 750).
+
+**Progress (2026-09-12m):**
+- Addressed the forty-fourth Copilot review round on PR #209 (issue
+  #195): round 43's give-up-path fingerprint strip was itself
+  unconditional -- if every model call in a re-render attempt raises
+  before a single response comes back, `out_path` is left exactly as it
+  was *before* this invocation, which for a re-render of an already-
+  successful member is that prior render's own known-good document,
+  still carrying a legitimately-stamped, trustworthy fingerprint.
+  Stripping it there mutated a known-good document over a failure that
+  was never its own, forcing every future validation back onto the
+  weaker id-overlap fallback. Added a `wrote_a_candidate` flag, set only
+  when this invocation actually overwrote `out_path` with a candidate,
+  and guarded the strip on it (`run_test_batch`'s own separate pooled-
+  dispatch give-up path already only reaches its equivalent cleanup after
+  a response was received and `out_path` was written, so needed no
+  matching change).
+- One new regression test, confirmed to fail without the fix. Full suite
+  green (1073 passed, 2 skipped) plus a clean `mfdoc validate` pass
+  against `examples/` (71/71 documents, 0 invalid citations of 750).
+
+**Progress (2026-09-12l):**
+- Addressed the forty-third Copilot review round on PR #209 (issue #195):
+  `_prior_fingerprint_for` trusts whatever `test_case_fingerprint` it
+  finds at a path as a genuinely-stamped prior, with no way to tell that
+  apart from a raw, never-validated candidate's own leftover field. A
+  render that exhausts every retry attempt without ever validating
+  leaves its last candidate on disk exactly as the model produced it --
+  `write_test_doc_with_sidecar` never runs for it, so nothing else ever
+  strips a `test_case_fingerprint` the model happened to echo/
+  hallucinate into that candidate. A *later* invocation reading the same
+  path back would recover that untrusted value as `_prior_fingerprint`,
+  risking the same stale-sidecar-looks-authoritative deadlock this whole
+  mechanism exists to prevent, on a value nothing ever actually
+  validated. Added `_strip_fingerprint_from_a_failed_candidate` (sharing
+  its stripping logic with `write_test_doc_with_sidecar`'s own field
+  strip via a new `_strip_stamped_fingerprint_field` helper) and called
+  it at both give-up points that leave a failed candidate on disk:
+  `_generate_test_doc_from_brief`'s own retry-loop exhaustion, and
+  `run_test_batch`'s separate pooled-dispatch implementation for
+  ordinary (non-chunked) members.
+- Two new regression tests, each confirmed to fail without its fix. Full
+  suite green (1072 passed, 2 skipped) plus a clean `mfdoc validate` pass
+  against `examples/` (71/71 documents, 0 invalid citations of 750).
+
+**Progress (2026-09-12k):**
+- Addressed the forty-second Copilot review round on PR #209 (issue #195),
+  three findings:
+  1. The chunk-loop's sidecar-backup restore only accounted for the
+     sidecar itself -- `_generate_test_doc_from_brief`'s own retry loop
+     writes each attempt's raw candidate straight to `chunk_path` *before*
+     validating it, so a render that gets a response on every attempt but
+     never validates still leaves that last, invalid candidate at
+     `chunk_path` when the range-changed invalidation's restore runs.
+     Restoring only the old sidecar there paired it with that failing
+     candidate -- the exact mismatch the invalidate-before-render
+     mechanism exists to prevent, one step later than the fingerprint
+     check alone can see. Added `_invalidate_chunk_pair_if_range_changed`,
+     backing up `chunk_path` alongside its sidecar and restoring/
+     discarding both together under the identical rule.
+  2. `validate_test_doc`'s render-time fingerprint precedence (round 40's
+     fix) still fell back to the candidate's own stamped field when
+     `_prior_fingerprint` was `None` -- a legacy document or orphaned
+     sidecar with nothing to recover a prior from could let a
+     coincidentally-matching candidate value make a stale sidecar look
+     authoritative again, reproducing the exact deadlock the render-time
+     bypass exists to prevent. Now ignores the candidate's own field
+     entirely whenever `_render_time=True`, falling through to the
+     no-fingerprint-context legacy bypass instead. `_test_chunk_reuse_ok`'s
+     own revalidation of already-written, previously-validated chunk
+     content (a different, legitimate use of `_render_time=True` -- see
+     that function's docstring) now explicitly threads that document's
+     own already-stamped fingerprint through as `_prior_fingerprint`
+     (via `_prior_fingerprint_for`) rather than relying on the internal
+     fallback this closed off; `_readonly_validate_test_doc` gained the
+     matching parameter to pass it through for the dry-run path.
+  3. Round 41's fingerprint-stripping fix only removed the
+     `test_case_fingerprint` key's own line -- a YAML block scalar or
+     sequence value carries its actual content on the following indented
+     lines instead, which a single-line strip left behind as orphaned
+     continuation lines (malformed YAML, or silently attached to a
+     preceding key). Now consumes those continuation lines too.
+- Three new regression tests, each confirmed to fail without its fix
+  (fix 1 verified via a temporary revert-and-restore during this round;
+  fixes 2 and 3 the same way). Full suite green (1070 passed, 2 skipped)
+  plus a clean `mfdoc validate` pass against `examples/` (71/71
+  documents, 0 invalid citations of 750).
+
+**Progress (2026-09-12j):**
+- Addressed the forty-first Copilot review round on PR #209 (issue #195):
+  `write_test_doc_with_sidecar` left any `test_case_fingerprint` already
+  present in the *candidate's own* front matter untouched whenever it
+  couldn't compute a trusted replacement (e.g. `test_case` stale relative
+  to `rule_candidate`). A model can echo/hallucinate this field from the
+  brief or a prior template even though it's only ever supposed to be
+  stamped here, after a successful validation -- left in place, that
+  untrusted value could later coincidentally match once `test-plan`
+  catches up, at which point `validate_test_doc`'s standalone fallback
+  (no `_prior_fingerprint` -- a `mfdoc test-validate` run) would read it
+  as genuine and treat a sidecar it was never actually validated against
+  as authoritative, reintroducing the exact false-manifest-mismatch
+  failure this mechanism exists to prevent. Now stripped unconditionally
+  before conditionally stamping a trusted value in its place.
+- One new regression test, confirmed to fail without the fix. Full suite
+  green (1067 passed, 2 skipped) plus a clean `mfdoc validate` pass
+  against `examples/` (71/71 documents, 0 invalid citations of 750).
+
+**Progress (2026-09-12i):**
+- Addressed the fortieth Copilot review round on PR #209 (issue #195):
+  1. The chunk-loop's own sidecar-backup restore/discard decision used
+     `if fresh_sidecar.exists() or (result is not None and result.ok):
+     sidecar_backup.unlink()` -- deferring to `fresh_sidecar.exists()`
+     first meant a nested failure (a partially-installed fresh sidecar
+     left behind by a mid-render exception) could be misread as a
+     completed, accepted render and wrongly *discard* the last-known-good
+     backup instead of restoring it. Now checks only `result is not None
+     and result.ok`; anything else (a failed validation, or the render
+     itself raising) always restores the backup, unconditionally
+     overwriting whatever partial state sits at the real path.
+  2. The corpus-level resume fast path's missing-sidecar check
+     (`_split_doc_missing_its_sidecar`, added in round 36/38) only ever
+     looked at a chunked member's own `out_path` -- the deterministic
+     index, which by design never has its own sidecar -- so it never
+     verified that the chunk files the index links to (or their sidecars,
+     for a split chunk) were still on disk. A chunk deleted out from
+     under this tool while the database, resume state, and index all
+     stayed otherwise unchanged would have been skipped indefinitely.
+     Added `_chunked_member_missing_a_chunk_file`, reconstructing each
+     prior chunk's path from `prior["chunks"]` the same way
+     `_generate_member_test_doc_chunked` originally named it, and wired
+     it into both resume-skip fast paths (`run_test_batch` and
+     `plan_test_batch`) alongside the existing single-document check.
+  3. `validate_test_doc`'s `stored_fingerprint` precedence had the
+     candidate's own stamped `test_case_fingerprint` field win over
+     `_prior_fingerprint` (the caller's own captured, known-genuine prior)
+     whenever the field was present -- but a freshly-generated candidate
+     is never supposed to carry this field at all (only
+     `write_test_doc_with_sidecar` stamps it, after validation succeeds),
+     so a value that shows up anyway is the model echoing/hallucinating
+     it, not something to trust over the caller's own prior. Swapped the
+     `or` precedence so `_prior_fingerprint` wins when both are present;
+     the candidate's own field is only read as a fallback for a
+     standalone `mfdoc test-validate` call, which never passes
+     `_prior_fingerprint` at all.
+  4. A genuine fingerprint *mismatch* (the corpus has moved on since a
+     sidecar was stamped) left `legacy_bypass_still_valid_ids` empty,
+     unlike the no-fingerprint-at-all bypass just below it in the same
+     function -- so a fresh candidate silently dropping a scenario the
+     stale sidecar still had (still a real, current `test_case` row)
+     passed with nothing to catch it, then got written with the
+     *current* fingerprint: permanently accepting the omission instead of
+     merely tolerating the staleness itself. Now populated in the
+     mismatch branch too, scoped to ids that are still genuinely valid
+     scenarios today, matching the existing bypass's own scoping.
+- Three new regression tests (a chunked-member missing-chunk-file resume
+  case; a fingerprint-mismatch dropped-scenario case; a
+  `_prior_fingerprint`-wins-over-the-candidate's-own-field case). Full
+  suite green (1066 passed, 2 skipped) plus a clean `mfdoc validate` pass
+  against `examples/` (71/71 documents, 0 invalid citations of 750).
+
+**Progress (2026-09-12h):**
+- Addressed the thirty-ninth Copilot review round on PR #209 (issue
+  #195):
+  1. `run_test_batch`'s own dispatch loop for chunked members had no
+     `try/except` around `generate_member_test_doc` -- several of that
+     function's own filesystem writes now raise on failure rather than
+     swallowing it (this issue's own several review rounds), so a real,
+     if rare, failure would propagate all the way out of
+     `run_test_batch`, discarding every *other* member's already-
+     checkpointed result in the same batch along with it. Now caught and
+     reported as that one member's own failure; a full snapshot/restore
+     of every already-written chunk file on such a failure was considered
+     and declined as disproportionate -- each chunk's own write is
+     already independently atomic (via `write_test_doc_with_sidecar`'s
+     own rollback), and the next run's resume re-derives each chunk's
+     reuse decision from scratch via `_test_chunk_reuse_ok` rather than
+     trusting anything about a failed attempt's state, self-correcting
+     without needing a cross-file transaction.
+  2. `member_test_case_aligned_with_rule_candidate`'s `current` dict
+     comprehension was keyed by `rule_candidate_id`, silently keeping
+     only the *last* `test_case` row for a given id -- the schema doesn't
+     enforce uniqueness on that link (unlike `rule_theme`'s own `UNIQUE(
+     rule_candidate_id)`), so two rows sharing one would never be
+     noticed, letting a fingerprint get stamped onto content this
+     function never actually confirmed was one-for-one. Now detected
+     explicitly and treated as misaligned.
+- Two new regression tests. Full suite green (1063 passed, 2 skipped)
+  plus a clean `mfdoc validate` pass against `examples/` (71/71
+  documents, 0 invalid citations of 750).
+
+**Progress (2026-09-12g):**
+- Addressed the thirty-eighth Copilot review round on PR #209 (issue
+  #195): the previous round's `_split_doc_missing_its_sidecar` (member-
+  level resume-skip fix) only checked for the `## Scenarios covered`
+  heading -- but the chunk *index* document (`_render_chunk_index`'s own
+  output) carries that same heading too, as its own aggregate across
+  every chunk, despite never getting a sidecar of its own at all (each
+  chunk gets its own instead). Every unchanged *chunked* member was being
+  misread as a split document that lost its sidecar, forcing a full
+  chunk/index rebuild on every single resume instead of the fast skip --
+  a real regression in the previous round's own fix, silent because no
+  test exercised a chunked member's resume path against it. Now excludes
+  the index via its own `## Chunks` heading (unique to that template)
+  before the `## Scenarios covered` check runs.
+- One new regression test proving an unchanged chunked member is still
+  skipped (no model calls) on resume. Full suite green (1061 passed, 2
+  skipped) plus a clean `mfdoc validate` pass against `examples/` (71/71
+  documents, 0 invalid citations of 750).
+
+**Progress (2026-09-12f):**
+- Addressed the thirty-seventh Copilot review round on PR #209 (issue
+  #195) -- a degraded pass ("unable to run its full agentic suite"),
+  lower-severity findings than usual:
+  - `split_frontmatter`'s malformed-front-matter message now reports
+    `type(raw_fm).__name__` instead of `raw_fm!r` -- the value itself
+    could be arbitrarily large or hold unexpected content, ending up in
+    CLI output/logs.
+  - `validate_test_doc`/`_readonly_validate_test_doc`'s internal-only
+    (`_`-prefixed) parameters are now keyword-only (`*` after `path`) --
+    every real call site already used keywords for them, so this only
+    forecloses an accidental future positional call.
+  - `valid_scenarios()` hoisted out of `bad_refs`'s loop in
+    `validate_test_doc` -- already memoized, so no behaviour change, just
+    clearer that every iteration checks against the same set.
+  - A test's `write_text` now passes `encoding="utf-8"` explicitly,
+    matching its neighbours.
+  Full suite green (1060 passed, 2 skipped) plus a clean `mfdoc validate`
+  pass against `examples/` (71/71 documents, 0 invalid citations of 750).
+
+**Progress (2026-09-12e):**
+- Addressed the thirty-sixth Copilot review round on PR #209 (issue
+  #195):
+  1. `run_test_batch`/`plan_test_batch`'s own member-level resume skip
+     (`corpus_unchanged and prior_ok`) never checked whether a previously
+     successful *split* single-document output had lost its sidecar --
+     unlike `_test_chunk_reuse_ok` on the chunked path, nothing there
+     would ever notice the executable source was gone, so `test-batch`
+     could keep reporting an incomplete output as reusable forever.
+     Factored the check `_test_chunk_reuse_ok` already had into a shared
+     `_split_doc_missing_its_sidecar` and applied it to both resume skips
+     too.
+  2. A chunked-to-chunked rerender that shrinks `chunk_count` pruned the
+     now-extra `.chunk<N>` files *before* the new index was committed --
+     those files were still referenced by the *old* index on disk, so an
+     exception anywhere in between (a bug in `_render_chunk_index`
+     itself, say) left that old, still-current index pointing at chunk
+     files that no longer existed. Deferred until right after the new
+     index write succeeds, mirroring the identical fix already made for
+     the single-document shrink-back path.
+  3. `validate_test_doc`'s "untraceable" guard (a stale sidecar with real
+     ids, next to a document body with none to fall back on) also fired
+     during `_render_time=True` -- rejecting a fresh, otherwise-valid
+     candidate that legitimately has zero `MEMBER:BR-nnn` references,
+     which is exactly the shape `_write_test_doc_with_sidecar_or_
+     invalidate` exists to clean up *after* acceptance. Rejecting it here
+     meant that cleanup path could never run, deadlocking a member that
+     legitimately drops to zero references forever. Scoped to the
+     standalone (`mfdoc test-validate`) path only -- the completeness
+     check just below it already covers the real risk (silently losing a
+     scenario the old sidecar still had) on a per-id basis.
+  4. `split_frontmatter`'s `yaml.safe_load(...) or {}` substituted `{}`
+     for *any* falsy parse -- `None` genuinely means "no front matter",
+     but a bare `false`, `0`, or `[]` between the markers is a real shape
+     mismatch that was being silently absorbed into empty front matter
+     instead of reported. Now only `None` gets the substitution.
+- Six new regression tests. Full suite green (1060 passed, 2 skipped)
+  plus a clean `mfdoc validate` pass against `examples/` (71/71
+  documents, 0 invalid citations of 750).
+
+**Progress (2026-09-12d):**
+- Addressed the thirty-fifth Copilot review round on PR #209 (issue
+  #195):
+  1. The chunk index document (`_render_chunk_index`'s output) was
+     written with a direct `write_text` onto `out_path`, unlike every
+     other write in this module -- a failed/truncated write there (disk-
+     full mid-write) would still hit the `finally` block that restores
+     the moved-aside `index_sidecar_backup` (since `index_written` is
+     only set *after* a successful write), pairing that restored old
+     sidecar with a *broken* new index instead of the fully-intact old
+     pair the rollback is meant to leave behind. Now written to a `.tmp`
+     sibling and replaced atomically, same as every other write here.
+  2. `_test_chunk_reuse_ok` treated `result["ok"] and not result.get(
+     "sidecar_stale")` as sufficient for reuse, but a *split* chunk
+     document (one already turned into prose + a `## Scenarios covered`
+     manifest, its actual test source moved to the sidecar file) whose
+     sidecar has since gone missing on disk still validates `ok=True` --
+     `validate_test_doc` falls back to scanning the body, and the
+     manifest's ids still resolve against `test_case` regardless of
+     whether the sidecar file exists. Reusing it would carry the missing-
+     source problem forward indefinitely. Now checks the real sidecar
+     path directly whenever the document's own `## Scenarios covered`
+     manifest marks it as split, while still allowing a genuinely
+     embedded-fence document (no manifest, nothing moved out) with no
+     sidecar of its own.
+- Three new regression tests (the atomic index write not leaving a
+  truncated index behind, and both directions of the missing-sidecar
+  reuse check -- reject a split chunk with no sidecar, still allow an
+  embedded-fence one). Full suite green (1057 passed, 2 skipped) plus a
+  clean `mfdoc validate` pass against `examples/` (71/71 documents, 0
+  invalid citations of 750).
+
+**Progress (2026-09-12c):**
+- Addressed the thirty-fourth Copilot review round on PR #209 (issue
+  #195): `write_test_doc_with_sidecar`'s rollback (when the document's
+  own `replace` fails after the sidecar's already succeeded) restored the
+  old sidecar with a direct `write_bytes` onto the real path -- not
+  atomic, so an interrupted or failed rollback write could itself leave a
+  truncated sidecar behind, the identical class of mismatch this whole
+  rollback exists to avoid. Now restores through a temp file plus
+  `Path.replace`, keeping the rollback itself a single directory-entry
+  update like every other write in this function.
+- Extended an existing regression test to also assert no rollback temp
+  file is left behind. Full suite green (1054 passed, 2 skipped) plus a
+  clean `mfdoc validate` pass against `examples/` (71/71 documents, 0
+  invalid citations of 750).
+
+**Progress (2026-09-12b):**
+- Addressed the thirty-third Copilot review round on PR #209 (issue
+  #195): `_corpus_signature`'s own `rule_candidate` query hashed `(id,
+  member_id, line_no)` but not `construct`, even though
+  `member_rule_fingerprint` hashes it (previous round) for exactly the
+  reason a construct-only reclassification also leaves `test_case`
+  untouched. Without it here, `corpus_unchanged` could short-circuit both
+  `run_test_batch` and `plan_test_batch` before ever reaching the
+  per-member fingerprint check that would have caught it. Added.
+- One new regression test (`_corpus_signature` changing for a
+  construct-only reclassification with unchanged `id`/`line_no`). Full
+  suite green (1054 passed, 2 skipped) plus a clean `mfdoc validate` pass
+  against `examples/` (71/71 documents, 0 invalid citations of 750).
+
+**Progress (2026-09-12):**
+- Addressed the thirty-second Copilot review round on PR #209 (issue
+  #195):
+  1. Corrected an inaccurate claim the previous round's own progress
+     entry, several docstrings, and a test repeated: `numbered_rule_
+     candidates()` assigns an ordinal to *every* `rule_candidate` row
+     before `_is_branch_row` filters which ones become scenarios, so
+     reclassifying an existing row's `construct` does *not* shift any
+     other row's positional id -- it only adds or removes that row's own
+     scenario from the set `test_case` should have. The fingerprint fix
+     itself was already correct (hashing `construct` still catches this,
+     just for a different reason than documented); only the documentation
+     was wrong, across `testplan.py` (two docstrings), `validate.py`, a
+     test docstring, and this file's own prior entry.
+  2. `_write_test_doc_with_sidecar_or_invalidate`'s stale-sidecar removal
+     failure was only logged, not propagated -- the render caller still
+     reported `ok=True` (a clean, resumable state) while the stale sidecar
+     remained. Now returns `(sidecar_path, cleanup_problem)`; every call
+     site folds a returned problem into that member's own result.
+  3. `generate_member_test_doc`'s (and `run_test_batch`'s identical
+     dispatch-time copy of the same) shrink-back cleanup pruned a
+     member's old `.chunk<N>` files -- its own *last successful* output --
+     before attempting the new single-document render, not after. A
+     model timeout or validation failure in that new render then
+     destroyed the last known-good result instead of leaving it as a
+     stale-but-real fallback. Both now defer the prune until the new
+     render actually succeeds.
+- Two new regression tests (the stale-sidecar-removal failure now
+  surfacing as a problem, and old chunk output surviving a failed
+  replacement render). Full suite green (1053 passed, 2 skipped) plus a
+  clean `mfdoc validate` pass against `examples/` (71/71 documents, 0
+  invalid citations of 750).
+
+**Progress (2026-09-11t):**
+- Addressed the thirty-first Copilot review round on PR #209 (issue
+  #195):
+  1. The chunk-loop sidecar-backup cleanup ran only after
+     `_generate_test_doc_from_brief` returned normally -- if that call
+     itself raised (`write_test_doc_with_sidecar`'s own temp-write/replace
+     failure propagates uncaught), the cleanup was skipped entirely,
+     stranding the backup at `.stale` with nothing at the real sidecar
+     path either. Now in a `finally`. Also corrected the "no fresh
+     sidecar, so restore" branch: an *accepted* (`ok=True`) render with no
+     sidecar written is a legitimate no-BR-references shape, not a
+     failure -- restoring the old, unrelated backup there would pair a
+     correctly-refless accepted document with a stale sidecar a later
+     validation would then wrongly flag as a real mismatch. Only a render
+     that didn't succeed at all now restores; an accepted refless one
+     discards, same as a real fresh sidecar does.
+  2. The single-document render paths (`_generate_test_doc_from_brief`'s
+     three call sites, `run_test_batch`'s pool loop) all ignored
+     `write_test_doc_with_sidecar`'s `None` return the identical way the
+     chunked path used to -- a member re-rendered into a no-BR-references
+     shape kept its *previous* render's sidecar sitting on disk, paired
+     with a document that no longer references it. New
+     `_write_test_doc_with_sidecar_or_invalidate` wraps every call site,
+     removing a stale leftover sidecar whenever this call doesn't produce
+     a replacement.
+  3. `member_rule_fingerprint` hashed only `(id, line_no)` -- ordinals are
+     assigned to every `rule_candidate` row before `_is_branch_row`
+     filters which ones become scenarios, so a `derive`/dialect-scanner
+     change that reclassifies an existing row's `construct` (e.g. between
+     a branch construct and `DECIDE ON`, which `_is_branch_row` excludes)
+     doesn't shift any other row's ordinal -- it only adds or removes
+     *that row's own* scenario from the set `test_case` should have,
+     while `(id, line_no)` itself stays unchanged. Still a real change
+     the fingerprint must catch: `construct` is now hashed alongside.
+- Four new regression tests (both outcomes of the corrected three-way
+  chunk cleanup, an exception-during-render case, the single-document
+  wrapper's own removal/no-op behavior, and the construct-reclassification
+  fingerprint change). Full suite green (1051 passed, 2 skipped) plus a
+  clean `mfdoc validate` pass against `examples/` (71/71 documents, 0
+  invalid citations of 750).
+
+**Progress (2026-09-11s):**
+- Addressed the thirtieth Copilot review round on PR #209 (issue #195):
+  the chunk-loop cleanup added last round trusted `result.ok` as proof
+  that `write_test_doc_with_sidecar` had written a fresh sidecar to
+  replace the one just moved aside -- but that function silently returns
+  without writing one when the validated candidate's own code fence has
+  no `MEMBER:BR-nnn` references at all (nothing for `validate_test_doc`
+  to flag as invalid in that shape either), and no caller captures its
+  return value. An accepted render in that shape deleted the backup
+  anyway, leaving the chunk with no sidecar at all -- the exact failure
+  this whole mechanism exists to prevent, just reached through an
+  accepted render instead of a failed one. Now checks whether a real
+  sidecar actually exists at the expected path directly, rather than
+  inferring it from `ok`.
+- One new regression test reproducing the no-BR-references shape end to
+  end. Full suite green (1047 passed, 2 skipped) plus a clean `mfdoc
+  validate` pass against `examples/` (71/71 documents, 0 invalid
+  citations of 750).
+
+**Progress (2026-09-11r):**
+- Addressed the twenty-ninth Copilot review round on PR #209 (issue
+  #195):
+  1. `_invalidate_sidecar_if_range_changed` now renames a wrong-range
+     sidecar to a `.stale` sibling instead of deleting it outright, and
+     returns that backup path -- if the chunk's own re-render never gets
+     far enough to write anything at all (every model call raises before
+     a response comes back), a plain delete left `chunk_path` (its old,
+     unchanged content, whose stale manifest still cites real, resolvable
+     ids) with no sidecar at all, which `validate_test_doc` treats as an
+     embedded-fence document and can validate clean from the stale
+     manifest alone. The caller now restores the backup when the render
+     didn't succeed, and discards it once a fresh sidecar has replaced it.
+  2. The leftover single-document sidecar cleanup in
+     `_generate_member_test_doc_chunked` has the identical hole one layer
+     up: if it's removed and something between there and the index
+     write raises uncaught, `out_path` is left as its own old,
+     pre-existing single-document render with no sidecar at all. Same
+     fix -- renamed to a backup, restored in a `finally` unless the index
+     write actually completes.
+  3. `write_test_doc_with_sidecar`'s temp-then-replace write left one or
+     both `.tmp` siblings behind on every failure path (a failed content
+     write, a failed first replace) -- neither is ever read back by
+     anything, but a repeatedly-failing run would accumulate misleading
+     generated-source/markdown artifacts in the output tree. Both are now
+     removed in a `finally` regardless of outcome.
+- Six new regression tests (direct rename-not-delete checks for both
+  sidecar-invalidation call sites, an end-to-end boundary-shift-plus-
+  render-failure case, and `.tmp` cleanup on both a first-write and a
+  first-replace failure). Full suite green (1046 passed, 2 skipped) plus
+  a clean `mfdoc validate` pass against `examples/` (71/71 documents, 0
+  invalid citations of 750).
+
+**Progress (2026-09-11q):**
+- Addressed the twenty-eighth Copilot review round on PR #209 (issue
+  #195):
+  1. `write_test_doc_with_sidecar`'s temp-then-replace write (previous
+     round) used `Path.rename` (refuses an existing destination on
+     Windows, unlike `Path.replace`) and was still only two individually-
+     atomic replaces, not one transaction for the pair -- if the sidecar's
+     replace succeeded and the document's own then failed, the new
+     sidecar was left paired with the old document. Switched to
+     `Path.replace`, and the sidecar's pre-existing bytes are now
+     snapshotted first and restored (or the just-placed sidecar removed,
+     if none existed) if the document's replace then fails -- returning
+     to the same paired state it started from rather than a real
+     mismatch. A true cross-file transaction (a journal/generation-marker
+     protocol) would close the remaining sliver of this window too, but
+     is more machinery than currently justified for a single-process
+     batch tool's residual risk here.
+  2. `member_test_case_aligned_with_rule_candidate` (rounds 24-25) checked
+     only that every *current* rule_candidate id has a matching test_case
+     row -- a one-directional subset check that missed a `rule_candidate`
+     row *removed* (or reclassified out of branch-row status) before
+     `mfdoc test-plan` re-runs: `test_case` then still carries a `unit`
+     row for an id no longer in the current expected set at all, which a
+     check that only walks the expected side never looks at. Now exact
+     equality of the `{rule_candidate_id: scenario_name}` mapping (only
+     over `rule_candidate_id`-linked rows -- an overlay-sourced row with
+     no such link is still excluded, as before), catching both directions
+     at once.
+- Five new regression tests (both halves of the rollback -- restoring an
+  existing sidecar and removing a newly-placed one with nothing to
+  restore -- and the removed/reclassified-rule alignment case). Full
+  suite green (1043 passed, 2 skipped) plus a clean `mfdoc validate` pass
+  against `examples/` (71/71 documents, 0 invalid citations of 750).
+
+**Progress (2026-09-11p):**
+- Addressed the twenty-seventh Copilot review round on PR #209 (issue
+  #195):
+  1. `write_test_doc_with_sidecar`'s sidecar/document pair is now written
+     to `.tmp` siblings first, then renamed into place, instead of two
+     plain sequential `write_text` calls: if the sidecar write succeeded
+     but the document's own write then failed (disk-full, a permissions
+     change mid-run), the old pair was left mismatched -- a freshly
+     written sidecar paired with the *old* document -- which
+     `validate_test_doc` would cross-check as a genuine drift. Content is
+     now fully written to temp files (the only place that failure mode
+     can occur) before either final path is touched at all.
+  2. `_prune_stale_test_chunk_files` (round 25's logging fix) now returns
+     its removal-failure messages instead of only logging them, and every
+     call site folds them into that member's own render/skip result
+     (marking it `ok=False`) -- a leftover obsolete `.chunk<N>` document
+     is exactly the kind of artifact `validate_tests_tree` still walks
+     and validates independently, so reporting the render as clean while
+     one remains was misleading.
+- Three new regression tests (the atomic-write failure mode leaving both
+  original files untouched, and cleanup-failure surfacing on both the
+  chunked-index and single-document shrink-back paths). Full suite green
+  (1040 passed, 2 skipped) plus a clean `mfdoc validate` pass against
+  `examples/` (71/71 documents, 0 invalid citations of 750).
+
+**Progress (2026-09-11o):**
+- Addressed the twenty-sixth Copilot review round on PR #209 (issue
+  #195):
+  1. `_generate_member_test_doc_chunked`'s leftover single-document
+     sidecar cleanup (issue #195 review, an earlier round) swallowed a
+     failed removal as merely cosmetic -- but that exact path is what
+     `sidecar_path_for` also resolves for the index document, so a later
+     standalone `mfdoc test-validate` sweep would still cross-check the
+     index's aggregate manifest against the unrelated leftover content.
+     Now recorded as a problem (this render reports `ok=False`) instead
+     of reporting clean while the stale sidecar remains.
+  2. `_test_chunk_reuse_ok`'s revalidation threaded through
+     `_fingerprint_cache` (previous round) but not an equivalent shared
+     `_valid_scenarios` provider -- new `_lazy_valid_scenarios` helper,
+     threaded through both the real chunk loop (per member) and
+     `plan_test_batch`'s dry-run (shared across the whole `--matrix`
+     preview, not just one member), the same sharing
+     `validate_tests_tree` already does for a tree walk.
+  3. `_corpus_signature`'s `ORDER BY tc.scenario_name` had no tie-break --
+     `scenario_name` isn't unique across libraries (a bare member name can
+     collide; `member` is unique on `(name, library, dialect)`), so two
+     equal names could change this digest based on SQLite's unspecified
+     tie order alone, forcing an unnecessary full rerender on resume for
+     no real corpus change. Added `tc.member_id, tc.id`.
+  4. `validate_test_doc`'s docstring claimed the `_render_time=False`
+     legacy-sidecar branch covers "a dry-run reuse check" -- `_test_chunk_
+     reuse_ok`'s dry-run (`readonly=True`) branch actually passes
+     `_render_time=True` unconditionally, same as its real-render path.
+     Corrected.
+- Four new regression tests (a scenario-name-collision corpus-signature
+  determinism check, the fingerprint-cache-forwarding test extended to
+  also cover `_valid_scenarios`, and the stale-index-sidecar removal
+  failure surfaced as a chunk failure). Full suite green (1038 passed, 2
+  skipped) plus a clean `mfdoc validate` pass against `examples/` (71/71
+  documents, 0 invalid citations of 750).
+
+**Progress (2026-09-11n):**
+- Addressed the twenty-fifth Copilot review round on PR #209 (issue
+  #195):
+  1. `member_test_case_aligned_with_rule_candidate` (previous round)
+     compared only the *set* of expected BR-nnn names, which a
+     `rule_candidate` rebuild that reorders existing rows (line_nos shift,
+     none inserted/removed) can leave unchanged even though each name is
+     now supposed to map to a different row. Now also compares each
+     expected id's `test_case.rule_candidate_id` against the row that
+     `numbered_rule_candidates` currently assigns that ordinal to, so a
+     silent reorder is caught the same way a missing id already was.
+  2. `_invalidate_sidecar_if_range_changed` (previous round) swallowed a
+     failed sidecar removal -- worse than this module's other
+     best-effort cleanup, since the *wrong-range* sidecar left behind
+     still carries a member-wide fingerprint that matches, making
+     `validate_test_doc` treat it as authoritative and fail the
+     about-to-be-rendered candidate's cross-check on every retry. Now
+     raises; the chunk loop catches it and reports it as that chunk's own
+     failure instead of pressing on into a render doomed to fail less
+     legibly.
+  3. `_prune_stale_test_chunk_files`'s own (separately) swallowed
+     `OSError`s now log a warning instead of failing silently -- a
+     leftover orphan here is lower-stakes (nothing currently authoritative
+     is affected) but can still surface as a confusing stale-manifest
+     failure whenever something later walks the output tree.
+- Three new regression tests (a same-name-set reorder the alignment check
+  must still catch, and the chunk loop surfacing a failed sidecar
+  invalidation instead of swallowing it). Full suite green (1036 passed, 2
+  skipped) plus a clean `mfdoc validate` pass against `examples/` (71/71
+  documents, 0 invalid citations of 750).
+
+**Progress (2026-09-11m):**
+- Addressed the twenty-fourth Copilot review round on PR #209 (issue
+  #195):
+  1. `write_test_doc_with_sidecar`'s fingerprint stamp is now guarded by a
+     new `testplan.member_test_case_aligned_with_rule_candidate`: this
+     document's own content was rendered from whatever `test_case` rows
+     were current when `test_case_brief` built its prompt, which can
+     predate a `rule_candidate` change `mfdoc test-plan` hasn't caught up
+     to yet (exactly the state `run_test_batch`'s per-member resume-skip
+     regression exercises). Stamping the *current* rule_candidate
+     fingerprint onto that still-old-numbered content bakes in a value
+     that keeps matching every later recomputation (rule_candidate
+     doesn't move again until the next derive run) -- making the
+     now-stale sidecar look current even after test-plan catches up,
+     rejecting a later, legitimate manifest's new ids as "missing from
+     sidecar". Deliberately a subset check (no current rule_candidate id
+     lacks a test_case row), not exact equality -- an unrelated *extra*
+     test_case row isn't this specific false positive's concern.
+  2. The prior round's `, id` tie-break only reached 3 of the several
+     queries that feed `numbered_rule_candidates()` (the shared BR-nnn
+     ordinal assignment `rules_register`, `module_brief`,
+     `thematic_rules_register`, and `testplan.build_member_test_cases`
+     all rely on). `module_brief`'s own rules query, `_copycode_rule_
+     candidates`, `rules_register`'s bulk query, and `thematic_rules_
+     register`'s bulk query now all order the same way -- otherwise a
+     same-line pair of rule_candidate rows could number differently
+     across these views, pointing a generated test or fingerprint at the
+     wrong rule despite each individual query "consistently" using its
+     own unspecified tie order.
+- Five new regression tests (the fingerprint-alignment guard, both
+  directly and via `write_test_doc_with_sidecar`, plus fixing two
+  existing test fixtures that asserted a fingerprint from `rule_candidate`
+  data with no matching `test_case` row -- an unrealistic combination the
+  new guard correctly rejects). Full suite green (1034 passed, 2 skipped)
+  plus a clean `mfdoc validate` pass against `examples/` (71/71 documents,
+  0 invalid citations of 750).
+
+**Progress (2026-09-11l):**
+- Addressed the twenty-third Copilot review round on PR #209 (issue #195):
+  1. `member_rule_fingerprint`'s `ORDER BY line_no` (previously deliberately
+     left without a secondary key, to match `build_member_test_cases`/
+     `brief.fetch_rule_candidate_rows`'s own bare `ORDER BY line_no`) left
+     same-line rule_candidate rows' relative order to SQLite's unspecified
+     tie behaviour -- a later query-plan/index change could silently
+     reorder them with no fact actually changing, marking every existing
+     sidecar's fingerprint stale for no real reason. All three queries now
+     explicitly order `line_no, id` -- the same tie-break `graph.py`/
+     `structural.py`'s own `rule_candidate` queries already use -- so the
+     three stay consistent with each other (the actual requirement) while
+     also being deterministic (the fix), instead of consistent-by-accident.
+  2. `sidecar_path_for` now rejects a non-string `language` (any YAML
+     scalar shape a malformed/hand-edited document's front matter allows --
+     a list, a number, a mapping) instead of reaching `LANGUAGE_EXTENSIONS.
+     get(language)` with an unhashable value and crashing `mfdoc
+     test-validate` with `TypeError`.
+- Three new regression tests (fingerprint tie-break query text,
+  `sidecar_path_for`'s type guard, and an end-to-end `validate_test_doc`
+  check for malformed `language`). Full suite green (1032 passed, 2
+  skipped) plus a clean `mfdoc validate` pass against `examples/` (71/71
+  documents, 0 invalid citations of 750 -- confirming the new tie-break
+  changed no real document's numbering).
+
+**Progress (2026-09-11k):**
+- Addressed the twenty-second Copilot review round on PR #209 (issue
+  #195): the prior round's shared `_fingerprint_cache` never reached
+  `_test_chunk_reuse_ok`'s own revalidation -- both the real chunk loop's
+  reuse check and `plan_test_batch`'s dry-run mirror called
+  `validate_test_doc`/`_readonly_validate_test_doc` with no cache at all,
+  so the intended cache-*hit* path (a chunk being reused verbatim) still
+  cost O(chunks * rules) recomputing the same member's fingerprint on
+  every chunk. `_test_chunk_reuse_ok` and `_readonly_validate_test_doc`
+  both gained the same `_fingerprint_cache` parameter and now forward it;
+  the real chunk loop passes its existing shared dict through, and the
+  dry-run loop gained one scoped to each member's own chunks (mirroring
+  the real path's scope). One new regression test asserting the
+  parameter is actually forwarded on both the real and read-only
+  validator branches. Full suite green (1029 passed, 2 skipped) plus a
+  clean `mfdoc validate` pass against `examples/` (71/71 documents, 0
+  invalid citations of 750).
+
+**Progress (2026-09-11j):**
+- Addressed the twenty-first Copilot review round on PR #209 (issue #195):
+  1. `split_frontmatter` now rejects syntactically valid but non-mapping
+     YAML (a bare scalar or list between the `---` markers) as malformed
+     front matter, instead of returning it unguarded -- every caller
+     already treated a non-`None` result as a mapping with no shape check
+     of its own, so this used to reach `validate_doc`'s `fm.get(...)` as
+     an unhandled crash in every `mfdoc validate`/`mfdoc test-validate`
+     call, not just the test-doc path a prior round had already guarded
+     locally in `write_test_doc_with_sidecar`.
+  2. `validate_tests_tree`'s shared `test_case` scenario-name scan
+     (previous round) is now a lazily-memoized callable passed to
+     `validate_test_doc` as `_valid_scenarios`, not a value computed
+     unconditionally before any document's own need for it is known -- a
+     tree with no sidecar-bearing/BR-referencing documents at all now
+     never runs that scan.
+  3. `validate_test_doc` gained `_fingerprint_cache`, an optional shared
+     dict keyed by sorted `sources`: `doc_rule_fingerprint` re-queries and
+     re-hashes a member's entire `rule_candidate` set from scratch on
+     every call, which was repeated once per chunk in
+     `_generate_member_test_doc_chunked` and up to four times per member
+     across `run_test_batch`'s own initial/auto-cite/patch/retry
+     validations for the same document. Threaded through both of those
+     call sites (and `validate_tests_tree`, for a tree containing more
+     than one chunk of the same member) so each distinct member's
+     fingerprint is computed at most once per operation; every other call
+     site leaves it unset and keeps the prior per-call cost.
+- Four new regression tests: two crash-guard tests for the non-mapping
+  front-matter fix (`tests/test_validate.py`, `tests/test_test_validate.py`),
+  one confirming `validate_tests_tree` shares its scan across documents,
+  and one confirming the fingerprint cache is shared across calls for the
+  same member. Full suite green (1028 passed, 2 skipped) plus a clean
+  `mfdoc validate` pass against `examples/` (71/71 documents, 0 invalid
+  citations of 750).
+
+**Progress (2026-09-11i):**
+- Addressed the twentieth Copilot review round on PR #209 (issue #195):
+  1. `validate_tests_tree` now computes its `valid test_case scenario names`
+     scan once and passes it into every `validate_test_doc(..., _valid_
+     scenarios=...)` call via a new optional parameter, instead of each
+     sidecar-bearing document independently re-running that same full
+     `test_case` scan -- was O(document_count * corpus_size) for a tree
+     validation; a caller validating a single document in isolation (every
+     other call site, including this suite) leaves the parameter unset and
+     keeps the prior per-call lazy-cache behaviour.
+  2. `write_test_doc_with_sidecar`'s inline comment above the fingerprint
+     write still claimed a `[member_name]` fallback for unparseable
+     `sources` that the function's own docstring (and the code immediately
+     below it) already disclaims -- the prior round's progress entry
+     verified the wrong piece of text (the docstring, not this comment) and
+     declared the finding already resolved. Corrected the comment to match
+     actual behaviour: `fingerprint` is left unset, never substituted.
+  3. `test_render_time_legacy_sidecar_bypass_does_not_flag_a_legitimately_
+     new_scenario` was named and documented as covering a candidate
+     introducing a scenario the old sidecar never had, but both the
+     candidate and the legacy sidecar it exercised only ever contained
+     `BR-004` -- no new id was actually exercised. Added a second scenario
+     (`BR-001`, real and current) to the candidate that the sidecar still
+     lacks, so the test now exercises the case its name and docstring claim.
+- Full suite green (1024 passed, 2 skipped) plus a clean `mfdoc validate`
+  pass against `examples/` (71/71 documents, 0 invalid citations of 750).
+
+**Progress (2026-09-11h):**
+- Addressed the remaining Copilot review findings on PR #209 (issue #195,
+  stale test-batch sidecar detection):
+  1. `testbatch.py`'s new `_invalidate_sidecar_if_range_changed` closes a
+     narrower gap than the full chunk-scoped-fingerprint redesign
+     `_prior_fingerprint_for`'s docstring already declines to take on:
+     `write_test_doc_with_sidecar` stamps a *member*-wide
+     `test_case_fingerprint`, not one scoped to which scenario range a
+     given chunk *index* covers, so if that member-wide `rule_candidate`
+     ordering is unchanged but chunk boundaries move on their own (a
+     `max_scenarios_per_call` change, or a `routine` boundary shifting),
+     the stamped fingerprint still matches and `validate_test_doc`'s
+     authoritative fingerprint check would read the old, now-wrong-range
+     sidecar as still current -- failing validation on every retry since
+     the corpus hasn't actually changed. `_generate_member_test_doc_
+     chunked` now calls this before re-rendering any cache-miss chunk,
+     dropping that chunk's on-disk sidecar outright when its own BR-nnn
+     ids no longer match this run's freshly-computed row range for that
+     index -- the same effect `validate_test_doc`'s existing legacy-
+     sidecar bypass has, triggered here for a range-shifted sidecar
+     instead of a fingerprint-less one.
+  2. `validate.py`'s `_render_time=True` legacy-sidecar bypass (no stored
+     `test_case_fingerprint` anywhere) was dropping the old sidecar from
+     validation entirely in both directions -- right for the *new*-id
+     deadlock it exists to prevent (see the function's own docstring), but
+     it also silently waived whether a fresh candidate still covers every
+     scenario the old sidecar did. `bad_refs` alone only checks a
+     candidate's own ids are valid, never that it didn't quietly stop
+     referencing one. Added a completeness check scoped to old-sidecar ids
+     that are still genuinely valid `test_case` scenarios today
+     (`legacy_bypass_still_valid_ids`) -- a candidate silently dropping one
+     of those now fails validation, while a legitimately new id the old
+     sidecar never had (the deadlock case) still passes.
+  3. `write_test_doc_with_sidecar` guarded `doc_fm.get("sources")` with
+     `isinstance(doc_fm, dict)`, not just `is not None`:
+     `split_frontmatter` can return a truthy scalar or list for
+     syntactically-valid-but-non-mapping YAML, which `.get` raises on.
+     Also reordered the function so both on-disk writes (the sidecar file,
+     then the rewritten document) happen only after every step that can
+     still bail out early, so a document that doesn't make it all the way
+     through can never end up with a freshly-written sidecar paired with a
+     document nobody rewrote to reference it.
+  4. Verified (no code change needed) that two other reported findings are
+     already resolved by earlier rounds on this same issue: `_corpus_
+     signature` already folds in `rule_candidate` `(id, line_no)` and
+     `routine` boundary/name rows (since the third review round), and
+     `run_test_batch`'s per-member `brief_sha256` already folds in
+     `member_rule_fingerprint` (since a later round) -- both a routine
+     rename/boundary shift and a `rule_candidate` reorder already defeat
+     the corpus-level and per-member resume fast paths, so `test_case_
+     brief`'s own routine-derived rendering can't go stale undetected at
+     either layer. `write_test_doc_with_sidecar`'s docstring already
+     matched its actual fallback-to-`None` behaviour on unparseable
+     `sources` (no fabricated fallback fingerprint).
+- Six new regression tests added across `tests/test_test_batch.py` and
+  `tests/test_test_validate.py` for the above; full suite green
+  (1024 passed, 2 skipped) plus a clean `mfdoc validate` pass against
+  `examples/` (71/71 documents, 0 invalid citations).
+
 **Progress (2026-09-11d):**
 - Implemented issue #214 (#207/#183 Part 2 follow-up): a second, member-
   level `cache_control` breakpoint for a chunked member's chunk loop, using
@@ -245,6 +1228,363 @@ GitHub org.
   prefix_redacts_metadata_fields` (`tests/test_brief.py`). Full suite: 993
   passed, 2 skipped (up from 955 passed, 2 skipped per #210's own progress
   entry).
+
+**Progress (2026-09-11g):**
+- Issue #195, real redesign: the previous rounds' `all(...)` id-overlap
+  staleness heuristic in `validate_test_doc` had a genuine hole Copilot's
+  review correctly identified -- a rule inserted (or removed) *after* the
+  sidecar's own BR-range still shifts every later id project-wide, but
+  leaves the sidecar's own ids a literal subset of the new, larger valid
+  set (old `{BR-001, BR-002, BR-003}`, current `{BR-001, ..., BR-004}`).
+  `code_ids <= valid_scenarios()` reads that as "still current" and
+  cross-checks the stale sidecar against a fresh manifest anyway --
+  reproducing the exact false "not found" failure this issue exists to
+  fix, for this one insertion shape. No amount of tuning the id-overlap
+  threshold (any/all/majority) can close this: it's testing the wrong
+  thing (which ids happen to still resolve) instead of the right one
+  (has the corpus that determined this numbering actually changed).
+  Replaced the primary signal with a real content fingerprint:
+  `testplan.member_rule_fingerprint(conn, member_name)` hashes the
+  member's own `rule_candidate` `(id, line_no)` ordering -- exactly the
+  input `build_member_test_cases`'s `numbered_rule_candidates()` reads
+  positionally to assign every `BR-nnn` id -- and `doc_rule_fingerprint`
+  combines it across a document's `sources` (normally one member, but not
+  assumed to be). `testbatch.write_test_doc_with_sidecar` now stamps this
+  as `test_case_fingerprint` into the document's front matter at write
+  time (needed `conn`/`member_name` added to its signature; updated all
+  four call sites in `testbatch.py` plus the one direct test call).
+  `validate_test_doc` recomputes the same fingerprint at validation time
+  and compares directly: a mismatch means the corpus has genuinely moved
+  on, independent of which specific ids happen to still resolve -- this
+  is what actually catches the insertion-after-range case. The original
+  `all(...)` id-overlap check is kept, but demoted to a fallback for
+  documents with no stored fingerprint at all (older documents written
+  before this field existed, or hand-written fixtures) -- every document
+  written from here on gets the exact check instead. One implementation
+  bug caught before pushing (self-review, not a review round): the write
+  side initially called `member_rule_fingerprint` directly while the read
+  side called `doc_rule_fingerprint` (which re-hashes its inputs) --
+  always-mismatching by construction, breaking `_test_chunk_reuse_ok`'s
+  reuse check for every already-correct chunk (six existing tests caught
+  this immediately). Fixed by using `doc_rule_fingerprint(conn,
+  [member_name])` on both sides.
+  Also fixed, same round: `_corpus_signature` (the global "nothing
+  changed, skip everything" fast path in `run_test_batch`/
+  `plan_test_batch`) hashed `test_case`'s own columns but not
+  `rule_candidate`'s `(id, line_no)` ordering or `routine` boundaries
+  directly -- a `derive` rebuild that shifts those *before* `mfdoc
+  test-plan` re-runs to reflect it in `test_case` could leave every
+  hashed column untouched while chunk boundaries/BR-numbering have
+  already moved, wrongly skipping every member and bypassing
+  `_test_chunk_reuse_ok`'s own per-chunk check entirely; and a stale
+  sidecar being ignored with nothing in the document body to fall back on
+  scanning (an empty manifest) previously validated `ok=True` for lack of
+  anything left to flag -- now reported as an explicit "cannot be
+  verified at all" problem instead of a silent pass. Confirmed by hand
+  (not just by the new tests) that the insertion-scenario test fails
+  without the fingerprint (using a temporary version with the field
+  stripped -- `sidecar_stale` came back `False`, the exact bug being
+  fixed) and passes with it. Added
+  `test_stale_sidecar_whose_old_ids_remain_a_subset_after_an_insertion`,
+  `test_stale_sidecar_with_no_body_fallback_is_reported_as_untraceable`,
+  `test_hand_edited_sidecar_with_a_fingerprint_still_flags_an_invented_id`
+  (`tests/test_test_validate.py`) and
+  `test_corpus_signature_changes_when_rule_candidate_ordering_shifts_but_test_case_does_not`
+  (`tests/test_test_batch.py`). A further review round asked for an
+  end-to-end guard through the real write path, not just a
+  hand-constructed `test_case_fingerprint` fixture -- added
+  `test_generate_member_test_doc_stamps_fingerprint_and_detects_a_later_insertion`
+  (`tests/test_test_batch.py`), which renders through
+  `generate_member_test_doc` -> `write_test_doc_with_sidecar`, asserts the
+  field actually landed in front matter, then inserts a `rule_candidate`
+  row after the document's own range and confirms the very next
+  validation reports it stale. Full suite: 979 passed, 2 skipped; bundled
+  fixture pipeline (`ingest`/`derive`/`coverage`/`validate --docs
+  examples`) unchanged from before this change.
+
+  A further review round found the actual critical gap in the above: the
+  fingerprint check only ever fired once a document already carried its
+  own stamped `test_case_fingerprint` -- but the *first* validation of a
+  freshly-generated candidate (the render/retry loop's own call, right
+  after the model responds and before `write_test_doc_with_sidecar` ever
+  runs) sees a document whose front matter has no such field at all (the
+  model was never asked to produce one), because `out_path` gets
+  overwritten with that candidate text *before* `validate_test_doc` reads
+  it -- destroying whatever fingerprint the *previous* successful render
+  had stamped there, at exactly the moment it would have been needed to
+  detect staleness in the old sidecar sitting untouched right next to it.
+  This meant the fingerprint fix, as first landed, protected only a
+  document's *second* validation onward (a later `mfdoc test-validate`
+  run, or a dry-run reuse check) -- never the render loop's own first
+  pass, which is the actual validation issue #195 is about. Confirmed by
+  hand: a temporary sanity check that made the new capture always return
+  `None` reproduced the exact pre-fix false "not found" failure end to
+  end, through the real render/retry path.
+  Fixed with `testbatch._prior_fingerprint_for(out_path)`: read *before*
+  the render loop's first write to `out_path` this call, from whatever
+  document (if any) is already there from a previous successful render,
+  and threaded through every `validate_test_doc(..., _prior_fingerprint=
+  ...)` call in both retry loops (`_generate_test_doc_from_brief`, and
+  `run_test_batch`'s separate inline pool-loop path for non-chunked
+  members). `validate_test_doc` now falls back to `_prior_fingerprint`
+  only when the document being validated carries no `test_case_
+  fingerprint` of its own. Also fixed, same round: a malformed `sources`
+  front-matter value (e.g. a non-string list element -- already flagged
+  separately in `problems` by `validate_doc`'s own checks) could make
+  `doc_rule_fingerprint`'s `sorted(..., key=str.upper)` raise, turning a
+  front-matter contract violation into an unhandled `mfdoc test-validate`
+  crash; guarded to leave the fingerprint unavailable (falls through to
+  the ID-overlap fallback) instead. Added
+  `test_rerender_after_an_insertion_is_not_falsely_rejected_against_the_
+  old_sidecar`, reproducing the exact end-to-end scenario: a first
+  successful render, a rule inserted afterward (simulating a `derive`
+  rebuild + `test-plan` re-run before the sidecar refreshes), then a
+  second render whose genuinely-correct response must validate clean on
+  the first attempt rather than being falsely rejected against the old,
+  now-stale sidecar. Full suite: 980 passed, 2 skipped; bundled fixture
+  pipeline unchanged.
+
+  Same round flagged one more resume layer with the identical blind spot:
+  `run_test_batch`/`plan_test_batch`'s *per-member* skip (distinct from
+  `_corpus_signature`'s global one) hashes `test_case_brief()`'s own
+  output, which only ever reads `test_case`, never `rule_candidate`
+  directly -- a `derive` rebuild that inserts a `rule_candidate` row for
+  one member, before `mfdoc test-plan` re-runs to reflect it in
+  `test_case`, leaves that brief (and the old per-member hash) completely
+  unchanged, so this skip would still wrongly treat the member as
+  unchanged and never reach the render path at all, leaving a stale
+  sidecar in place indefinitely regardless of the corpus-level and
+  render-loop fixes above. Folded `testplan.member_rule_fingerprint` into
+  both the real per-member `brief_hash` (`run_test_batch`) and its
+  dry-run mirror (`plan_test_batch`, which must match exactly per its own
+  documented contract). Added
+  `test_run_test_batch_per_member_skip_sees_a_rule_candidate_only_change`.
+  Full suite: 981 passed, 2 skipped.
+
+  A twelfth review round raised two quick, real fixes and one
+  documentation-only point, addressed here: `sources` containing
+  whitespace-padded member names (e.g. `["FAKEMOD "]`) fell through to the
+  weaker ID-overlap fallback because `resolve_member_by_name`'s exact
+  match doesn't find a member literally named with trailing whitespace --
+  `doc_rule_fingerprint`'s inputs are now stripped first. The malformed-
+  `sources` crash guard from the previous round had no regression test
+  actually exercising `validate_test_doc`'s own code path (existing tests
+  covered `validate_doc`/tree partitioning, not this one) -- added
+  `test_malformed_sources_does_not_crash_the_fingerprint_lookup`. And: a
+  document/sidecar pair written *before* this fingerprint field existed
+  has no migration path -- there's nothing in today's fact store to
+  reconstruct what the `rule_candidate` ordering *was* at that earlier
+  write time, which is what a retroactive fingerprint would need.
+  Documented explicitly in `validate_test_doc`'s docstring as a one-time,
+  self-resolving transition (a pre-existing document stays on the weaker
+  ID-overlap fallback until its own next successful render stamps a real
+  fingerprint), not a persistent gap -- no code change needed, since this
+  is the same, already-necessary fallback (2) exists for. Full suite:
+  1008 passed, 2 skipped.
+
+  A thirteenth review round found four more real gaps and two test-
+  coverage gaps, all addressed here. Real fixes: (1) `member_rule_
+  fingerprint`'s query added its own `, id` tie-break for same-line
+  `rule_candidate` rows, but `build_member_test_cases`/`brief.
+  fetch_rule_candidate_rows` (the actual numbering source, used
+  identically across every other BR-numbering consumer in the codebase)
+  never has one -- same-line rows are explicitly supported, and adding a
+  tie-break only on the fingerprinting side made it describe a different
+  ordering than the one that actually produced the scenario IDs. Removed
+  the added tie-break to match the established `ORDER BY line_no`
+  convention exactly, rather than inventing a second, disagreeing one.
+  (2) `write_test_doc_with_sidecar` always fingerprinted `[member_name]`,
+  but `validate_test_doc` recomputes from the document's own `sources`
+  list, which can legitimately name more than one member -- mismatching
+  by construction for any such document. Now parses the document's own
+  `sources` at write time (falling back to `[member_name]` only if it
+  can't be parsed) so both sides hash the same input. (3) A member
+  growing past the chunking threshold between runs leaves its prior
+  single-document sidecar on disk; `_prune_stale_chunk_files` only
+  removes `.chunk<N>` files, deliberately, so the chunked index document
+  at the same `out_path` (which never gets its own sidecar -- each chunk
+  gets its own) could have its aggregated manifest cross-checked against
+  that unrelated leftover content via `sidecar_path_for`'s purely
+  path-based lookup. Now removed explicitly, unconditionally, right
+  before a chunked render begins. (4) A malformed-but-technically-a-list
+  `sources` entry with stray whitespace (e.g. `["FAKEMOD "]`) failed
+  `resolve_member_by_name`'s exact match and fell through to the weaker
+  fallback -- now stripped before fingerprinting. One point accepted as a
+  documented, not fixed, limitation: `_prior_fingerprint_for` has nothing
+  to recover across a fresh invocation following one that exhausted every
+  retry (the last invalid candidate on disk never got a fingerprint
+  stamped) -- closing this would mean persisting the fingerprint
+  separately in resume state purely to survive a failure that already
+  needs human investigation on its own, not something this mechanism
+  should add complexity trying to paper over silently.
+  Test coverage gaps closed: `test_corpus_signature_changes_when_a_
+  routine_boundary_shifts` (the existing rule-ordering regression never
+  varied a `routine` row on its own); `test_run_test_batch_pool_loop_
+  rerender_after_an_insertion_is_not_falsely_rejected` (the critical
+  end-to-end regression only exercised `generate_member_test_doc`, not
+  `run_test_batch`'s separate inline pool-loop path, which duplicates the
+  same `_prior_fingerprint_for`/`validate_test_doc` calls independently);
+  `test_chunked_index_removes_a_leftover_single_doc_sidecar` (confirmed
+  by hand to fail -- the leftover file staying on disk -- without fix
+  (3), and pass with it). Full suite: 1011 passed, 2 skipped; bundled
+  fixture pipeline unchanged.
+
+  A fourteenth review round caught that the previous round's "self-
+  resolving transition" framing for a legacy (no-fingerprint) document
+  was actually wrong -- and correctly identified this as the *exact*
+  scenario issue #195 itself describes, not a minor residual case. For a
+  legacy document, `test-plan` adding a scenario after the old sidecar's
+  range makes the old ids a coincidental subset of the new valid set; the
+  id-overlap fallback reads that as "still current"; the fresh
+  candidate's manifest legitimately listing the new id gets rejected as
+  "missing from sidecar" on *every* retry (nothing about the corpus
+  changes between them, so retrying changes nothing); and because
+  `write_test_doc_with_sidecar` only stamps a fingerprint after a
+  *successful* validation, the sidecar is never refreshed and this
+  deadlocks indefinitely across every future invocation -- not a one-time
+  transition at all. Fixed by adding `_render_time: bool = False` to
+  `validate_test_doc`: when true (set only by the two render/retry loops'
+  own `validate_test_doc` calls -- `_generate_test_doc_from_brief` and
+  `run_test_batch`'s separate inline pool-loop path, all 7 call sites), a
+  sidecar with no fingerprint context at all (neither its own nor a
+  recovered prior one) is treated as absent outright, skipping the
+  id-overlap heuristic entirely, rather than risking exactly this
+  deadlock. Safe specifically because a render-time validation's own
+  outcome determines whether the sidecar is about to be rewritten anyway,
+  and the ordinary `bad_refs` check against `body` still runs regardless
+  -- an invented id in the candidate is still caught; this bypass only
+  removes a stale-or-legacy sidecar's veto power over an otherwise-
+  correct fresh candidate. The id-overlap fallback remains for
+  `_render_time=False` callers (`mfdoc test-validate`, dry-run reuse
+  checks) validating a document that isn't about to be rewritten this
+  call. Confirmed by hand: a temporary change disabling the
+  `_render_time` branch reproduced the exact deadlock (`ok=False` on both
+  attempts, the "missing from sidecar" problem) before re-enabling it.
+  Added `test_legacy_sidecar_with_no_fingerprint_does_not_deadlock_
+  after_an_insertion`, reproducing the real issue #195 scenario end to
+  end: a document/sidecar pair written exactly as every pre-this-fix
+  document looks (no fingerprint anywhere), an insertion via a real
+  `test-plan` re-run, then a rerender that must succeed on the first
+  attempt and leave a real fingerprint stamped going forward. Full suite:
+  1012 passed, 2 skipped; bundled fixture pipeline unchanged.
+
+  A fifteenth review round found the write-side counterpart of the
+  whitespace-stripping fix from an earlier round: `validate_test_doc`
+  strips `sources` member names before resolving them, but `write_test_
+  doc_with_sidecar` was still passing them through unstripped -- a
+  `sources` entry with incidental whitespace would fail to resolve on
+  the *write* side, silently skip stamping a fingerprint at all, and
+  push every later validation onto the weaker fallback regardless of
+  `_render_time`. Stripped identically on both sides now. Also: the
+  chunked index document's own `validate_test_doc` call didn't pass
+  `_render_time=True` -- if the leftover single-doc sidecar's
+  best-effort `unlink()` (added last round) ever failed (a file lock, a
+  permission-restricted directory), the index (which never gets its own
+  fingerprint, being deterministic rather than model-authored) would
+  still be exposed to exactly the stale-sidecar cross-check this whole
+  mechanism exists to bypass. Passed `_render_time=True` there too,
+  closing the gap without needing to propagate the unlink failure as a
+  hard error. Added
+  `test_write_test_doc_with_sidecar_strips_whitespace_in_sources_before_
+  fingerprinting`. Full suite: 1013 passed, 2 skipped; bundled fixture
+  pipeline unchanged.
+
+  A sixteenth review round found the identical legacy-deadlock shape from
+  round 14 reachable through one more, different door: `_test_chunk_
+  reuse_ok`'s own revalidation of a cached chunk didn't pass
+  `_render_time=True`, so a *legacy* chunk file (no `test_case_
+  fingerprint`, written before this fix existed) whose own `brief_sha256`
+  happens to still match (its own routine's content is unaffected by a
+  `rule_candidate` change elsewhere in the member) could still fall to
+  the id-overlap fallback here too and be read as "still current" --
+  reused forever, since nothing would ever call `write_test_doc_with_
+  sidecar` on a chunk this function keeps calling reusable. Fixed by
+  threading `_render_time=True` through `_test_chunk_reuse_ok`'s
+  revalidation (both the real and `readonly`/dry-run paths, via a new
+  `_readonly_validate_test_doc(..., _render_time=...)` parameter) -- the
+  one-time cost is the same transition every other legacy artifact goes
+  through: a legacy chunk gets forced through one real re-render, then
+  carries a real fingerprint from then on. Also added `tc.
+  rule_candidate_id` to `_corpus_signature`'s hashed `test_case` columns
+  (a cheap, clearly-justified addition): the link a scenario's chunk
+  placement is actually keyed off, not just that scenario's own derived
+  content. Two points documented as accepted, out-of-scope limitations
+  rather than fixed, each explained in the relevant function's own
+  docstring: (1) the leftover-sidecar `unlink()`'s best-effort failure
+  mode (matching `_prune_stale_chunk_files`'s own established risk
+  profile, not escalated to a hard failure for the same reason); (2) the
+  member-wide fingerprint is too coarse to catch a *chunk-boundary-only*
+  drift (chunking threshold or routine-boundary changes with the
+  underlying `rule_candidate` ordering unchanged) -- closing that
+  properly would need a fingerprint scoped to each chunk's own rule
+  range, which depends on the very chunk-planning logic being evaluated
+  at that point: a real design change in the same category as #207/
+  #214's caching redesign, not an incremental fix, and confirmed not to
+  affect the actual issue #195 scenario (a positional shift always moves
+  the member-wide ordering the existing fingerprint already catches).
+  Added `test_chunk_reuse_forces_a_re_render_for_a_legacy_chunk_with_no_
+  fingerprint` and
+  `test_corpus_signature_changes_when_a_test_case_relinks_to_a_different_
+  rule_candidate`. Full suite: 1015 passed, 2 skipped; bundled fixture
+  pipeline unchanged.
+
+  A seventeenth review round found one more write/read inconsistency and
+  repeated a previously-documented, accepted point unchanged (the
+  leftover-sidecar `unlink()`'s best-effort failure mode -- left as
+  documented, not re-litigated). The new one: `sources: []` is a
+  syntactically valid (if useless) list, so `validate_doc`'s own
+  malformed-shape check doesn't flag it, but `write_test_doc_with_
+  sidecar` was substituting `[member_name]` for it and stamping a
+  fingerprint from that substitution anyway. `validate_test_doc`'s own
+  recomputation always reads the document's *own* `sources` verbatim,
+  with no such substitution -- a fingerprint derived that way could never
+  be reproduced by that recomputation, permanently pushing such a
+  document onto the weaker id-overlap fallback despite carrying what
+  looked like a valid stamped value. Removed the `[member_name]`
+  substitution entirely: the write side now omits the fingerprint field
+  whenever the document's own `sources` can't be parsed as a non-empty
+  list of strings, the same "leave it out" treatment already given to a
+  genuinely malformed one -- consistent with the read side by
+  construction, since neither side can compute one without real
+  `sources` to work from. `member_name` is now otherwise unused inside
+  this function's own logic (kept in the signature for caller-side
+  clarity/API consistency, not removed). Added
+  `test_write_test_doc_with_sidecar_omits_fingerprint_for_empty_sources`.
+  Full suite: 1016 passed, 2 skipped; bundled fixture pipeline unchanged.
+
+  An eighteenth review round found two more real gaps (a fourth repeat of
+  the leftover-sidecar `unlink()` best-effort point was left as already
+  documented, per the previous three rounds). First: the growing-into-
+  chunked cleanup fixed two rounds ago had no symmetric counterpart for a
+  member *shrinking* back under the threshold -- that case goes straight
+  to the single-document path, which never revisits old `.chunk<N>.md`/
+  sidecar pairs from a prior chunked render, leaving them to be found and
+  misvalidated independently by a later full tree walk. Factored a new
+  `_prune_stale_test_chunk_files` (like `batch._prune_stale_chunk_files`,
+  but also removes each stale chunk's own sidecar, which that shared
+  helper has no concept of) and called it from *three* places: the
+  existing growing-into-chunked path (replacing the old `batch.
+  _prune_stale_chunk_files` call there, now unused and removed from the
+  import), `generate_member_test_doc`'s own single-document fallthrough,
+  and -- found only by tracing the actual call graph --
+  `run_test_batch`'s *separate* inline dispatch loop, which builds its
+  `to_run`/`to_run_chunked` lists directly and never calls
+  `generate_member_test_doc` at all, so fixing only that function's own
+  fallthrough left `run_test_batch` (the ordinary `mfdoc test-batch`
+  path) still exposed; confirmed by a first attempt at the regression
+  test failing until this third call site was added too. Second:
+  `_prior_fingerprint_for` could raise on a previous failed render's
+  malformed front matter -- `split_frontmatter`'s `yaml.safe_load(...)
+  or {}` only substitutes `{}` for a *falsy* parse result, not a truthy
+  non-dict one (a bare YAML scalar or list is valid YAML, just not a
+  mapping), so `.get()` on that would crash instead of returning `None`
+  and letting the render recover, exactly the "invalid prior candidate
+  on disk" case this function's own docstring already described but
+  didn't actually guard against. Added
+  `test_shrinking_back_below_threshold_removes_leftover_chunk_files_and_
+  sidecars` and
+  `test_prior_fingerprint_for_does_not_crash_on_malformed_front_matter`.
+  Full suite: 1018 passed, 2 skipped; bundled fixture pipeline unchanged.
 
 **Progress (2026-09-11):**
 - Fixed issue #199: `mfdoc doc-drift`'s existing checks (issue #161) caught
@@ -630,6 +1970,167 @@ GitHub org.
   `test_module_brief_lexicon_scan_only_decodes_actual_table_rows`. Full
   suite: 967 passed, 2 skipped. Fixture pipeline re-run clean: 71/71
   documents, 0 invalid citations.
+
+**Progress (2026-09-11f):**
+- Fixed issue #195: `validate_test_doc`'s on-disk `.nsp`/`.py`/etc. sidecar
+  check (added for the test-batch narrate path) treated the sidecar as
+  authoritative whenever it existed, but `write_test_doc_with_sidecar` only
+  overwrites it after a *successful* validation. If something upstream of
+  `test-plan` renumbers `rule_candidate` rows after the sidecar was last
+  written (a `classify-rules` re-run, a `derive` rebuild -- a known,
+  accepted trade-off of positional BR-ids, not itself a defect), every
+  BR-id shifts positionally, and the stale on-disk sidecar (old numbering)
+  gets compared against a freshly generated manifest (new numbering) --
+  producing dozens of false "not found" problems per chunk, identical
+  across retries. Went with option 2 from the issue (treat a sidecar as
+  absent whenever its own BR-id set doesn't reference any currently-valid
+  `test_case` row) over option 1 (regenerate the sidecar before comparing
+  on `--state ""`): it fixes the staleness at its actual source --
+  `validate_test_doc`'s comparison itself -- rather than only the no-resume
+  entry point, so a resumed run hitting the same staleness (a
+  `classify-rules` re-run between an earlier chunk's successful write and
+  a later chunk's validation, without a full `--state ""` restart) is
+  covered too, and it needs no new call into `testbatch.py` from
+  `validate.py` (the two modules deliberately don't import each other's
+  narrate-vs-validate concerns beyond the existing `testlang.py` shim).
+  `validate_test_doc` (`src/mfdoc/validate.py`) now checks, before treating
+  a sidecar as authoritative, whether *every* one of the sidecar's own
+  BR-ids resolves against a current `test_case` row; if it has BR-ids and
+  any of them don't, it falls back to scanning `body` directly -- the same
+  treatment already given to "no sidecar on disk" -- rather than
+  cross-checking the stale content against the fresh manifest. This is
+  deliberately not counted toward `problems`/`ok` (a stale sidecar isn't a
+  defect in the document being validated, and gets overwritten with fresh
+  content the next time this validation actually succeeds); reported
+  instead via a new `result["sidecar_stale"]` field for a caller that wants
+  to know. Added `test_stale_sidecar_from_renumbering_is_treated_as_absent`
+  (simulates the renumbering by writing a sidecar whose only BR-id doesn't
+  exist in `test_case`, asserts no false "not found" problems and `ok` is
+  true) and `test_current_sidecar_still_cross_checked_against_manifest` (a
+  sidecar whose content genuinely disagrees with the manifest, using a
+  different but still-current BR-id, must still be flagged, confirming the
+  guard doesn't swallow a real mismatch) to `tests/test_test_validate.py`.
+  Copilot PR review caught three real gaps in the first pass, addressed
+  here: (1) the initial `any(...)` staleness check missed a *partial*
+  positional shift (e.g. old `{BR-001, BR-002, BR-003}` renumbered to
+  `{BR-002, BR-003, BR-004}` still has coincidental overlap) -- changed to
+  `all(...)`, documented in `validate_test_doc`'s docstring along with the
+  accepted trade-off this creates (a lone invented/malformed id mixed
+  into an otherwise-current sidecar is now also treated as stale rather
+  than flagged directly by the sidecar cross-check specifically, though it
+  still surfaces via the body-scan fallback's own `bad_refs` check); (2)
+  `_test_chunk_reuse_ok` (`testbatch.py`) was calling `validate_test_doc`
+  for its cache-reuse check but only reading `result["ok"]` -- a chunk
+  whose sidecar the staleness guard tolerated (`ok=True` via the body
+  fallback) would then be reused verbatim forever, leaving the actually
+  stale `.py`/`.nsp` sidecar on disk with no path back to
+  `write_test_doc_with_sidecar` ever refreshing it; now also checks
+  `not result.get("sidecar_stale")`, forcing a real re-render (which
+  rewrites the sidecar normally once it validates) instead of a reuse.
+  Added `test_chunk_reuse_treats_a_stale_sidecar_as_a_cache_miss` to
+  `tests/test_test_batch.py`. (3) the original
+  `test_current_sidecar_still_cross_checked_against_manifest` used a
+  sidecar with no BR-ids at all, so the `any(...)`/`all(...)` branch was
+  never exercised -- rewritten to use `MMP0100:BR-001` (confirmed via the
+  bundled fixture's own `test_case` rows), a real, current, but different
+  id from the manifest's `BR-004`, actually exercising the cross-check.
+  Full suite: 954 passed, 2 skipped. A second Copilot review round caught
+  two more real gaps: the staleness check's per-id `SELECT ... WHERE
+  UPPER(scenario_name)=UPPER(?)` query (no index on that expression) was
+  run once per sidecar id for the staleness decision and again per scanned
+  id in the final `bad_refs` check -- refactored to fetch every current
+  `test_case.scenario_name`, uppercased, into one set at the top of
+  `validate_test_doc` and reuse it for both (`code_ids <= valid_scenarios`
+  replaces the per-id query loop); and the partial-positional-shift claim
+  in `all(...)`'s docstring justification had no test actually exercising
+  it -- added `test_partial_positional_shift_sidecar_is_still_treated_as_
+  stale` (an old `{BR-001, BR-002, BR-003}` sidecar against a current
+  `{BR-002, BR-003, BR-004}` `test_case`/manifest, proving `any(...)` would
+  have missed this and `all(...)` catches it). Full suite: 955 passed, 2
+  skipped. A third Copilot review round flagged the PR description's test
+  count (`940 passed`) had drifted from this progress log's (`955 passed`)
+  as the fix iterated -- reconciled below and in the PR body -- plus two
+  more real gaps: `run_test_batch`/`plan_test_batch`'s `corpus_unchanged`
+  fast path (a *global* skip-everything check, ahead of and separate from
+  `_test_chunk_reuse_ok`'s per-chunk reuse check) hashed only each
+  `test_case`'s `(scenario_name, status)`, so a `classify-rules`/`derive`
+  rebuild that reassigns the same `scenario_name` strings (same count,
+  same positional BR-numbering) to *different* underlying rows -- a
+  different citation/condition/source excerpt behind each id -- would
+  leave every `(scenario_name, status)` pair unchanged and wrongly skip
+  every member, bypassing the sidecar-staleness check in this same fix
+  entirely; `testbatch._corpus_signature` now also hashes each row's
+  `citation` and given/when/then JSON blobs, so any such change moves the
+  signature regardless of whether `scenario_name` also moved. Added
+  `test_corpus_signature_changes_when_scenario_content_changes_but_name_
+  and_status_do_not` to `tests/test_test_batch.py`. Second: `all(...)`'s
+  own trade-off (a lone invented/malformed id mixed into an
+  otherwise-current sidecar is treated as stale rather than flagged
+  directly) was silently dropping that id from view entirely rather than
+  just from `problems`/`ok` -- added `result["sidecar_unresolved_ids"]`
+  (populated only when `sidecar_stale` is true) so a caller or a human
+  reading a `mfdoc test-validate` report can still see exactly which ids
+  didn't resolve, without it counting toward pass/fail; there's no
+  persisted per-run generation signature `test_case` carries today that
+  would let `validate_test_doc` make the stale-vs-invented call on its own
+  with certainty, so this stays a visible diagnostic rather than a
+  disguised fix. Full suite: 956 passed, 2 skipped. A fourth Copilot review
+  round found two more narrow gaps: `_corpus_signature`'s new
+  citation/JSON-blob hashing still missed the member's `system` field --
+  `test_case_brief()` renders it into the document header
+  (`testplan.render_test_case_brief`), so relabelling a source's
+  configured `system` and re-ingesting (no `test_case` row itself changes)
+  would leave the signature unchanged and skip re-rendering a document
+  whose header text actually changed; now joined in and hashed alongside
+  the rest. And the new `valid_scenarios` lookup in `validate_test_doc`
+  ran unconditionally on every call, including documents with no sidecar
+  and no `MEMBER:BR-nnn` references at all -- made lazy (computed at most
+  once, only if a sidecar-id or `bad_refs` check actually needs it).
+  Added `test_corpus_signature_changes_when_member_system_changes`. Full
+  suite: 957 passed, 2 skipped. A fifth review round raised a genuinely
+  different scenario -- `test-plan` *adding* a scenario after the old
+  sidecar's range leaves every old sidecar id still resolving
+  (`sidecar_usable` stays true), so the fresh manifest's new id then hits
+  `manifest_ids - code_ids` and reports a real "not found in sidecar"
+  problem. This is correct, not a bug: the sidecar genuinely doesn't
+  contain code for that scenario yet, so flagging it is accurate, and it
+  is not a deadlock the review's wording suggested -- `test-batch`'s retry
+  loop never reuses a chunk recorded as anything other than `ok: True`
+  (`_test_chunk_reuse_ok`), so the normal render-validate-retry cycle
+  already regenerates and re-splits the sidecar via
+  `write_test_doc_with_sidecar` on the very next attempt, the same as any
+  other validation failure -- no different handling needed. A sixth round
+  repeated that same scenario-addition point (not actioned, per the above)
+  plus three real, quick fixes, made here: `validate_test_doc`'s own
+  docstring had the `all(...)`-vs-`any(...)` rationale backwards ("Requiring
+  *all* ... to fail to resolve would under-detect..." when the code
+  requires all to *succeed*) -- reworded so the docstring actually matches
+  `sidecar_usable = code_ids <= valid_scenarios()`; `mfdoc test-validate`'s
+  CLI output (`cmd_test_validate`) never printed `sidecar_stale`/
+  `sidecar_unresolved_ids` at all, so a human reading the report (as
+  opposed to a caller reading the Python dict) had no way to see a
+  tolerated staleness happened -- added a `! sidecar looks stale (...)`
+  advisory line, never affecting the exit code; and this progress log's
+  test count (957) had drifted from the PR description's (956) again as
+  the fix iterated -- both now read 962. Added
+  `test_cmd_test_validate_surfaces_a_tolerated_stale_sidecar`
+  (`tests/test_cli.py`). Full suite: 962 passed, 2 skipped. A seventh round
+  repeated the same "no persisted generation signature" limitation from a
+  different angle (an inserted/appended rule leaving an old sidecar fully
+  contained in the current valid set, so `code_ids <= valid_scenarios()`
+  reads it as current when it's actually from before the insertion) --
+  this is the identical, already-documented trade-off of an ID-overlap
+  heuristic with no persisted per-run content signature to check against
+  instead (see `validate_test_doc`'s own docstring and this log's prior
+  entries), not a new gap this round surfaced. Stopping the review-
+  response cycle here: seven rounds, CI green, `mergeStateStatus: CLEAN`,
+  and the last two rounds have restated one already-acknowledged, already-
+  documented limitation rather than finding new ones. A real fix for that
+  specific limitation -- a persisted `test_case`-generation fingerprint
+  `validate_test_doc` could compare against directly, instead of inferring
+  staleness from ID-set overlap -- is real follow-up work, not a fix
+  this PR is withholding; noted here as a candidate for a future issue
+  rather than expanding this one further.
 
 **Progress (2026-09-10e):**
 - Fixed issue #188: ported `batch.py`'s near-miss/targeted-patch mechanism

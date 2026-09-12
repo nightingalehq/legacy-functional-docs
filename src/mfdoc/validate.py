@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
+from collections.abc import Callable
 from functools import lru_cache
 from pathlib import Path
 
@@ -32,6 +33,7 @@ from .conditions import (
 )
 from .db import insert, resolve_member_by_name
 from .testlang import sidecar_path_for
+from .testplan import doc_rule_fingerprint
 
 CITATION = re.compile(r"\[\[(?P<member>[A-Z0-9#@$&\-_.]+)(?::(?P<from>\d+)(?:-(?P<to>\d+))?)?\]\]", re.I)
 
@@ -54,6 +56,16 @@ CITATION = re.compile(r"\[\[(?P<member>[A-Z0-9#@$&\-_.]+)(?::(?P<from>\d+)(?:-(?
 # *matched* here so the lookup below reports it as invalid, rather than
 # the id being invisible to validation entirely.
 BR_REF = re.compile(r"(?<![A-Z0-9#@$&.\-_])(?P<member>[A-Z0-9#@$&\-_.]+):BR-(?P<n>\d+)\b", re.I)
+
+# A chunked test doc's index (`testbatch._render_chunk_index`) links each of
+# its chunk files as `- [name](./name) -- OK/FAILED: ...`, always with the
+# same name repeated in both the link text and the relative path. Used by
+# `validate_test_doc` to confirm every chunk the index claims to have is
+# still actually present on disk (Copilot review, round 54) -- a tree walk
+# over `*.md` files alone would otherwise never notice a deleted chunk, since
+# there's nothing left to walk into once the file is gone; the index is the
+# only remaining record that it was ever supposed to exist.
+CHUNK_LINK = re.compile(r"(?m)^- \[(?P<name>[^\]]+)\]\(\./(?P=name)\)")
 
 
 def _name_pattern(name: str) -> re.Pattern:
@@ -225,10 +237,35 @@ def split_frontmatter(text: str) -> tuple[dict | None, str, str | None]:
     if len(parts) < 3:
         return None, text, "malformed YAML front matter"
     try:
-        fm = yaml.safe_load(parts[1]) or {}
+        raw_fm = yaml.safe_load(parts[1])
     except yaml.YAMLError as exc:
         return None, parts[2], f"unparseable YAML front matter: {exc}"
-    return fm, parts[2], None
+    # `yaml.safe_load` happily parses syntactically valid YAML between the
+    # `---` markers into *any* shape a YAML scalar/sequence/mapping can
+    # take, not just a mapping -- an empty block (or one that's only
+    # whitespace/comments) parses to `None`, genuinely equivalent to "no
+    # front matter fields at all", but a non-`None` non-mapping (a bare
+    # list, `false`, `0`, a quoted string with no `key:` at all) is a real
+    # shape mismatch, not an empty-but-valid one. A naive `or {}` here
+    # would substitute `{}` for *every* falsy parse -- `None` and `""`
+    # alike, but also a bare `false`, `0`, or `[]` between the markers --
+    # silently treating those last three as empty front matter too instead
+    # of reporting them as malformed (Copilot review). Every caller of
+    # this function treats a non-`None` `fm` as a mapping (`fm.get(...)`,
+    # `fm["sources"]`, `"key" in fm`) with no shape check of its own, so
+    # left unguarded a truthy non-dict parse reaches `validate_doc` (and,
+    # through it, every `mfdoc test-validate`/`mfdoc validate` call) as an
+    # `AttributeError`/`TypeError` crash instead of this reported problem.
+    if raw_fm is None:
+        return {}, parts[2], None
+    if not isinstance(raw_fm, dict):
+        # `type(...).__name__`, not the value itself (Copilot review): a
+        # malformed front matter block can be arbitrarily large (or hold
+        # unexpected/binary-ish content), and this message can end up in
+        # CLI output or logs -- naming the shape is enough to diagnose
+        # "not a mapping" without risking a noisy dump of its contents.
+        return None, parts[2], f"front matter is not a mapping, got a {type(raw_fm).__name__}"
+    return raw_fm, parts[2], None
 
 
 _LEADING_CITATION_RUN = re.compile(r"^(?:\[\[[^\]]+\]\]\s*)+")
@@ -940,7 +977,11 @@ def validate_doc(conn, path: Path, outcome_field=OUTCOME_FIELD, _text: str | Non
     }
 
 
-def validate_test_doc(conn, path: Path, _text: str | None = None) -> dict:
+def validate_test_doc(conn, path: Path, *, _text: str | None = None,
+                       _prior_fingerprint: str | None = None,
+                       _render_time: bool = False,
+                       _valid_scenarios: Callable[[], set[str]] | None = None,
+                       _fingerprint_cache: dict[tuple[str, ...], str | None] | None = None) -> dict:
     """`validate_doc` plus the checks specific to a generated test file:
     `language`/`framework` front matter, and that every bare `MEMBER:BR-nnn`
     reference names a scenario that actually exists in test_case -- the
@@ -959,6 +1000,124 @@ def validate_test_doc(conn, path: Path, _text: str | None = None) -> dict:
     really contains. No sidecar on disk (older embedded-fence documents, or
     an unrecognised language) falls back to scanning `body` directly,
     exactly as before this feature existed.
+
+    The sidecar is only rewritten after a *successful* validation
+    (`testbatch.write_test_doc_with_sidecar`), so it can itself go stale: if
+    something upstream of `test-plan` renumbers `rule_candidate` rows after
+    the sidecar was last written (a `classify-rules` re-run, a `derive`
+    rebuild), every BR-id it contains shifts positionally and stops
+    matching any current `test_case` row (issue #195). Comparing that
+    numbering against a freshly generated manifest would then report every
+    id in the sidecar as missing, even though nothing about the current run
+    is wrong.
+
+    Detected two ways, tried in this order:
+
+    1. **Fingerprint comparison (authoritative).** `write_test_doc_with_
+       sidecar` stamps a `test_case_fingerprint` field into the document's
+       front matter -- `testplan.member_rule_fingerprint`'s hash of the
+       exact `rule_candidate` `(id, line_no, construct)` ordering that
+       determined this render's `BR-nnn` numbering, at write time. If that field is
+       present, this recomputes the same fingerprint from `sources`'
+       member(s) right now (`testplan.doc_rule_fingerprint`) and compares:
+       any mismatch means the corpus has genuinely moved on since the
+       sidecar was written, full stop -- this is a direct, exact signal,
+       not an inference from which ids happen to still resolve. It is what
+       correctly catches the case an ID-overlap check alone cannot: a rule
+       inserted (or removed) *after* the sidecar's own BR-range still
+       shifts every later id project-wide, but leaves the sidecar's own
+       (unshifted) ids a literal subset of the current valid set -- e.g.
+       old `{BR-001, BR-002, BR-003}` with a rule now inserted afterward,
+       current valid set `{BR-001, BR-002, BR-003, BR-004}`. An
+       ID-membership check reads that as "still current" (every old id
+       still resolves) and wrongly cross-checks the stale sidecar against
+       the fresh manifest anyway; the fingerprint, computed from the whole
+       member's `rule_candidate` ordering rather than just the ids this one
+       sidecar happens to mention, does not.
+    2. **ID-overlap fallback (legacy documents only).** No stored
+       `test_case_fingerprint` at all (an older document written before
+       this field existed, or a hand-written/test fixture) falls back to
+       one of two things, depending on `_render_time`:
+       - **`_render_time=False`** (a standalone check -- a bare `mfdoc
+         test-validate` sweep over already-written documents, not a
+         reuse/resume decision about to render one): checks whether
+         *every* one of the sidecar's own BR-ids resolves against
+         `test_case`; if it has BR-ids and *any* of them don't, the
+         sidecar is treated as though it weren't there. Deliberately
+         `all(...)`, not `any(...)`: a partial positional shift (old
+         `{BR-001, BR-002, BR-003}` renumbered to `{BR-002, BR-003,
+         BR-004}`) still has two overlapping ids by coincidence, which
+         `any(...)` would wrongly call "still current". This still can't
+         catch the insertion-after-range case (1) handles for a document
+         with no fingerprint context at all.
+       - **`_render_time=True`** (`_generate_test_doc_from_brief`/
+         `run_test_batch`'s retry loops, validating a freshly-generated
+         candidate that's about to replace this sidecar's pairing if it
+         validates clean -- and `testbatch._test_chunk_reuse_ok`'s own
+         revalidation of a *reusable* chunk, on both its real and
+         `readonly=True` dry-run branches, which pass this unconditionally
+         rather than `False`): the sidecar is treated as though it weren't
+         there outright, with no id-overlap check at all. A legacy
+         document's sidecar predating this fingerprint entirely can
+         otherwise **deadlock**: on the very next `test-plan` re-run that
+         adds a new scenario after the old sidecar's range, the fresh
+         candidate's manifest legitimately names that new id, the old
+         sidecar's ids remain a coincidental subset of the current valid
+         set (`all(...)` reads that as "still current"), the cross-check
+         reports the new id as "missing from sidecar", validation fails
+         on *every* retry (the corpus hasn't changed between them), and
+         because `write_test_doc_with_sidecar` only runs after a
+         *successful* validation, the sidecar is never refreshed and
+         never gets its own fingerprint either -- reproducing indefinitely
+         on every future invocation, not self-resolving the way a
+         `_render_time=True` bypass instead makes it. Safe specifically
+         because this validation's own outcome determines whether the
+         sidecar is about to be rewritten anyway: a candidate this bypass
+         lets through still has to actually resolve against `test_case`
+         (the ordinary `bad_refs` check below still runs against `body`,
+         unaffected by this), so nothing invented slips through -- this
+         bypass only ever removes a *stale-or-legacy* sidecar's veto
+         power over an otherwise-correct fresh candidate, never weakens
+         what "correct" means.
+
+    A document with a real fingerprint of its own (case 1 above) is
+    unaffected by `_render_time` either way -- the exact check is always
+    preferred when it's available, at any call site.
+
+    Either way, `result["sidecar_stale"]` reports the outcome without it
+    counting toward `problems`/`ok` -- a stale sidecar isn't a defect in
+    *this* document, and gets overwritten with fresh content the next time
+    this validation actually succeeds. When the ID-overlap fallback is what
+    triggered it, a sidecar with one genuinely invented/malformed id mixed
+    in among otherwise-current ones is also treated as stale rather than
+    flagged directly in `problems` -- not silently lost, though:
+    `result["sidecar_unresolved_ids"]` lists exactly which of the
+    sidecar's ids didn't resolve, for a caller or a human reading a `mfdoc
+    test-validate` report who wants to tell "genuine renumbering" apart
+    from "one bad id" in that fallback case.
+
+    `_prior_fingerprint`, from `testbatch._prior_fingerprint_for`: the
+    fingerprint a *previous* successful render already stamped at `path`,
+    for a caller validating a freshly-generated candidate that has just
+    overwritten that same path -- the candidate's own front matter never
+    carries `test_case_fingerprint` itself (only `write_test_doc_with_
+    sidecar` adds it, after validation succeeds), so without this the
+    fingerprint check above would have nothing to compare against on
+    exactly the validation this issue is about (the render/retry loop's
+    own first pass, not a later re-check of an already-fully-written
+    document) and would silently fall through to the weaker ID-overlap
+    fallback every time. Used only when the document being validated
+    itself carries no `test_case_fingerprint` of its own.
+
+    A malformed `sources` front-matter value (not a list of plain strings
+    -- `validate_doc`'s own `_out_of_scope_sources`/`REQUIRED_FRONTMATTER`
+    checks already flag this in `problems`) must never make the
+    fingerprint lookup itself raise: `doc_rule_fingerprint` is only ever
+    called after confirming every element is a string, and any other
+    shape leaves `fp` as `None` -- caught here, not treated as "no
+    fingerprint available" as a matter of course, so this can't turn a
+    front-matter contract violation into an unhandled crash in `mfdoc
+    test-validate`.
     """
     result = validate_doc(conn, path, _text=_text)
     fm, body = result.pop("_fm"), result.pop("_body")
@@ -968,15 +1127,329 @@ def validate_test_doc(conn, path: Path, _text: str | None = None) -> dict:
         for key in REQUIRED_TEST_FRONTMATTER:
             if key not in fm:
                 problems.append(f"front matter missing required key: {key}")
+        # A non-string `language` (a hand-edited/malformed document -- a
+        # YAML list, number, or mapping) makes `sidecar_path_for` return
+        # `None` the same way a merely-unrecognised language string does
+        # (testlang.sidecar_path_for's own contract: never guess an
+        # extension, never crash on an unhashable value -- Copilot review
+        # on issue #195's fix). But those two cases aren't the same thing:
+        # an unrecognised *string* language legitimately has no sidecar to
+        # check (the code stayed embedded in the body). A malformed,
+        # non-string language most often means a previously-split document
+        # (body already replaced with a `## Scenarios covered` manifest,
+        # exactly like a real language) whose front matter got corrupted
+        # afterward -- silently falling back to scanning that manifest
+        # would report `ok=True` even if the actual sidecar file next to it
+        # is missing or tampered with, since nothing here would ever look
+        # at it. Flagged directly as a problem so this can't happen
+        # unnoticed (Copilot review, round 45).
+        #
+        # Checked via key *presence* (`"language" in fm`), not
+        # `fm.get("language") is not None`: an explicit `language: null`
+        # front-matter value is present-but-non-string exactly like
+        # `language: [python]` is -- `fm.get(...)` can't tell "key absent"
+        # from "key present with value None" apart, and the missing-key
+        # check above already covers the absent case on its own. Using
+        # `is not None` here would let an explicit null silently take the
+        # same bypass this check exists to close (Copilot review, round 49).
+        if "language" in fm:
+            language = fm["language"]
+            if not isinstance(language, str):
+                problems.append(
+                    f"front matter field 'language' must be a string, got {type(language).__name__}"
+                )
+
+    # Fetched at most once per call, lazily, and reused for both the
+    # sidecar staleness decision and the final `bad_refs` check -- a per-id
+    # `SELECT ... WHERE UPPER(scenario_name)=UPPER(?)` query (no index on
+    # that expression) would otherwise scan `test_case` twice per id: once
+    # for staleness, once for validity (Copilot PR review on issue #195's
+    # fix). Lazy rather than unconditional: a document with no sidecar and
+    # no `MEMBER:BR-nnn` references at all (an edge case `validate_tests_
+    # tree` can still walk into) has no need for this and shouldn't pay a
+    # full `test_case` scan on every single document it validates.
+    #
+    # `_valid_scenarios`, from `validate_tests_tree`: a zero-arg callable
+    # that computes and memoizes the full-corpus scan *once*, shared across
+    # every document in the tree, instead of every sidecar-bearing document
+    # re-running its own `SELECT scenario_name FROM test_case` (Copilot
+    # review -- otherwise O(document_count * corpus_size) for a tree
+    # validation). Deliberately a callable, not a precomputed set: a tree
+    # walk with no sidecar-bearing/BR-referencing documents at all must
+    # still never run that scan (the same "don't pay for what nothing needs"
+    # contract this whole cache already had, just now shared across
+    # documents instead of scoped to one call -- a second review round
+    # after the first version of this fix computed the set unconditionally,
+    # before any document's own need for it was known). A caller validating
+    # one document in isolation (`mfdoc test-gen`'s single-file path, the
+    # render/retry loops, every test in this suite) has no tree-wide scan
+    # to share and leaves this unset, falling back to the same lazy
+    # per-call query as before.
+    _valid_scenarios_cache: set[str] | None = None
+
+    def valid_scenarios() -> set[str]:
+        nonlocal _valid_scenarios_cache
+        if _valid_scenarios_cache is None:
+            _valid_scenarios_cache = _valid_scenarios() if _valid_scenarios is not None else {
+                row["scenario_name"].upper() for row in conn.execute("SELECT scenario_name FROM test_case")
+            }
+        return _valid_scenarios_cache
+
+    # `_prior_fingerprint` (the previous successful render's, captured by
+    # the caller before overwriting `path` with a fresh candidate) is
+    # preferred *over* the document's own stamped field, not just a
+    # fallback for when the document has none (Copilot review): a
+    # freshly-generated candidate is never supposed to carry this field
+    # at all (only `write_test_doc_with_sidecar` stamps it, after
+    # validation succeeds) -- if one shows up anyway, it's the model
+    # echoing/hallucinating it from the brief or a prior template, not a
+    # value this validation should trust over the caller's own captured,
+    # known-genuine prior. Trusting whichever the candidate happened to
+    # include would let such a value make a stale sidecar look
+    # authoritative again.
+    #
+    # During a render/retry loop's own validation (`_render_time=True`),
+    # the candidate's own field is never read at all, even as a fallback
+    # when `_prior_fingerprint` is `None` (Copilot review): a legacy
+    # document with no recoverable prior (or an orphaned sidecar with
+    # nothing to recover a prior from) would otherwise let the
+    # candidate's own untrusted value supply a coincidental match,
+    # making a stale sidecar look authoritative again and reproducing
+    # the exact manifest/sidecar retry deadlock this bypass exists to
+    # close -- falling through instead to the no-fingerprint-context
+    # legacy bypass just below, exactly as if the field were absent.
+    # Only a standalone call (`mfdoc test-validate`, which never passes
+    # `_prior_fingerprint` at all) reads the document's own stamped
+    # value -- there, it's the only real fingerprint to check against,
+    # so allowed as this function has always let it.
+    stored_fingerprint = (
+        _prior_fingerprint if _render_time
+        else _prior_fingerprint or (fm.get("test_case_fingerprint") if fm is not None else None)
+    )
+    # Whether a stored fingerprint value should be treated as present at
+    # all -- distinct from `stored_fingerprint` itself, which is `None`
+    # both when nothing supplied one *and* when a document explicitly
+    # carries `test_case_fingerprint: null` (`dict.get` can't tell those
+    # apart, the same shape of gap the `language` check above closes).
+    # Those two cases must not be treated alike: no field at all is a
+    # legitimate legacy document predating this feature, entitled to the
+    # weaker id-overlap fallback below; an explicit null is a corrupted or
+    # tampered value on an otherwise-fingerprint-aware document and must
+    # still be *compared* (comparing unequal to any real computed
+    # fingerprint, so it's rejected/treated as stale, same as any other
+    # mismatch) rather than silently handed the fallback meant for
+    # documents that never had this field to begin with (Copilot review,
+    # round 50).
+    stored_fingerprint_is_present = _prior_fingerprint is not None or (
+        fm is not None and "test_case_fingerprint" in fm
+    )
+    _current_fingerprint_cache: list = []  # 0 or 1 element -- memoized None is valid too
+
+    def current_fingerprint() -> str | None:
+        if not _current_fingerprint_cache:
+            sources = fm.get("sources") if fm is not None else None
+            # A malformed `sources` (not a list of plain strings --
+            # already flagged separately in `problems` by validate_doc's
+            # own front-matter checks) must never make this raise:
+            # `doc_rule_fingerprint`'s `sorted(..., key=str.upper)` would
+            # otherwise crash on a non-string element (e.g. `sources:
+            # [123]`), turning a front-matter contract violation into an
+            # unhandled `mfdoc test-validate` crash instead of just
+            # leaving the fingerprint unavailable and falling through to
+            # the ID-overlap fallback below.
+            fp = None
+            if isinstance(sources, list) and sources and all(isinstance(s, str) for s in sources):
+                # Stripped: `resolve_member_by_name`'s lookup is an exact
+                # `UPPER(name)=UPPER(?)` match, so `sources: ["FAKEMOD "]`
+                # (stray whitespace, however it got there) would otherwise
+                # fail to resolve and silently fall back to the weaker
+                # id-overlap check instead of the exact fingerprint one.
+                #
+                # `_fingerprint_cache`, from a caller re-validating several
+                # documents that share the same `sources` -- most commonly
+                # every chunk of one member in `_generate_member_test_doc_
+                # chunked`, or every retry attempt of one member's document
+                # in `run_test_batch` (Copilot review): each of those calls
+                # `doc_rule_fingerprint`, which re-queries and re-hashes
+                # that member's *entire* `rule_candidate` set from
+                # scratch, even though it's the same member and therefore
+                # the same fingerprint every time. Keyed by the sorted,
+                # stripped `sources` tuple so it's correct regardless of
+                # input ordering/whitespace; a caller with nothing to
+                # share (every other call site, including this suite)
+                # leaves it unset and pays the same per-call cost as
+                # before.
+                key = tuple(sorted((s.strip() for s in sources), key=str.upper))
+                if _fingerprint_cache is not None and key in _fingerprint_cache:
+                    fp = _fingerprint_cache[key]
+                else:
+                    fp = doc_rule_fingerprint(conn, list(key))
+                    if _fingerprint_cache is not None:
+                        _fingerprint_cache[key] = fp
+            _current_fingerprint_cache.append(fp)
+        return _current_fingerprint_cache[0]
 
     sidecar = sidecar_path_for(path, fm.get("language")) if fm is not None else None
+    # A known/recognised `language` means a sidecar is expected for this
+    # document; if the document itself shows it was actually split (a
+    # `## Scenarios covered` manifest in place of the code fence -- the
+    # same signal `testbatch._split_doc_missing_its_sidecar` keys off for
+    # its own, different resume-fast-path purpose) but the sidecar file
+    # itself doesn't exist on disk, the body-scan fallback below would
+    # otherwise just check the manifest's own ids against `test_case` and
+    # can report `ok=True` even though the actual test source the
+    # manifest describes is gone entirely -- deleted, or never written
+    # back. Flagged directly, before that fallback ever runs (Copilot
+    # review, round 53). `## Chunks` excludes a chunk *index* document,
+    # which legitimately never gets a sidecar of its own at all (each
+    # chunk has its own instead) -- the same exclusion
+    # `_split_doc_missing_its_sidecar` makes.
+    if (
+        sidecar is not None and not sidecar.exists()
+        and "## Chunks" not in body and "## Scenarios covered" in body
+    ):
+        problems.append(
+            f"{sidecar.name} is missing -- {path.name} is a split document with no "
+            f"embedded code of its own to fall back on"
+        )
+    # A chunk *index* document (`## Chunks`) never has a sidecar of its own
+    # -- excluded above for exactly that reason -- but it links every chunk
+    # file it aggregates, and each of those is where the real per-chunk
+    # missing-sidecar check above actually applies once that file is
+    # visited on its own. Deleting a linked chunk file entirely leaves
+    # nothing for a tree walk to visit at all, so nothing else would ever
+    # notice it's gone: the index's own aggregate `## Scenarios covered`
+    # ids still resolve against `test_case` regardless, since they were
+    # computed from the chunk's content at write time, not read from the
+    # chunk file itself at validation time. Checked here instead, directly
+    # against what's actually still on disk (Copilot review, round 54).
+    if "## Chunks" in body:
+        for chunk_name in sorted(set(CHUNK_LINK.findall(body))):
+            if not (path.parent / chunk_name).exists():
+                problems.append(
+                    f"{chunk_name} is listed in {path.name}'s '## Chunks' section but "
+                    f"no longer exists"
+                )
+    sidecar_usable = False
+    sidecar_unresolved_ids: list[str] = []
+    sidecar_had_ids = False
+    # Populated only by the `_render_time` legacy-sidecar bypass below, with
+    # exactly the old sidecar's ids that are *still* real `test_case`
+    # scenarios today (Copilot review): that bypass drops the stale
+    # sidecar's veto power over a fresh candidate entirely, which is right
+    # for the *new*-id deadlock it exists to fix (see this function's
+    # docstring) but was also silently dropping the other direction --
+    # `bad_refs` below only ever checks that a candidate's *own* ids are
+    # valid, never that it didn't just quietly stop mentioning a scenario
+    # the old sidecar did. Restricted to still-valid ids on purpose: an old
+    # id the corpus has since retired is exactly what the bypass exists to
+    # stop vetoing, and demanding a candidate still reference it would
+    # reintroduce the same deadlock this bypass closes.
+    legacy_bypass_still_valid_ids: set[str] = set()
     if sidecar is not None and sidecar.exists():
-        manifest_ids = {
-            f"{m.group('member').upper()}:BR-{m.group('n')}" for m in BR_REF.finditer(body)
-        }
         code_ids = {
             f"{m.group('member').upper()}:BR-{m.group('n')}"
             for m in BR_REF.finditer(sidecar.read_text(encoding="utf-8"))
+        }
+        sidecar_had_ids = bool(code_ids)
+        # Staleness guard (issue #195): the sidecar is only rewritten after a
+        # *successful* validation, so if something upstream of `test-plan`
+        # renumbers `rule_candidate` rows after the sidecar was last written
+        # (a `classify-rules` re-run, a `derive` rebuild), every BR-id in it
+        # shifts positionally and stops matching any current `test_case`
+        # row. Comparing that stale numbering against a freshly generated
+        # manifest then produces a "not found" for every id in the sidecar,
+        # not because anything about this run is actually wrong -- just
+        # because the sidecar predates the renumbering.
+        #
+        # Fingerprint check first (exact, see docstring): a stored
+        # `test_case_fingerprint` that no longer matches the current
+        # `rule_candidate` ordering for this document's `sources` means the
+        # corpus has genuinely moved on, regardless of whether the
+        # sidecar's own ids happen to still resolve -- this is what catches
+        # an insertion *after* the sidecar's own BR-range, which leaves its
+        # ids a literal (and therefore ID-overlap-invisible) subset of the
+        # current valid set.
+        # `stored_fingerprint_is_present`, not `stored_fingerprint is not
+        # None` and not truthiness: an explicitly present but empty,
+        # invalid, or `null` stored fingerprint (a corrupted/hand-edited
+        # `test_case_fingerprint: ""` or `test_case_fingerprint: null`) is a
+        # real, present value that must still be *compared* against the
+        # current one (and reported as a mismatch when it doesn't match) --
+        # not silently treated the same as "no fingerprint recorded at
+        # all" and routed to the weaker id-overlap fallback below, which
+        # can then report a false manifest/sidecar mismatch for a sidecar
+        # whose ids remain a coincidental subset after an insertion
+        # (Copilot review, rounds 49 and 50 -- round 49 covered the empty-
+        # string case via `is not None`, which still couldn't tell an
+        # explicit null value apart from the field being absent entirely,
+        # since both read back as `None` from `dict.get`).
+        fp = current_fingerprint() if stored_fingerprint_is_present else None
+        if stored_fingerprint_is_present and fp is not None:
+            sidecar_usable = fp == stored_fingerprint
+            if not sidecar_usable:
+                # A genuine fingerprint *mismatch* -- the corpus has moved
+                # on since this sidecar was stamped -- deserves the same
+                # completeness protection the no-fingerprint-at-all bypass
+                # gets just below, not none at all (Copilot review): this
+                # branch used to leave `legacy_bypass_still_valid_ids`
+                # empty, so a fresh candidate silently dropping a scenario
+                # the stale sidecar still had (and which is still a real,
+                # current `test_case` row) would pass here with nothing to
+                # catch it, then get written with the *current* fingerprint
+                # -- permanently accepting the omission instead of merely
+                # tolerating the staleness itself.
+                legacy_bypass_still_valid_ids = code_ids & valid_scenarios()
+        elif _render_time:
+            # No fingerprint context at all (a legacy sidecar predating
+            # this field), validating a freshly-generated candidate about
+            # to replace it if this succeeds: treat the sidecar as absent
+            # rather than falling to the id-overlap heuristic below. That
+            # heuristic can otherwise deadlock a legacy document
+            # indefinitely -- see this function's own docstring -- because
+            # `write_test_doc_with_sidecar` (the only thing that would
+            # ever stamp a real fingerprint) only runs after a successful
+            # validation, and the id-overlap check is exactly what would
+            # keep failing it. Safe here specifically because this is a
+            # render/retry-loop call: the ordinary `bad_refs` check below
+            # still runs against `body` regardless, so an invented id in
+            # the candidate is still caught -- this bypass only removes a
+            # stale sidecar's veto power, not the underlying correctness
+            # check itself.
+            sidecar_usable = False
+            legacy_bypass_still_valid_ids = code_ids & valid_scenarios()
+        else:
+            # Fallback (a standalone check -- mfdoc test-validate, a
+            # dry-run reuse check -- on a document with no fingerprint
+            # context): the same id-overlap heuristic this guard
+            # originally shipped with. Deliberately `all(...)`, not
+            # `any(...)`: a partial positional shift (old {BR-001,
+            # BR-002, BR-003} renumbered to {BR-002, BR-003, BR-004})
+            # still leaves some ids coincidentally overlapping with
+            # `test_case`'s current numbering, which `any(...)` would
+            # wrongly read as "still current". This fallback still can't
+            # see an insertion after the sidecar's own range the way the
+            # fingerprint check above can -- accepted only because it's
+            # limited to documents predating that field, and only reached
+            # outside the render loop (where `_render_time` above already
+            # closes the gap that matters most).
+            sidecar_usable = not code_ids or code_ids <= valid_scenarios()
+        if not sidecar_usable:
+            # Diagnostic only, deliberately not appended to `problems`/`ok`:
+            # a stale sidecar isn't a defect in *this* document -- it's
+            # leftover state from before an upstream renumbering, and
+            # `write_test_doc_with_sidecar` will overwrite it with fresh
+            # content the next time this validation actually succeeds.
+            # Recorded via `result["sidecar_unresolved_ids"]` so a caller
+            # (or a human reading a `mfdoc test-validate` report) can still
+            # see exactly which sidecar ids don't resolve against current
+            # `test_case` rows (even when the fingerprint mismatch, not an
+            # unresolved id, is what actually triggered `sidecar_stale` --
+            # this can come back empty in that case, which is expected).
+            sidecar_unresolved_ids = sorted(code_ids - valid_scenarios())
+    if sidecar is not None and sidecar.exists() and sidecar_usable:
+        manifest_ids = {
+            f"{m.group('member').upper()}:BR-{m.group('n')}" for m in BR_REF.finditer(body)
         }
         scan_ids = code_ids
         for sid in sorted(manifest_ids - code_ids):
@@ -987,19 +1460,75 @@ def validate_test_doc(conn, path: Path, _text: str | None = None) -> dict:
                              f"{path.name}'s '## Scenarios covered' manifest")
     else:
         scan_ids = {f"{m.group('member').upper()}:BR-{m.group('n')}" for m in BR_REF.finditer(body)}
+        if sidecar_had_ids and not sidecar_usable and not scan_ids and not _render_time:
+            # A stale sidecar that actually had BR-nnn content is being
+            # ignored (see the staleness guard above), and the document
+            # body has nothing to fall back on scanning either (an empty
+            # "## Scenarios covered" manifest, or a code fence with no
+            # references) -- this document is untraceable, not clean.
+            # Without this, `bad_refs` would stay 0 purely because there is
+            # nothing left to check, and `ok=True` would silently report a
+            # document that can no longer be verified against anything as
+            # though it had passed genuine verification.
+            #
+            # `not _render_time` (Copilot review): during a render/retry
+            # loop's own validation, this exact shape -- a fresh, valid
+            # candidate that genuinely has no `MEMBER:BR-nnn` references at
+            # all, next to an old sidecar this bypass has already decided
+            # not to trust -- is not an error to reject; it's precisely
+            # the case `testbatch._write_test_doc_with_sidecar_or_
+            # invalidate` exists to clean up *after* this validation
+            # accepts it (discarding the stale sidecar once the render
+            # succeeds). Rejecting it here instead would mean that
+            # cleanup path can never actually run: the render would never
+            # reach `ok=True` in the first place, deadlocking a member
+            # that legitimately drops to zero BR references forever. The
+            # completeness check just below (`legacy_bypass_still_valid_
+            # ids - scan_ids`) already covers the real risk this guard
+            # exists for -- silently losing a scenario the old sidecar
+            # still had -- on a per-id basis, so nothing is actually left
+            # unchecked by scoping this one to the standalone
+            # (`mfdoc test-validate`) path alone.
+            problems.append(
+                f"{sidecar.name} is stale and {path.name}'s body has no MEMBER:BR-nnn "
+                f"references to fall back on -- this document cannot be verified at all"
+            )
+        # Completeness check preserved across the `_render_time` legacy-
+        # sidecar bypass (Copilot review): that bypass only ever removes
+        # the *stale* sidecar's veto power over ids the candidate newly
+        # introduces (the deadlock case its docstring describes) -- it was
+        # never meant to also waive whether the candidate still covers
+        # every scenario the old sidecar did. Scoped to ids that are still
+        # genuinely valid `test_case` scenarios today
+        # (`legacy_bypass_still_valid_ids`), so a scenario the corpus has
+        # since retired can't reintroduce the exact deadlock this bypass
+        # exists to close. The fully-empty-`scan_ids` case above already
+        # reports the more severe "untraceable" problem; this covers the
+        # narrower, easier-to-miss partial-omission case that check alone
+        # doesn't catch.
+        for sid in sorted(legacy_bypass_still_valid_ids - scan_ids):
+            problems.append(
+                f"'{sid}' was referenced in {sidecar.name if sidecar is not None else 'the previous sidecar'} "
+                f"and is still a valid test_case scenario, but is no longer referenced anywhere in "
+                f"{path.name} -- confirm this scenario was intentionally dropped, not silently omitted"
+            )
 
     bad_refs = 0
+    # Hoisted out of the loop (Copilot review): valid_scenarios() already
+    # memoizes internally, so this changes nothing about cost -- calling
+    # it once up front just makes it clear at a glance that every
+    # iteration below checks against the same set, not a fresh query per id.
+    valid = valid_scenarios() if scan_ids else set()
     for scenario in scan_ids:
-        row = conn.execute(
-            "SELECT 1 FROM test_case WHERE UPPER(scenario_name)=UPPER(?)", (scenario,)
-        ).fetchone()
-        if not row:
+        if scenario.upper() not in valid:
             bad_refs += 1
             problems.append(f"'{scenario}' is not a known test_case scenario -- run `mfdoc test-plan`, "
                              f"or this id was invented/renumbered")
 
     result["problems"] = problems
     result["invalid_scenario_refs"] = bad_refs
+    result["sidecar_stale"] = sidecar is not None and sidecar.exists() and not sidecar_usable
+    result["sidecar_unresolved_ids"] = sidecar_unresolved_ids
     result["ok"] = not problems
     return result
 
@@ -1205,7 +1734,32 @@ def _partition_pipeline_docs(conn, root: Path) -> tuple[list[Path], list[str], d
 
 def validate_tests_tree(conn, root: Path) -> dict:
     paths, out_of_scope, text_cache = _partition_pipeline_docs(conn, root)
-    results = [validate_test_doc(conn, p, _text=text_cache.get(p)) for p in paths]
+    # Computed at most once, lazily, and shared across every document below
+    # instead of each sidecar-bearing document re-scanning `test_case` on
+    # its own (Copilot review on issue #195's fix -- see
+    # `validate_test_doc`'s `_valid_scenarios` docstring). A `list`, not a
+    # plain variable, purely so the closure below can rebind it without a
+    # `nonlocal` declaration.
+    _valid_scenarios_cache: list[set[str]] = []
+
+    def shared_valid_scenarios() -> set[str]:
+        if not _valid_scenarios_cache:
+            _valid_scenarios_cache.append(
+                {row["scenario_name"].upper() for row in conn.execute("SELECT scenario_name FROM test_case")}
+            )
+        return _valid_scenarios_cache[0]
+
+    # Shared the same way, across every chunk of one member's several chunk
+    # documents in a tree (`MEMBER.chunk1.md`, `MEMBER.chunk2.md`, ...) --
+    # see `validate_test_doc`'s `_fingerprint_cache` docstring.
+    fingerprint_cache: dict[tuple[str, ...], str | None] = {}
+    results = [
+        validate_test_doc(
+            conn, p, _text=text_cache.get(p),
+            _valid_scenarios=shared_valid_scenarios, _fingerprint_cache=fingerprint_cache,
+        )
+        for p in paths
+    ]
     return {
         "documents": len(results),
         "documents_ok": sum(1 for r in results if r["ok"]),
