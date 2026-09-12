@@ -1280,6 +1280,28 @@ def validate_test_doc(conn, path: Path, *, _text: str | None = None,
         return _current_fingerprint_cache[0]
 
     sidecar = sidecar_path_for(path, fm.get("language")) if fm is not None else None
+    # A known/recognised `language` means a sidecar is expected for this
+    # document; if the document itself shows it was actually split (a
+    # `## Scenarios covered` manifest in place of the code fence -- the
+    # same signal `testbatch._split_doc_missing_its_sidecar` keys off for
+    # its own, different resume-fast-path purpose) but the sidecar file
+    # itself doesn't exist on disk, the body-scan fallback below would
+    # otherwise just check the manifest's own ids against `test_case` and
+    # can report `ok=True` even though the actual test source the
+    # manifest describes is gone entirely -- deleted, or never written
+    # back. Flagged directly, before that fallback ever runs (Copilot
+    # review, round 53). `## Chunks` excludes a chunk *index* document,
+    # which legitimately never gets a sidecar of its own at all (each
+    # chunk has its own instead) -- the same exclusion
+    # `_split_doc_missing_its_sidecar` makes.
+    if (
+        sidecar is not None and not sidecar.exists()
+        and "## Chunks" not in body and "## Scenarios covered" in body
+    ):
+        problems.append(
+            f"{sidecar.name} is missing -- {path.name} is a split document with no "
+            f"embedded code of its own to fall back on"
+        )
     sidecar_usable = False
     sidecar_unresolved_ids: list[str] = []
     sidecar_had_ids = False

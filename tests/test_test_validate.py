@@ -203,6 +203,28 @@ def test_stale_sidecar_from_renumbering_is_treated_as_absent(indexed_db, tmp_pat
     assert result["sidecar_unresolved_ids"] == ["MMP0100:BR-999"]
 
 
+def test_missing_sidecar_for_a_known_language_split_document_is_flagged(indexed_db, tmp_path):
+    """Copilot review, round 53: a document with a recognised `language`
+    (a sidecar is expected) that was actually split -- `## Scenarios
+    covered` manifest in place of the code fence -- but whose sidecar file
+    has been deleted or never written back must not silently fall back to
+    scanning the manifest alone. That manifest's ids (BR-004) still
+    resolve against `test_case` just fine, so without this check
+    `validate_test_doc` would report `ok=True` even though the actual test
+    source the manifest describes doesn't exist at all -- indistinguishable
+    from a tampered/missing sidecar. Uses SIDECAR_DOC's own split-document
+    shape with no `MMP0100.py` written next to it."""
+    conn = indexed_db
+    testplan.run_all(conn, member_name="MMP0100")
+    path = tmp_path / "MMP0100.md"
+    path.write_text(SIDECAR_DOC, encoding="utf-8")
+    # Deliberately no MMP0100.py written -- the sidecar this split
+    # document expects is simply gone.
+    result = validate_test_doc(conn, path)
+    assert not result["ok"]
+    assert any("MMP0100.py" in p and "missing" in p for p in result["problems"]), result["problems"]
+
+
 def test_partial_positional_shift_sidecar_is_still_treated_as_stale(tmp_path):
     """Copilot review follow-up on issue #195: a partial positional
     renumbering (only some ids move) must still trip the staleness guard.

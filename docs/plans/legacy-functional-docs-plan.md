@@ -12,6 +12,23 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-12s):**
+- Addressed the fifty-third Copilot review round on PR #209 (issue #195):
+  a document with a known/recognised `language` (a sidecar is expected)
+  that had actually been split (`## Scenarios covered` manifest in place
+  of the code fence) but whose sidecar file was deleted or never written
+  back was falling through to `validate_test_doc`'s body-scan fallback,
+  which only ever checks the manifest's own ids against `test_case` --
+  reporting `ok=True` even though the real test source the manifest
+  describes doesn't exist at all. Added an explicit check (mirroring the
+  same `## Scenarios covered`/`## Chunks` signal
+  `testbatch._split_doc_missing_its_sidecar` already uses for its own,
+  different resume-fast-path purpose) that flags a missing sidecar for a
+  known-language split document directly, before the fallback runs.
+- One new regression test, confirmed to fail without the fix. Full suite
+  green (1079 passed, 2 skipped) plus a clean `mfdoc validate` pass
+  against `examples/` (71/71 documents, 0 invalid citations of 750).
+
 **Progress (2026-09-12r):**
 - Addressed the fifty-second Copilot review round on PR #209 (issue #195):
   `testbatch._TEST_CASE_FINGERPRINT_FIELD`'s strip regex only matched a
