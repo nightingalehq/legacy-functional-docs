@@ -2428,6 +2428,50 @@ def test_run_test_batch_member_level_resume_skip_sees_a_missing_sidecar(tmp_path
     assert sidecar_path.exists(), "the re-render must recreate the missing sidecar"
 
 
+def test_run_test_batch_still_skips_an_unchanged_chunked_member_on_resume(tmp_path):
+    """Copilot review follow-up: the chunk *index* document
+    (`_render_chunk_index`'s own output) carries a `## Scenarios covered`
+    section too -- its own aggregate across every chunk -- but never gets
+    a sidecar of its own at all (each chunk gets its own instead). The
+    member-level resume skip's missing-sidecar check (added above) must
+    not mistake that index for a split document that lost its sidecar --
+    otherwise every unchanged *chunked* member would be forced through a
+    full rebuild on every single resume, defeating resumability for the
+    entire chunked path."""
+    from mfdoc import testbatch
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_scenarios(conn, 4)
+
+    caller = _counting_caller(_chunk_aware_caller("python", "pytest"))
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+
+    summary1 = testbatch.run_test_batch(
+        conn, ["FAKEMOD"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path,
+        max_scenarios_per_call=2,
+    )
+    assert summary1.skipped == 0 and summary1.ok == 1
+    assert caller.calls == 2, "sanity check: two chunks rendered"
+
+    # Nothing changed at all -- must be a resumed skip, no model calls.
+    summary2 = testbatch.run_test_batch(
+        conn, ["FAKEMOD"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path,
+        max_scenarios_per_call=2,
+    )
+    assert summary2.skipped == 1, (
+        "an unchanged chunked member's index must not be misread as a split "
+        "document missing its sidecar"
+    )
+    assert caller.calls == 2, "no new model calls -- the resume must be a true skip"
+
+
 def test_shrinking_back_below_threshold_removes_leftover_chunk_files_and_sidecars(tmp_path):
     """Copilot review follow-up on issue #195: the symmetric direction of
     the threshold-change test above. A member that *shrinks* back under

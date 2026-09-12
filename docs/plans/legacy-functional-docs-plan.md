@@ -12,6 +12,25 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-12g):**
+- Addressed the thirty-eighth Copilot review round on PR #209 (issue
+  #195): the previous round's `_split_doc_missing_its_sidecar` (member-
+  level resume-skip fix) only checked for the `## Scenarios covered`
+  heading -- but the chunk *index* document (`_render_chunk_index`'s own
+  output) carries that same heading too, as its own aggregate across
+  every chunk, despite never getting a sidecar of its own at all (each
+  chunk gets its own instead). Every unchanged *chunked* member was being
+  misread as a split document that lost its sidecar, forcing a full
+  chunk/index rebuild on every single resume instead of the fast skip --
+  a real regression in the previous round's own fix, silent because no
+  test exercised a chunked member's resume path against it. Now excludes
+  the index via its own `## Chunks` heading (unique to that template)
+  before the `## Scenarios covered` check runs.
+- One new regression test proving an unchanged chunked member is still
+  skipped (no model calls) on resume. Full suite green (1061 passed, 2
+  skipped) plus a clean `mfdoc validate` pass against `examples/` (71/71
+  documents, 0 invalid citations of 750).
+
 **Progress (2026-09-12f):**
 - Addressed the thirty-seventh Copilot review round on PR #209 (issue
   #195) -- a degraded pass ("unable to run its full agentic suite"),

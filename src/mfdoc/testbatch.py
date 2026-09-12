@@ -1129,13 +1129,29 @@ def _split_doc_missing_its_sidecar(doc_path: Path, language: str) -> bool:
     that's a completely normal, still-current state, not a missing
     artifact. `False` (nothing missing) whenever `doc_path` doesn't exist
     at all -- a caller's own existence check is what decides whether that
-    counts as reusable in the first place, not this function."""
+    counts as reusable in the first place, not this function.
+
+    A chunk *index* document (`_generate_member_test_doc_chunked`'s own
+    `_render_chunk_index` output, always at the member's un-suffixed
+    `out_path`) also carries a `## Scenarios covered` section -- its own
+    aggregate across every chunk -- but, by design, never gets a sidecar
+    of its own at all (each chunk gets its own instead). Without
+    excluding it, every unchanged chunked member's index would be
+    misread as a split document missing its sidecar on every single
+    resume (Copilot review), forcing a full chunk/index rebuild instead
+    of the fast corpus/member skip. `## Chunks` is the section heading
+    unique to that index template -- a real split document, single or
+    per-chunk, never has one -- so it's checked first and excludes the
+    index case before the `## Scenarios covered` check below ever runs."""
     if not doc_path.exists():
         return False
     sidecar = sidecar_path_for(doc_path, language)
     if sidecar is None or sidecar.exists():
         return False
-    return "## Scenarios covered" in doc_path.read_text(encoding="utf-8")
+    text = doc_path.read_text(encoding="utf-8")
+    if "## Chunks" in text:
+        return False
+    return "## Scenarios covered" in text
 
 
 def _test_chunk_reuse_ok(conn, prior_chunks: dict | None, i: int, brief_hash: str,
