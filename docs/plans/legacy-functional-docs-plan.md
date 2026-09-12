@@ -12,6 +12,24 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-12p):**
+- Addressed the fiftieth Copilot review round on PR #209 (issue #195):
+  round 49's `stored_fingerprint_is_present`-less fix (`stored_fingerprint
+  is not None`) still couldn't distinguish a document with no
+  `test_case_fingerprint` field at all from one explicitly carrying
+  `test_case_fingerprint: null` -- `dict.get` reads both back as `None`.
+  An explicit null was therefore still silently handed the weaker
+  id-overlap fallback meant only for documents that never had this field.
+  Added `stored_fingerprint_is_present`, computed from key presence
+  (`"test_case_fingerprint" in fm`) rather than the value itself, and used
+  it in place of the value's own `is not None` check at both gate sites --
+  an explicit null is now compared like any other present value (and,
+  since no computed fingerprint is ever `None`, correctly reported as a
+  mismatch/stale rather than bypassed).
+- One new regression test, confirmed to fail without the fix. Full suite
+  green (1077 passed, 2 skipped) plus a clean `mfdoc validate` pass
+  against `examples/` (71/71 documents, 0 invalid citations of 750).
+
 **Progress (2026-09-12o):**
 - Addressed the forty-ninth Copilot review round on PR #209 (issue #195),
   three findings (a fourth, repeating the "MMP0100/MOM is client content"

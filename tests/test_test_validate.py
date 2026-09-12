@@ -982,6 +982,70 @@ def test_rejects_unconfirmed_order():
     ), result["problems"]
 
 
+def test_explicit_null_stored_fingerprint_is_still_compared_not_treated_as_absent(indexed_db, tmp_path):
+    """Copilot review, round 50: `stored_fingerprint`'s value is `None`
+    both when a document has no `test_case_fingerprint` field at all *and*
+    when it explicitly carries `test_case_fingerprint: null` -- `dict.get`
+    can't tell those two apart, the same shape of gap the `language` fix
+    (round 49) already closed for that field. Round 49's `is not None`
+    fingerprint-truthiness fix compared any present *non-None* value
+    (catching the empty-string case) but still fell through to the weaker
+    id-overlap fallback for an explicit null, exactly as if the field were
+    absent. A key-presence check (`stored_fingerprint_is_present`) closes
+    this the same way: an explicit null is still a real, present value
+    that gets compared (and, since no computed fingerprint ever equals
+    `None`, correctly treated as a mismatch/stale rather than handed the
+    fallback meant for documents that never had this field)."""
+    conn = indexed_db
+    testplan.run_all(conn, member_name="MMP0100")
+    path = tmp_path / "MMP0100.md"
+    sidecar = tmp_path / "MMP0100.py"
+    path.write_text(
+        """---
+title: "MMP0100 -- generated tests (python)"
+doc_type: generated_test
+system: MOM
+module: MMP0100
+language: python
+framework: pytest
+generated_by: legacy-functional-docs 0.1.0
+generated_at: "2026-01-01"
+review_status: draft
+reviewers: []
+confidence_summary:
+  verified: 1
+  inferred: 0
+  unresolved: 0
+sources: ["MMP0100"]
+test_case_fingerprint: null
+---
+
+# MMP0100 -- generated tests
+
+```python
+def test_rejects_unconfirmed_order():
+    # MMP0100:BR-004 [[MMP0100:38-40]]
+    ...
+```
+""",
+        encoding="utf-8",
+    )
+    sidecar.write_text(
+        "def test_rejects_unconfirmed_order():\n"
+        "    # MMP0100:BR-004\n"
+        "    ...\n"
+        "def test_something_else():\n"
+        "    # MMP0100:BR-001\n"
+        "    ...\n",
+        encoding="utf-8",
+    )
+    result = validate_test_doc(conn, path)
+    assert not result["ok"], "an explicit null stored fingerprint must not waive the completeness check"
+    assert any(
+        "BR-001" in p and "no longer referenced" in p for p in result["problems"]
+    ), result["problems"]
+
+
 def test_prior_fingerprint_is_trusted_over_the_candidates_own_stamped_field(indexed_db, tmp_path):
     """Copilot review follow-up (round 40): `_prior_fingerprint` (the
     previous successful render's, captured by the caller before

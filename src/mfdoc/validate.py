@@ -1216,6 +1216,23 @@ def validate_test_doc(conn, path: Path, *, _text: str | None = None,
         _prior_fingerprint if _render_time
         else _prior_fingerprint or (fm.get("test_case_fingerprint") if fm is not None else None)
     )
+    # Whether a stored fingerprint value should be treated as present at
+    # all -- distinct from `stored_fingerprint` itself, which is `None`
+    # both when nothing supplied one *and* when a document explicitly
+    # carries `test_case_fingerprint: null` (`dict.get` can't tell those
+    # apart, the same shape of gap the `language` check above closes).
+    # Those two cases must not be treated alike: no field at all is a
+    # legitimate legacy document predating this feature, entitled to the
+    # weaker id-overlap fallback below; an explicit null is a corrupted or
+    # tampered value on an otherwise-fingerprint-aware document and must
+    # still be *compared* (comparing unequal to any real computed
+    # fingerprint, so it's rejected/treated as stale, same as any other
+    # mismatch) rather than silently handed the fallback meant for
+    # documents that never had this field to begin with (Copilot review,
+    # round 50).
+    stored_fingerprint_is_present = _prior_fingerprint is not None or (
+        fm is not None and "test_case_fingerprint" in fm
+    )
     _current_fingerprint_cache: list = []  # 0 or 1 element -- memoized None is valid too
 
     def current_fingerprint() -> str | None:
@@ -1303,17 +1320,22 @@ def validate_test_doc(conn, path: Path, *, _text: str | None = None,
         # an insertion *after* the sidecar's own BR-range, which leaves its
         # ids a literal (and therefore ID-overlap-invisible) subset of the
         # current valid set.
-        # `is not None`, not truthiness: an explicitly present but empty or
-        # otherwise invalid stored fingerprint (a corrupted/hand-edited
-        # `test_case_fingerprint: ""`) is a real, present value that must
-        # still be *compared* against the current one (and reported as a
-        # mismatch when it doesn't match) -- not silently treated the same
-        # as "no fingerprint recorded at all" and routed to the weaker
-        # id-overlap fallback below, which can then report a false
-        # manifest/sidecar mismatch for a sidecar whose ids remain a
-        # coincidental subset after an insertion (Copilot review, round 49).
-        fp = current_fingerprint() if stored_fingerprint is not None else None
-        if stored_fingerprint is not None and fp is not None:
+        # `stored_fingerprint_is_present`, not `stored_fingerprint is not
+        # None` and not truthiness: an explicitly present but empty,
+        # invalid, or `null` stored fingerprint (a corrupted/hand-edited
+        # `test_case_fingerprint: ""` or `test_case_fingerprint: null`) is a
+        # real, present value that must still be *compared* against the
+        # current one (and reported as a mismatch when it doesn't match) --
+        # not silently treated the same as "no fingerprint recorded at
+        # all" and routed to the weaker id-overlap fallback below, which
+        # can then report a false manifest/sidecar mismatch for a sidecar
+        # whose ids remain a coincidental subset after an insertion
+        # (Copilot review, rounds 49 and 50 -- round 49 covered the empty-
+        # string case via `is not None`, which still couldn't tell an
+        # explicit null value apart from the field being absent entirely,
+        # since both read back as `None` from `dict.get`).
+        fp = current_fingerprint() if stored_fingerprint_is_present else None
+        if stored_fingerprint_is_present and fp is not None:
             sidecar_usable = fp == stored_fingerprint
             if not sidecar_usable:
                 # A genuine fingerprint *mismatch* -- the corpus has moved
