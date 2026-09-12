@@ -12,6 +12,25 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-12j):**
+- Addressed the forty-first Copilot review round on PR #209 (issue #195):
+  `write_test_doc_with_sidecar` left any `test_case_fingerprint` already
+  present in the *candidate's own* front matter untouched whenever it
+  couldn't compute a trusted replacement (e.g. `test_case` stale relative
+  to `rule_candidate`). A model can echo/hallucinate this field from the
+  brief or a prior template even though it's only ever supposed to be
+  stamped here, after a successful validation -- left in place, that
+  untrusted value could later coincidentally match once `test-plan`
+  catches up, at which point `validate_test_doc`'s standalone fallback
+  (no `_prior_fingerprint` -- a `mfdoc test-validate` run) would read it
+  as genuine and treat a sidecar it was never actually validated against
+  as authoritative, reintroducing the exact false-manifest-mismatch
+  failure this mechanism exists to prevent. Now stripped unconditionally
+  before conditionally stamping a trusted value in its place.
+- One new regression test, confirmed to fail without the fix. Full suite
+  green (1067 passed, 2 skipped) plus a clean `mfdoc validate` pass
+  against `examples/` (71/71 documents, 0 invalid citations of 750).
+
 **Progress (2026-09-12i):**
 - Addressed the fortieth Copilot review round on PR #209 (issue #195):
   1. The chunk-loop's own sidecar-backup restore/discard decision used

@@ -783,6 +783,57 @@ def test_write_test_doc_with_sidecar_omits_fingerprint_when_test_case_is_stale(t
     assert "test_case_fingerprint:" not in written
 
 
+def test_write_test_doc_with_sidecar_strips_an_untrusted_preexisting_fingerprint(tmp_path):
+    """Copilot review follow-up (round 41): when this function cannot
+    compute a trusted fingerprint (here, `test_case` is stale relative to
+    `rule_candidate` -- the same shape as the test above), it used to
+    leave any `test_case_fingerprint` already present in the *candidate's
+    own* front matter untouched. A model can echo/hallucinate this field
+    from the brief or a prior template even though it's only ever
+    supposed to be stamped here, after a successful validation -- left in
+    place, that untrusted value could later coincidentally match once
+    `test-plan` catches up, at which point `validate_test_doc`'s
+    standalone fallback (no `_prior_fingerprint`) would read it as
+    genuine and treat a sidecar it was never actually validated against
+    as authoritative. Must be stripped regardless of whether a trusted
+    replacement is computed."""
+    from mfdoc import testbatch
+    import sqlite3
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
+    rc1 = insert(conn, "rule_candidate", member_id=1, line_no=1, construct="IF", condition="COND-1", raw="IF COND-1")
+    insert(
+        conn, "test_case", member_id=1, kind="unit", rule_candidate_id=rc1, scenario_name="FAKEMOD:BR-001",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+        then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:1", confidence="verified",
+    )
+    # test_case stale relative to rule_candidate -- no trusted fingerprint
+    # can be computed for this write (same shape as the test above).
+    insert(conn, "rule_candidate", member_id=1, line_no=2, construct="IF", condition="COND-2", raw="IF COND-2")
+    conn.commit()
+
+    doc_text = _valid_test_doc_text("python", "pytest").replace(
+        'sources: ["FAKEMOD"]\n',
+        'sources: ["FAKEMOD"]\ntest_case_fingerprint: "hallucinated-untrusted-value"\n',
+    )
+    out_path = tmp_path / "FAKEMOD.md"
+    out_path.write_text(doc_text, encoding="utf-8")
+    testbatch.write_test_doc_with_sidecar(conn, "FAKEMOD", out_path, doc_text, "python")
+
+    written = out_path.read_text(encoding="utf-8")
+    assert "test_case_fingerprint:" not in written, (
+        "an untrusted pre-existing fingerprint must be stripped, not left in place, "
+        "when no trusted replacement can be computed"
+    )
+
+
 def test_write_test_doc_with_sidecar_omits_fingerprint_for_empty_sources(tmp_path):
     """Copilot review follow-up on issue #195: `sources: []` is a
     syntactically valid list (so `validate_doc`'s own malformed-shape

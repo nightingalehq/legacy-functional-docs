@@ -245,6 +245,22 @@ def write_test_doc_with_sidecar(conn, member_name: str, out_path: Path, doc_text
         # describes what it's attached to.
         if all(member_test_case_aligned_with_rule_candidate(conn, s) for s in doc_sources):
             fingerprint = doc_rule_fingerprint(conn, doc_sources)
+    # Strip any `test_case_fingerprint` the candidate's own front matter
+    # already carried, unconditionally -- not only when a trusted one is
+    # about to replace it (Copilot review): this field is only ever
+    # supposed to be stamped here, by this function, after a successful
+    # validation, so one already present in a freshly-generated candidate
+    # is the model echoing/hallucinating it from the brief or a prior
+    # template, never a value to trust. Left in place, an untrusted value
+    # surviving into the written document could coincidentally match a
+    # *later* corpus state once `test-plan` catches up, at which point
+    # `validate_test_doc`'s fallback (no `_prior_fingerprint` -- a
+    # standalone `mfdoc test-validate` run) would read it as genuine and
+    # treat a sidecar it was never actually validated against as
+    # authoritative -- reintroducing the exact false-manifest-mismatch
+    # failure this whole mechanism exists to prevent. Applied even when
+    # `fingerprint` stays `None` below (nothing trusted to stamp instead).
+    front_matter_block = re.sub(r"(?m)^test_case_fingerprint:.*\n?", "", front_matter_block)
     if fingerprint is not None:
         front_matter_block = front_matter_block.rstrip("\n") + f'\ntest_case_fingerprint: "{fingerprint}"\n'
 
