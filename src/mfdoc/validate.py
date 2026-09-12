@@ -1154,15 +1154,23 @@ def validate_test_doc(conn, path: Path, *, _text: str | None = None,
             }
         return _valid_scenarios_cache
 
-    # The document's own stamped fingerprint, if any -- falling back to
     # `_prior_fingerprint` (the previous successful render's, captured by
-    # the caller before overwriting `path` with a fresh candidate) only
-    # when this document carries none of its own. A freshly-generated
-    # candidate never has one yet (only `write_test_doc_with_sidecar`
-    # stamps it, after validation succeeds), so without this fallback the
-    # fingerprint check below would have nothing to compare against on
-    # exactly the render/retry loop's own first validation of a chunk.
-    stored_fingerprint = (fm.get("test_case_fingerprint") if fm is not None else None) or _prior_fingerprint
+    # the caller before overwriting `path` with a fresh candidate) is
+    # preferred *over* the document's own stamped field, not just a
+    # fallback for when the document has none (Copilot review): a
+    # freshly-generated candidate is never supposed to carry this field
+    # at all (only `write_test_doc_with_sidecar` stamps it, after
+    # validation succeeds) -- if one shows up anyway, it's the model
+    # echoing/hallucinating it from the brief or a prior template, not a
+    # value this validation should trust over the caller's own captured,
+    # known-genuine prior. Trusting whichever the candidate happened to
+    # include would let such a value make a stale sidecar look
+    # authoritative again. Only read the candidate's own field when the
+    # caller has no prior to recover (a standalone `mfdoc test-validate`
+    # call, which never passes `_prior_fingerprint` at all) -- there, the
+    # document's own stamped value (if any) is the only real fingerprint
+    # to check against, so allowed as this function has always let it.
+    stored_fingerprint = _prior_fingerprint or (fm.get("test_case_fingerprint") if fm is not None else None)
     _current_fingerprint_cache: list = []  # 0 or 1 element -- memoized None is valid too
 
     def current_fingerprint() -> str | None:
@@ -1253,6 +1261,19 @@ def validate_test_doc(conn, path: Path, *, _text: str | None = None,
         fp = current_fingerprint() if stored_fingerprint else None
         if stored_fingerprint and fp is not None:
             sidecar_usable = fp == stored_fingerprint
+            if not sidecar_usable:
+                # A genuine fingerprint *mismatch* -- the corpus has moved
+                # on since this sidecar was stamped -- deserves the same
+                # completeness protection the no-fingerprint-at-all bypass
+                # gets just below, not none at all (Copilot review): this
+                # branch used to leave `legacy_bypass_still_valid_ids`
+                # empty, so a fresh candidate silently dropping a scenario
+                # the stale sidecar still had (and which is still a real,
+                # current `test_case` row) would pass here with nothing to
+                # catch it, then get written with the *current* fingerprint
+                # -- permanently accepting the omission instead of merely
+                # tolerating the staleness itself.
+                legacy_bypass_still_valid_ids = code_ids & valid_scenarios()
         elif _render_time:
             # No fingerprint context at all (a legacy sidecar predating
             # this field), validating a freshly-generated candidate about

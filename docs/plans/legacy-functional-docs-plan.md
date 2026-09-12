@@ -12,6 +12,59 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-12i):**
+- Addressed the fortieth Copilot review round on PR #209 (issue #195):
+  1. The chunk-loop's own sidecar-backup restore/discard decision used
+     `if fresh_sidecar.exists() or (result is not None and result.ok):
+     sidecar_backup.unlink()` -- deferring to `fresh_sidecar.exists()`
+     first meant a nested failure (a partially-installed fresh sidecar
+     left behind by a mid-render exception) could be misread as a
+     completed, accepted render and wrongly *discard* the last-known-good
+     backup instead of restoring it. Now checks only `result is not None
+     and result.ok`; anything else (a failed validation, or the render
+     itself raising) always restores the backup, unconditionally
+     overwriting whatever partial state sits at the real path.
+  2. The corpus-level resume fast path's missing-sidecar check
+     (`_split_doc_missing_its_sidecar`, added in round 36/38) only ever
+     looked at a chunked member's own `out_path` -- the deterministic
+     index, which by design never has its own sidecar -- so it never
+     verified that the chunk files the index links to (or their sidecars,
+     for a split chunk) were still on disk. A chunk deleted out from
+     under this tool while the database, resume state, and index all
+     stayed otherwise unchanged would have been skipped indefinitely.
+     Added `_chunked_member_missing_a_chunk_file`, reconstructing each
+     prior chunk's path from `prior["chunks"]` the same way
+     `_generate_member_test_doc_chunked` originally named it, and wired
+     it into both resume-skip fast paths (`run_test_batch` and
+     `plan_test_batch`) alongside the existing single-document check.
+  3. `validate_test_doc`'s `stored_fingerprint` precedence had the
+     candidate's own stamped `test_case_fingerprint` field win over
+     `_prior_fingerprint` (the caller's own captured, known-genuine prior)
+     whenever the field was present -- but a freshly-generated candidate
+     is never supposed to carry this field at all (only
+     `write_test_doc_with_sidecar` stamps it, after validation succeeds),
+     so a value that shows up anyway is the model echoing/hallucinating
+     it, not something to trust over the caller's own prior. Swapped the
+     `or` precedence so `_prior_fingerprint` wins when both are present;
+     the candidate's own field is only read as a fallback for a
+     standalone `mfdoc test-validate` call, which never passes
+     `_prior_fingerprint` at all.
+  4. A genuine fingerprint *mismatch* (the corpus has moved on since a
+     sidecar was stamped) left `legacy_bypass_still_valid_ids` empty,
+     unlike the no-fingerprint-at-all bypass just below it in the same
+     function -- so a fresh candidate silently dropping a scenario the
+     stale sidecar still had (still a real, current `test_case` row)
+     passed with nothing to catch it, then got written with the
+     *current* fingerprint: permanently accepting the omission instead of
+     merely tolerating the staleness itself. Now populated in the
+     mismatch branch too, scoped to ids that are still genuinely valid
+     scenarios today, matching the existing bypass's own scoping.
+- Three new regression tests (a chunked-member missing-chunk-file resume
+  case; a fingerprint-mismatch dropped-scenario case; a
+  `_prior_fingerprint`-wins-over-the-candidate's-own-field case). Full
+  suite green (1066 passed, 2 skipped) plus a clean `mfdoc validate` pass
+  against `examples/` (71/71 documents, 0 invalid citations of 750).
+
 **Progress (2026-09-12h):**
 - Addressed the thirty-ninth Copilot review round on PR #209 (issue
   #195):

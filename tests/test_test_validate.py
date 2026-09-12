@@ -805,6 +805,143 @@ def test_placeholder():
     assert result["ok"], result["problems"]
 
 
+def test_a_fingerprint_mismatch_still_catches_a_dropped_scenario(indexed_db, tmp_path):
+    """Copilot review follow-up (round 40): a genuine fingerprint
+    *mismatch* (the corpus has moved on since this sidecar was stamped)
+    used to leave `legacy_bypass_still_valid_ids` empty, unlike the
+    no-fingerprint-at-all bypass just below it -- so a fresh candidate
+    that silently drops a scenario the stale sidecar still had, while
+    that scenario is still a real, current `test_case` row, passed
+    validation with nothing to catch it, then got written with the
+    *current* fingerprint: permanently accepting the omission instead of
+    merely tolerating the staleness itself. `MMP0100:BR-001` is real and
+    current; the sidecar covers it and `BR-004`, but the candidate's own
+    manifest/body only reference `BR-004`."""
+    conn = indexed_db
+    testplan.run_all(conn, member_name="MMP0100")
+    path = tmp_path / "MMP0100.md"
+    sidecar = tmp_path / "MMP0100.py"
+    path.write_text(
+        """---
+title: "MMP0100 -- generated tests (python)"
+doc_type: generated_test
+system: MOM
+module: MMP0100
+language: python
+framework: pytest
+generated_by: legacy-functional-docs 0.1.0
+generated_at: "2026-01-01"
+review_status: draft
+reviewers: []
+confidence_summary:
+  verified: 1
+  inferred: 0
+  unresolved: 0
+sources: ["MMP0100"]
+test_case_fingerprint: "stale-fingerprint-does-not-match-current-corpus"
+---
+
+# MMP0100 -- generated tests
+
+```python
+def test_rejects_unconfirmed_order():
+    # MMP0100:BR-004 [[MMP0100:38-40]]
+    ...
+```
+""",
+        encoding="utf-8",
+    )
+    # The sidecar this stale fingerprint was stamped against still covers
+    # both BR-001 and BR-004 -- the candidate above silently drops BR-001.
+    sidecar.write_text(
+        "def test_rejects_unconfirmed_order():\n"
+        "    # MMP0100:BR-004\n"
+        "    ...\n"
+        "def test_something_else():\n"
+        "    # MMP0100:BR-001\n"
+        "    ...\n",
+        encoding="utf-8",
+    )
+    result = validate_test_doc(conn, path)
+    assert not result["ok"], "a fingerprint mismatch must not waive the completeness check"
+    assert any(
+        "BR-001" in p and "no longer referenced" in p for p in result["problems"]
+    ), result["problems"]
+
+
+def test_prior_fingerprint_is_trusted_over_the_candidates_own_stamped_field(indexed_db, tmp_path):
+    """Copilot review follow-up (round 40): `_prior_fingerprint` (the
+    previous successful render's, captured by the caller before
+    overwriting `path` with a fresh candidate) must be preferred *over*
+    whatever the candidate's own front matter happens to carry, not just
+    used as a fallback -- a freshly-generated candidate is never supposed
+    to stamp this field at all (only `write_test_doc_with_sidecar` does,
+    after validation succeeds), so a value that shows up anyway is the
+    model echoing/hallucinating it, not a value this validation should
+    trust over the caller's own known-genuine prior. Here the candidate's
+    own stamped field is deliberately wrong (would read as a mismatch if
+    trusted), while `_prior_fingerprint` is the real current fingerprint --
+    the sidecar must still be treated as usable (matching), so the full
+    two-directional manifest/sidecar check runs instead of the
+    fingerprint-mismatch completeness fallback, and catches the
+    candidate's manifest claiming a scenario (`BR-001`) the sidecar's
+    actual code doesn't have."""
+    import mfdoc.validate as validate_module
+
+    conn = indexed_db
+    testplan.run_all(conn, member_name="MMP0100")
+    real_fp = validate_module.doc_rule_fingerprint(conn, ["MMP0100"])
+    path = tmp_path / "MMP0100.md"
+    sidecar = tmp_path / "MMP0100.py"
+    path.write_text(
+        """---
+title: "MMP0100 -- generated tests (python)"
+doc_type: generated_test
+system: MOM
+module: MMP0100
+language: python
+framework: pytest
+generated_by: legacy-functional-docs 0.1.0
+generated_at: "2026-01-01"
+review_status: draft
+reviewers: []
+confidence_summary:
+  verified: 1
+  inferred: 0
+  unresolved: 0
+sources: ["MMP0100"]
+test_case_fingerprint: "hallucinated-value-that-does-not-match-anything"
+---
+
+# MMP0100 -- generated tests
+
+See [`MMP0100.py`](./MMP0100.py) for the generated test source.
+
+## Scenarios covered
+
+- MMP0100:BR-004
+- MMP0100:BR-001
+""",
+        encoding="utf-8",
+    )
+    # The sidecar's actual code only has BR-004 -- the manifest's BR-001
+    # claim above is unbacked by anything in the sidecar.
+    sidecar.write_text(
+        "def test_rejects_unconfirmed_order():\n"
+        "    # MMP0100:BR-004\n"
+        "    ...\n",
+        encoding="utf-8",
+    )
+    result = validate_test_doc(conn, path, _prior_fingerprint=real_fp)
+    assert not result["ok"], (
+        "the trusted _prior_fingerprint must win, making the sidecar 'usable' so the "
+        "full manifest/sidecar cross-check runs and catches the unbacked manifest claim"
+    )
+    assert any(
+        "BR-001" in p and "not found in" in p for p in result["problems"]
+    ), result["problems"]
+
+
 def test_missing_language_or_framework_front_matter_is_flagged(indexed_db, tmp_path):
     conn = indexed_db
     testplan.run_all(conn, member_name="MMP0100")

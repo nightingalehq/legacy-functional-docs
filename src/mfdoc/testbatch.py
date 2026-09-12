@@ -1154,6 +1154,52 @@ def _split_doc_missing_its_sidecar(doc_path: Path, language: str) -> bool:
     return "## Scenarios covered" in text
 
 
+def _chunked_member_missing_a_chunk_file(out_path: Path, prior_chunks, language: str) -> bool:
+    """Whether any chunk a chunked member's prior successful run recorded
+    (`prior["chunks"]`, keyed by chunk index as a string -- see
+    `_generate_member_test_doc_chunked`'s own `chunk_state`) is now
+    missing on disk, or missing its sidecar (`_split_doc_missing_its_
+    sidecar`) if that chunk was split.
+
+    Guards the identical member-level resume-skip fast path
+    `_split_doc_missing_its_sidecar` guards for a single-document member
+    (Copilot review): that check alone only ever looks at `out_path`
+    itself, which for a chunked member is the deterministic *index*
+    document -- one that, by design, never has its own sidecar and is
+    deliberately excluded from that check. Nothing there (or in
+    `corpus_unchanged`/`prior_ok`'s other conditions) ever verifies that
+    the chunk files the index *references* are actually still present.
+    Left unguarded, a chunk file deleted out from under this tool (or
+    lost to some other bug) while the database, resume state, and index
+    itself stay otherwise unchanged would leave `run_test_batch` skipping
+    this member indefinitely -- `validate_test_doc` never resolves a
+    markdown link, so the index's own validation has no way to notice a
+    linked chunk file is gone.
+
+    Chunk file names are reconstructed the same way
+    `_generate_member_test_doc_chunked` computed them originally --
+    `chunk_width` from the *count* of recorded chunks, matching that
+    function's own `len(str(chunk_count))` -- so this only needs the
+    prior state dict, not a fresh `routine_aware_chunk_ranges` call.
+    `False` (nothing missing) for anything that isn't a chunked member's
+    prior state (`prior_chunks` not a non-empty dict) -- a single-document
+    member has no chunks to check here at all."""
+    if not isinstance(prior_chunks, dict) or not prior_chunks:
+        return False
+    chunk_width = len(str(len(prior_chunks)))
+    for key in prior_chunks:
+        try:
+            i = int(key)
+        except (TypeError, ValueError):
+            continue
+        chunk_path = out_path.with_name(f"{out_path.stem}.chunk{i:0{chunk_width}d}{out_path.suffix}")
+        if not chunk_path.exists():
+            return True
+        if _split_doc_missing_its_sidecar(chunk_path, language):
+            return True
+    return False
+
+
 def _test_chunk_reuse_ok(conn, prior_chunks: dict | None, i: int, brief_hash: str,
                           chunk_path: Path, language: str, readonly: bool = False,
                           _fingerprint_cache: dict | None = None, _valid_scenarios=None) -> bool:
@@ -1446,26 +1492,39 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
                             # Checked directly rather than trusted from `ok`.
                             #
                             # Three outcomes, not two (Copilot review): a
-                            # real fresh sidecar means discard the backup
-                            # (the common case); no sidecar but the render
-                            # still validated `ok=True` is a *legitimate*
-                            # no-BR-references shape -- restoring the old,
-                            # unrelated backup there would pair an accepted,
+                            # completed, accepted render (`result is not
+                            # None and result.ok`) means discard the backup
+                            # -- whether or not `write_test_doc_with_sidecar`
+                            # actually wrote a fresh sidecar (a legitimate
+                            # no-BR-references shape can validate `ok=True`
+                            # with none at all; restoring the old, unrelated
+                            # backup there would pair an accepted,
                             # correctly-refless document with a stale
                             # sidecar a later validation would then wrongly
-                            # flag as a genuine mismatch, so this also
-                            # discards rather than restores; only a render
-                            # that didn't succeed at all (`ok=False`, or an
-                            # exception with no `result` ever produced)
-                            # restores the backup, so this chunk isn't left
-                            # with a manifest/body citing real ids but no
-                            # sidecar to actually back them.
+                            # flag as a genuine mismatch). Anything else --
+                            # `result.ok` is `False`, or `_generate_test_doc_
+                            # from_brief` itself raised (`result` is still
+                            # `None`, from `write_test_doc_with_sidecar`'s
+                            # own temp-write/replace failure propagating
+                            # uncaught, possibly after it already replaced
+                            # the real sidecar before its own rollback then
+                            # also failed) -- always restores instead,
+                            # unconditionally overwriting whatever sits at
+                            # the real path right now (Copilot review: an
+                            # earlier version deferred to `fresh_sidecar.
+                            # exists()` first, which could see a partially-
+                            # installed fresh sidecar from exactly that
+                            # nested-failure case and wrongly discard the
+                            # backup instead of restoring over it). Content
+                            # already known-good either way is never worth
+                            # trusting over a render this loop doesn't
+                            # consider to have succeeded.
                             # Same `language`, same `chunk_path` as the call
                             # that produced this backup in the first place --
                             # always resolves to a real path here, never None.
                             fresh_sidecar = sidecar_path_for(chunk_path, language)
                             try:
-                                if fresh_sidecar.exists() or (result is not None and result.ok):
+                                if result is not None and result.ok:
                                     sidecar_backup.unlink()
                                 else:
                                     sidecar_backup.replace(fresh_sidecar)
@@ -1876,6 +1935,12 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
             # passes this check regardless -- each chunk's own sidecar is
             # `_test_chunk_reuse_ok`'s concern, not this member-level one.
             and not _split_doc_missing_its_sidecar(out_path, language)
+            # Copilot review: for a chunked member this fast path only
+            # ever looked at the index above -- it never confirmed the
+            # chunk files (or their sidecars) the index links to are
+            # still on disk. `prior.get("chunks")` is `None` for a
+            # single-document member, so this is a no-op there.
+            and not _chunked_member_missing_a_chunk_file(out_path, prior.get("chunks"), language)
         )
 
         if corpus_unchanged and prior_ok:
@@ -2394,6 +2459,7 @@ def plan_test_batch(conn, members: list[str], language: str, framework: str, out
         prior_ok = (
             isinstance(prior, dict) and prior.get("ok") and out_path.exists()
             and not _split_doc_missing_its_sidecar(out_path, language)
+            and not _chunked_member_missing_a_chunk_file(out_path, prior.get("chunks"), language)
         )
 
         if corpus_unchanged and prior_ok:

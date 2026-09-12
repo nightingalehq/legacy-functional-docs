@@ -2472,6 +2472,53 @@ def test_run_test_batch_still_skips_an_unchanged_chunked_member_on_resume(tmp_pa
     assert caller.calls == 2, "no new model calls -- the resume must be a true skip"
 
 
+def test_run_test_batch_chunked_member_resume_skip_sees_a_missing_chunk_file(tmp_path):
+    """Copilot review follow-up (round 40): the member-level resume skip's
+    missing-sidecar check only ever looks at `out_path` itself, which for
+    a chunked member is the deterministic *index* document -- one that,
+    by design, never has its own sidecar and is deliberately excluded
+    from that check (see the test above). Nothing there ever verified
+    that the chunk files the index links to are still on disk. If a
+    chunk file is deleted out from under this tool while the database,
+    resume state, and index all stay otherwise unchanged, this must
+    force a real re-render of the missing chunk, not keep reporting the
+    now-incomplete output as reusable indefinitely."""
+    from mfdoc import testbatch
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_scenarios(conn, 4)
+
+    caller = _counting_caller(_chunk_aware_caller("python", "pytest"))
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+
+    summary1 = testbatch.run_test_batch(
+        conn, ["FAKEMOD"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path,
+        max_scenarios_per_call=2,
+    )
+    assert summary1.skipped == 0 and summary1.ok == 1
+    assert caller.calls == 2, "sanity check: two chunks rendered"
+
+    chunk_dir = out_dir / "natural" / "python" / "pytest"
+    chunk1 = chunk_dir / "FAKEMOD.chunk1.md"
+    assert chunk1.exists()
+    chunk1.unlink()
+
+    summary2 = testbatch.run_test_batch(
+        conn, ["FAKEMOD"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path,
+        max_scenarios_per_call=2,
+    )
+    assert summary2.skipped == 0, "a missing chunk file must force a real re-render, not a resumed skip"
+    assert summary2.ok == 1
+    assert chunk1.exists(), "the re-render must recreate the missing chunk"
+
+
 def test_run_test_batch_does_not_abort_the_whole_run_when_a_chunked_member_raises(tmp_path):
     """Copilot review follow-up: `run_test_batch`'s own dispatch loop for
     chunked members had no `try/except` around `generate_member_test_doc`
