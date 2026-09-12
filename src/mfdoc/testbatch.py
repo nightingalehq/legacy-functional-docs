@@ -96,7 +96,16 @@ def extract_code_fence(body: str, language: str) -> str | None:
     return matches[0]
 
 
-_TEST_CASE_FINGERPRINT_FIELD = re.compile(r"(?m)^test_case_fingerprint:.*\n(?:[ \t].*\n?)*")
+# The key itself, not just the value, matched optionally quoted (single or
+# double) -- YAML permits a quoted mapping key (`"test_case_fingerprint":
+# ...`) with exactly the same meaning as a bare one, and `yaml.safe_load`
+# parses both into the identical dict key. A model echoing/hallucinating
+# this field can just as easily quote the key as not; matching only the
+# bare form would let a quoted-key copy survive this strip untouched,
+# recoverable by a later `_prior_fingerprint_for` call as a false trusted
+# prior -- exactly the leak this whole mechanism exists to close (Copilot
+# review, round 52).
+_TEST_CASE_FINGERPRINT_FIELD = re.compile(r"(?m)^[\"']?test_case_fingerprint[\"']?:.*\n(?:[ \t].*\n?)*")
 
 
 def _strip_stamped_fingerprint_field(front_matter_block: str) -> str:

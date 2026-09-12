@@ -12,6 +12,22 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-12r):**
+- Addressed the fifty-second Copilot review round on PR #209 (issue #195):
+  `testbatch._TEST_CASE_FINGERPRINT_FIELD`'s strip regex only matched a
+  bare `test_case_fingerprint:` key -- YAML permits a quoted mapping key
+  (`"test_case_fingerprint": ...`) with exactly the same meaning
+  (`yaml.safe_load` parses both into the identical dict key), and a model
+  echoing/hallucinating this field can just as easily quote the key as
+  not. Left unstripped, a quoted-key copy would survive the give-up-path/
+  write_test_doc_with_sidecar rewrite untouched and be recoverable by a
+  later `_prior_fingerprint_for` call as a false trusted prior -- the same
+  leak the round-41 fix closed for the bare-key form. Widened the regex
+  to match an optionally single- or double-quoted key.
+- One new regression test, confirmed to fail without the fix. Full suite
+  green (1078 passed, 2 skipped) plus a clean `mfdoc validate` pass
+  against `examples/` (71/71 documents, 0 invalid citations of 750).
+
 **Progress (2026-09-12q):**
 - Addressed the fifty-first Copilot review round on PR #209 (issue #195).
   One valid finding: round 49's new `docs/guides/architecture.md`
