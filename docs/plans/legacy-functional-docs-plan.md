@@ -12,6 +12,26 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-12q):**
+- Addressed the fifty-first Copilot review round on PR #209 (issue #195).
+  One valid finding: round 49's new `docs/guides/architecture.md`
+  paragraph claimed both stale-sidecar-completeness exceptions apply only
+  to a standalone `mfdoc test-validate` check (`_render_time=False`), but
+  `validate.py`'s dropped-still-valid-scenario completeness check
+  (`legacy_bypass_still_valid_ids - scan_ids`) actually runs unconditionally
+  -- only the untraceable-body check is standalone-only (gated `not
+  _render_time`). Corrected the doc to distinguish the two.
+  A second finding (the progress-log heading `2026-09-12p` being flagged as
+  an invalid/typo'd date) is a false positive: this file's own established
+  convention, unbroken across a dozen-plus prior entries in this same
+  session (`...m`, `...n`, `...o`, `...p`), is a lettered suffix for
+  multiple same-day entries -- `p` correctly continues it. Left as-is;
+  replied via PR comment rather than renaming an intentional, consistent
+  heading.
+- No code changes this round (doc-only). Full suite still green (1077
+  passed, 2 skipped); `mfdoc validate` against `examples/` still clean
+  (71/71 documents, 0 invalid citations of 750).
+
 **Progress (2026-09-12p):**
 - Addressed the fiftieth Copilot review round on PR #209 (issue #195):
   round 49's `stored_fingerprint_is_present`-less fix (`stored_fingerprint

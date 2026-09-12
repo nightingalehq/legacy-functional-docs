@@ -514,23 +514,29 @@ checked, and resolves itself the next time that document's own render
 succeeds and its sidecar is rewritten.
 
 Two exceptions still turn a stale/dropped sidecar into a real, hard
-`problems` entry, for a standalone check (`mfdoc test-validate`,
-`_render_time=False`) only — never during a render/retry loop's own
-validation, where the equivalent risk is instead covered by the loop
-itself re-validating and, on success, overwriting the sidecar via
-`write_test_doc_with_sidecar`:
+`problems` entry — one of them standalone-only, the other checked either
+way:
 
 - The document has nothing left to fall back on scanning at all — a stale
   sidecar with real `MEMBER:BR-nnn` content, next to a body with no
   references of its own (an empty manifest, or a code fence with none).
   This is untraceable, not clean: `ok=True` here would silently report a
   document that can no longer be verified against anything as though it
-  had passed genuine verification.
+  had passed genuine verification. Scoped to a standalone check (`mfdoc
+  test-validate`, `_render_time=False`) only — during a render/retry
+  loop's own validation, a freshly-generated candidate that genuinely has
+  no `BR-nnn` references at all next to an already-bypassed stale sidecar
+  is exactly the shape `write_test_doc_with_sidecar` exists to clean up
+  *after* this validation accepts it, so rejecting it here would deadlock
+  a member that legitimately drops to zero references forever.
 - A scenario the old (now-bypassed) sidecar referenced, and which is
   still a real `test_case` row today, is no longer mentioned anywhere in
   the current document — the completeness protection that stops the
   staleness bypass from also hiding a scenario silently dropped from the
-  candidate, not merely renumbered.
+  candidate, not merely renumbered. Checked on *every* call, standalone
+  or render-time: dropping a still-valid scenario is never acceptable
+  just because the validation happens to be a render/retry loop's own,
+  unlike the untraceable-body case just above.
 
 See `validate.validate_test_doc`'s docstring for the full decision order
 and the deadlock this staleness handling exists to avoid.
