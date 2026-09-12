@@ -96,6 +96,73 @@ def extract_code_fence(body: str, language: str) -> str | None:
     return matches[0]
 
 
+_TEST_CASE_FINGERPRINT_FIELD = re.compile(r"(?m)^test_case_fingerprint:.*\n(?:[ \t].*\n?)*")
+
+
+def _strip_stamped_fingerprint_field(front_matter_block: str) -> str:
+    """Removes any `test_case_fingerprint` key -- and, for a YAML block
+    scalar/sequence value, its own indented continuation lines -- from a
+    document's front matter block text. This field is only ever supposed
+    to be stamped by `write_test_doc_with_sidecar`, after a successful
+    validation; anything already present in a candidate the model
+    produced is untrusted (echoed/hallucinated from the brief or a prior
+    template) and must never survive into what's left on disk, in either
+    of two shapes (Copilot review):
+
+    - `write_test_doc_with_sidecar` calls this before conditionally
+      stamping a trusted value of its own onto an *accepted* candidate.
+    - `_generate_test_doc_from_brief`'s own give-up path (issue #195
+      round 43 review) calls this on a final, never-validated candidate
+      before leaving it on disk: `_prior_fingerprint_for` trusts whatever
+      `test_case_fingerprint` it finds at a path as a genuinely-stamped
+      prior, with no way to tell that apart from a raw, failed
+      candidate's own leftover field -- a later invocation recovering
+      that untrusted value as `_prior_fingerprint` could make an actually
+      stale sidecar look authoritative again, recreating the exact
+      manifest/sidecar retry deadlock this whole mechanism exists to
+      prevent."""
+    return _TEST_CASE_FINGERPRINT_FIELD.sub("", front_matter_block)
+
+
+def _strip_fingerprint_from_a_failed_candidate(out_path: Path) -> str | None:
+    """Best-effort cleanup for a document at `out_path` that a render just
+    gave up on after exhausting every attempt: if the raw, never-
+    validated candidate its last attempt left on disk happens to carry
+    its own `test_case_fingerprint`, strip it in place. Returns a problem
+    string on failure (surfaced as this render's own failure, not
+    swallowed), `None` on success or when there was nothing to strip.
+
+    Why (Copilot review, issue #195 round 43): `write_test_doc_with_
+    sidecar` never runs for a candidate that never validates, so nothing
+    else ever strips this field from it -- and `_prior_fingerprint_for`
+    has no way to tell a genuinely-stamped prior apart from this leftover
+    once a *later* invocation reads this same path back. Left untouched,
+    a coincidentally-matching (or simply copied-from-the-brief)
+    hallucinated value could make an actually stale sidecar look
+    authoritative again on that later run, recreating the exact
+    manifest/sidecar retry deadlock this whole mechanism exists to
+    prevent."""
+    if not out_path.exists():
+        return None
+    try:
+        final_text = out_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return f"could not read the failed candidate to strip its leftover fingerprint: {exc}"
+    if not final_text.startswith("---"):
+        return None
+    parts = final_text.split("---", 2)
+    if len(parts) < 3:
+        return None
+    stripped_fm = _strip_stamped_fingerprint_field(parts[1])
+    if stripped_fm == parts[1]:
+        return None
+    try:
+        out_path.write_text(f"---{stripped_fm}---{parts[2]}", encoding="utf-8")
+    except OSError as exc:
+        return f"could not strip an untrusted leftover fingerprint from the failed candidate: {exc}"
+    return None
+
+
 def write_test_doc_with_sidecar(conn, member_name: str, out_path: Path, doc_text: str,
                                  language: str) -> Path | None:
     """Given a response that has already validated ok, split its one code
@@ -268,7 +335,7 @@ def write_test_doc_with_sidecar(conn, member_name: str, out_path: Path, doc_text
     # first line would leave those continuation lines behind, either
     # producing malformed YAML (an indented block with no key of its own)
     # or silently attaching them to whatever key precedes this one.
-    front_matter_block = re.sub(r"(?m)^test_case_fingerprint:.*\n(?:[ \t].*\n?)*", "", front_matter_block)
+    front_matter_block = _strip_stamped_fingerprint_field(front_matter_block)
     if fingerprint is not None:
         front_matter_block = front_matter_block.rstrip("\n") + f'\ntest_case_fingerprint: "{fingerprint}"\n'
 
@@ -1000,6 +1067,15 @@ def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: 
         )
         problems = problems + result["problems"]
         retry_note = "\n".join(f"- {p}" for p in problems)
+    # Every attempt exhausted with nothing validating: see
+    # `_strip_fingerprint_from_a_failed_candidate`'s own docstring (Copilot
+    # review, issue #195 round 43) -- the raw candidate the last attempt
+    # left at `out_path` never passed through `write_test_doc_with_
+    # sidecar`'s own stamping, so a `test_case_fingerprint` it happens to
+    # carry survives untouched unless stripped here.
+    cleanup_problem = _strip_fingerprint_from_a_failed_candidate(out_path)
+    if cleanup_problem:
+        problems = problems + [cleanup_problem]
     return DocResult(member_name, str(out_path), False, attempt, input_tokens, output_tokens, problems)
 
 
@@ -2368,6 +2444,17 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
                 member_cleanup_problems = member_cleanup_problems + _prune_stale_test_chunk_files(
                     out_path, set(), language,
                 )
+            if not validation["ok"]:
+                # This loop's own give-up path (Copilot review, issue #195
+                # round 43) -- same gap `_generate_test_doc_from_brief`'s
+                # own give-up path closes, see `_strip_fingerprint_from_a_
+                # failed_candidate`'s docstring: `out_path` still holds
+                # this attempt's raw, never-validated candidate, which
+                # never passed through `write_test_doc_with_sidecar`'s own
+                # stamping.
+                fingerprint_cleanup_problem = _strip_fingerprint_from_a_failed_candidate(out_path)
+                if fingerprint_cleanup_problem:
+                    member_cleanup_problems = member_cleanup_problems + [fingerprint_cleanup_problem]
 
             result = DocResult(
                 name, str(out_path), validation["ok"] and not member_cleanup_problems, attempts,

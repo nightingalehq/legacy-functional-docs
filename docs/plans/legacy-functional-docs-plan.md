@@ -12,6 +12,30 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-12l):**
+- Addressed the forty-third Copilot review round on PR #209 (issue #195):
+  `_prior_fingerprint_for` trusts whatever `test_case_fingerprint` it
+  finds at a path as a genuinely-stamped prior, with no way to tell that
+  apart from a raw, never-validated candidate's own leftover field. A
+  render that exhausts every retry attempt without ever validating
+  leaves its last candidate on disk exactly as the model produced it --
+  `write_test_doc_with_sidecar` never runs for it, so nothing else ever
+  strips a `test_case_fingerprint` the model happened to echo/
+  hallucinate into that candidate. A *later* invocation reading the same
+  path back would recover that untrusted value as `_prior_fingerprint`,
+  risking the same stale-sidecar-looks-authoritative deadlock this whole
+  mechanism exists to prevent, on a value nothing ever actually
+  validated. Added `_strip_fingerprint_from_a_failed_candidate` (sharing
+  its stripping logic with `write_test_doc_with_sidecar`'s own field
+  strip via a new `_strip_stamped_fingerprint_field` helper) and called
+  it at both give-up points that leave a failed candidate on disk:
+  `_generate_test_doc_from_brief`'s own retry-loop exhaustion, and
+  `run_test_batch`'s separate pooled-dispatch implementation for
+  ordinary (non-chunked) members.
+- Two new regression tests, each confirmed to fail without its fix. Full
+  suite green (1072 passed, 2 skipped) plus a clean `mfdoc validate` pass
+  against `examples/` (71/71 documents, 0 invalid citations of 750).
+
 **Progress (2026-09-12k):**
 - Addressed the forty-second Copilot review round on PR #209 (issue #195),
   three findings:

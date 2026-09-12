@@ -3750,6 +3750,68 @@ def test_run_test_batch_retry_call_exception_is_reported_not_raised(tmp_path):
     assert any("RuntimeError" in p for p in bad.problems)
 
 
+def test_run_test_batch_pool_loop_strips_a_leftover_fingerprint_from_a_failed_candidate(tmp_path):
+    """Copilot review follow-up (round 43): the same gap
+    `test_generate_member_test_doc_strips_a_leftover_fingerprint_from_a_
+    failed_candidate` closes for `generate_member_test_doc`'s own give-up
+    path exists in `run_test_batch`'s separate pooled-dispatch
+    implementation for ordinary (non-chunked) members too -- a candidate
+    that never validates never reaches `write_test_doc_with_sidecar`'s
+    own stamping, so a `test_case_fingerprint` it happens to carry
+    (echoed/hallucinated) is left behind untouched unless this loop's own
+    give-up path strips it too."""
+    import sqlite3
+
+    from mfdoc import testbatch
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_two_members(conn)
+
+    def always_failing_caller(prompt: str) -> ModelResponse:
+        # Deliberately missing language/framework front matter -- fails
+        # validate_test_doc on every attempt.
+        text = """---
+title: "BADMOD -- generated tests"
+doc_type: generated_test
+system: "MOM"
+generated_by: mfdoc
+generated_at: "2026-09-02"
+review_status: draft
+confidence_summary:
+  verified: 0
+sources: ["BADMOD"]
+test_case_fingerprint: "hallucinated-leftover-value"
+---
+
+# BADMOD tests
+
+```python
+def test_x():
+    # BADMOD:BR-001 [[BADMOD:1]]
+    pass
+```
+"""
+        return ModelResponse(text=text, input_tokens=1, output_tokens=1)
+
+    out_dir = tmp_path / "out"
+    summary = testbatch.run_test_batch(
+        conn, ["BADMOD"], "python", "pytest", out_dir, always_failing_caller,
+        "writing rules text", "template text",
+    )
+    assert summary.failed == 1
+    out_path = out_dir / "natural" / "python" / "pytest" / "BADMOD.md"
+    written = out_path.read_text(encoding="utf-8")
+    assert "test_case_fingerprint" not in written, (
+        "a leftover fingerprint on a failed, never-validated candidate must be "
+        "stripped before this loop's own give-up path leaves it on disk"
+    )
+    from mfdoc.testbatch import _prior_fingerprint_for
+    assert _prior_fingerprint_for(out_path) is None
+
+
 def test_run_test_batch_initial_call_exception_is_retried_and_can_still_succeed(tmp_path):
     """The pooled path's *first* model call raising must be retried once,
     the same second chance a bad-but-successful response already gets --
@@ -3983,6 +4045,82 @@ def test_generate_member_test_doc_preserves_validation_problems_when_retry_raise
     assert len(result.problems) >= 2, (
         "the first attempt's real validation problem(s) must survive alongside "
         "the retry's exception, not be overwritten by it"
+    )
+
+
+def test_generate_member_test_doc_strips_a_leftover_fingerprint_from_a_failed_candidate(tmp_path):
+    """Copilot review follow-up (round 43): every attempt this render
+    makes returns a candidate that never validates (missing `language`/
+    `framework` front matter, deterministically invalid on every retry)
+    but *does* carry its own `test_case_fingerprint` -- a model can echo/
+    hallucinate this field even in a candidate that fails validation for
+    an unrelated reason. `write_test_doc_with_sidecar` never runs for a
+    candidate that never validates, so nothing else would ever strip it;
+    left in place, a *later* invocation's `_prior_fingerprint_for` would
+    read this leftover value back as if it were a genuinely-stamped
+    prior, risking exactly the stale-sidecar-looks-authoritative deadlock
+    this whole mechanism exists to prevent. The give-up path itself must
+    strip it before leaving the failed candidate on disk."""
+    import sqlite3
+
+    from mfdoc import testbatch
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
+    insert(
+        conn, "test_case", member_id=1, kind="unit", scenario_name="FAKEMOD:BR-001",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+        then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:1", confidence="verified",
+    )
+    conn.commit()
+
+    def always_failing_caller(prompt: str) -> ModelResponse:
+        # Deliberately missing language/framework front matter -- fails
+        # validate_test_doc every attempt, regardless of retry content.
+        text = """---
+title: "FAKEMOD -- generated tests"
+doc_type: generated_test
+system: "MOM"
+generated_by: mfdoc
+generated_at: "2026-09-02"
+review_status: draft
+confidence_summary:
+  verified: 0
+sources: ["FAKEMOD"]
+test_case_fingerprint: "hallucinated-leftover-value"
+---
+
+# FAKEMOD tests
+
+```python
+def test_x():
+    # FAKEMOD:BR-001 [[FAKEMOD:1]]
+    pass
+```
+"""
+        return ModelResponse(text=text, input_tokens=1, output_tokens=1)
+
+    out_path = tmp_path / "FAKEMOD.md"
+    result = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, always_failing_caller,
+        "writing rules text", "template text",
+    )
+    assert result.ok is False
+    written = out_path.read_text(encoding="utf-8")
+    assert "test_case_fingerprint" not in written, (
+        "a leftover fingerprint on a failed, never-validated candidate must be "
+        "stripped before the give-up path leaves it on disk"
+    )
+    from mfdoc.testbatch import _prior_fingerprint_for
+    assert _prior_fingerprint_for(out_path) is None, (
+        "a later invocation reading this same path must find nothing to recover, "
+        "not this failed candidate's own untrusted leftover value"
     )
 
 
