@@ -108,8 +108,16 @@ def extract_code_fence(body: str, language: str) -> str | None:
 # (Copilot review, round 54): YAML permits whitespace between a mapping
 # key and its `:`, which `yaml.safe_load` again treats identically to no
 # whitespace at all -- the same untrusted-copy leak, just one more
-# syntactically-valid spelling of it.
-_TEST_CASE_FINGERPRINT_FIELD = re.compile(r"(?m)^[\"']?test_case_fingerprint[\"']?\s*:.*\n(?:[ \t].*\n?)*")
+# syntactically-valid spelling of it. `^[ \t]*` allows the key line
+# itself to be indented too (Copilot review, round 55): every one of
+# these documents' front matter is a flat, single-level mapping (no key
+# in it is ever legitimately indented), but a model producing malformed/
+# indented YAML by mistake is exactly the kind of untrusted shape this
+# strip has to handle regardless of how well-formed the surrounding
+# document otherwise is -- an indented key is still the same `dict` key
+# once `yaml.safe_load` (or a human) parses it, just one more spelling a
+# bare `^` at true line-start would have missed entirely.
+_TEST_CASE_FINGERPRINT_FIELD = re.compile(r"(?m)^[ \t]*[\"']?test_case_fingerprint[\"']?\s*:.*\n(?:[ \t].*\n?)*")
 
 
 def _strip_stamped_fingerprint_field(front_matter_block: str) -> str:
@@ -1619,6 +1627,24 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
             problems.append(f"could not remove stale single-document sidecar {stale_index_sidecar}: {exc}")
             index_sidecar_backup = None
     index_written = False
+    # Every chunk whose boundary shift produced a `chunk_backup`/
+    # `sidecar_backup` pair (below) records its outcome here instead of
+    # deciding discard-vs-restore on the spot (Copilot review, round 55):
+    # a chunk render can complete and validate cleanly, yet the *index*
+    # covering every chunk can still fail to commit afterward (an
+    # exception from `_render_chunk_index`, or the index's own atomic
+    # replace) -- discarding this chunk's backup immediately, before that
+    # index commit is known to have succeeded, would leave the *old*
+    # index (untouched, since its own write never landed) on disk
+    # pointing at chunk files whose content/ranges have already moved on,
+    # a mismatch nothing would ever detect. Deferred entries are only
+    # acted on once, in this function's own outer `finally` below, once
+    # `index_written` is known: every entry discards on `index_written`
+    # and its own chunk's success, and restores otherwise -- including
+    # every *already-succeeded* chunk when the index itself never
+    # committed, so the whole chunked member rolls back together rather
+    # than partially.
+    deferred_chunk_backups: list[tuple[Path, Path | None, Path | None, bool]] = []
     try:
         for i, (start, end) in enumerate(ranges, start=1):
             chunk_rows = rows[start - 1:end]
@@ -1678,91 +1704,28 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
                         # uncaught -- which used to skip this cleanup
                         # entirely and strand the backup at `.stale` with
                         # no sidecar at the real path either.
-                        if sidecar_backup is not None:
-                            # `result.ok` alone doesn't prove a fresh sidecar
-                            # now exists -- write_test_doc_with_sidecar
-                            # returns (silently, uncaptured by every caller)
-                            # without writing one when the validated
-                            # candidate's code fence has no `MEMBER:BR-nnn`
-                            # references at all, so an accepted render can
-                            # still leave nothing at the real sidecar path.
-                            # Checked directly rather than trusted from `ok`.
-                            #
-                            # Three outcomes, not two (Copilot review): a
-                            # completed, accepted render (`result is not
-                            # None and result.ok`) means discard the backup
-                            # -- whether or not `write_test_doc_with_sidecar`
-                            # actually wrote a fresh sidecar (a legitimate
-                            # no-BR-references shape can validate `ok=True`
-                            # with none at all; restoring the old, unrelated
-                            # backup there would pair an accepted,
-                            # correctly-refless document with a stale
-                            # sidecar a later validation would then wrongly
-                            # flag as a genuine mismatch). Anything else --
-                            # `result.ok` is `False`, or `_generate_test_doc_
-                            # from_brief` itself raised (`result` is still
-                            # `None`, from `write_test_doc_with_sidecar`'s
-                            # own temp-write/replace failure propagating
-                            # uncaught, possibly after it already replaced
-                            # the real sidecar before its own rollback then
-                            # also failed) -- always restores instead,
-                            # unconditionally overwriting whatever sits at
-                            # the real path right now (Copilot review: an
-                            # earlier version deferred to `fresh_sidecar.
-                            # exists()` first, which could see a partially-
-                            # installed fresh sidecar from exactly that
-                            # nested-failure case and wrongly discard the
-                            # backup instead of restoring over it). Content
-                            # already known-good either way is never worth
-                            # trusting over a render this loop doesn't
-                            # consider to have succeeded.
-                            # Same `language`, same `chunk_path` as the call
-                            # that produced this backup in the first place --
-                            # always resolves to a real path here, never None.
-                            fresh_sidecar = sidecar_path_for(chunk_path, language)
-                            try:
-                                if result is not None and result.ok:
-                                    sidecar_backup.unlink()
-                                else:
-                                    sidecar_backup.replace(fresh_sidecar)
-                            except OSError as exc:
-                                logger.warning(
-                                    "%s: chunk %d/%d: could not clean up stale sidecar backup %s: %s",
-                                    member_name, i, chunk_count, sidecar_backup, exc,
-                                )
-                        if chunk_backup is not None:
-                            # Same restore-on-failure/discard-on-success rule
-                            # as the sidecar backup just above, applied to
-                            # `chunk_path` itself (Copilot review):
-                            # `_generate_test_doc_from_brief`'s own retry loop
-                            # overwrites `chunk_path` with each attempt's raw
-                            # candidate *before* validating it, so a render
-                            # that ultimately fails (not raises -- every
-                            # attempt gets a response, none of them validate)
-                            # still leaves a failing candidate sitting at
-                            # `chunk_path` when this `finally` runs. Restoring
-                            # only the sidecar in that case would pair the old
-                            # (correctly-scoped) sidecar with that failing
-                            # candidate -- the exact mismatch this whole
-                            # invalidate-before-render mechanism exists to
-                            # prevent, just occurring one step later than the
-                            # fingerprint check alone can see. A completed,
-                            # accepted render means discard (the document
-                            # already at `chunk_path` is `write_test_doc_
-                            # with_sidecar`'s own fresh, validated content);
-                            # anything else always restores, unconditionally
-                            # overwriting whatever candidate currently sits at
-                            # the real path.
-                            try:
-                                if result is not None and result.ok:
-                                    chunk_backup.unlink()
-                                else:
-                                    chunk_backup.replace(chunk_path)
-                            except OSError as exc:
-                                logger.warning(
-                                    "%s: chunk %d/%d: could not clean up stale chunk document backup %s: %s",
-                                    member_name, i, chunk_count, chunk_backup, exc,
-                                )
+                        #
+                        # `result.ok` alone doesn't prove a fresh sidecar now
+                        # exists -- write_test_doc_with_sidecar returns
+                        # (silently, uncaptured by every caller) without
+                        # writing one when the validated candidate's code
+                        # fence has no `MEMBER:BR-nnn` references at all, so
+                        # an accepted render can still leave nothing at the
+                        # real sidecar path. Recorded here, not decided here
+                        # (Copilot review, round 55): whether this chunk's
+                        # backup(s) actually get discarded or restored isn't
+                        # knowable yet -- it also depends on whether the
+                        # *index* covering every chunk goes on to commit
+                        # successfully after this loop finishes, which is
+                        # exactly what this function's own outer `finally`
+                        # resolves once `index_written` is known. See
+                        # `deferred_chunk_backups`'s own comment above for
+                        # why immediate discard was wrong.
+                        if sidecar_backup is not None or chunk_backup is not None:
+                            deferred_chunk_backups.append((
+                                chunk_path, chunk_backup, sidecar_backup,
+                                result is not None and result.ok,
+                            ))
             input_tokens += result.input_tokens
             output_tokens += result.output_tokens
             chunk_entries.append((i, chunk_path, result))
@@ -1823,6 +1786,41 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
                     "%s: could not clean up stale index sidecar backup %s: %s",
                     member_name, index_sidecar_backup, exc,
                 )
+        # Resolve every deferred per-chunk backup now that `index_written`
+        # is known (Copilot review, round 55): a chunk discards its own
+        # backup only if *both* that chunk's own render succeeded *and*
+        # the index covering every chunk actually committed -- if the
+        # index never committed (this function raised before reaching its
+        # write, or the write/replace itself failed), every already-
+        # succeeded chunk's backup is restored too, right alongside any
+        # chunk that failed on its own, so the whole chunked member rolls
+        # back together instead of leaving new chunk content paired with
+        # an old index that no longer matches it.
+        for chunk_path, chunk_backup, sidecar_backup, chunk_ok in deferred_chunk_backups:
+            discard = index_written and chunk_ok
+            if sidecar_backup is not None:
+                fresh_sidecar = sidecar_path_for(chunk_path, language)
+                try:
+                    if discard:
+                        sidecar_backup.unlink()
+                    else:
+                        sidecar_backup.replace(fresh_sidecar)
+                except OSError as exc:
+                    logger.warning(
+                        "%s: could not clean up stale sidecar backup %s: %s",
+                        member_name, sidecar_backup, exc,
+                    )
+            if chunk_backup is not None:
+                try:
+                    if discard:
+                        chunk_backup.unlink()
+                    else:
+                        chunk_backup.replace(chunk_path)
+                except OSError as exc:
+                    logger.warning(
+                        "%s: could not clean up stale chunk document backup %s: %s",
+                        member_name, chunk_backup, exc,
+                    )
 
     # The index is built deterministically, not model-generated, but that's
     # not a reason to skip checking it -- validate_test_doc is the same

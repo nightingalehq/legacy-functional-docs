@@ -977,6 +977,33 @@ def test_write_test_doc_with_sidecar_strips_whitespace_before_the_fingerprint_co
     )
 
 
+def test_strip_stamped_fingerprint_field_strips_an_indented_key(tmp_path):
+    """Copilot review, round 55: `_TEST_CASE_FINGERPRINT_FIELD` required
+    the key at true line-start -- but a give-up candidate
+    (`_strip_fingerprint_from_a_failed_candidate`, issue #195 round 43) is
+    by definition never-validated, untrusted text that can carry a
+    `test_case_fingerprint` key indented to any level a model happened to
+    produce, not just column 0. Tested directly against
+    `_strip_stamped_fingerprint_field` rather than through
+    `write_test_doc_with_sidecar`: that function only ever runs on
+    already-valid YAML (a document that's already validated `ok=True`),
+    and an indented key at the wrong level breaks a flat top-level
+    mapping's YAML parse entirely -- this shape can only actually occur on
+    the give-up path this same strip function also serves, precisely
+    because that candidate never validated in the first place."""
+    from mfdoc import testbatch
+
+    front_matter = (
+        '\ntitle: "FAKEMOD"\n'
+        'sources: ["FAKEMOD"]\n'
+        '  test_case_fingerprint: "hallucinated-untrusted-value"\n'
+        'generated_by: mfdoc\n'
+    )
+    stripped = testbatch._strip_stamped_fingerprint_field(front_matter)
+    assert "test_case_fingerprint" not in stripped, "an indented key must be stripped too"
+    assert "generated_by: mfdoc" in stripped, "an unrelated later key must survive the strip untouched"
+
+
 def test_write_test_doc_with_sidecar_omits_fingerprint_for_empty_sources(tmp_path):
     """Copilot review follow-up on issue #195: `sources: []` is a
     syntactically valid list (so `validate_doc`'s own malformed-shape
@@ -5204,6 +5231,67 @@ def test_chunk_boundary_shift_restores_both_the_old_document_and_sidecar_on_a_fa
     assert chunk1_path.exists(), "the old chunk document must be restored, not left with a failing candidate"
     assert chunk1_path.read_text(encoding="utf-8") == old_chunk1_text
     assert chunk1_sidecar.exists(), "the old sidecar must be restored, not left missing"
+    assert chunk1_sidecar.read_text(encoding="utf-8") == old_sidecar_text
+    assert not chunk1_path.with_name(chunk1_path.name + ".stale").exists(), (
+        "the document backup must not be left behind once restored"
+    )
+    assert not chunk1_sidecar.with_name(chunk1_sidecar.name + ".stale").exists(), (
+        "the sidecar backup must not be left behind once restored"
+    )
+
+
+def test_chunk_boundary_shift_is_rolled_back_entirely_if_the_index_commit_fails(tmp_path, monkeypatch):
+    """Copilot review, round 55: a chunk whose own re-render succeeds and
+    validates cleanly used to have its old backup discarded immediately,
+    before the *index* covering every chunk (built and written only after
+    every chunk in the loop is done) was known to have committed
+    successfully. If that index write then fails -- `_render_chunk_index`
+    itself raising, or the index's own atomic replace failing -- the old
+    index is left on disk (untouched, since the new one never landed)
+    while chunk 1's content has already moved on to the new render,
+    leaving the index pointing at a chunk whose actual content/ranges no
+    longer match what the index describes. Simulated here by making
+    `_render_chunk_index` raise; the whole chunked member -- chunk 1's
+    document *and* its sidecar -- must roll back to the old, pre-rerender
+    content, not just the chunks whose own render happened to fail."""
+    import pytest
+
+    from mfdoc import testbatch
+
+    conn = _sqlite_conn()
+    _seed_fakemod_scenarios(conn, 4)
+
+    out_path = tmp_path / "FAKEMOD.md"
+    first = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, _chunk_aware_caller("python", "pytest"),
+        "writing rules text", "template text", max_scenarios_per_call=2,
+    )
+    assert first.ok is True
+    chunk1_path = tmp_path / "FAKEMOD.chunk1.md"
+    chunk1_sidecar = tmp_path / "FAKEMOD.chunk1.py"
+    old_chunk1_text = chunk1_path.read_text(encoding="utf-8")
+    old_sidecar_text = chunk1_sidecar.read_text(encoding="utf-8")
+
+    def exploding_render_chunk_index(*args, **kwargs):
+        raise RuntimeError("simulated index-render failure")
+
+    monkeypatch.setattr(testbatch, "_render_chunk_index", exploding_render_chunk_index)
+
+    # max_scenarios_per_call=1 shifts chunk 1's boundary from {BR-001,
+    # BR-002} to {BR-001} alone, triggering the range-changed invalidation
+    # -- chunk 1's own re-render succeeds and validates cleanly with the
+    # good caller below, but the index build then raises.
+    with pytest.raises(RuntimeError, match="simulated index-render failure"):
+        testbatch.generate_member_test_doc(
+            conn, "FAKEMOD", "python", "pytest", out_path,
+            _chunk_aware_caller("python", "pytest"),
+            "writing rules text", "template text", max_scenarios_per_call=1,
+            prior_chunks=first.chunk_state,
+        )
+
+    assert chunk1_path.exists(), "chunk 1's old document must be restored despite its own successful render"
+    assert chunk1_path.read_text(encoding="utf-8") == old_chunk1_text
+    assert chunk1_sidecar.exists(), "chunk 1's old sidecar must be restored despite its own successful render"
     assert chunk1_sidecar.read_text(encoding="utf-8") == old_sidecar_text
     assert not chunk1_path.with_name(chunk1_path.name + ".stale").exists(), (
         "the document backup must not be left behind once restored"

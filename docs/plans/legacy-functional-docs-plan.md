@@ -12,6 +12,37 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-12u):**
+- Addressed the fifty-fifth Copilot review round on PR #209 (issue #195),
+  two findings:
+  1. **Critical:** in `_generate_member_test_doc_chunked`, a chunk whose
+     boundary shifted and re-rendered successfully had its old
+     document/sidecar backup discarded immediately, *before* the index
+     covering every chunk (built only after the whole per-chunk loop
+     finishes) was known to have committed. If `_render_chunk_index` or
+     the index's own atomic replace then failed, the *old* index was left
+     on disk (untouched, since the new one never landed) while that
+     chunk's content had already moved on -- an index pointing at
+     semantically mismatched chunks that nothing would ever detect or
+     roll back. Reworked to defer every per-chunk backup's discard/
+     restore decision into this function's own outer `finally`, once
+     `index_written` is known: a chunk's backup now discards only when
+     *both* its own render succeeded *and* the index actually committed;
+     otherwise every already-succeeded chunk's backup is restored too, so
+     the whole chunked member rolls back together rather than partially.
+  2. `testbatch._TEST_CASE_FINGERPRINT_FIELD`'s strip regex required the
+     key at true line-start -- but a give-up candidate
+     (`_strip_fingerprint_from_a_failed_candidate`, round 43) is
+     never-validated, untrusted text that can carry this key indented to
+     any level. Added `^[ \t]*` to match an indented key too (an
+     already-*validated* document's front matter can never actually have
+     this shape -- inconsistent indentation breaks its YAML parse
+     entirely -- so this only ever matters on the give-up path, exactly
+     where the text is guaranteed untrusted).
+- Two new regression tests, each confirmed to fail without its fix. Full
+  suite green (1083 passed, 2 skipped) plus a clean `mfdoc validate` pass
+  against `examples/` (71/71 documents, 0 invalid citations of 750).
+
 **Progress (2026-09-12t):**
 - Addressed the fifty-fourth Copilot review round on PR #209 (issue #195),
   two findings:
