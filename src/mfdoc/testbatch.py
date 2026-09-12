@@ -2207,11 +2207,38 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
     for name, brief_hash, out_path in to_run_chunked:
         prior = state.get(state_keys[name])
         prior_chunks = prior.get("chunks") if isinstance(prior, dict) else None
-        result = generate_member_test_doc(
-            conn, name, language, framework, out_path, caller, writing_rules, template,
-            redact=redact, max_scenarios_per_call=threshold, prior_chunks=prior_chunks,
-            sme_notes=sme_notes,
-        )
+        try:
+            result = generate_member_test_doc(
+                conn, name, language, framework, out_path, caller, writing_rules, template,
+                redact=redact, max_scenarios_per_call=threshold, prior_chunks=prior_chunks,
+                sme_notes=sme_notes,
+            )
+        except Exception as exc:
+            # A member large enough to chunk touches the filesystem many
+            # more times than a single-document render (one write/replace
+            # per chunk, plus the index) -- several of those now raise on
+            # failure rather than swallowing it (issue #195's own several
+            # review rounds), so a real, if rare, failure here (a
+            # transient filesystem error mid-render) must not be allowed
+            # to escape uncaught and abort every *other* member's progress
+            # in this same batch (Copilot review): this loop has no
+            # surrounding try/except of its own, so an uncaught exception
+            # here would propagate all the way out of run_test_batch,
+            # discarding every already-checkpointed member's result along
+            # with it. Reported as this member's own failure instead --
+            # `state["ok"]` stays unset/False, so the next run's resume
+            # check doesn't trust whatever partial output this attempt
+            # left behind, and re-derives each chunk's own reuse decision
+            # from scratch via `_test_chunk_reuse_ok` rather than assuming
+            # anything about this failed attempt's mixed result.
+            logger.error(
+                "%s: chunked render raised %s: %s", name, exc.__class__.__name__, exc,
+                exc_info=True,
+            )
+            result = DocResult(
+                name, str(out_path), False, 0, 0, 0,
+                [f"chunked render raised {exc.__class__.__name__}: {exc}"],
+            )
         results.append(result)
         state[state_keys[name]] = {
             "ok": result.ok, "attempts": result.attempts, "brief_sha256": brief_hash,

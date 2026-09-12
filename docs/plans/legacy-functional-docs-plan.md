@@ -12,6 +12,36 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-12h):**
+- Addressed the thirty-ninth Copilot review round on PR #209 (issue
+  #195):
+  1. `run_test_batch`'s own dispatch loop for chunked members had no
+     `try/except` around `generate_member_test_doc` -- several of that
+     function's own filesystem writes now raise on failure rather than
+     swallowing it (this issue's own several review rounds), so a real,
+     if rare, failure would propagate all the way out of
+     `run_test_batch`, discarding every *other* member's already-
+     checkpointed result in the same batch along with it. Now caught and
+     reported as that one member's own failure; a full snapshot/restore
+     of every already-written chunk file on such a failure was considered
+     and declined as disproportionate -- each chunk's own write is
+     already independently atomic (via `write_test_doc_with_sidecar`'s
+     own rollback), and the next run's resume re-derives each chunk's
+     reuse decision from scratch via `_test_chunk_reuse_ok` rather than
+     trusting anything about a failed attempt's state, self-correcting
+     without needing a cross-file transaction.
+  2. `member_test_case_aligned_with_rule_candidate`'s `current` dict
+     comprehension was keyed by `rule_candidate_id`, silently keeping
+     only the *last* `test_case` row for a given id -- the schema doesn't
+     enforce uniqueness on that link (unlike `rule_theme`'s own `UNIQUE(
+     rule_candidate_id)`), so two rows sharing one would never be
+     noticed, letting a fingerprint get stamped onto content this
+     function never actually confirmed was one-for-one. Now detected
+     explicitly and treated as misaligned.
+- Two new regression tests. Full suite green (1063 passed, 2 skipped)
+  plus a clean `mfdoc validate` pass against `examples/` (71/71
+  documents, 0 invalid citations of 750).
+
 **Progress (2026-09-12g):**
 - Addressed the thirty-eighth Copilot review round on PR #209 (issue
   #195): the previous round's `_split_doc_missing_its_sidecar` (member-

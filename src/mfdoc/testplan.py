@@ -312,13 +312,25 @@ def member_test_case_aligned_with_rule_candidate(conn, member_name: str) -> bool
         r["id"]: _rule_id(canonical_name, n)
         for n, r in numbered_rule_candidates(rc_rows) if _is_branch_row(r)
     }
-    current = {
-        row["rule_candidate_id"]: row["scenario_name"]
-        for row in conn.execute(
-            "SELECT scenario_name, rule_candidate_id FROM test_case "
-            "WHERE member_id=? AND kind='unit' AND rule_candidate_id IS NOT NULL", (mid,)
-        ).fetchall()
-    }
+    current_rows = conn.execute(
+        "SELECT scenario_name, rule_candidate_id FROM test_case "
+        "WHERE member_id=? AND kind='unit' AND rule_candidate_id IS NOT NULL", (mid,)
+    ).fetchall()
+    # A dict comprehension keyed by rule_candidate_id would silently keep
+    # only the *last* row for a given id and never notice two `unit` rows
+    # sharing one (Copilot review): nothing in the schema enforces that
+    # link's uniqueness (unlike rule_theme's own `UNIQUE(rule_candidate_id)`
+    # -- see db.py), so a duplicate is a real, if unusual, misalignment
+    # `build_member_test_cases`'s one-row-per-branch-row contract never
+    # produces on its own -- collapsing it here instead of detecting it
+    # would let `write_test_doc_with_sidecar` stamp a fingerprint onto
+    # content this function never actually confirmed is one-for-one.
+    current: dict[int, str] = {}
+    for row in current_rows:
+        rc_id = row["rule_candidate_id"]
+        if rc_id in current:
+            return False
+        current[rc_id] = row["scenario_name"]
     return expected == current
 
 

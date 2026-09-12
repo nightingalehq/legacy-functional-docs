@@ -421,6 +421,45 @@ def test_member_test_case_aligned_with_rule_candidate_catches_a_removed_rule_sti
     assert testplan.member_test_case_aligned_with_rule_candidate(conn, "FAKEMOD") is False
 
 
+def test_member_test_case_aligned_with_rule_candidate_catches_a_duplicate_rule_candidate_id():
+    """Copilot review follow-up: the schema doesn't enforce uniqueness on
+    `test_case.rule_candidate_id` (unlike `rule_theme`'s own `UNIQUE(
+    rule_candidate_id)`), so two `unit` rows could in principle share one
+    -- a dict comprehension keyed by that id would silently keep only the
+    *last* row and never notice, letting `write_test_doc_with_sidecar`
+    stamp a fingerprint onto content this check never actually confirmed
+    was one-for-one. Must be treated as misaligned, not silently
+    collapsed."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'x')")
+    rc1 = insert(conn, "rule_candidate", member_id=1, line_no=1, construct="IF", raw="a")
+    insert(
+        conn, "test_case", member_id=1, kind="unit", rule_candidate_id=rc1, scenario_name="FAKEMOD:BR-001",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "A", "citation": "[[FAKEMOD:1]]"}',
+        then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:1", confidence="verified",
+    )
+    conn.commit()
+    assert testplan.member_test_case_aligned_with_rule_candidate(conn, "FAKEMOD") is True
+
+    # A second unit row, sharing the same rule_candidate_id -- a shape
+    # build_member_test_cases never produces on its own, but not
+    # prevented by the schema either.
+    insert(
+        conn, "test_case", member_id=1, kind="unit", rule_candidate_id=rc1, scenario_name="FAKEMOD:BR-999",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "A", "citation": "[[FAKEMOD:1]]"}',
+        then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:1", confidence="verified",
+    )
+    conn.commit()
+    assert testplan.member_test_case_aligned_with_rule_candidate(conn, "FAKEMOD") is False
+
+
 def test_register_lists_scenarios_with_resolvable_citations(indexed_db):
     conn = indexed_db
     testplan.run_all(conn)

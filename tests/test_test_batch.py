@@ -2472,6 +2472,71 @@ def test_run_test_batch_still_skips_an_unchanged_chunked_member_on_resume(tmp_pa
     assert caller.calls == 2, "no new model calls -- the resume must be a true skip"
 
 
+def test_run_test_batch_does_not_abort_the_whole_run_when_a_chunked_member_raises(tmp_path):
+    """Copilot review follow-up: `run_test_batch`'s own dispatch loop for
+    chunked members had no `try/except` around `generate_member_test_doc`
+    -- several of that function's own filesystem writes now raise on
+    failure rather than swallowing it (issue #195's several review
+    rounds), so a real, if rare, failure (a transient filesystem error
+    mid-render) would propagate all the way out of `run_test_batch`,
+    discarding every *other* member's already-checkpointed result in the
+    same batch along with it. Must be caught and reported as this one
+    member's own failure instead."""
+    from mfdoc import testbatch
+    import sqlite3
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 40, 'irrelevant')")
+    for n in range(1, 5):
+        rc = insert(
+            conn, "rule_candidate", member_id=1, line_no=n, construct="IF",
+            condition=f"COND-{n}", raw=f"IF COND-{n}",
+        )
+        insert(
+            conn, "test_case", member_id=1, kind="unit", rule_candidate_id=rc,
+            scenario_name=f"FAKEMOD:BR-{n:03d}",
+            given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+            when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+            then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+            status="characterization", citation="FAKEMOD:1", confidence="verified",
+        )
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (2, 'OTHERMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (2, 1, 'irrelevant')")
+    rc_other = insert(conn, "rule_candidate", member_id=2, line_no=1, construct="IF", condition="X", raw="IF X")
+    insert(
+        conn, "test_case", member_id=2, kind="unit", rule_candidate_id=rc_other,
+        scenario_name="OTHERMOD:BR-001",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "X", "citation": "[[OTHERMOD:1]]"}',
+        then_json='{"citation": "[[OTHERMOD:1]]", "source_excerpt": []}',
+        status="characterization", citation="OTHERMOD:1", confidence="verified",
+    )
+    conn.commit()
+
+    def exploding_generate_member_test_doc(*args, **kwargs):
+        if args[1] == "FAKEMOD":
+            raise RuntimeError("simulated: a bug deep in the chunked render path")
+        return real_generate_member_test_doc(*args, **kwargs)
+
+    real_generate_member_test_doc = testbatch.generate_member_test_doc
+    import unittest.mock
+    with unittest.mock.patch.object(testbatch, "generate_member_test_doc", exploding_generate_member_test_doc):
+        summary = testbatch.run_test_batch(
+            conn, ["FAKEMOD", "OTHERMOD"], "python", "pytest", tmp_path,
+            _chunk_aware_caller("python", "pytest"),
+            "writing rules text", "template text", max_scenarios_per_call=2,
+        )
+
+    by_name = {r.member: r for r in summary.results}
+    assert by_name["FAKEMOD"].ok is False
+    assert any("chunked render raised" in p for p in by_name["FAKEMOD"].problems)
+    assert by_name["OTHERMOD"].ok is True, "the other member's own result must not be lost"
+
+
 def test_shrinking_back_below_threshold_removes_leftover_chunk_files_and_sidecars(tmp_path):
     """Copilot review follow-up on issue #195: the symmetric direction of
     the threshold-change test above. A member that *shrinks* back under
