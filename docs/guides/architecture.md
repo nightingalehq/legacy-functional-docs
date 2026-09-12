@@ -509,11 +509,31 @@ deadlock (a new scenario added past the old sidecar's range would
 otherwise fail every retry indefinitely, since nothing ever gets the
 chance to refresh a sidecar that never validates). Either way, staleness
 is reported (`result["sidecar_stale"]`) without counting against
-`ok`/`problems` — it isn't a defect in the document being checked, and
-resolves itself the next time that document's own render succeeds and its
-sidecar is rewritten. See `validate.validate_test_doc`'s docstring for the
-full decision order and the deadlock this staleness handling exists to
-avoid.
+`ok`/`problems` on its own — it isn't a defect in the document being
+checked, and resolves itself the next time that document's own render
+succeeds and its sidecar is rewritten.
+
+Two exceptions still turn a stale/dropped sidecar into a real, hard
+`problems` entry, for a standalone check (`mfdoc test-validate`,
+`_render_time=False`) only — never during a render/retry loop's own
+validation, where the equivalent risk is instead covered by the loop
+itself re-validating and, on success, overwriting the sidecar via
+`write_test_doc_with_sidecar`:
+
+- The document has nothing left to fall back on scanning at all — a stale
+  sidecar with real `MEMBER:BR-nnn` content, next to a body with no
+  references of its own (an empty manifest, or a code fence with none).
+  This is untraceable, not clean: `ok=True` here would silently report a
+  document that can no longer be verified against anything as though it
+  had passed genuine verification.
+- A scenario the old (now-bypassed) sidecar referenced, and which is
+  still a real `test_case` row today, is no longer mentioned anywhere in
+  the current document — the completeness protection that stops the
+  staleness bypass from also hiding a scenario silently dropped from the
+  candidate, not merely renumbered.
+
+See `validate.validate_test_doc`'s docstring for the full decision order
+and the deadlock this staleness handling exists to avoid.
 
 Before any of the above, `_partition_pipeline_docs` (#130) splits the tree
 walk itself: a multi-project workspace commonly runs several `mfdoc`

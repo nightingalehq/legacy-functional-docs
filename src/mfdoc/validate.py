@@ -1133,11 +1133,21 @@ def validate_test_doc(conn, path: Path, *, _text: str | None = None,
         # is missing or tampered with, since nothing here would ever look
         # at it. Flagged directly as a problem so this can't happen
         # unnoticed (Copilot review, round 45).
-        language = fm.get("language")
-        if language is not None and not isinstance(language, str):
-            problems.append(
-                f"front matter field 'language' must be a string, got {type(language).__name__}"
-            )
+        #
+        # Checked via key *presence* (`"language" in fm`), not
+        # `fm.get("language") is not None`: an explicit `language: null`
+        # front-matter value is present-but-non-string exactly like
+        # `language: [python]` is -- `fm.get(...)` can't tell "key absent"
+        # from "key present with value None" apart, and the missing-key
+        # check above already covers the absent case on its own. Using
+        # `is not None` here would let an explicit null silently take the
+        # same bypass this check exists to close (Copilot review, round 49).
+        if "language" in fm:
+            language = fm["language"]
+            if not isinstance(language, str):
+                problems.append(
+                    f"front matter field 'language' must be a string, got {type(language).__name__}"
+                )
 
     # Fetched at most once per call, lazily, and reused for both the
     # sidecar staleness decision and the final `bad_refs` check -- a per-id
@@ -1293,8 +1303,17 @@ def validate_test_doc(conn, path: Path, *, _text: str | None = None,
         # an insertion *after* the sidecar's own BR-range, which leaves its
         # ids a literal (and therefore ID-overlap-invisible) subset of the
         # current valid set.
-        fp = current_fingerprint() if stored_fingerprint else None
-        if stored_fingerprint and fp is not None:
+        # `is not None`, not truthiness: an explicitly present but empty or
+        # otherwise invalid stored fingerprint (a corrupted/hand-edited
+        # `test_case_fingerprint: ""`) is a real, present value that must
+        # still be *compared* against the current one (and reported as a
+        # mismatch when it doesn't match) -- not silently treated the same
+        # as "no fingerprint recorded at all" and routed to the weaker
+        # id-overlap fallback below, which can then report a false
+        # manifest/sidecar mismatch for a sidecar whose ids remain a
+        # coincidental subset after an insertion (Copilot review, round 49).
+        fp = current_fingerprint() if stored_fingerprint is not None else None
+        if stored_fingerprint is not None and fp is not None:
             sidecar_usable = fp == stored_fingerprint
             if not sidecar_usable:
                 # A genuine fingerprint *mismatch* -- the corpus has moved

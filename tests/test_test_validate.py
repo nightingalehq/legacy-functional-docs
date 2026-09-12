@@ -108,6 +108,24 @@ def test_non_string_language_on_a_split_document_is_flagged_not_silently_bypasse
     assert any("language" in p and "must be a string" in p for p in result["problems"])
 
 
+def test_explicit_null_language_is_flagged_not_treated_as_absent(indexed_db, tmp_path):
+    """Copilot review, round 49: `fm.get("language") is not None` can't
+    tell "key absent" (already covered by the missing-required-key check)
+    apart from "key present with an explicit `language: null` value" --
+    both return `None` from `dict.get`. The malformed-language check must
+    key off presence (`"language" in fm`), not `is not None`, or an
+    explicit null silently takes the same sidecar-bypass path a real,
+    unrecognised string language legitimately would."""
+    conn = indexed_db
+    testplan.run_all(conn, member_name="MMP0100")
+    bad = SIDECAR_DOC.replace("language: python\n", "language: null\n")
+    path = tmp_path / "MMP0100.md"
+    path.write_text(bad, encoding="utf-8")
+    result = validate_test_doc(conn, path)
+    assert not result["ok"]
+    assert any("language" in p and "must be a string" in p for p in result["problems"])
+
+
 def test_invented_scenario_id_is_flagged(indexed_db, tmp_path):
     """MMP0100:BR-999 doesn't exist -- a model inventing or renumbering a
     scenario id must be caught, the same way an invalid [[MEMBER:LINE]]
@@ -894,6 +912,71 @@ def test_rejects_unconfirmed_order():
     )
     result = validate_test_doc(conn, path)
     assert not result["ok"], "a fingerprint mismatch must not waive the completeness check"
+    assert any(
+        "BR-001" in p and "no longer referenced" in p for p in result["problems"]
+    ), result["problems"]
+
+
+def test_empty_stored_fingerprint_is_still_compared_not_treated_as_absent(indexed_db, tmp_path):
+    """Copilot review, round 49: `stored_fingerprint` was gated on
+    truthiness (`if stored_fingerprint else None` / `if stored_fingerprint
+    and ...`), so an explicitly present but empty/invalid stored value
+    (`test_case_fingerprint: ""`, a corrupted or hand-edited document) was
+    silently treated the same as "no fingerprint recorded at all" and
+    routed to the weaker id-overlap fallback -- which can then report a
+    false manifest/sidecar mismatch for a sidecar whose old ids remain a
+    coincidental subset after an insertion, exactly the failure mode #195's
+    fingerprint check exists to eliminate. An empty stored value must
+    instead be *compared* against the current fingerprint (any real
+    fingerprint value is unequal to `""`, so this reports a genuine
+    mismatch and still runs the completeness check), never bypassed to the
+    fallback. Same shape as the mismatch test above, just with `""` in
+    place of a non-empty stale value."""
+    conn = indexed_db
+    testplan.run_all(conn, member_name="MMP0100")
+    path = tmp_path / "MMP0100.md"
+    sidecar = tmp_path / "MMP0100.py"
+    path.write_text(
+        """---
+title: "MMP0100 -- generated tests (python)"
+doc_type: generated_test
+system: MOM
+module: MMP0100
+language: python
+framework: pytest
+generated_by: legacy-functional-docs 0.1.0
+generated_at: "2026-01-01"
+review_status: draft
+reviewers: []
+confidence_summary:
+  verified: 1
+  inferred: 0
+  unresolved: 0
+sources: ["MMP0100"]
+test_case_fingerprint: ""
+---
+
+# MMP0100 -- generated tests
+
+```python
+def test_rejects_unconfirmed_order():
+    # MMP0100:BR-004 [[MMP0100:38-40]]
+    ...
+```
+""",
+        encoding="utf-8",
+    )
+    sidecar.write_text(
+        "def test_rejects_unconfirmed_order():\n"
+        "    # MMP0100:BR-004\n"
+        "    ...\n"
+        "def test_something_else():\n"
+        "    # MMP0100:BR-001\n"
+        "    ...\n",
+        encoding="utf-8",
+    )
+    result = validate_test_doc(conn, path)
+    assert not result["ok"], "an empty stored fingerprint must not waive the completeness check"
     assert any(
         "BR-001" in p and "no longer referenced" in p for p in result["problems"]
     ), result["problems"]

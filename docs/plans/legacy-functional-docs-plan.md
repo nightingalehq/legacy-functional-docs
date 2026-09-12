@@ -12,6 +12,36 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-12o):**
+- Addressed the forty-ninth Copilot review round on PR #209 (issue #195),
+  three findings (a fourth, repeating the "MMP0100/MOM is client content"
+  claim from round 46, is a false positive already answered by PR comment:
+  both are this repo's own pre-existing, invented fixture names, used
+  across 24+ files on `main` before this PR touched anything -- not
+  rewritten again here):
+  1. Round 45's non-string-`language` check used `fm.get("language") is
+     not None`, which can't distinguish "key absent" from "key present
+     with an explicit `language: null`" -- both return `None` from
+     `dict.get`. An explicit null therefore still silently took the
+     sidecar-bypass path a real, unrecognised string language legitimately
+     gets. Changed to key off presence (`"language" in fm`) instead.
+  2. `stored_fingerprint`'s fingerprint-vs-fallback branch was gated on
+     truthiness, not presence -- an explicitly stored but empty/invalid
+     `test_case_fingerprint: ""` was treated the same as "no fingerprint
+     at all" and routed to the weaker id-overlap fallback, which can
+     report a false manifest/sidecar mismatch for a sidecar whose ids
+     remain a coincidental subset after an insertion. Changed both gating
+     conditions to `is not None`, so a present-but-invalid value is
+     compared (and correctly reported as a mismatch) instead of bypassed.
+  3. `docs/guides/architecture.md`'s new staleness-is-advisory paragraph
+     (added last round) didn't mention the two cases that *do* turn a
+     stale/dropped sidecar into a hard `problems` entry for a standalone
+     `mfdoc test-validate` check (the untraceable-body case, and the
+     dropped-still-valid-scenario completeness check). Documented both.
+- Two new regression tests, each confirmed to fail without its fix. Full
+  suite green (1076 passed, 2 skipped) plus a clean `mfdoc validate` pass
+  against `examples/` (71/71 documents, 0 invalid citations of 750).
+
 **Progress (2026-09-12n):**
 - Addressed the forty-fifth Copilot review round on PR #209 (issue #195),
   two findings:
