@@ -939,6 +939,18 @@ def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: 
     input_tokens = output_tokens = 0
     problems: list[str] = []
     attempt = 0
+    # Tracks whether *this invocation* ever actually overwrote `out_path`
+    # with a candidate (Copilot review): if every model call raises
+    # before a single response comes back, `out_path` is left exactly as
+    # it was before this call -- for a re-render of an already-successful
+    # document, that's the *prior* render's own known-good content, still
+    # carrying a legitimately-stamped, trustworthy `test_case_fingerprint`
+    # of its own. The give-up path's cleanup below must not strip that:
+    # doing so on an untouched, already-good document would downgrade a
+    # perfectly valid stamped fingerprint to the weaker id-overlap
+    # fallback on every future validation, for a failure that was never
+    # this document's own.
+    wrote_a_candidate = False
     for attempt in range(1, max_attempts + 1):
         prompt = build_test_prompt(brief, writing_rules, template, language, framework, retry_note)
         try:
@@ -956,6 +968,7 @@ def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: 
         text = _fix_generated_by_version(response.text)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(text, encoding="utf-8")
+        wrote_a_candidate = True
         result = validate_test_doc(
             conn, out_path, _prior_fingerprint=prior_fingerprint, _render_time=True,
             _fingerprint_cache=_fingerprint_cache,
@@ -1073,9 +1086,19 @@ def _generate_test_doc_from_brief(conn, member_name: str, brief: str, language: 
     # left at `out_path` never passed through `write_test_doc_with_
     # sidecar`'s own stamping, so a `test_case_fingerprint` it happens to
     # carry survives untouched unless stripped here.
-    cleanup_problem = _strip_fingerprint_from_a_failed_candidate(out_path)
-    if cleanup_problem:
-        problems = problems + [cleanup_problem]
+    #
+    # `wrote_a_candidate` guards this (Copilot review, round 44): if
+    # every model call above raised and `out_path` was never touched this
+    # invocation, it still holds whatever was there before this call --
+    # for a re-render of an already-successful document, that's the prior
+    # render's own known-good content with a legitimately-stamped,
+    # trustworthy fingerprint. Stripping it in that case would mutate a
+    # known-good document over a failure that was never its own, forcing
+    # every future validation back onto the weaker id-overlap fallback.
+    if wrote_a_candidate:
+        cleanup_problem = _strip_fingerprint_from_a_failed_candidate(out_path)
+        if cleanup_problem:
+            problems = problems + [cleanup_problem]
     return DocResult(member_name, str(out_path), False, attempt, input_tokens, output_tokens, problems)
 
 

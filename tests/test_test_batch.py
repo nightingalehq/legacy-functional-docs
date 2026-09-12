@@ -4124,6 +4124,58 @@ def test_x():
     )
 
 
+def test_generate_member_test_doc_does_not_strip_an_untouched_prior_successful_document(tmp_path):
+    """Copilot review follow-up (round 44): the give-up cleanup added above
+    must not run at all when this invocation never actually wrote a
+    candidate to `out_path` -- if every model call raises before a
+    single response comes back, `out_path` is left exactly as it was
+    *before* this call, which for a re-render of an already-successful
+    member is that prior render's own known-good document, still
+    carrying a legitimately-stamped, trustworthy `test_case_fingerprint`.
+    Stripping it here would mutate a known-good document over a failure
+    that was never its own, forcing every future validation back onto
+    the weaker id-overlap fallback."""
+    from mfdoc import testbatch
+    import sqlite3
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
+    insert(
+        conn, "test_case", member_id=1, kind="unit", scenario_name="FAKEMOD:BR-001",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+        then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:1", confidence="verified",
+    )
+    conn.commit()
+
+    out_path = tmp_path / "FAKEMOD.md"
+    successful_result = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, _valid_test_doc_caller("python", "pytest"),
+        "writing rules text", "template text",
+    )
+    assert successful_result.ok is True
+    original_text = out_path.read_text(encoding="utf-8")
+    assert "test_case_fingerprint:" in original_text, "sanity check: the prior render stamped a real fingerprint"
+
+    def exploding_caller(prompt: str) -> ModelResponse:
+        raise RuntimeError("simulated: model call always fails")
+
+    second_result = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, exploding_caller,
+        "writing rules text", "template text",
+    )
+    assert second_result.ok is False
+    assert out_path.read_text(encoding="utf-8") == original_text, (
+        "an untouched, already-successful document must survive a re-render where every "
+        "model call raises -- its legitimately-stamped fingerprint must not be stripped"
+    )
+
+
 def test_generate_member_test_doc_preserves_exception_when_retry_fails_validation(tmp_path):
     """The reverse ordering of the case above -- an attempt raises first,
     and the retry then comes back with a response that still fails

@@ -12,6 +12,26 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-12m):**
+- Addressed the forty-fourth Copilot review round on PR #209 (issue
+  #195): round 43's give-up-path fingerprint strip was itself
+  unconditional -- if every model call in a re-render attempt raises
+  before a single response comes back, `out_path` is left exactly as it
+  was *before* this invocation, which for a re-render of an already-
+  successful member is that prior render's own known-good document,
+  still carrying a legitimately-stamped, trustworthy fingerprint.
+  Stripping it there mutated a known-good document over a failure that
+  was never its own, forcing every future validation back onto the
+  weaker id-overlap fallback. Added a `wrote_a_candidate` flag, set only
+  when this invocation actually overwrote `out_path` with a candidate,
+  and guarded the strip on it (`run_test_batch`'s own separate pooled-
+  dispatch give-up path already only reaches its equivalent cleanup after
+  a response was received and `out_path` was written, so needed no
+  matching change).
+- One new regression test, confirmed to fail without the fix. Full suite
+  green (1073 passed, 2 skipped) plus a clean `mfdoc validate` pass
+  against `examples/` (71/71 documents, 0 invalid citations of 750).
+
 **Progress (2026-09-12l):**
 - Addressed the forty-third Copilot review round on PR #209 (issue #195):
   `_prior_fingerprint_for` trusts whatever `test_case_fingerprint` it
