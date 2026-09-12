@@ -12,6 +12,25 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-12v):**
+- Addressed the fifty-sixth Copilot review round on PR #209 (issue #195):
+  round 55's deferred chunk-backup rollback had a gap of its own.
+  `_invalidate_chunk_pair_if_range_changed` returns `(None,
+  sidecar_backup)` for an orphan sidecar -- wrong-range ids on disk with
+  no `chunk_path` document at all to back up -- since there's nothing to
+  restore *from*. But the render that follows still writes its own fresh
+  candidate straight to `chunk_path` before validating it regardless, and
+  restoring only the sidecar (when that render then fails, or the
+  covering index never commits) used to leave that candidate in place:
+  a document that didn't exist when the run started, now mismatched with
+  the just-restored old sidecar. Added a branch to the deferred-backup
+  resolution loop that removes whatever now sits at `chunk_path` in
+  exactly this case (`chunk_backup is None`, not discarding) instead of
+  leaving it.
+- One new regression test, confirmed to fail without the fix. Full suite
+  green (1084 passed, 2 skipped) plus a clean `mfdoc validate` pass
+  against `examples/` (71/71 documents, 0 invalid citations of 750).
+
 **Progress (2026-09-12u):**
 - Addressed the fifty-fifth Copilot review round on PR #209 (issue #195),
   two findings:

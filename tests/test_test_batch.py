@@ -5301,6 +5301,66 @@ def test_chunk_boundary_shift_is_rolled_back_entirely_if_the_index_commit_fails(
     )
 
 
+def test_orphan_sidecar_with_no_original_document_does_not_leave_a_failed_candidate_behind(tmp_path):
+    """Copilot review, round 56: `_invalidate_chunk_pair_if_range_changed`
+    returns `(None, sidecar_backup)` when a chunk's sidecar exists on disk
+    with wrong-range ids but `chunk_path` itself doesn't exist at all (an
+    orphan sidecar) -- there's no original document to back up, so
+    `chunk_backup` stays `None`. The render that follows still writes its
+    own fresh candidate straight to `chunk_path` before validating it,
+    though (`_generate_test_doc_from_brief`'s retry loop always does).
+    Restoring only the sidecar when that render then fails, with
+    `chunk_backup` still `None`, used to leave that failed candidate
+    sitting there -- a document that didn't exist when this run started,
+    now mismatched with the just-restored old (wrong-range) sidecar."""
+    from mfdoc import testbatch
+
+    conn = _sqlite_conn()
+    _seed_fakemod_scenarios(conn, 4)
+
+    out_path = tmp_path / "FAKEMOD.md"
+    first = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, _chunk_aware_caller("python", "pytest"),
+        "writing rules text", "template text", max_scenarios_per_call=2,
+    )
+    assert first.ok is True
+    chunk1_path = tmp_path / "FAKEMOD.chunk1.md"
+    chunk1_sidecar = tmp_path / "FAKEMOD.chunk1.py"
+    assert chunk1_path.exists() and chunk1_sidecar.exists()
+
+    # Simulate an orphan sidecar: the chunk document is gone entirely, but
+    # its sidecar remains, with ids that no longer match what chunk 1
+    # (BR-001, BR-002, same boundaries as the first render) expects.
+    chunk1_path.unlink()
+    chunk1_sidecar.write_text(
+        "def test_something_stale():\n    # FAKEMOD:BR-999\n    ...\n",
+        encoding="utf-8",
+    )
+
+    def flaky_caller(prompt: str) -> ModelResponse:
+        if "BR-001" in prompt:
+            return ModelResponse(text="not a valid document", input_tokens=1, output_tokens=1)
+        return _chunk_aware_caller("python", "pytest")(prompt)
+
+    # No prior_chunks: every chunk is a cache miss and goes through
+    # _invalidate_chunk_pair_if_range_changed, which is what detects
+    # chunk 1's orphan sidecar here (same boundaries as the first render,
+    # so this isn't a boundary shift -- just a corrupted/orphaned sidecar).
+    second = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, flaky_caller,
+        "writing rules text", "template text", max_scenarios_per_call=2,
+    )
+    assert second.ok is False
+    assert not chunk1_path.exists(), (
+        "a failed candidate with no original document to restore must be removed, not left behind"
+    )
+    assert chunk1_sidecar.exists(), "the orphan sidecar must be restored"
+    assert "BR-999" in chunk1_sidecar.read_text(encoding="utf-8")
+    assert not chunk1_sidecar.with_name(chunk1_sidecar.name + ".stale").exists(), (
+        "the sidecar backup must not be left behind once restored"
+    )
+
+
 def test_chunk_boundary_shift_discards_the_old_sidecar_when_the_rerender_writes_no_sidecar(tmp_path):
     """Copilot review follow-up: `result.ok` alone doesn't prove a fresh
     sidecar now exists -- `write_test_doc_with_sidecar` silently returns

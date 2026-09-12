@@ -1821,6 +1821,32 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
                         "%s: could not clean up stale chunk document backup %s: %s",
                         member_name, chunk_backup, exc,
                     )
+            elif not discard:
+                # `chunk_backup` is `None` here yet this entry still exists
+                # in `deferred_chunk_backups` (its append condition requires
+                # at least one of the two backups to be non-`None`) -- the
+                # only way that combination happens is
+                # `_invalidate_chunk_pair_if_range_changed` finding an
+                # orphan sidecar with wrong-range ids but no `chunk_path`
+                # document to back up at all (Copilot review, round 56):
+                # there was nothing there before this render, so there is
+                # no backup to restore *from* -- but the render since then
+                # may well have written a fresh (possibly never-validated,
+                # possibly validated-but-index-uncommitted) candidate to
+                # `chunk_path` in the meantime. Restoring only the sidecar
+                # above and leaving that candidate in place would pair the
+                # just-restored old sidecar with a document that didn't
+                # exist when this run started -- exactly the mismatched
+                # on-disk pair a later validation/resume could misread.
+                # Since nothing should be there, remove whatever is there
+                # now instead of leaving it.
+                try:
+                    chunk_path.unlink(missing_ok=True)
+                except OSError as exc:
+                    logger.warning(
+                        "%s: could not remove an orphaned chunk document with no original to restore %s: %s",
+                        member_name, chunk_path, exc,
+                    )
 
     # The index is built deterministically, not model-generated, but that's
     # not a reason to skip checking it -- validate_test_doc is the same
