@@ -71,7 +71,7 @@ def test_validator_rejects_non_mapping_front_matter_instead_of_crashing(indexed_
     own `fm.get(...)` as an unhandled `AttributeError` instead of the
     malformed-front-matter problem this document should actually report."""
     doc = tmp_path / "doc.md"
-    doc.write_text("---\n- a\n- b\n---\n\nThe program moves the field [[MMP0100:1]].\n")
+    doc.write_text("---\n- a\n- b\n---\n\nThe program moves the field [[MMP0100:1]].\n", encoding="utf-8")
     result = validate_doc(indexed_db, doc)
     assert not result["ok"]
     assert any("front matter is not a mapping" in p for p in result["problems"])

@@ -249,7 +249,12 @@ def split_frontmatter(text: str) -> tuple[dict | None, str, str | None]:
     if raw_fm is None:
         return {}, parts[2], None
     if not isinstance(raw_fm, dict):
-        return None, parts[2], f"front matter is not a mapping, got {raw_fm!r}"
+        # `type(...).__name__`, not the value itself (Copilot review): a
+        # malformed front matter block can be arbitrarily large (or hold
+        # unexpected/binary-ish content), and this message can end up in
+        # CLI output or logs -- naming the shape is enough to diagnose
+        # "not a mapping" without risking a noisy dump of its contents.
+        return None, parts[2], f"front matter is not a mapping, got a {type(raw_fm).__name__}"
     return raw_fm, parts[2], None
 
 
@@ -962,7 +967,7 @@ def validate_doc(conn, path: Path, outcome_field=OUTCOME_FIELD, _text: str | Non
     }
 
 
-def validate_test_doc(conn, path: Path, _text: str | None = None,
+def validate_test_doc(conn, path: Path, *, _text: str | None = None,
                        _prior_fingerprint: str | None = None,
                        _render_time: bool = False,
                        _valid_scenarios: Callable[[], set[str]] | None = None,
@@ -1362,8 +1367,13 @@ def validate_test_doc(conn, path: Path, _text: str | None = None,
             )
 
     bad_refs = 0
+    # Hoisted out of the loop (Copilot review): valid_scenarios() already
+    # memoizes internally, so this changes nothing about cost -- calling
+    # it once up front just makes it clear at a glance that every
+    # iteration below checks against the same set, not a fresh query per id.
+    valid = valid_scenarios() if scan_ids else set()
     for scenario in scan_ids:
-        if scenario.upper() not in valid_scenarios():
+        if scenario.upper() not in valid:
             bad_refs += 1
             problems.append(f"'{scenario}' is not a known test_case scenario -- run `mfdoc test-plan`, "
                              f"or this id was invented/renumbered")

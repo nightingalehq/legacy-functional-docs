@@ -12,6 +12,26 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-12f):**
+- Addressed the thirty-seventh Copilot review round on PR #209 (issue
+  #195) -- a degraded pass ("unable to run its full agentic suite"),
+  lower-severity findings than usual:
+  - `split_frontmatter`'s malformed-front-matter message now reports
+    `type(raw_fm).__name__` instead of `raw_fm!r` -- the value itself
+    could be arbitrarily large or hold unexpected content, ending up in
+    CLI output/logs.
+  - `validate_test_doc`/`_readonly_validate_test_doc`'s internal-only
+    (`_`-prefixed) parameters are now keyword-only (`*` after `path`) --
+    every real call site already used keywords for them, so this only
+    forecloses an accidental future positional call.
+  - `valid_scenarios()` hoisted out of `bad_refs`'s loop in
+    `validate_test_doc` -- already memoized, so no behaviour change, just
+    clearer that every iteration checks against the same set.
+  - A test's `write_text` now passes `encoding="utf-8"` explicitly,
+    matching its neighbours.
+  Full suite green (1060 passed, 2 skipped) plus a clean `mfdoc validate`
+  pass against `examples/` (71/71 documents, 0 invalid citations of 750).
+
 **Progress (2026-09-12e):**
 - Addressed the thirty-sixth Copilot review round on PR #209 (issue
   #195):

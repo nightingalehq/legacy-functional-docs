@@ -1038,7 +1038,7 @@ _DOC_CLAIM_COLUMNS = (
 )
 
 
-def _readonly_validate_test_doc(conn, path: Path, _render_time: bool = False,
+def _readonly_validate_test_doc(conn, path: Path, *, _render_time: bool = False,
                                  _fingerprint_cache: dict | None = None,
                                  _valid_scenarios=None) -> dict:
     """The same result `validate_test_doc(conn, path)` returns, but leaves
