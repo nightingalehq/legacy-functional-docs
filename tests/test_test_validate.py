@@ -225,6 +225,63 @@ def test_missing_sidecar_for_a_known_language_split_document_is_flagged(indexed_
     assert any("MMP0100.py" in p and "missing" in p for p in result["problems"]), result["problems"]
 
 
+def test_chunk_index_flags_a_deleted_linked_chunk_document(indexed_db, tmp_path):
+    """Copilot review, round 54: a chunked member's index document
+    (`## Chunks`) never has a sidecar of its own -- each chunk has its
+    own instead -- so it's excluded from the missing-sidecar check above.
+    But if a linked chunk file is deleted entirely, nothing else would
+    ever notice: there's nothing left for a tree walk to visit, and the
+    index's own aggregate `## Scenarios covered` ids were computed from
+    the chunk's content at write time, not read back from the (now
+    missing) chunk file at validation time, so they still resolve against
+    `test_case` regardless. `MMP0100.chunk02.md` is listed in the index's
+    `## Chunks` section but deliberately never written to `tmp_path`."""
+    conn = indexed_db
+    testplan.run_all(conn, member_name="MMP0100")
+    path = tmp_path / "MMP0100.md"
+    (tmp_path / "MMP0100.chunk01.md").write_text("placeholder chunk 1\n", encoding="utf-8")
+    path.write_text(
+        """---
+title: "MMP0100 — generated tests (python), chunked"
+doc_type: generated_test
+system: "MOM"
+module: "MMP0100"
+language: python
+framework: pytest
+generated_by: legacy-functional-docs 0.1.0
+generated_at: "2026-01-01"
+review_status: draft
+reviewers: []
+confidence_summary:
+  verified: 1
+  inferred: 0
+  unresolved: 0
+sources: ["MMP0100"]
+---
+
+# MMP0100 — generated tests (python/pytest), chunked
+
+## Chunks
+
+- [MMP0100.chunk01.md](./MMP0100.chunk01.md) -- OK
+- [MMP0100.chunk02.md](./MMP0100.chunk02.md) -- OK
+
+## Scenarios covered
+
+- MMP0100:BR-004
+""",
+        encoding="utf-8",
+    )
+    result = validate_test_doc(conn, path)
+    assert not result["ok"]
+    assert any(
+        "MMP0100.chunk02.md" in p and "no longer exists" in p for p in result["problems"]
+    ), result["problems"]
+    assert not any("MMP0100.chunk01.md" in p for p in result["problems"]), (
+        "the chunk that still exists must not be flagged"
+    )
+
+
 def test_partial_positional_shift_sidecar_is_still_treated_as_stale(tmp_path):
     """Copilot review follow-up on issue #195: a partial positional
     renumbering (only some ids move) must still trip the staleness guard.

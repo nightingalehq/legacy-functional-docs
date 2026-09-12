@@ -104,8 +104,12 @@ def extract_code_fence(body: str, language: str) -> str | None:
 # bare form would let a quoted-key copy survive this strip untouched,
 # recoverable by a later `_prior_fingerprint_for` call as a false trusted
 # prior -- exactly the leak this whole mechanism exists to close (Copilot
-# review, round 52).
-_TEST_CASE_FINGERPRINT_FIELD = re.compile(r"(?m)^[\"']?test_case_fingerprint[\"']?:.*\n(?:[ \t].*\n?)*")
+# review, round 52). `\s*` before the colon for the same reason
+# (Copilot review, round 54): YAML permits whitespace between a mapping
+# key and its `:`, which `yaml.safe_load` again treats identically to no
+# whitespace at all -- the same untrusted-copy leak, just one more
+# syntactically-valid spelling of it.
+_TEST_CASE_FINGERPRINT_FIELD = re.compile(r"(?m)^[\"']?test_case_fingerprint[\"']?\s*:.*\n(?:[ \t].*\n?)*")
 
 
 def _strip_stamped_fingerprint_field(front_matter_block: str) -> str:

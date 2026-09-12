@@ -931,6 +931,52 @@ def test_write_test_doc_with_sidecar_strips_a_quoted_key_preexisting_fingerprint
     )
 
 
+def test_write_test_doc_with_sidecar_strips_whitespace_before_the_fingerprint_colon(tmp_path):
+    """Copilot review follow-up (round 54): `_TEST_CASE_FINGERPRINT_FIELD`
+    required the key to be followed immediately by `:`, but YAML permits
+    whitespace between a mapping key and its colon (`test_case_fingerprint
+    : ...`) with exactly the same meaning -- `yaml.safe_load` parses both
+    identically. A model echoing/hallucinating this field can include that
+    whitespace just as easily as not; left unstripped, it would survive
+    this rewrite untouched and be recoverable by a later
+    `_prior_fingerprint_for` call as a false trusted prior -- the same
+    leak the round-41/52 fixes closed for the bare- and quoted-key forms."""
+    from mfdoc import testbatch
+    import sqlite3
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
+    rc1 = insert(conn, "rule_candidate", member_id=1, line_no=1, construct="IF", condition="COND-1", raw="IF COND-1")
+    insert(
+        conn, "test_case", member_id=1, kind="unit", rule_candidate_id=rc1, scenario_name="FAKEMOD:BR-001",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+        then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:1", confidence="verified",
+    )
+    # test_case stale relative to rule_candidate -- no trusted fingerprint
+    # can be computed for this write (same shape as the tests above).
+    insert(conn, "rule_candidate", member_id=1, line_no=2, construct="IF", condition="COND-2", raw="IF COND-2")
+    conn.commit()
+
+    doc_text = _valid_test_doc_text("python", "pytest").replace(
+        'sources: ["FAKEMOD"]\n',
+        'sources: ["FAKEMOD"]\ntest_case_fingerprint : "hallucinated-untrusted-value"\n',
+    )
+    out_path = tmp_path / "FAKEMOD.md"
+    out_path.write_text(doc_text, encoding="utf-8")
+    testbatch.write_test_doc_with_sidecar(conn, "FAKEMOD", out_path, doc_text, "python")
+
+    written = out_path.read_text(encoding="utf-8")
+    assert "test_case_fingerprint" not in written, (
+        "a pre-existing fingerprint with whitespace before its colon must be stripped too"
+    )
+
+
 def test_write_test_doc_with_sidecar_omits_fingerprint_for_empty_sources(tmp_path):
     """Copilot review follow-up on issue #195: `sources: []` is a
     syntactically valid list (so `validate_doc`'s own malformed-shape

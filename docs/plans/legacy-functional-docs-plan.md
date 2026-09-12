@@ -12,6 +12,29 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-12t):**
+- Addressed the fifty-fourth Copilot review round on PR #209 (issue #195),
+  two findings:
+  1. `testbatch._TEST_CASE_FINGERPRINT_FIELD`'s strip regex required the
+     key to be followed immediately by `:`, but YAML permits whitespace
+     between a mapping key and its colon (`test_case_fingerprint : ...`)
+     with the same meaning -- `yaml.safe_load` parses both identically.
+     Added `\s*` before the colon, same rationale as the round-52
+     quoted-key fix.
+  2. A chunked member's index document (`## Chunks`) has no sidecar of
+     its own -- each chunk has its own instead -- so it's excluded from
+     the round-53 missing-sidecar check. But a linked chunk file deleted
+     entirely left nothing for `mfdoc test-validate`'s tree walk to visit
+     at all, and the index's own aggregate `## Scenarios covered` ids
+     (computed from the chunk's content at write time, not read back at
+     validation time) still resolved against `test_case` regardless --
+     reporting the index clean despite a missing chunk. Added a
+     `CHUNK_LINK` check that confirms every chunk file the index's
+     `## Chunks` section names is still actually present on disk.
+- Two new regression tests, each confirmed to fail without its fix. Full
+  suite green (1081 passed, 2 skipped) plus a clean `mfdoc validate` pass
+  against `examples/` (71/71 documents, 0 invalid citations of 750).
+
 **Progress (2026-09-12s):**
 - Addressed the fifty-third Copilot review round on PR #209 (issue #195):
   a document with a known/recognised `language` (a sidecar is expected)

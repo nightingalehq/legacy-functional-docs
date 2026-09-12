@@ -57,6 +57,16 @@ CITATION = re.compile(r"\[\[(?P<member>[A-Z0-9#@$&\-_.]+)(?::(?P<from>\d+)(?:-(?
 # the id being invisible to validation entirely.
 BR_REF = re.compile(r"(?<![A-Z0-9#@$&.\-_])(?P<member>[A-Z0-9#@$&\-_.]+):BR-(?P<n>\d+)\b", re.I)
 
+# A chunked test doc's index (`testbatch._render_chunk_index`) links each of
+# its chunk files as `- [name](./name) -- OK/FAILED: ...`, always with the
+# same name repeated in both the link text and the relative path. Used by
+# `validate_test_doc` to confirm every chunk the index claims to have is
+# still actually present on disk (Copilot review, round 54) -- a tree walk
+# over `*.md` files alone would otherwise never notice a deleted chunk, since
+# there's nothing left to walk into once the file is gone; the index is the
+# only remaining record that it was ever supposed to exist.
+CHUNK_LINK = re.compile(r"(?m)^- \[(?P<name>[^\]]+)\]\(\./(?P=name)\)")
+
 
 def _name_pattern(name: str) -> re.Pattern:
     """Compiled whole-token, case-insensitive match pattern for `name`.
@@ -1302,6 +1312,24 @@ def validate_test_doc(conn, path: Path, *, _text: str | None = None,
             f"{sidecar.name} is missing -- {path.name} is a split document with no "
             f"embedded code of its own to fall back on"
         )
+    # A chunk *index* document (`## Chunks`) never has a sidecar of its own
+    # -- excluded above for exactly that reason -- but it links every chunk
+    # file it aggregates, and each of those is where the real per-chunk
+    # missing-sidecar check above actually applies once that file is
+    # visited on its own. Deleting a linked chunk file entirely leaves
+    # nothing for a tree walk to visit at all, so nothing else would ever
+    # notice it's gone: the index's own aggregate `## Scenarios covered`
+    # ids still resolve against `test_case` regardless, since they were
+    # computed from the chunk's content at write time, not read from the
+    # chunk file itself at validation time. Checked here instead, directly
+    # against what's actually still on disk (Copilot review, round 54).
+    if "## Chunks" in body:
+        for chunk_name in sorted(set(CHUNK_LINK.findall(body))):
+            if not (path.parent / chunk_name).exists():
+                problems.append(
+                    f"{chunk_name} is listed in {path.name}'s '## Chunks' section but "
+                    f"no longer exists"
+                )
     sidecar_usable = False
     sidecar_unresolved_ids: list[str] = []
     sidecar_had_ids = False
