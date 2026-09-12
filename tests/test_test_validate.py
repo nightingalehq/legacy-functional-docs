@@ -65,17 +65,47 @@ def test_malformed_language_front_matter_does_not_crash_the_sidecar_lookup(index
     YAML scalar shape a document's own (malformed/hand-edited) front matter
     allows, not just a string -- `sidecar_path_for`'s `LANGUAGE_EXTENSIONS.
     get(language)` used to raise `TypeError: unhashable type: 'list'` for
-    `language: [python]`, crashing `mfdoc test-validate` outright. Treated
-    the same as any other language `sidecar_path_for` doesn't recognise (no
-    sidecar to cross-check against, falling back to scanning the body
-    directly) -- not itself a validation failure, just no longer a crash."""
+    `language: [python]`, crashing `mfdoc test-validate` outright.
+
+    `sidecar_path_for` itself still treats this the same as any other
+    language it doesn't recognise (returns `None`, no crash) -- but
+    `validate_test_doc` must not then silently accept it as equivalent to a
+    legitimately-unknown language string: a later Copilot review round (#195
+    fix, round 45) pointed out that doing so lets a malformed, non-string
+    `language` bypass sidecar validation entirely, which is exactly what is
+    asserted here instead of `result["ok"]`."""
     conn = indexed_db
     testplan.run_all(conn, member_name="MMP0100")
     bad = VALID_DOC.replace("language: python\n", "language: [python]\n")
     path = tmp_path / "MMP0100.md"
     path.write_text(bad, encoding="utf-8")
     result = validate_test_doc(conn, path)  # must not raise
-    assert result["ok"], result["problems"]
+    assert not result["ok"]
+    assert any("language" in p and "must be a string" in p for p in result["problems"])
+
+
+def test_non_string_language_on_a_split_document_is_flagged_not_silently_bypassed(indexed_db, tmp_path):
+    """Copilot review, round 45: a previously-split document (body already
+    replaced with a `## Scenarios covered` manifest, sidecar holding the
+    real code) whose `language` front matter gets corrupted to a non-string
+    shape must not have its sidecar checks silently skipped -- that would
+    report `ok=True` even if the actual sidecar file is missing or has been
+    tampered with, since `sidecar_path_for` returning `None` for a
+    malformed `language` looks identical to it returning `None` for a
+    merely-unrecognised one. Uses SIDECAR_DOC's own split-document shape
+    (manifest body, no embedded code) with no `.py` sidecar written at all
+    -- the exact "tampered/missing sidecar" scenario the review flagged."""
+    conn = indexed_db
+    testplan.run_all(conn, member_name="MMP0100")
+    bad = SIDECAR_DOC.replace("language: python\n", "language: [python]\n")
+    path = tmp_path / "MMP0100.md"
+    path.write_text(bad, encoding="utf-8")
+    # Deliberately no MMP0100.py written next to it -- if this fell back to
+    # scanning the manifest body directly, it would still resolve BR-004
+    # against test_case and report ok=True despite the missing sidecar.
+    result = validate_test_doc(conn, path)
+    assert not result["ok"]
+    assert any("language" in p and "must be a string" in p for p in result["problems"])
 
 
 def test_invented_scenario_id_is_flagged(indexed_db, tmp_path):

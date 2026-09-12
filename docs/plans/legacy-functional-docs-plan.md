@@ -12,6 +12,33 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-12n):**
+- Addressed the forty-fifth Copilot review round on PR #209 (issue #195),
+  two findings:
+  1. `testlang.sidecar_path_for` returns `None` for a non-string
+     `language` the same way it does for a merely-unrecognised language
+     string (both "no sidecar to check"), but those aren't the same case:
+     a malformed, non-string `language` on a previously-split document
+     (manifest body, real code in the sidecar) silently fell back to
+     scanning that manifest, which can report `ok=True` even when the
+     actual sidecar file is missing or tampered with. Fixed in
+     `validate_test_doc`: a present-but-non-string `language` is now
+     flagged directly in `problems`, before any sidecar bypass decision
+     is made. Updated the one existing test that had asserted `ok=True`
+     for this shape (it was exercising exactly the gap this closes) and
+     added a new one using the sidecar-doc fixture with no `.py` file on
+     disk, confirming this no longer silently passes.
+  2. `docs/guides/architecture.md`'s §4 (Validate) described only the
+     manifest/sidecar cross-check, not the `test_case_fingerprint`
+     staleness contract added across rounds 40-44 of this same PR.
+     Expanded that section with the fingerprint-comparison /
+     id-overlap-fallback decision order and why staleness is advisory
+     (`result["sidecar_stale"]`) rather than a hard failure.
+- Two regression tests added/updated, both confirmed to fail without the
+  fix. Full suite green (1074 passed, 2 skipped) plus a clean `mfdoc
+  validate` pass against `examples/` (71/71 documents, 0 invalid citations
+  of 750).
+
 **Progress (2026-09-12m):**
 - Addressed the forty-fourth Copilot review round on PR #209 (issue
   #195): round 43's give-up-path fingerprint strip was itself

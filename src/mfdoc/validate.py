@@ -1117,6 +1117,27 @@ def validate_test_doc(conn, path: Path, *, _text: str | None = None,
         for key in REQUIRED_TEST_FRONTMATTER:
             if key not in fm:
                 problems.append(f"front matter missing required key: {key}")
+        # A non-string `language` (a hand-edited/malformed document -- a
+        # YAML list, number, or mapping) makes `sidecar_path_for` return
+        # `None` the same way a merely-unrecognised language string does
+        # (testlang.sidecar_path_for's own contract: never guess an
+        # extension, never crash on an unhashable value -- Copilot review
+        # on issue #195's fix). But those two cases aren't the same thing:
+        # an unrecognised *string* language legitimately has no sidecar to
+        # check (the code stayed embedded in the body). A malformed,
+        # non-string language most often means a previously-split document
+        # (body already replaced with a `## Scenarios covered` manifest,
+        # exactly like a real language) whose front matter got corrupted
+        # afterward -- silently falling back to scanning that manifest
+        # would report `ok=True` even if the actual sidecar file next to it
+        # is missing or tampered with, since nothing here would ever look
+        # at it. Flagged directly as a problem so this can't happen
+        # unnoticed (Copilot review, round 45).
+        language = fm.get("language")
+        if language is not None and not isinstance(language, str):
+            problems.append(
+                f"front matter field 'language' must be a string, got {type(language).__name__}"
+            )
 
     # Fetched at most once per call, lazily, and reused for both the
     # sidecar staleness decision and the final `bad_refs` check -- a per-id
