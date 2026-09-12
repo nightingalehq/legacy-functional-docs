@@ -260,7 +260,15 @@ def write_test_doc_with_sidecar(conn, member_name: str, out_path: Path, doc_text
     # authoritative -- reintroducing the exact false-manifest-mismatch
     # failure this whole mechanism exists to prevent. Applied even when
     # `fingerprint` stays `None` below (nothing trusted to stamp instead).
-    front_matter_block = re.sub(r"(?m)^test_case_fingerprint:.*\n?", "", front_matter_block)
+    #
+    # Also consumes any indented continuation lines after the key
+    # (Copilot review): a YAML block scalar (`test_case_fingerprint: |`)
+    # or block sequence carries its actual content on the following
+    # indented lines, not on the key's own line -- stripping only that
+    # first line would leave those continuation lines behind, either
+    # producing malformed YAML (an indented block with no key of its own)
+    # or silently attaching them to whatever key precedes this one.
+    front_matter_block = re.sub(r"(?m)^test_case_fingerprint:.*\n(?:[ \t].*\n?)*", "", front_matter_block)
     if fingerprint is not None:
         front_matter_block = front_matter_block.rstrip("\n") + f'\ntest_case_fingerprint: "{fingerprint}"\n'
 
@@ -624,6 +632,49 @@ def _invalidate_sidecar_if_range_changed(chunk_path: Path, language: str,
     backup = sidecar.with_name(sidecar.name + ".stale")
     sidecar.replace(backup)
     return backup
+
+
+def _invalidate_chunk_pair_if_range_changed(chunk_path: Path, language: str,
+                                             expected_ids: set[str]) -> tuple[Path | None, Path | None]:
+    """Same range-changed staleness check as `_invalidate_sidecar_if_range_
+    changed`, but backs up `chunk_path` itself alongside its sidecar
+    (Copilot review): the caller's render immediately afterward always
+    overwrites `chunk_path` on every attempt of `_generate_test_doc_from_
+    brief`'s own retry loop (`out_path.write_text(text)` runs before that
+    attempt is validated), regardless of whether that particular attempt
+    ultimately validates. Restoring only the old sidecar next to whatever
+    candidate the failed render most recently left behind would still
+    produce the exact mismatched pair this whole mechanism exists to
+    prevent -- just one step later than the fingerprint check alone can
+    see. Backing up the document too, under the identical restore-on-
+    failure/discard-on-success rule the caller already applies to the
+    sidecar backup, keeps the two consistent with each other in every
+    outcome.
+
+    Returns `(chunk_backup, sidecar_backup)`, both `None` if nothing
+    needed invalidating (no sidecar yet, or its content already matches
+    `expected_ids` -- the common case, where `chunk_path` is left
+    completely untouched here). If backing up `chunk_path` itself fails
+    after the sidecar was already renamed away, the sidecar rename is
+    rolled back before re-raising, so a partial invalidation never leaves
+    the sidecar and document out of sync with each other on disk."""
+    sidecar_backup = _invalidate_sidecar_if_range_changed(chunk_path, language, expected_ids)
+    if sidecar_backup is None:
+        return None, None
+    if not chunk_path.exists():
+        return None, sidecar_backup
+    chunk_backup = chunk_path.with_name(chunk_path.name + ".stale")
+    try:
+        chunk_path.replace(chunk_backup)
+    except OSError:
+        sidecar = sidecar_path_for(chunk_path, language)
+        if sidecar is not None:
+            try:
+                sidecar_backup.replace(sidecar)
+            except OSError:
+                pass
+        raise
+    return chunk_backup, sidecar_backup
 
 
 def select_test_batch_members(conn) -> list[str]:
@@ -1055,6 +1106,7 @@ _DOC_CLAIM_COLUMNS = (
 
 
 def _readonly_validate_test_doc(conn, path: Path, *, _render_time: bool = False,
+                                 _prior_fingerprint: str | None = None,
                                  _fingerprint_cache: dict | None = None,
                                  _valid_scenarios=None) -> dict:
     """The same result `validate_test_doc(conn, path)` returns, but leaves
@@ -1080,8 +1132,8 @@ def _readonly_validate_test_doc(conn, path: Path, *, _render_time: bool = False,
     ).fetchall()
     try:
         return validate_test_doc(
-            conn, path, _render_time=_render_time, _fingerprint_cache=_fingerprint_cache,
-            _valid_scenarios=_valid_scenarios,
+            conn, path, _render_time=_render_time, _prior_fingerprint=_prior_fingerprint,
+            _fingerprint_cache=_fingerprint_cache, _valid_scenarios=_valid_scenarios,
         )
     finally:
         conn.execute("DELETE FROM doc_claim WHERE doc_path=?", (path_str,))
@@ -1313,8 +1365,22 @@ def _test_chunk_reuse_ok(conn, prior_chunks: dict | None, i: int, brief_hash: st
         return False
     validator = _readonly_validate_test_doc if readonly else validate_test_doc
     result = validator(
-        conn, chunk_path, _render_time=True, _fingerprint_cache=_fingerprint_cache,
-        _valid_scenarios=_valid_scenarios,
+        conn, chunk_path,
+        # Read explicitly and passed through as the trusted prior, rather
+        # than relying on `validate_test_doc`'s own internal fallback to
+        # the document's stamped field (Copilot review, round 42): that
+        # fallback is now suppressed whenever `_render_time=True`, since
+        # for a *freshly generated candidate* (`_generate_test_doc_from_
+        # brief`'s own validation) any stamped field it carries is never
+        # trustworthy -- the model could only have echoed/hallucinated
+        # it. This call is the opposite case: `chunk_path` here is
+        # existing, previously-*validated* content nothing has touched
+        # this call, so its own stamped fingerprint (if any) genuinely is
+        # the last successful render's -- `_prior_fingerprint_for` reads
+        # exactly that value the same way the render loop's own retry
+        # calls already do before their first overwrite.
+        _render_time=True, _prior_fingerprint=_prior_fingerprint_for(chunk_path),
+        _fingerprint_cache=_fingerprint_cache, _valid_scenarios=_valid_scenarios,
     )
     if not (result["ok"] and not result.get("sidecar_stale")):
         return False
@@ -1469,8 +1535,11 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
                 # member-wide fingerprint still happens to match.
                 expected_ids = {r["scenario_name"].upper() for r in chunk_rows}
                 sidecar_backup = None
+                chunk_backup = None
                 try:
-                    sidecar_backup = _invalidate_sidecar_if_range_changed(chunk_path, language, expected_ids)
+                    chunk_backup, sidecar_backup = _invalidate_chunk_pair_if_range_changed(
+                        chunk_path, language, expected_ids,
+                    )
                 except OSError as exc:
                     # Surfaced as this chunk's own failure (Copilot review),
                     # not swallowed: rendering ahead with a wrong-range sidecar
@@ -1548,6 +1617,39 @@ def _generate_member_test_doc_chunked(conn, member_name: str, system: str | None
                                 logger.warning(
                                     "%s: chunk %d/%d: could not clean up stale sidecar backup %s: %s",
                                     member_name, i, chunk_count, sidecar_backup, exc,
+                                )
+                        if chunk_backup is not None:
+                            # Same restore-on-failure/discard-on-success rule
+                            # as the sidecar backup just above, applied to
+                            # `chunk_path` itself (Copilot review):
+                            # `_generate_test_doc_from_brief`'s own retry loop
+                            # overwrites `chunk_path` with each attempt's raw
+                            # candidate *before* validating it, so a render
+                            # that ultimately fails (not raises -- every
+                            # attempt gets a response, none of them validate)
+                            # still leaves a failing candidate sitting at
+                            # `chunk_path` when this `finally` runs. Restoring
+                            # only the sidecar in that case would pair the old
+                            # (correctly-scoped) sidecar with that failing
+                            # candidate -- the exact mismatch this whole
+                            # invalidate-before-render mechanism exists to
+                            # prevent, just occurring one step later than the
+                            # fingerprint check alone can see. A completed,
+                            # accepted render means discard (the document
+                            # already at `chunk_path` is `write_test_doc_
+                            # with_sidecar`'s own fresh, validated content);
+                            # anything else always restores, unconditionally
+                            # overwriting whatever candidate currently sits at
+                            # the real path.
+                            try:
+                                if result is not None and result.ok:
+                                    chunk_backup.unlink()
+                                else:
+                                    chunk_backup.replace(chunk_path)
+                            except OSError as exc:
+                                logger.warning(
+                                    "%s: chunk %d/%d: could not clean up stale chunk document backup %s: %s",
+                                    member_name, i, chunk_count, chunk_backup, exc,
                                 )
             input_tokens += result.input_tokens
             output_tokens += result.output_tokens

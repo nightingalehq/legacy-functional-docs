@@ -12,6 +12,49 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-12k):**
+- Addressed the forty-second Copilot review round on PR #209 (issue #195),
+  three findings:
+  1. The chunk-loop's sidecar-backup restore only accounted for the
+     sidecar itself -- `_generate_test_doc_from_brief`'s own retry loop
+     writes each attempt's raw candidate straight to `chunk_path` *before*
+     validating it, so a render that gets a response on every attempt but
+     never validates still leaves that last, invalid candidate at
+     `chunk_path` when the range-changed invalidation's restore runs.
+     Restoring only the old sidecar there paired it with that failing
+     candidate -- the exact mismatch the invalidate-before-render
+     mechanism exists to prevent, one step later than the fingerprint
+     check alone can see. Added `_invalidate_chunk_pair_if_range_changed`,
+     backing up `chunk_path` alongside its sidecar and restoring/
+     discarding both together under the identical rule.
+  2. `validate_test_doc`'s render-time fingerprint precedence (round 40's
+     fix) still fell back to the candidate's own stamped field when
+     `_prior_fingerprint` was `None` -- a legacy document or orphaned
+     sidecar with nothing to recover a prior from could let a
+     coincidentally-matching candidate value make a stale sidecar look
+     authoritative again, reproducing the exact deadlock the render-time
+     bypass exists to prevent. Now ignores the candidate's own field
+     entirely whenever `_render_time=True`, falling through to the
+     no-fingerprint-context legacy bypass instead. `_test_chunk_reuse_ok`'s
+     own revalidation of already-written, previously-validated chunk
+     content (a different, legitimate use of `_render_time=True` -- see
+     that function's docstring) now explicitly threads that document's
+     own already-stamped fingerprint through as `_prior_fingerprint`
+     (via `_prior_fingerprint_for`) rather than relying on the internal
+     fallback this closed off; `_readonly_validate_test_doc` gained the
+     matching parameter to pass it through for the dry-run path.
+  3. Round 41's fingerprint-stripping fix only removed the
+     `test_case_fingerprint` key's own line -- a YAML block scalar or
+     sequence value carries its actual content on the following indented
+     lines instead, which a single-line strip left behind as orphaned
+     continuation lines (malformed YAML, or silently attached to a
+     preceding key). Now consumes those continuation lines too.
+- Three new regression tests, each confirmed to fail without its fix
+  (fix 1 verified via a temporary revert-and-restore during this round;
+  fixes 2 and 3 the same way). Full suite green (1070 passed, 2 skipped)
+  plus a clean `mfdoc validate` pass against `examples/` (71/71
+  documents, 0 invalid citations of 750).
+
 **Progress (2026-09-12j):**
 - Addressed the forty-first Copilot review round on PR #209 (issue #195):
   `write_test_doc_with_sidecar` left any `test_case_fingerprint` already

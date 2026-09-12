@@ -1165,12 +1165,26 @@ def validate_test_doc(conn, path: Path, *, _text: str | None = None,
     # value this validation should trust over the caller's own captured,
     # known-genuine prior. Trusting whichever the candidate happened to
     # include would let such a value make a stale sidecar look
-    # authoritative again. Only read the candidate's own field when the
-    # caller has no prior to recover (a standalone `mfdoc test-validate`
-    # call, which never passes `_prior_fingerprint` at all) -- there, the
-    # document's own stamped value (if any) is the only real fingerprint
-    # to check against, so allowed as this function has always let it.
-    stored_fingerprint = _prior_fingerprint or (fm.get("test_case_fingerprint") if fm is not None else None)
+    # authoritative again.
+    #
+    # During a render/retry loop's own validation (`_render_time=True`),
+    # the candidate's own field is never read at all, even as a fallback
+    # when `_prior_fingerprint` is `None` (Copilot review): a legacy
+    # document with no recoverable prior (or an orphaned sidecar with
+    # nothing to recover a prior from) would otherwise let the
+    # candidate's own untrusted value supply a coincidental match,
+    # making a stale sidecar look authoritative again and reproducing
+    # the exact manifest/sidecar retry deadlock this bypass exists to
+    # close -- falling through instead to the no-fingerprint-context
+    # legacy bypass just below, exactly as if the field were absent.
+    # Only a standalone call (`mfdoc test-validate`, which never passes
+    # `_prior_fingerprint` at all) reads the document's own stamped
+    # value -- there, it's the only real fingerprint to check against,
+    # so allowed as this function has always let it.
+    stored_fingerprint = (
+        _prior_fingerprint if _render_time
+        else _prior_fingerprint or (fm.get("test_case_fingerprint") if fm is not None else None)
+    )
     _current_fingerprint_cache: list = []  # 0 or 1 element -- memoized None is valid too
 
     def current_fingerprint() -> str | None:

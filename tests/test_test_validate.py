@@ -937,9 +937,79 @@ See [`MMP0100.py`](./MMP0100.py) for the generated test source.
         "the trusted _prior_fingerprint must win, making the sidecar 'usable' so the "
         "full manifest/sidecar cross-check runs and catches the unbacked manifest claim"
     )
-    assert any(
-        "BR-001" in p and "not found in" in p for p in result["problems"]
-    ), result["problems"]
+
+
+def test_render_time_validation_never_trusts_the_candidates_own_field_even_with_no_prior(indexed_db, tmp_path):
+    """Copilot review follow-up (round 42): when `_render_time=True` and
+    the caller has no `_prior_fingerprint` to recover (a legacy sidecar
+    with nothing to capture before the first overwrite, or an orphaned
+    sidecar with no recoverable prior document at all -- exactly what
+    `_test_chunk_reuse_ok`'s own docstring on the legacy-sidecar bypass
+    describes), this must not fall back to reading the *candidate's own*
+    stamped `test_case_fingerprint` field either. A model can echo/
+    hallucinate a value that happens to coincidentally match the current
+    corpus fingerprint (it need not be nonsense -- copying one verbatim
+    from an example in its own prompt is exactly the failure mode), which
+    would make a stale legacy sidecar look authoritative again and
+    reproduce the exact manifest/sidecar retry deadlock the render-time
+    bypass exists to prevent: `MMP0100:BR-001` is a genuinely *new*
+    scenario the old (legacy, no-fingerprint) sidecar never had -- the
+    bypass must still let it through, not deadlock on it."""
+    import mfdoc.validate as validate_module
+
+    conn = indexed_db
+    testplan.run_all(conn, member_name="MMP0100")
+    real_fp = validate_module.doc_rule_fingerprint(conn, ["MMP0100"])
+    path = tmp_path / "MMP0100.md"
+    sidecar = tmp_path / "MMP0100.py"
+    path.write_text(
+        f"""---
+title: "MMP0100 -- generated tests (python)"
+doc_type: generated_test
+system: MOM
+module: MMP0100
+language: python
+framework: pytest
+generated_by: legacy-functional-docs 0.1.0
+generated_at: "2026-01-01"
+review_status: draft
+reviewers: []
+confidence_summary:
+  verified: 2
+  inferred: 0
+  unresolved: 0
+sources: ["MMP0100"]
+test_case_fingerprint: "{real_fp}"
+---
+
+# MMP0100 -- generated tests
+
+```python
+def test_rejects_unconfirmed_order():
+    # MMP0100:BR-004 [[MMP0100:38-40]]
+    ...
+
+def test_something_new():
+    # MMP0100:BR-001 [[MMP0100:1]]
+    ...
+```
+""",
+        encoding="utf-8",
+    )
+    # A legacy sidecar (no fingerprint field ever stamped) that only ever
+    # covered BR-004 -- BR-001 above is genuinely new to it.
+    sidecar.write_text(
+        "def test_rejects_unconfirmed_order():\n"
+        "    # MMP0100:BR-004\n"
+        "    ...\n",
+        encoding="utf-8",
+    )
+    result = validate_test_doc(conn, path, _render_time=True)
+    assert result["ok"], (
+        "the candidate's own stamped field must never be trusted at render time, even "
+        "with no _prior_fingerprint -- otherwise a coincidentally-matching value "
+        "deadlocks the legacy-sidecar bypass on a genuinely new scenario"
+    )
 
 
 def test_missing_language_or_framework_front_matter_is_flagged(indexed_db, tmp_path):

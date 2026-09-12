@@ -834,6 +834,57 @@ def test_write_test_doc_with_sidecar_strips_an_untrusted_preexisting_fingerprint
     )
 
 
+def test_write_test_doc_with_sidecar_strips_a_multiline_preexisting_fingerprint(tmp_path):
+    """Copilot review follow-up (round 42): the round-41 fix above only
+    stripped the `test_case_fingerprint` key's own line -- a YAML block
+    scalar (`test_case_fingerprint: |`) or block sequence carries its
+    actual content on the *following*, indented lines instead, which that
+    single-line strip left behind. Left in place, those orphaned
+    continuation lines produce malformed YAML (an indented block with no
+    key of its own) once the front matter is rewritten -- even though the
+    candidate validated cleanly before this rewrite touched it. The very
+    next key (`generated_by`) must survive untouched, immediately after
+    the multiline field is fully removed."""
+    from mfdoc import testbatch
+    import sqlite3
+    from mfdoc.db import SCHEMA, insert
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
+    rc1 = insert(conn, "rule_candidate", member_id=1, line_no=1, construct="IF", condition="COND-1", raw="IF COND-1")
+    insert(
+        conn, "test_case", member_id=1, kind="unit", rule_candidate_id=rc1, scenario_name="FAKEMOD:BR-001",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+        then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+        status="characterization", citation="FAKEMOD:1", confidence="verified",
+    )
+    # test_case stale relative to rule_candidate -- no trusted fingerprint
+    # can be computed for this write (same shape as the tests above).
+    insert(conn, "rule_candidate", member_id=1, line_no=2, construct="IF", condition="COND-2", raw="IF COND-2")
+    conn.commit()
+
+    doc_text = _valid_test_doc_text("python", "pytest").replace(
+        'sources: ["FAKEMOD"]\n',
+        'sources: ["FAKEMOD"]\ntest_case_fingerprint: |\n  untrusted\n  continuation-line\n',
+    )
+    out_path = tmp_path / "FAKEMOD.md"
+    out_path.write_text(doc_text, encoding="utf-8")
+    testbatch.write_test_doc_with_sidecar(conn, "FAKEMOD", out_path, doc_text, "python")
+
+    written = out_path.read_text(encoding="utf-8")
+    assert "test_case_fingerprint" not in written, (
+        "the multiline field's key must be stripped, not left in place"
+    )
+    assert "untrusted" not in written and "continuation-line" not in written, (
+        "the block scalar's own continuation lines must be stripped too, not just its key line"
+    )
+    assert "generated_by: mfdoc" in written, "an unrelated later key must survive the strip untouched"
+
+
 def test_write_test_doc_with_sidecar_omits_fingerprint_for_empty_sources(tmp_path):
     """Copilot review follow-up on issue #195: `sources: []` is a
     syntactically valid list (so `validate_doc`'s own malformed-shape
@@ -3062,7 +3113,8 @@ def test_chunk_reuse_ok_passes_its_fingerprint_cache_through_to_validation(tmp_p
     received.clear()
     monkeypatch.setattr(
         testbatch, "_readonly_validate_test_doc",
-        lambda conn, path, _render_time=False, _fingerprint_cache=None, _valid_scenarios=None: (
+        lambda conn, path, _render_time=False, _prior_fingerprint=None, _fingerprint_cache=None,
+        _valid_scenarios=None: (
             received.append((_fingerprint_cache, _valid_scenarios))
             or {"ok": True, "sidecar_stale": False, "problems": []}
         ),
@@ -4816,6 +4868,66 @@ def test_chunk_boundary_shift_restores_the_old_sidecar_when_the_rerender_fails(t
     assert chunk1_sidecar.read_text(encoding="utf-8") == old_sidecar_text
     assert not chunk1_sidecar.with_name(chunk1_sidecar.name + ".stale").exists(), (
         "the backup must not be left behind once restored"
+    )
+
+
+def test_chunk_boundary_shift_restores_both_the_old_document_and_sidecar_on_a_failed_render(tmp_path):
+    """Copilot review follow-up (round 42): unlike the "exploding caller"
+    test above (every model call raises -- chunk_path is never touched
+    at all by the failed re-render), a re-render that gets a response on
+    every attempt but never validates still leaves that last, invalid
+    candidate written to `chunk_path` -- `_generate_test_doc_from_brief`'s
+    own retry loop writes each attempt's raw text to `out_path` *before*
+    validating it. Restoring only the old (correctly-scoped) sidecar in
+    that case, as an earlier version of this fix did, would pair it with
+    the new, failing candidate -- the exact mismatched pair this whole
+    invalidate-before-render mechanism exists to prevent, just appearing
+    one step later than the fingerprint check alone can see. Both
+    `chunk_path` and its sidecar must be restored together."""
+    from mfdoc import testbatch
+
+    conn = _sqlite_conn()
+    _seed_fakemod_scenarios(conn, 4)
+
+    out_path = tmp_path / "FAKEMOD.md"
+    first = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, _chunk_aware_caller("python", "pytest"),
+        "writing rules text", "template text", max_scenarios_per_call=2,
+    )
+    assert first.ok is True
+    chunk1_path = tmp_path / "FAKEMOD.chunk1.md"
+    chunk1_sidecar = tmp_path / "FAKEMOD.chunk1.py"
+    old_chunk1_text = chunk1_path.read_text(encoding="utf-8")
+    old_sidecar_text = chunk1_sidecar.read_text(encoding="utf-8")
+    assert "BR-002" in old_sidecar_text, "sanity check: chunk 1 originally covered BR-001 and BR-002"
+
+    good_caller = _chunk_aware_caller("python", "pytest")
+
+    def flaky_caller(prompt: str) -> ModelResponse:
+        # The re-render's new chunk 1 (max_scenarios_per_call=1 below)
+        # covers only BR-001 -- its boundary has shifted from the
+        # original chunk 1's {BR-001, BR-002}, triggering the range-
+        # changed sidecar invalidation this fix guards. Every attempt
+        # gets a response, but this one never validates (no exception).
+        if "BR-001" in prompt and "BR-002" not in prompt:
+            return ModelResponse(text="not a valid document", input_tokens=1, output_tokens=1)
+        return good_caller(prompt)
+
+    second = testbatch.generate_member_test_doc(
+        conn, "FAKEMOD", "python", "pytest", out_path, flaky_caller,
+        "writing rules text", "template text", max_scenarios_per_call=1,
+        prior_chunks=first.chunk_state,
+    )
+    assert second.ok is False
+    assert chunk1_path.exists(), "the old chunk document must be restored, not left with a failing candidate"
+    assert chunk1_path.read_text(encoding="utf-8") == old_chunk1_text
+    assert chunk1_sidecar.exists(), "the old sidecar must be restored, not left missing"
+    assert chunk1_sidecar.read_text(encoding="utf-8") == old_sidecar_text
+    assert not chunk1_path.with_name(chunk1_path.name + ".stale").exists(), (
+        "the document backup must not be left behind once restored"
+    )
+    assert not chunk1_sidecar.with_name(chunk1_sidecar.name + ".stale").exists(), (
+        "the sidecar backup must not be left behind once restored"
     )
 
 
