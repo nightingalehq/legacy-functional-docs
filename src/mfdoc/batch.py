@@ -2414,29 +2414,48 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
         # entry survives a sibling chunk's failure), so this try/except is
         # a second line of defense for anything unexpected *outside* that
         # per-chunk loop (chunk-range computation, narrative reconciliation,
-        # ...) -- in that rarer case there's no partial chunk_state from
-        # this pass to report, so prior_chunks (last run's state) is the
-        # best available fallback, same as before. See issue #78.
+        # ...). `_checkpoint_chunk_state` (issue #217) will usually have
+        # already written this pass's own partial progress into `state`
+        # before such an exception; the handler below merges that with
+        # `prior_chunks` (last run's state) rather than relying on either
+        # alone. See issue #78.
         def _checkpoint_chunk_state(partial_chunk_state: dict, state_key=state_key,
-                                     brief_hash=brief_hash) -> None:
+                                     brief_hash=brief_hash, prior_chunks=prior_chunks) -> None:
             # Fires after every chunk (and again after narrative
             # reconciliation) inside generate_module_doc, well before it
             # returns -- writes the in-progress chunk_state to `state` (and,
             # if a state_path is configured, straight to disk) so a run
             # killed partway through this member still has every
-            # already-completed chunk on record for the next resume. The
-            # member's own top-level "ok"/"attempts" aren't known yet at
-            # this point (the member overall hasn't finished), so this
-            # entry is left/created with ok=False -- overwritten with the
-            # real values immediately below once generate_module_doc
-            # actually returns (or clobbered by run_batch's own state[
-            # state_key] assignment there in the interrupted case, this is
-            # simply the last checkpoint written).
-            entry = state.get(state_key)
-            if not isinstance(entry, dict):
-                entry = {"ok": False, "attempts": 0, "brief_sha256": brief_hash}
-                state[state_key] = entry
-            entry["chunks"] = partial_chunk_state
+            # already-completed chunk on record for the next resume.
+            #
+            # This member reached `to_run_chunked` precisely because its
+            # prior state entry (if any) is stale -- ok=True there is a
+            # fact about the *previous* run, not this one. Overwriting
+            # "ok"/"attempts"/"brief_sha256" here (not just "chunks") on
+            # every checkpoint, not only when no entry exists yet, is what
+            # stops a kill right after this checkpoint from leaving an
+            # entry that resume's own `corpus_unchanged and prior_ok` /
+            # `prior_ok and prior_hash == brief_hash` skip fast-paths would
+            # read as "this member is already done" -- which would skip a
+            # half-regenerated member forever, mixing new and stale chunk
+            # files under one output with nothing left to flag it. The
+            # real "ok"/"attempts" land here once generate_module_doc
+            # actually returns (state[state_key] = {...} below).
+            #
+            # `partial_chunk_state` only carries entries for chunks this
+            # pass has reached so far -- merged over `prior_chunks` (not
+            # replacing it) so a kill after chunk 2 of 10 doesn't also
+            # discard chunks 3-10's still-good entries from the *previous*
+            # run, which would force them to re-render on resume for no
+            # reason (the exact waste issue #217 is about). Safe to merge
+            # blindly: `_chunk_reuse_ok` re-validates every carried-over
+            # entry's own hash/file-existence/doc-validity before ever
+            # trusting it, so a stale entry here can't cause bad reuse.
+            entry = {
+                "ok": False, "attempts": 0, "brief_sha256": brief_hash,
+                "chunks": {**(prior_chunks or {}), **partial_chunk_state},
+            }
+            state[state_key] = entry
             if state_path:
                 _save_state(state_path, state)
 
@@ -2460,13 +2479,15 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
                 "%s: chunked generation failed: %s: %s", name, exc.__class__.__name__, exc,
                 exc_info=True,
             )
-            # Prefer whatever `_checkpoint_chunk_state` already wrote into
+            # Merge whatever `_checkpoint_chunk_state` already wrote into
             # `state` for this member during this same pass (real progress
-            # made before the exception) over `prior_chunks` (the previous
-            # run's state, now stale) -- otherwise the incremental
-            # checkpointing above would be pointless, since this branch's
-            # `chunk_state` would immediately overwrite it with old data at
-            # the `state[state_key] = {...}` assignment just below.
+            # made before the exception) with `prior_chunks` (the previous
+            # run's state) -- same reasoning as `_checkpoint_chunk_state`
+            # itself: neither alone is complete. `in_progress_chunks` is
+            # missing any chunk this pass hadn't reached yet (dropping
+            # those would re-render them for nothing on resume, the same
+            # waste issue #217 is about); `prior_chunks` alone would lose
+            # whatever this pass actually completed before the exception.
             in_progress_entry = state.get(state_key)
             in_progress_chunks = (
                 in_progress_entry.get("chunks") if isinstance(in_progress_entry, dict) else None
@@ -2474,7 +2495,7 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
             result = DocResult(
                 name, str(out_path), False, 0, 0, 0,
                 [f"model call failed: {exc.__class__.__name__}: {exc}"], chunked=True,
-                chunk_state=in_progress_chunks if in_progress_chunks is not None else prior_chunks,
+                chunk_state={**(prior_chunks or {}), **(in_progress_chunks or {})},
             )
         results.append(result)
         state[state_key] = {

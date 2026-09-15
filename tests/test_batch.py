@@ -2376,6 +2376,107 @@ def test_run_batch_resume_after_interruption_keeps_already_completed_chunks(inde
     assert summary2.failed == 0
 
 
+def test_run_batch_hard_kill_mid_chunk_loop_neither_marks_the_member_falsely_done_nor_drops_the_tail(
+    monkeypatch, tmp_path,
+):
+    """Code-review finding on the #217 fix itself: a checkpoint written
+    after only the *first* of several chunks has re-rendered (not an
+    exception during narrative reconciliation, which run_batch's own
+    try/except already handles -- an actual process kill, simulated here
+    via KeyboardInterrupt, a BaseException that propagates straight out of
+    run_batch uncaught, exactly like a real kill would) must not:
+
+    (a) leave the member's state entry at ok=True -- the previous run's
+        stale value -- which would make a later resume's `corpus_unchanged
+        and prior_ok` fast path skip this now-half-regenerated member
+        forever, permanently mixing new and stale chunk files under one
+        output with nothing left to flag it; or
+    (b) drop chunks the interrupted pass never got to (2, 3) and the
+        narrative entry from the *previous* run's still-good chunk_state --
+        which would force them to re-render for nothing on the next
+        resume, the exact waste issue #217 exists to fix.
+    """
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_rules(conn, 5)  # -> 3 chunks with max_rules_per_call=2
+    # A real edit re-ingests, which changes this row -- needed so
+    # run_batch's corpus-level fast path (`corpus_unchanged and prior_ok`)
+    # doesn't skip this member without even checking its own brief hash;
+    # _seed_fakemod_rules doesn't populate `source_file` at all.
+    conn.execute(
+        "INSERT INTO source_file (id, path, sha256, line_count) VALUES (1, 'FAKEMOD.nsp', 'sha-v1', 1)"
+    )
+    conn.commit()
+
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+
+    first = batch_mod.run_batch(
+        conn, ["FAKEMOD"], out_dir, _chunk_aware_module_caller(),
+        "writing rules text", "template text", max_rules_per_call=2, state_path=state_path,
+    )
+    assert first.failed == 0
+    subdir = batch_mod._output_subdir(conn, "FAKEMOD")
+    state_key = f"{subdir.as_posix()}/FAKEMOD"
+    original_chunks = dict(json.loads(state_path.read_text())[state_key]["chunks"])
+    assert set(original_chunks) == {"1", "2", "3", "_narrative"}
+
+    # Rule 1 (line 1) falls in chunk 1's range -- change it so only chunk
+    # 1's own brief hash (and the member-level brief hash) changes; chunks
+    # 2 and 3 stay reusable. Also bump source_file's sha256 (a real re-
+    # ingest would) so the corpus-level fast path doesn't skip this member
+    # outright before the per-member/per-chunk checks are ever reached.
+    conn.execute("UPDATE rule_candidate SET condition='COND-1-CHANGED' WHERE line_no=1")
+    conn.execute("UPDATE source_file SET sha256='sha-v2' WHERE id=1")
+    conn.commit()
+
+    real_save_state = batch_mod._save_state
+    save_calls = {"n": 0}
+
+    def kill_after_first_checkpoint(path, state):
+        save_calls["n"] += 1
+        real_save_state(path, state)  # the checkpoint really lands on disk...
+        if save_calls["n"] == 1:
+            raise KeyboardInterrupt("simulated hard kill right after chunk 1's own checkpoint")
+
+    monkeypatch.setattr(batch_mod, "_save_state", kill_after_first_checkpoint)
+    second_caller = _counting_caller(_chunk_aware_module_caller())
+    with pytest.raises(KeyboardInterrupt):
+        batch_mod.run_batch(
+            conn, ["FAKEMOD"], out_dir, second_caller,
+            "writing rules text", "template text", max_rules_per_call=2, state_path=state_path,
+        )
+    assert second_caller.calls == 1, "must die right after chunk 1's own model call, before chunk 2"
+    monkeypatch.setattr(batch_mod, "_save_state", real_save_state)
+
+    entry_after_kill = json.loads(state_path.read_text())[state_key]
+    assert entry_after_kill["ok"] is False, (
+        "a mid-flight entry must never read as done, or a resumed run's corpus-unchanged "
+        "fast path would skip this half-regenerated member forever"
+    )
+    assert entry_after_kill["chunks"]["2"] == original_chunks["2"]
+    assert entry_after_kill["chunks"]["3"] == original_chunks["3"]
+    assert entry_after_kill["chunks"]["_narrative"] == original_chunks["_narrative"]
+    assert entry_after_kill["chunks"]["1"]["ok"] is True
+    assert entry_after_kill["chunks"]["1"] != original_chunks["1"]  # actually re-rendered, not stale
+
+    third_caller = _counting_caller(_chunk_aware_module_caller())
+    third = batch_mod.run_batch(
+        conn, ["FAKEMOD"], out_dir, third_caller,
+        "writing rules text", "template text", max_rules_per_call=2, state_path=state_path,
+    )
+    assert third.failed == 0
+    assert third_caller.calls == 0, (
+        "chunk 1 (already regenerated this pass) and chunks 2/3 plus the narrative "
+        "(carried over from before the kill) must all be reused -- a dropped tail would "
+        "force chunks 2 and 3 to re-render here for no reason"
+    )
+
+
 def test_plan_batch_reports_a_member_with_no_prior_state_as_render(indexed_db, tmp_path):
     """No --state file at all (or an empty one) -- every member is a fresh
     render, never chunked here (MMP0100's rule count is under any
