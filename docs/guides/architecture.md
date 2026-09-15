@@ -608,7 +608,7 @@ for what these are for and how to introduce the concept to a team.
   primitives: `run_test_batch` has its own routing/gating loop, its own
   `_checkpoint`, its own state-key shape (`subdir::member::language::
   framework`), and its own per-language sidecar/chunk-file checks
-  (`.py`/`.java`/`.nsp`/... via `testlang.sidecar_path_for`) -- so a
+  (`.py`/`.java`/`.nsp`/... via `testlang.sidecar_path_for`) — so a
   resume-safety fix to `run_batch`'s policy (issues #217/#218) does not
   automatically apply here and has to be ported deliberately (issue
   #219). Output is still Markdown (front matter + one fenced code block

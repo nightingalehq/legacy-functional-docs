@@ -422,6 +422,26 @@ GitHub org.
   shorter key). No test changes this round (documentation and comment
   accuracy only); full suite still green (1100 passed, 2 skipped). Still
   parked, not pushed/PR'd.
+- Ninth review round: independently re-verified every specific claim in
+  round 8's doc corrections against the actual code (the `_load_state`/
+  `_save_state`/`_skip_result` imports, the `testbatch._corpus_signature`
+  `extra=` delegation to `batch._corpus_signature`, the per-language
+  sidecar mechanism, the exactly-two-fixes count) and against
+  `origin/main:src/mfdoc/batch.py` specifically for the one claim about
+  `batch.py`'s own docstring wording (this worktree's local `batch.py`
+  predates PR #223, so that comparison has to go against `origin/main`,
+  not the local file) -- all held up. Found one purely cosmetic nit: a
+  `--`-style separator round 8 introduced in `docs/guides/
+  architecture.md` broke that file's own established em-dash (`—`)
+  convention (the identical `--` is correct in `CLAUDE.md`, which uses
+  that style throughout -- the fix is file-specific). Fixed. No code or
+  test changes this round. Full suite green (1100 passed, 2 skipped).
+  Given two consecutive clean rounds on the actual Python code (rounds 7
+  and 8) and a clean round on the doc corrections (round 9), this branch
+  is considered reviewed and ready -- still deliberately not pushed/PR'd,
+  per this issue's own scope, until `batch.py`'s sibling PR #223 (already
+  merged to `origin/main` as of the sync round) is accounted for by
+  whoever finalizes this branch.
 
 **Progress (2026-09-12v):**
 - Addressed the fifty-sixth Copilot review round on PR #209 (issue #195):
