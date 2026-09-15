@@ -62,8 +62,19 @@ GitHub org.
   of them once the threshold came back down. Fixed by carrying `chunks`
   forward in the flat pre-mark too, exactly as the chunked half already
   does.
-- Nine new regression tests, seven confirmed (by reverting the
-  corresponding code) to fail without their fix. Full suite green (1092
+- A sixth review round found the fifth round's fix only covered the
+  window up to a flat member's *own* completion write: all three of the
+  flat pool's own state writes (initial model-call exception, retry-call
+  exception, and normal completion after a validation retry still fails)
+  built a fresh dict with no `chunks` key, wiping the carried-forward
+  value the instant that member's own work finished with `ok: False`. A
+  transient model failure (rate limit, timeout, a validation failure that
+  doesn't clear on retry) -- far more common than a hard kill -- destroyed
+  the same resumable chunk state just as thoroughly. Fixed by carrying
+  `chunks` forward on all three `ok: False` writes too (never on
+  success, where the member is genuinely a single document now).
+- Eleven new regression tests, nine confirmed (by reverting the
+  corresponding code) to fail without their fix. Full suite green (1093
   passed, 2 skipped).
 
 **Progress (2026-09-12v):**

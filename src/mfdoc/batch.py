@@ -2423,7 +2423,11 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
                     [f"model call failed: {exc.__class__.__name__}: {exc}"],
                 )
                 results.append(result)
-                state[state_key] = {"ok": False, "attempts": 1, "brief_sha256": brief_hash}
+                prior_chunks = (state.get(state_key) or {}).get("chunks")
+                state[state_key] = {
+                    "ok": False, "attempts": 1, "brief_sha256": brief_hash,
+                    **({"chunks": prior_chunks} if prior_chunks else {}),
+                }
                 if state_path:
                     _save_state(state_path, state)
                 continue
@@ -2463,7 +2467,11 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
                         duration_s=duration_s, retries=retries,
                     )
                     results.append(result)
-                    state[state_key] = {"ok": False, "attempts": 2, "brief_sha256": brief_hash}
+                    prior_chunks = (state.get(state_key) or {}).get("chunks")
+                    state[state_key] = {
+                        "ok": False, "attempts": 2, "brief_sha256": brief_hash,
+                        **({"chunks": prior_chunks} if prior_chunks else {}),
+                    }
                     if state_path:
                         _save_state(state_path, state)
                     continue
@@ -2480,7 +2488,11 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
                 validation.get("problems", []), duration_s=duration_s, retries=retries,
             )
             results.append(result)
-            state[state_key] = {"ok": result.ok, "attempts": attempts, "brief_sha256": brief_hash}
+            prior_chunks = (state.get(state_key) or {}).get("chunks") if not result.ok else None
+            state[state_key] = {
+                "ok": result.ok, "attempts": attempts, "brief_sha256": brief_hash,
+                **({"chunks": prior_chunks} if prior_chunks else {}),
+            }
             # Checkpoint after every completed/failed member, not only once
             # at the very end -- otherwise a later member's failure (or the
             # process being killed mid-run) loses every already-completed

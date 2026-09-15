@@ -2570,6 +2570,81 @@ def test_run_batch_kill_of_a_chunked_member_pre_marked_flat_keeps_its_chunks(
     )
 
 
+def test_run_batch_transient_failure_of_a_chunked_member_pre_marked_flat_keeps_its_chunks(
+    tmp_path,
+):
+    """Code-review finding (round 6): round 5's fix (carrying a member's
+    prior `chunks` forward into the flat pre-mark) only protects the
+    window up to that member's *own* completion write -- every one of the
+    flat pool's own writes (initial-call exception, retry-call exception,
+    and normal completion after a failed validation retry) built a fresh
+    dict with no `chunks` key, wiping the carry-forward the instant that
+    member's own work finished with `ok: False`. A transient model failure
+    (rate limit, timeout, a validation failure that doesn't clear on
+    retry) is far more common than a hard kill and destroys the exact same
+    resumable chunk state, forcing every chunk to re-render from scratch
+    once the member routes chunked again -- even though every chunk file
+    on disk is untouched and every chunk's brief hash still matches."""
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_rules(conn, 5)  # -> 3 chunks with max_rules_per_call=2
+    conn.execute(
+        "INSERT INTO source_file (id, path, sha256, line_count) VALUES (1, 'FAKEMOD.nsp', 'sha-v1', 1)"
+    )
+    conn.commit()
+
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+
+    first = batch_mod.run_batch(
+        conn, ["FAKEMOD"], out_dir, _chunk_aware_module_caller(),
+        "writing rules text", "template text", max_rules_per_call=2, state_path=state_path,
+    )
+    assert first.failed == 0
+    subdir = batch_mod._output_subdir(conn, "FAKEMOD")
+    state_key = f"{subdir.as_posix()}/FAKEMOD"
+    original_chunks = dict(json.loads(state_path.read_text())[state_key]["chunks"])
+    assert set(original_chunks) == {"1", "2", "3", "_narrative"}
+
+    def raising_caller(prompt: str) -> batch_mod.ModelResponse:
+        raise RuntimeError("simulated transient rate limit")
+
+    # Raise the threshold so FAKEMOD (5 rows) now routes flat; the raising
+    # caller fails its one and only (initial) model call, landing on the
+    # "initial model call raised" write.
+    second = batch_mod.run_batch(
+        conn, ["FAKEMOD"], out_dir, raising_caller,
+        "writing rules text", "template text", max_rules_per_call=100, state_path=state_path,
+    )
+    assert second.failed == 1
+
+    entry_after_failure = json.loads(state_path.read_text())[state_key]
+    assert entry_after_failure["ok"] is False
+    assert entry_after_failure.get("chunks") == original_chunks, (
+        "a transient flat-member failure must carry a chunked member's prior `chunks` forward "
+        "too, not just the pre-mark save -- dropping them here loses resumable progress on "
+        "every chunk, even though the chunk files on disk are untouched"
+    )
+
+    # Bring the threshold back down: FAKEMOD routes chunked again, with the
+    # exact same rule content and chunk briefs as run 1.
+    third_caller = _counting_caller(_chunk_aware_module_caller())
+    third = batch_mod.run_batch(
+        conn, ["FAKEMOD"], out_dir, third_caller,
+        "writing rules text", "template text", max_rules_per_call=2, state_path=state_path,
+    )
+    assert third.failed == 0
+    assert third_caller.calls == 0, (
+        "every chunk (and the narrative) is unchanged from run 1 and must be fully reused -- "
+        "dropping `chunks` on the flat member's own failure write forces all of them to "
+        "re-render for nothing"
+    )
+
+
 def test_run_batch_kill_before_any_chunk_completes_does_not_leave_a_falsely_done_entry(
     monkeypatch, tmp_path,
 ):
