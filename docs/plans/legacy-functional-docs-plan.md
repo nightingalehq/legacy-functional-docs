@@ -246,14 +246,31 @@ GitHub org.
   mid-way" (the premise behind
   nightingalehq/legacy-functional-docs#221, filed during an earlier
   review round of this same fix, before #217's own later commits landed)
-  turned out to likely already be closed by #217's routing-loop pre-mark,
-  which flushes every about-to-run member's not-done entry in the same
-  atomic save that first writes the corpus signature to disk. Rewrote
-  the comment to describe why, and left a comment on #221 itself flagging
-  this for re-verification rather than closing it outright (an ad hoc
-  repro attempt didn't behave as expected and wasn't chased down
-  further). One new regression test added, confirmed by reverting the
-  fix to fail without it. Full suite green (1112 passed, 2 skipped).
+  turned out to already be closed by #217's routing-loop pre-mark, which
+  flushes every about-to-run member's not-done entry in the same atomic
+  save that first writes the corpus signature to disk. Rewrote the
+  comment to describe why, and left a comment on #221 flagging this for
+  re-verification. One new regression test added, confirmed by reverting
+  the fix to fail without it. Full suite green (1112 passed, 2 skipped).
+- **Round 9 (independent adversarial pass, 4000-seed randomized fuzz
+  harness over multi-run sequences)** found no further defects in this
+  fix -- confirmed round 8's fixes are all correct, confirmed round 8's
+  #221 comment empirically (killing on either of two members in a
+  from-scratch repro correctly leaves both entries `ok: False`, resume
+  makes exactly the right number of model calls both ways), and
+  confirmed #221's originally-recorded repro no longer reproduces --
+  its *read-side* diagnosis (the `corpus_unchanged and prior_ok` fast
+  path has no per-member coverage check of its own, only the write side
+  is now gated) is still structurally correct as a hardening
+  opportunity, just not reachable as a live bug through any path this
+  round could construct. Commented on #221 with the full write-up;
+  left the retitle/re-scope decision to the issue owner rather than
+  closing it. Also surfaced (not filed, since it's exactly issue #219's
+  own scope): `testbatch.py`'s `_checkpoint` still folds
+  `_corpus_sha256` into every per-member checkpoint unconditionally,
+  reproducing #218 verbatim for `mfdoc test-batch --members` -- #219
+  needs to pick up this fix's final shape (demote-not-delete,
+  simplified `currently_known_members`) once this PR lands.
 
 **Progress (2026-09-15, #217):**
 - Fixed issue #217: `mfdoc batch`'s chunk-level resume state was only
