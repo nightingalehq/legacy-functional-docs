@@ -42,9 +42,27 @@ GitHub org.
   reconciled sections rarely narrate IF/ELSE polarity in the first place
   (that lives in the Business rules section, which reconciliation never
   touches).
-- Six new regression tests, including two confirmed (by temporarily
-  reverting the relevant code) to fail without their corresponding fix.
-  Full suite green (1091 passed, 2 skipped).
+- Round-3 review caught that the whole-member-form guidance's own
+  qualifier ("not just true of every chunk you happen to have seen") was
+  vacuous -- the given excerpts *are* every chunk by construction, once
+  every chunk has validated ok -- and so could talk a careful model back
+  into the comma-list/citation-stacking failure this fix exists to avoid.
+  Reworded to state the actual condition (the claim generalizes across
+  all the excerpts given, which together cover the whole module).
+  Documented two tradeoffs the seeded whole-member citation form
+  introduces, previously unrecorded: it's invisible to `sample.py`'s
+  claim-verification sampling (skips any citation with no line number),
+  and it's an otherwise-unbounded provenance exception for the *claim*
+  even though the *citation* itself can't be a fabrication. Added a cheap
+  `CITATION.fullmatch` guard against a pathological member name (a colon
+  in it) accidentally seeding a real, resolvable line citation for a
+  different member. Updated the design spec's "As built" section and
+  `_uncited_provenance_problems`'s docstring, both now-stale after the
+  round-2 change (CLAUDE.md's "update the doc the change actually
+  touches" rule).
+- Seven new regression tests, four confirmed (by temporarily reverting
+  the relevant code) to fail without their corresponding fix. Full suite
+  green (1091 passed, 2 skipped).
 
 **Progress (2026-09-12v):**
 - Addressed the fifty-sixth Copilot review round on PR #209 (issue #195):

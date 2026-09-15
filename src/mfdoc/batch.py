@@ -1190,13 +1190,14 @@ _RECONCILIATION_INSTRUCTIONS = (
     "coherent whole-module statement. Do not invent any claim, fact, or "
     "citation that is not already present, in substance, in the excerpts "
     "below. The default, for almost every sentence, is one member:line "
-    "citation copied from one of them. A sentence that states something "
-    "true of the module as a whole -- not just true of every chunk you "
-    "happen to have seen -- should instead use the bare whole-member "
-    "citation form (this module's own name, no line number -- see the "
-    "writing rules' Citation format section); that form is never a "
-    "fabrication, since it names the module itself rather than a line "
-    "borrowed from any one chunk. Reserve a comma-separated multi-citation "
+    "citation copied from one of them. A sentence that generalizes across "
+    "all of the excerpts below -- which together cover every chunk of "
+    "this module, so such a claim is true of the module as a whole, not "
+    "just of the specific excerpts you're reading -- should instead use "
+    "the bare whole-member citation form (this module's own name, no line "
+    "number -- see the writing rules' Citation format section); that form "
+    "is never a fabrication, since it names the module itself rather than "
+    "a line borrowed from any one chunk. Reserve a comma-separated multi-citation "
     "list (at most three citations) for the narrower case in between -- a "
     "claim that genuinely generalizes across more than one chunk but isn't "
     "true of the whole module -- citing one excerpt for each chunk it "
@@ -1343,10 +1344,11 @@ def _uncited_provenance_problems(sections: dict[str, str], allowed_citations: se
     real source line, not that it was actually copied forward rather than
     invented fresh by the model for a broadened whole-module claim. Checked
     deterministically here, against `allowed_citations` (every citation
-    already present, verbatim, in the excerpts given -- see
-    _generate_module_index_narrative), so this can never pass by construction
-    the way relying on validate_doc's citation-resolution check alone
-    would."""
+    already present, verbatim, in the excerpts given, plus -- since issue
+    #216 -- the one deliberately-seeded exception for a genuine
+    whole-module claim; see _generate_module_index_narrative), so this can
+    never pass by construction the way relying on validate_doc's
+    citation-resolution check alone would."""
     problems = []
     for heading, text in sections.items():
         extra = _citations_in(text) - allowed_citations
@@ -1405,7 +1407,31 @@ def _generate_module_index_narrative(conn, member_name: str, chunk_bodies: list[
     # this, a model correctly following writing_rules.md's own documented
     # form for a whole-module claim would have that citation rejected as
     # "not present in any given chunk excerpt".
-    allowed_citations.add(f"[[{member_name.upper()}]]")
+    #
+    # This is a deliberate, narrow widening of the provenance check, not a
+    # loophole: it admits exactly one new citation, for exactly this
+    # member, and nothing else. It does trade away two things the
+    # per-line form gave for free, worth knowing if either check is ever
+    # revisited (round-3 review): `sample.py`'s claim-sampling QA loop
+    # skips any citation with no line number, so a bare-cited sentence is
+    # never sampled for human verification; and `validate.py`'s
+    # `_reversed_condition_problems` already opts out of a multi-citation
+    # sentence entirely (see that function's own comment) -- the
+    # unenforced "at most three citations" guidance above is the only
+    # thing keeping that opt-out rare rather than routine.
+    #
+    # The `CITATION.fullmatch` check guards against a member name with a
+    # colon in it (e.g. an unsanitised `FOO:12`) accidentally producing a
+    # real, resolvable `member:line` citation for a *different* member --
+    # contrived (member names come from the fact store, not free text),
+    # but seeding a citation this function doesn't fully understand the
+    # shape of is exactly the kind of shortcut this check exists to avoid
+    # elsewhere in this module.
+    whole_member_citation = f"[[{member_name.upper()}]]"
+    whole_member_match = CITATION.fullmatch(whole_member_citation)
+    if whole_member_match and whole_member_match.group("member") == member_name.upper() \
+            and whole_member_match.group("from") is None:
+        allowed_citations.add(whole_member_citation)
     retry_note: str | None = None
     input_tokens = output_tokens = 0
     duration_s = 0.0

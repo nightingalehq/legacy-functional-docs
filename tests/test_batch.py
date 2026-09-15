@@ -2875,7 +2875,7 @@ def test_generate_module_index_narrative_retry_prompt_carries_provenance_problem
     assert "not present in any given chunk excerpt" in prompts[1]
 
 
-def test_reconciliation_instructions_actually_invite_a_multi_citation_list(tmp_path):
+def test_reconciliation_instructions_actually_invite_a_multi_citation_list():
     """Issue #216: the *prompt text* itself must invite a bounded
     comma-separated multi-citation list for a genuine cross-chunk
     generalization, not just leave the deterministic checks able to
