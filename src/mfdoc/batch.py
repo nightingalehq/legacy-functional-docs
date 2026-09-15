@@ -1564,6 +1564,54 @@ def _chunk_reuse_ok(conn, prior_chunks: dict | None, i: int, brief_hash: str,
     return validate_doc(conn, chunk_path)["ok"]
 
 
+def _chunked_member_missing_a_chunk_file(out_path: Path, prior_chunks: dict | None) -> bool:
+    """Whether any chunk a chunked member's prior successful run recorded
+    (`prior["chunks"]`, keyed by chunk index as a string, plus a
+    `"_narrative"` entry this function ignores -- see
+    `_generate_module_doc_chunked`'s own `chunk_state`) is now missing on
+    disk.
+
+    Guards the member-level resume-skip fast paths in `run_batch`/
+    `plan_batch` (issue #217 round-4 review): `prior_ok` there only ever
+    checks `out_path` itself, which for a chunked member is the
+    deterministic *index* document, never one of the chunk files it
+    references. Nothing else verifies those chunk files are actually
+    still present -- a chunk file deleted out from under this tool (or
+    lost to some other bug) while the database, resume state, and index
+    itself stay otherwise unchanged would leave `run_batch` skipping this
+    member indefinitely, `corpus_unchanged`/`prior_ok`'s only two
+    conditions both still satisfied. `validate_doc` on the index alone
+    can't catch this either -- it doesn't resolve a markdown link to
+    confirm the linked file exists. Mirrors testbatch.py's own
+    `_chunked_member_missing_a_chunk_file`, which fixed the identical gap
+    for generated tests.
+
+    Chunk file names are reconstructed the same way
+    `_generate_module_doc_chunked` computed them originally --
+    `chunk_width` from the *count* of recorded real chunks (excluding the
+    `"_narrative"` entry, which isn't a chunk index), matching that
+    function's own `len(str(chunk_count))` -- so this only needs the
+    prior state dict, not a fresh `routine_aware_chunk_ranges` call.
+    `False` (nothing missing) for anything that isn't a chunked member's
+    prior state (`prior_chunks` not a non-empty dict) -- a single-document
+    member has no chunks to check here at all."""
+    if not isinstance(prior_chunks, dict):
+        return False
+    chunk_keys = [k for k in prior_chunks if k != "_narrative"]
+    if not chunk_keys:
+        return False
+    chunk_width = len(str(len(chunk_keys)))
+    for key in chunk_keys:
+        try:
+            i = int(key)
+        except (TypeError, ValueError):
+            continue
+        chunk_path = out_path.with_name(f"{out_path.stem}.chunk{i:0{chunk_width}d}{out_path.suffix}")
+        if not chunk_path.exists():
+            return True
+    return False
+
+
 def _routine_chunk_map(routines: list, rule_rows: list, ranges: list[tuple[int, int]]) -> dict[str, int]:
     """Routine name (upper) -> 1-based chunk index whose rule range contains
     that routine's own rules -- the mapping `module_brief`'s `chunk_map`
@@ -2283,7 +2331,10 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
         # guard against the (currently reserved but unenforced) "_corpus_sha256"
         # key ever being looked up as if it were one -- see cli.py's --members
         # normalisation, which keeps ordinary member names from colliding with it.
-        prior_ok = isinstance(prior, dict) and prior.get("ok") and out_path.exists()
+        prior_ok = (
+            isinstance(prior, dict) and prior.get("ok") and out_path.exists()
+            and not _chunked_member_missing_a_chunk_file(out_path, prior.get("chunks"))
+        )
 
         if corpus_unchanged and prior_ok:
             logger.debug("skip %s: unchanged (corpus signature match, resumed)", name)
@@ -2701,7 +2752,10 @@ def plan_batch(conn, members: list[str], out_dir: Path,
         out_path = out_dir / subdir / f"{name}.md"
         state_key = f"{subdir.as_posix()}/{name}"
         prior = state.get(state_key)
-        prior_ok = isinstance(prior, dict) and prior.get("ok") and out_path.exists()
+        prior_ok = (
+            isinstance(prior, dict) and prior.get("ok") and out_path.exists()
+            and not _chunked_member_missing_a_chunk_file(out_path, prior.get("chunks"))
+        )
 
         if corpus_unchanged and prior_ok:
             plans.append(MemberPlan(name, "skip"))

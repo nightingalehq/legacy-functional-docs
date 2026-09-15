@@ -35,8 +35,24 @@ GitHub org.
   silently serving stale output forever. Fixed by having the routing loop
   mark every member about to run as not-done, in one save, before the
   worker pool or the chunked-member loop ever starts.
-- Six new regression tests, four confirmed (by reverting the relevant
-  code) to fail without their corresponding fix. Full suite green (1089
+- A fourth review round found one more variant of the same "reads as done
+  when it isn't" class, unrelated to checkpoint timing: `prior_ok` (in
+  both `run_batch` and `plan_batch`) only ever checked that a chunked
+  member's own index document exists, never that the chunk files it
+  *links to* are still on disk -- a chunk file lost to an out-of-band
+  delete (or any other bug) while the database, resume state, and index
+  all stayed otherwise unchanged left that member skipped indefinitely,
+  since `validate_doc` never resolves a markdown link to notice the
+  linked file is gone. Fixed with `_chunked_member_missing_a_chunk_file`,
+  mirroring `testbatch.py`'s own fix for the identical gap on generated
+  tests. Filed two related, larger findings from the same review round as
+  their own follow-ups rather than folding them into this fix: #218 (a
+  `--members` subset run advances the *global* corpus signature, which
+  can falsely mark an out-of-scope member as done too) and #219 (port
+  #218's fix, once decided, to `testbatch.py`'s own routing loop, which
+  has the identical gap and none of #217's other fixes either).
+- Eight new regression tests, six confirmed (by reverting the relevant
+  code) to fail without their corresponding fix. Full suite green (1091
   passed, 2 skipped).
 
 **Progress (2026-09-12v):**

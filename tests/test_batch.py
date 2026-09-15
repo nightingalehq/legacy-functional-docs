@@ -2649,6 +2649,73 @@ def test_run_batch_kill_of_one_flat_member_does_not_leave_a_sibling_falsely_done
     assert subdir_check[state_key]["ok"] is True, "MODB must actually re-render on resume, not be skipped"
 
 
+def test_run_batch_never_skips_a_chunked_member_whose_chunk_file_is_missing(tmp_path):
+    """Code-review finding (round 4): `prior_ok`'s member-level resume
+    fast path only ever checked `out_path` (the deterministic index
+    document for a chunked member) exists -- never that the chunk files
+    the index actually links to are still on disk. A chunk file lost to
+    an out-of-band delete (or any other bug) while the database, resume
+    state, and index all stay otherwise unchanged used to leave this
+    member skipped indefinitely: `validate_doc` never resolves a markdown
+    link, so the index's own validation has no way to notice a linked
+    chunk file is gone."""
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_rules(conn, 5)  # -> 3 chunks with max_rules_per_call=2
+
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+    first = batch_mod.run_batch(
+        conn, ["FAKEMOD"], out_dir, _chunk_aware_module_caller(),
+        "writing rules text", "template text", max_rules_per_call=2, state_path=state_path,
+    )
+    assert first.failed == 0
+    chunk2_path = out_dir / "natural" / "FAKEMOD.chunk2.md"
+    chunk2_path.unlink()
+
+    second_caller = _counting_caller(_chunk_aware_module_caller())
+    second = batch_mod.run_batch(
+        conn, ["FAKEMOD"], out_dir, second_caller,
+        "writing rules text", "template text", max_rules_per_call=2, state_path=state_path,
+    )
+    assert second.failed == 0
+    assert second_caller.calls > 0, "must not be skipped as unchanged while a chunk file is missing"
+    assert chunk2_path.exists()
+
+
+def test_plan_batch_reports_render_for_a_chunked_member_whose_chunk_file_is_missing(tmp_path):
+    """Same guard, exercised through plan_batch's dry-run preview (issue
+    #160) -- it must report "render", not "skip", for exactly the same
+    reason, or a --dry-run preview would promise a cheap resume that a
+    real run then can't actually deliver (the missing chunk still won't
+    exist)."""
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_rules(conn, 5)  # -> 3 chunks with max_rules_per_call=2
+
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+    first = batch_mod.run_batch(
+        conn, ["FAKEMOD"], out_dir, _chunk_aware_module_caller(),
+        "writing rules text", "template text", max_rules_per_call=2, state_path=state_path,
+    )
+    assert first.failed == 0
+    (out_dir / "natural" / "FAKEMOD.chunk2.md").unlink()
+
+    plan = batch_mod.plan_batch(
+        conn, ["FAKEMOD"], out_dir, max_rules_per_call=2, state_path=state_path,
+    )
+    assert plan.members[0].status != "skip"
+
+
 def test_plan_batch_reports_a_member_with_no_prior_state_as_render(indexed_db, tmp_path):
     """No --state file at all (or an empty one) -- every member is a fresh
     render, never chunked here (MMP0100's rule count is under any
