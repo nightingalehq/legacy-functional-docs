@@ -278,8 +278,14 @@ source ─▶ [0 Ingest: normalise.py] ─▶ [1 Extract: dialects/*.py] ─▶ 
   `testoverlay.py` is where an LLM may *propose* (never confirm) a
   scenario's bug-vs-spec status via `test-overlay.yml`, gated on a human
   moving `review_status` past `draft`; `testbatch.py` is the narrate stage
-  for tests, reusing `batch.py`'s `ModelCaller`/retry/resumable-state
-  machinery verbatim.
+  for tests, reusing `batch.py`'s `ModelCaller`/retry harness directly, as
+  well as its state-file primitives (`_load_state`/`_save_state`/
+  `_skip_result`) and its corpus-signature hash. What's NOT shared is the
+  resume *policy* built on those primitives -- `testbatch.py` has its own
+  routing/gating loop, its own `_checkpoint`, its own state-key shape, and
+  its own per-language sidecar checks -- so a resume-safety fix to
+  `batch.py`'s policy (issues #217/#218) doesn't automatically apply here
+  (issue #219 ports two such fixes across).
 
 Two rules that matter most when touching a dialect scanner (full contract in
 `reference/adding-a-dialect.md`):

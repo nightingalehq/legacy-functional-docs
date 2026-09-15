@@ -13,6 +13,452 @@ GitHub org.
   flows and the gap register, where judgement matters most.
 
 **Progress (2026-09-15):**
+- Issue #219: ported #217/#218's `batch.py` resume-safety fixes to
+  `testbatch.py`'s own routing loop (`run_test_batch`), which shared
+  neither and had one variant worse than what #217 found.
+  1. `run_test_batch` now marks every member about to run (flat or
+     chunked) as not-done -- `{"ok": False, "attempts": 0,
+     "brief_sha256": ...}` (plus `"chunks": prior_chunks or {}` for a
+     chunked member) -- in one `_save_state` call, before the worker pool
+     or the sequential chunked-member loop ever starts. Without this, a
+     kill on one member after a sibling's checkpoint had already flushed
+     a new corpus signature to disk could leave that first member's
+     previous-run `ok: True` entry permanently read as done by the
+     corpus-unchanged resume fast path.
+  2. `_checkpoint` no longer folds `state["_corpus_sha256"]` into every
+     per-member checkpoint call -- it did so unconditionally on *every*
+     call, not just an initial one, which was strictly worse than
+     batch.py's pre-#218 bug: even a full (non-subset) run would flush
+     the new corpus signature to disk the moment its first member
+     finished, exposing every sibling member's stale `ok: True` entry to
+     the same "reads as done when it isn't" hole. `run_test_batch` now
+     tracks which members established the stored signature
+     (`state["_corpus_members"]`, mirroring #218) and only advances
+     `_corpus_sha256`/`_corpus_members` once, up front, when this run's
+     `members` is a superset of the previously-recorded set -- the same
+     "coverage only ever grows" rule #218 established for `batch.py`,
+     applied here too so a `--members` subset run of `mfdoc test-batch`
+     can't silently advance the signature past a member it never looked
+     at either.
+  `testbatch.py`'s own, independently-fixed `_chunked_member_missing_a_
+  chunk_file` (predating and more complete than #217's version in
+  `batch.py`) needed no change -- confirmed by re-reading it, not ported
+  in either direction.
+- Two new regression tests in `tests/test_test_batch.py`
+  (`test_run_test_batch_subset_run_never_advances_corpus_signature_past_
+  an_untouched_member`, `test_run_test_batch_kill_of_one_flat_member_
+  does_not_leave_a_sibling_falsely_done`), each confirmed to fail without
+  its corresponding fix (reverted `src/mfdoc/testbatch.py` locally,
+  re-ran, restored). Two existing tests exercising `_checkpoint`'s old
+  3-argument, corpus-sig-folding contract updated to match the new one.
+  Full suite green (1086 passed, 2 skipped).
+- First code-review round on the above (adversarial, against #217/#218's
+  own review history) found the initial `_corpus_members` gate was itself
+  incomplete relative to #218's actual fix in `batch.py`:
+  1. **Blocking:** the gate read `state.get("_corpus_members") or []`
+     directly, treating a *legacy* state file (one with `_corpus_sha256`
+     but no `_corpus_members` -- i.e. every state file that predates this
+     fix) as "no prior coverage", which let the very first post-upgrade
+     `--members` subset run against any existing state file reproduce
+     issue #218's bug on the spot. Fixed by adding
+     `_legacy_test_batch_corpus_members_from_state`, mirroring batch.py's
+     `_legacy_corpus_members_from_state`, and branching on `"_corpus_sha256"
+     not in state` / `"_corpus_members" in state` / neither (legacy)
+     exactly as `batch.py` does. (Round-5 review nit: round 2 below
+     replaced *both* of these two branches with a single
+     `isinstance(..., list)` gate, not just the `"_corpus_members" in
+     state` half -- the more consequential removal, since a state file
+     with `_corpus_sha256` manually deleted has real member entries and
+     no `_corpus_sha256`, and treating that as zero coverage reproduces
+     #218 too; round 2's own bullet describes only the `isinstance`
+     change, not this.)
+  2. **Should-fix:** a member leaving the batchable set entirely (its last
+     `test_case` row deleted) permanently froze `_corpus_sha256` forever,
+     since no future `members` list could be a superset of a set
+     containing a member that no longer exists. Fixed by intersecting
+     `prior_corpus_members` with `select_test_batch_members(conn)` before
+     the superset check, mirroring `batch.py`.
+  3. **Should-fix:** the `to_run_chunked` loop's `except Exception` branch
+     built its failure `DocResult` with the default `chunk_state=None`,
+     discarding `prior_chunks` (deliberately preserved by the new
+     not-done pre-write) from the final state write -- a transient
+     failure would force every chunk to re-render on the next resume
+     instead of only the ones actually affected. Fixed with
+     `chunk_state=prior_chunks or {}`.
+  4-5. Two nits (a provably-no-op `|` union, an unconditionally-computed
+     guard variable) folded into the same rewrite while fixing #1/#2.
+  6-7. Test-quality nits: tightened one call-count assertion from `> 0` to
+     an exact count, and added coverage for the `to_run_chunked` half of
+     the routing-loop pre-write (untested by the first round).
+  Four new regression tests added for findings #1-#3 and #7
+  (`test_run_test_batch_legacy_state_file_does_not_reproduce_218_on_
+  first_upgrade_run`, `test_run_test_batch_never_permanently_freezes_
+  corpus_signature_when_a_member_leaves`,
+  `test_run_test_batch_chunked_render_exception_preserves_prior_chunks_
+  for_next_resume`,
+  `test_run_test_batch_kill_before_chunked_members_first_chunk_does_not_
+  leave_it_falsely_done`), each confirmed to fail without its fix by a
+  targeted local revert, re-run, and restore. Full suite green (1090
+  passed, 2 skipped).
+- Second review round (against the round-1 fixes above) found three more
+  real gaps, all in the legacy/corrupted-state and departed-member
+  handling -- the same class of issue the sibling #218 fix in `batch.py`
+  had independently hit and fixed in its own follow-up rounds by the
+  time this round ran, so this rewrite adopts `batch.py`'s final,
+  already-hardened shape rather than re-deriving it independently:
+  1. **Blocking:** the gate checked `"_corpus_members" in state`, not the
+     value's *type* -- a hand-edited or otherwise corrupted
+     `_corpus_members` that isn't a list (a stray string, an int) either
+     raised `TypeError` and aborted the whole run, or (a string) silently
+     reproduced issue #218's bug (`set("MODA")` iterates into single
+     characters, gets intersected away to nothing, and "superset of
+     nothing" advances the signature past an untouched member). Fixed by
+     gating on `isinstance(state.get("_corpus_members"), list)` instead,
+     mirroring `batch.py`'s own final fix -- a non-list value now falls
+     into the same legacy-reconstruction path as a missing key.
+  2. **Should-fix:** the departed-member intersection (round 1's fix for
+     the permanent-freeze bug) dropped a departed member from the
+     *requirement* but left its own stale `ok: True` state entry on disk
+     untouched -- if that member later returned to the batchable set
+     with genuinely different content, a subsequent run could advance
+     the signature without the departed member counting against the
+     superset check, then silently skip the returned member's real
+     change forever via its untouched stale entry. Fixed by pruning that
+     member's own state entry at the moment it's recognised as departed,
+     mirroring `batch.py`'s own fix for the identical hole.
+  3. **Should-fix:** `_legacy_test_batch_corpus_members_from_state`
+     recovered the bare member name as the *second* `"::"`-separated
+     segment (`parts[1]`), which is only correct for the current
+     4-segment state-key shape (`subdir::name::language::framework`); an
+     older, pre-subdir-qualification 3-segment shape
+     (`name::language::framework`) would instead yield the *language* as
+     the "member name". Fixed by reading the *third-from-last* segment
+     instead (`parts[-3]`, correct for both generations, since the last
+     two segments are always language/framework) and dropping the
+     minimum-segment-count filtering down to "at least 3" -- mirroring
+     `batch.py`'s own decision to stop trying to distinguish state-file
+     generations, since over-including a key as a member name only
+     tightens the later superset requirement (via the intersection
+     against `select_test_batch_members`), never loosens it.
+  Three new regression tests added (a corrupted-`_corpus_members`
+  tolerance test, a departed-member-that-returns test, and a direct unit
+  test on `_legacy_test_batch_corpus_members_from_state` covering both
+  key-shape generations), plus one nit fix (a loose `> 0` call-count
+  assertion tightened to an exact count). Findings #1 and #2 each
+  confirmed to fail without their fix by a targeted local revert, re-run,
+  and restore. Full suite green (1093 passed, 2 skipped).
+- Third review round confirmed round 1/2's fixes correctly match
+  `batch.py`'s own final, fully-hardened #218 shape (traced fix-by-fix
+  against all four of its commits) and found no blocking issues -- the
+  branch was assessed as PR-ready from that round. Two small
+  test-quality nits addressed anyway: tightened a remaining loose
+  `> 0` call-count assertion (in the departed-member-returns test) to an
+  exact count, and extended the corrupted-`_corpus_members` test to also
+  cover the raising case (an int, not just a silently-fails-open string).
+  One finding was surfaced and (incorrectly, see the round-4 bullet below)
+  assessed as out of scope: `run_test_batch` doesn't grow `_corpus_members`
+  when the superset gate fails (a member rendered under an
+  already-current signature, via a *different* subset run that didn't
+  need to advance anything, never gets added to the recorded coverage
+  set). This was assumed at the time to be "inherited identically from
+  `batch.py`'s current shape" and deferred as a follow-up issue against
+  both modules together -- that premise turned out to be false (see
+  round 4). Full suite green (1093 passed, 2 skipped).
+- Sync round: after round 3 above assessed this branch as matching
+  `batch.py`'s #218 fix "in its final shape," two further review rounds
+  on `batch.py` itself (PR #223) found two more real bugs in that fix,
+  landing after this branch's own round 3. Ported both here:
+  1. The "still known" existence check (`batchable_now` here) was
+     `set(select_test_batch_members(conn))` alone -- the same over-strict
+     rule an earlier `batch.py` iteration had used and then fixed: it
+     wrongly treated a member outside that auto-selected set as
+     "departed" even while it was actively named in `members` for this
+     exact run, deleting its cached chunk state on every single resumed
+     re-run with zero content change. Fixed by unioning with `members`,
+     mirroring `batch.py`'s final shape:
+     `set(select_test_batch_members(conn)) | set(members)`.
+  2. A departed member's state entry was still fully deleted
+     (`del state[key]`), not merely demoted. Round 2's fix (above) added
+     this deletion specifically to close the "departed member returns
+     with stale entry" hole, but review of the `batch.py` sibling found
+     deletion throws away a chunked member's already-paid-for `chunks`
+     cache the moment it's outside `select_test_batch_members` and left
+     out of one intervening run -- forcing a full, unnecessary re-render
+     the next time it's explicitly run again. Fixed by setting `ok:
+     False` on the entry instead of deleting it: `prior_ok` already
+     requires `ok: True`, and per-chunk reuse (`_test_chunk_reuse_ok`,
+     the brief-hash check) independently re-validates content before
+     ever trusting a carried-forward `chunks` entry, so a
+     demoted-but-kept entry can't cause incorrect reuse.
+  Two new regression tests added, mirroring `batch.py`'s own pair for
+  this exact fix
+  (`test_run_test_batch_a_member_outside_select_test_batch_members_is_
+  never_pruned_while_still_run`,
+  `test_run_test_batch_departed_member_keeps_its_chunk_cache_across_an_
+  intervening_unfiltered_run`), each confirmed to fail without its fix by
+  a targeted local revert (via `git stash`), re-run, and restore --
+  `select_test_batch_members` monkeypatched in both, since its own
+  selection criterion (>=1 `test_case` row) has no equivalent to
+  `batch.py`'s object_type filter that can exclude a member with real,
+  unchanged content from auto-selection. Full suite green (1095 passed,
+  2 skipped). `batch.py`'s own PR #223 had not merged at the time this
+  round started; it merged partway through this session, ahead of this
+  branch (see round 4 below).
+- Fourth review round (against the sync-round commit above) found one
+  blocking gap the round-3 "out-of-scope" write-up (above) had wrongly
+  assumed was shared with `batch.py`: `batch.py`'s own final #218 shape
+  (merged as PR #223) actually *does* have an `else` branch after the
+  `corpus_members_grew_or_held` check, recording
+  `state["_corpus_members"] = sorted(prior_corpus_members | set(members))`
+  for a non-advancing run -- `run_test_batch` never had this, so a
+  non-advancing subset run's own real, current coverage silently never
+  made it into `_corpus_members`. This reopens issue #218 across a
+  *sequence* of otherwise-unremarkable subset runs: run 1 covers {A, B}
+  and establishes `_corpus_members`; run 2 covers {B, C} (not a superset
+  of {A, B}, so it doesn't advance the signature) and genuinely renders C
+  for the first time, but without this fix that render's coverage is
+  dropped on the floor; C's content then changes; a later run over just
+  {A, B} now trivially satisfies the superset check against the
+  undercounted `_corpus_members` and advances the signature past C's real
+  change; a final full run reads C's stale `ok: True` entry as still
+  current via `corpus_unchanged and prior_ok` and silently skips it
+  forever. Ported the missing `else` branch verbatim (adapted to this
+  module's own comments), plus the matching explanatory paragraph in the
+  block-level comment above it. Also tightened the first sync-round test
+  (`..._is_never_pruned_while_still_run`), which review found only
+  discriminated the *pair* of that round's two fixes together, not the
+  union fix on its own (with only the union reverted, the demotion fix
+  alone still made the reused-cache assertion pass for the wrong reason)
+  -- added an explicit `skipped is True` assertion pinning that the
+  corpus-level fast path, not per-chunk cache reuse, is what actually
+  produced the zero-model-calls result. Corrected this progress log's own
+  round-3 entry (above) to stop calling the missing-`else`-branch gap
+  "inherited identically from `batch.py`'s current shape" -- it wasn't.
+  One new regression test added
+  (`test_run_test_batch_a_non_advancing_run_still_records_its_own_
+  coverage`), confirmed to fail without the `else` branch (reverted
+  locally, re-ran, restored) and to pass with it. Full suite green (1096
+  passed, 2 skipped). Still not pushed/PR'd, per this issue's own scope:
+  stays parked for now regardless of #223's merge status, pending an
+  explicit decision to finalize.
+- Fifth review round (against round 4's commit) found two more real
+  issues, both a further instance of the same failure mode round 4 named:
+  a comment or code path asserting parity with `batch.py` that wasn't
+  actually there.
+  1. **Should-fix (comment/code drift):** the corpus-signature block's
+     own comment claimed the mid-run-kill hole (a process killed after
+     some members checkpoint but before others, leaving stale `ok: True`
+     entries alongside an already-advanced signature) was still open and
+     "the same one `batch.py`'s own #218 fix documents, tracked
+     separately" -- both halves false. `batch.py`'s final shape documents
+     that hole as *closed*; and this branch's own first commit (`ae54865`)
+     already closed it here too, via the routing-loop pre-mark ported
+     from #217. Corrected the comment to describe the pre-mark as closing
+     it, mirroring `batch.py`'s own paragraph at the equivalent point.
+  2. **Should-fix (real, un-ported divergence):** the flat (non-chunked)
+     half of the routing-loop pre-mark unconditionally dropped `chunks`
+     (`state[key] = {"ok": False, "attempts": 0, "brief_sha256": ...}`,
+     no `chunks`), where `batch.py`'s equivalent carries a prior
+     `chunks` cache forward on its own flat pre-mark too. Reachable: a
+     member that was chunked on a prior run and later shrinks back under
+     threshold (fewer `test_case` rows, or a raised
+     `max_scenarios_per_call`) routes through this flat path -- the
+     pre-mark was destroying its already-paid-for chunk cache before the
+     render was even attempted, forcing a full re-render on a kill or a
+     flat-render failure (the exact unbounded-model-spend waste #217/#218
+     exist to close). Fixed the pre-mark to carry `prior_chunks` forward
+     like the chunked half already does, and extended the same
+     preservation to both of this path's own failure-write sites further
+     down (the retry-exception write and the final combined write) --
+     mirroring `batch.py`'s shape at each of its own equivalent sites,
+     which drop `chunks` only on a genuine success (once that member's
+     own cleanup has pruned the leftover chunk files it no longer needs).
+  One nit also addressed: round 1's bullet (above) claimed the legacy/
+  corrupted-state gate branched on `"_corpus_sha256" not in state` /
+  `"_corpus_members" in state` / neither, "exactly as `batch.py` does" --
+  round 2 actually replaced *both* of those branches with a single
+  `isinstance(..., list)` gate, not just the second one, and round 2's
+  own bullet only mentions the `isinstance` change. Annotated round 1's
+  bullet to say so.
+  One new regression test added for finding #2
+  (`test_run_test_batch_a_shrunk_back_flat_member_keeps_its_chunk_cache_
+  on_failure`), confirmed to fail without the fix (reverted locally,
+  re-ran -- `KeyError: 'chunks'` -- restored). Full suite green (1097
+  passed, 2 skipped). Still parked, not pushed/PR'd.
+- Sixth review round found three more issues: a third instance of the
+  same failure mode rounds 4/5 each caught (a comment/docstring asserting
+  parity with `batch.py` that wasn't real), a genuine scope gap that
+  comment was hiding, and one of round 5's own three fixed write sites
+  left unpinned by its regression test.
+  1. **Should-fix (comment/code drift):** `_checkpoint`'s own docstring
+     claimed chunked-member checkpointing being member-granular (not
+     chunk-granular) "mirrors batch.py's run_batch, which makes the
+     identical member-wide trade-off for module docs" -- false against
+     `batch.py`'s post-#223 shape. `batch.py`'s `run_batch` does NOT make
+     this trade-off: issue #217 gave it genuine per-chunk checkpointing
+     via `generate_module_doc`'s `on_chunk_done` hook
+     (`_checkpoint_chunk_state`), so a kill mid-chunk there loses at most
+     one chunk, not the whole in-progress member. Corrected the docstring
+     to say so plainly.
+  2. **Should-fix (real, un-ported scope gap, surfaced by fixing #1):**
+     issue #217 landed two things in `batch.py`: the routing-loop
+     pre-mark (ported here, correctly, across commits `ae54865`-
+     `b26481b`) and per-chunk checkpointing (never ported). The practical
+     consequence: a chunked test member killed partway through its own
+     chunk loop here loses every chunk rendered on *this* pass (not just
+     the one in flight), where `batch.py`'s equivalent kill loses at most
+     one chunk. Deliberately left unported in this round rather than
+     added under review pressure this late in the branch's life --
+     wiring an `on_chunk_done`-style hook through
+     `_generate_member_test_doc_chunked`/`generate_member_test_doc` is a
+     real feature addition, not a small fix, and this issue (#219) is
+     scoped to the corpus-signature/departed-member port, not a full
+     #217 port. Documented here as a deliberate follow-up rather than
+     left as a silent gap (no GitHub issue filed yet) -- worth its own
+     issue against `testbatch.py`'s chunked path specifically.
+  3. **Should-fix (test-coverage gap):** round 5's fix touched three
+     write sites (the flat pre-mark, the retry-exception write, and the
+     final combined write) but its one regression test only reached the
+     first two -- the `always_raises` caller it uses short-circuits via
+     `continue` before ever reaching the final combined write, so that
+     third site was unpinned (confirmed: reverting only that site left
+     the full suite green). Added a sibling test exercising a
+     *validation* failure (not a raised exception) so the final combined
+     write's own `not result.ok` branch is actually reached and pinned.
+  No code changes for finding #2 (documentation of scope only, per the
+  decision above). One new regression test added for finding #3
+  (`test_run_test_batch_a_shrunk_back_flat_member_keeps_its_chunk_cache_
+  on_a_validation_failure`), confirmed to fail without the fix (reverted
+  the final-write site locally, re-ran, restored). Full suite green
+  (1098 passed, 2 skipped). Still parked, not pushed/PR'd.
+- Seventh review round found two more instances of the same comment/code
+  drift pattern (a 4th and 5th, both pre-existing docstrings this
+  branch's own earlier commits had made stale without updating), one
+  real coverage gap, and doc-accuracy nits in `docs/guides/
+  architecture.md`/`CLAUDE.md` this branch's own premise (that
+  `testbatch.py`'s resume state is an independent implementation, not
+  shared with `batch.py`) directly contradicted:
+  1. **Should-fix (comment drift):** `_legacy_test_batch_corpus_members_
+     from_state`'s docstring named the later intersection as
+     `select_test_batch_members(conn)` alone -- stale since the sync
+     round's union fix; corrected to name the actual
+     `select_test_batch_members(conn) | set(members)` set.
+  2. **Should-fix (comment drift):** `_checkpoint`'s docstring claimed
+     `_corpus_sha256` and `_corpus_members` were both gated the same way
+     on the superset check -- only `_corpus_sha256` is; round 4's `else`
+     branch writes `_corpus_members` on every run regardless. Corrected.
+  3. **Should-fix (real coverage gap):** the `bool(members) and` guard on
+     `corpus_members_grew_or_held` (blocking an empty `--members`
+     invocation from trivially establishing a corpus signature for a
+     corpus nothing was ever examined against) had no regression test --
+     removing it left the full suite green. Added one, confirmed to fail
+     without the guard.
+  4. **Should-fix (stale docs):** `docs/guides/architecture.md` and
+     `CLAUDE.md` both still described `testbatch.py` as reusing
+     `batch.py`'s "resumable-state"/"resumable-corpus-signature"
+     machinery "directly"/"verbatim" -- the opposite of this whole
+     issue's own premise (#219 exists because that machinery is a
+     separate, independently-implemented copy). Corrected both to say so
+     explicitly, per CLAUDE.md's own rule 3 ("update the doc that would
+     mislead someone if left stale").
+  Also addressed: a plan-doc wording overclaim ("filed as a follow-up"
+  when no GitHub issue was actually opened, corrected to "documented
+  here as a deliberate follow-up"), two test docstrings still describing
+  the pre-round-2/pre-sync-round behaviour ("pruned"/"wrongly pruned")
+  rather than the demote-not-delete shape those same tests now pin, one
+  loose `>= 1` call-count assertion tightened to `== 1`, one test
+  assertion message corrected to not overclaim what it discriminates,
+  and two unused local variables (leftover `moda_key`/`modb_key`
+  computed but never asserted against) resolved by adding the missing
+  assertions they were clearly meant for, rather than deleting them.
+  One new regression test added for finding #3
+  (`test_run_test_batch_an_empty_members_run_never_establishes_
+  coverage`, plus a companion
+  `test_run_test_batch_an_empty_intervening_run_does_not_disturb_
+  established_coverage` pinning the surrounding behavior), confirmed to
+  fail without the fix. Full suite green (1100 passed, 2 skipped). Still
+  parked, not pushed/PR'd.
+- Eighth review round: the Python code itself (`src/mfdoc/testbatch.py`)
+  came back clean -- a full re-audit of every comment/docstring this
+  branch has ever touched or added (15 blocks), and an independent
+  re-check of every `batch.py`-parity claim among them (9 claims) against
+  `origin/main:src/mfdoc/batch.py` directly, found nothing wrong. But
+  round 7's own doc corrections (`docs/guides/architecture.md`,
+  `CLAUDE.md`) turned out to be themselves inaccurate -- a 6th instance
+  of the pattern, this time in prose rather than code:
+  1. **Should-fix:** both docs claimed the resumable corpus-signature/
+     per-member resume-state machinery is "NOT shared" and
+     "independently implemented" -- overstated. `testbatch.py` actually
+     imports and reuses `batch.py`'s state-file primitives
+     (`_load_state`/`_save_state`/`_skip_result`) and its
+     corpus-signature hash directly (`testbatch._corpus_signature`
+     extends `batch._corpus_signature` via its own `extra` hook). What's
+     genuinely independent is the resume *policy* built on top of those
+     primitives: `run_test_batch`'s own routing/gating loop,
+     `_checkpoint`, and state-key shape -- which is the actual reason a
+     `batch.py` fix doesn't automatically apply. Corrected both docs to
+     make that distinction precisely instead of an overbroad "not
+     shared."
+  2. **Should-fix:** both docs also said `.nsp`-sidecar checks, implying
+     that's testbatch's one sidecar extension -- `.nsp` is Natural's
+     specifically; the real mechanism is per-destination-language via
+     `testlang.sidecar_path_for`, and `mfdoc test-batch`'s own documented
+     default target in these same docs is python/pytest. Corrected to
+     name the mechanism, not one dialect's extension.
+  3. Two minor wording fixes: `CLAUDE.md` said #219 ports "one" fix
+     across when it ports two (#217's pre-mark and #218's superset
+     gate); and `_checkpoint`'s own docstring still said the per-chunk-
+     checkpointing gap was "tracked as a follow-up" when round 7 had
+     already corrected the identical plan-doc phrasing to "documented
+     here" (no GitHub issue actually filed) without updating this
+     docstring to match.
+  One more nit, from the full comment re-audit itself:
+  `_legacy_test_batch_corpus_members_from_state`'s docstring never
+  disclosed that its own `>= 3` segment-count filter is a real,
+  documented divergence from `batch.py`'s deliberately-unfiltered
+  equivalent (whose own docstring argues against any such filter, for a
+  different reason) -- added a clause noting the divergence and why it's
+  safe today (no `testbatch.py` key generation has ever produced a
+  shorter key). No test changes this round (documentation and comment
+  accuracy only); full suite still green (1100 passed, 2 skipped). Still
+  parked, not pushed/PR'd.
+- Ninth review round: independently re-verified every specific claim in
+  round 8's doc corrections against the actual code (the `_load_state`/
+  `_save_state`/`_skip_result` imports, the `testbatch._corpus_signature`
+  `extra=` delegation to `batch._corpus_signature`, the per-language
+  sidecar mechanism, the exactly-two-fixes count) and against
+  `origin/main:src/mfdoc/batch.py` specifically for the one claim about
+  `batch.py`'s own docstring wording (this worktree's local `batch.py`
+  predates PR #223, so that comparison has to go against `origin/main`,
+  not the local file) -- all held up. Found one purely cosmetic nit: a
+  `--`-style separator round 8 introduced in `docs/guides/
+  architecture.md` broke that file's own established em-dash (`—`)
+  convention (the identical `--` is correct in `CLAUDE.md`, which uses
+  that style throughout -- the fix is file-specific). Fixed. No code or
+  test changes this round. Full suite green (1100 passed, 2 skipped).
+  Given two consecutive clean rounds on the actual Python code (rounds 7
+  and 8) and a clean round on the doc corrections (round 9), this branch
+  is considered reviewed and ready -- still deliberately not pushed/PR'd,
+  per this issue's own scope, until `batch.py`'s sibling PR #223 (already
+  merged to `origin/main` as of the sync round) is accounted for by
+  whoever finalizes this branch.
+- **Finalization round, after merging onto `main` (which now includes
+  #223)**: confirmed the ported logic matches `batch.py`'s final #223
+  shape clause-for-clause (the `select_batch_members(conn) | set(members)`
+  union, demote-not-delete for a departed member, the routing-loop
+  pre-mark). Found and fixed two small issues: a stale batch.py-ism in
+  the departed-member comment referencing a `_narrative` cache this
+  module doesn't have (it reconciles chunked members' index documents
+  deterministically, never via a model call -- see `TestMemberPlan`'s own
+  docstring), and a missing regression test for the "state file has real
+  member entries but no `_corpus_sha256` at all" case (`batch.py` has a
+  dedicated test for this from its own round 3; this module's mirror
+  test only ever deleted `_corpus_members`, never `_corpus_sha256`
+  itself, leaving the fix's own stated justification for that case
+  untested). Added the missing test, confirmed to fail against the
+  bug it guards. Full suite green (1129 passed, 2 skipped).
+
+**Progress (2026-09-15, #218):**
 - Fixed issue #218: `mfdoc batch --members A,B` (a documented, first-class
   flag) shares one `--state` file with a full run, but `run_batch`
   overwrote `state["_corpus_sha256"]` unconditionally on every run,
