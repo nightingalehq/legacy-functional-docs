@@ -808,7 +808,16 @@ def _legacy_test_batch_corpus_members_from_state(state: dict) -> set[str]:
     the intersection against `select_test_batch_members(conn) |
     set(members)` right after this returns -- round-7 review: not
     `select_test_batch_members(conn)` alone, see the union rationale at
-    that intersection's own call site), never loosens it."""
+    that intersection's own call site), never loosens it. Round-8 review:
+    unlike `batch.py`'s unfiltered equivalent (which deliberately applies
+    no shape filter at all, to also catch an even older, pre-"/"-qualified
+    key generation), this DOES skip a key with fewer than 3 `"::"`-
+    separated segments -- an under-including choice batch.py's own
+    docstring argues against for its own two generations. No practical
+    risk today: no `testbatch.py` state-key generation has ever produced
+    a key with fewer than 3 segments, so this filter has never actually
+    excluded anything real; flagged only in case a future key-shape
+    change makes it relevant."""
     members: set[str] = set()
     for key in state:
         if key in _TEST_BATCH_RESERVED_STATE_KEYS:
@@ -2130,9 +2139,10 @@ def _checkpoint(state: dict, state_path: Path | None) -> None:
     at most one chunk, not the whole member's progress on this pass.
     `testbatch.py` has no equivalent hook, so it stays member-granular
     here -- a real, deliberate, currently-unclosed gap relative to #217's
-    full scope (tracked as a follow-up; see this issue's own 2026-09-15
-    plan-doc entry), not a mirrored batch.py behaviour. No-op when
-    `state_path` is None (resume tracking disabled).
+    full scope, not a mirrored batch.py behaviour. Documented as a
+    deliberate follow-up in this issue's own 2026-09-15 plan-doc entry;
+    no GitHub issue filed yet. No-op when `state_path` is None (resume
+    tracking disabled).
 
     Does NOT touch `state["_corpus_sha256"]`/`state["_corpus_members"]`
     (issue #219, mirroring #218's fix in batch.py) -- those are set by

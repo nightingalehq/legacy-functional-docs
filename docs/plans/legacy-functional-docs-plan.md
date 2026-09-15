@@ -378,6 +378,50 @@ GitHub org.
   established_coverage` pinning the surrounding behavior), confirmed to
   fail without the fix. Full suite green (1100 passed, 2 skipped). Still
   parked, not pushed/PR'd.
+- Eighth review round: the Python code itself (`src/mfdoc/testbatch.py`)
+  came back clean -- a full re-audit of every comment/docstring this
+  branch has ever touched or added (15 blocks), and an independent
+  re-check of every `batch.py`-parity claim among them (9 claims) against
+  `origin/main:src/mfdoc/batch.py` directly, found nothing wrong. But
+  round 7's own doc corrections (`docs/guides/architecture.md`,
+  `CLAUDE.md`) turned out to be themselves inaccurate -- a 6th instance
+  of the pattern, this time in prose rather than code:
+  1. **Should-fix:** both docs claimed the resumable corpus-signature/
+     per-member resume-state machinery is "NOT shared" and
+     "independently implemented" -- overstated. `testbatch.py` actually
+     imports and reuses `batch.py`'s state-file primitives
+     (`_load_state`/`_save_state`/`_skip_result`) and its
+     corpus-signature hash directly (`testbatch._corpus_signature`
+     extends `batch._corpus_signature` via its own `extra` hook). What's
+     genuinely independent is the resume *policy* built on top of those
+     primitives: `run_test_batch`'s own routing/gating loop,
+     `_checkpoint`, and state-key shape -- which is the actual reason a
+     `batch.py` fix doesn't automatically apply. Corrected both docs to
+     make that distinction precisely instead of an overbroad "not
+     shared."
+  2. **Should-fix:** both docs also said `.nsp`-sidecar checks, implying
+     that's testbatch's one sidecar extension -- `.nsp` is Natural's
+     specifically; the real mechanism is per-destination-language via
+     `testlang.sidecar_path_for`, and `mfdoc test-batch`'s own documented
+     default target in these same docs is python/pytest. Corrected to
+     name the mechanism, not one dialect's extension.
+  3. Two minor wording fixes: `CLAUDE.md` said #219 ports "one" fix
+     across when it ports two (#217's pre-mark and #218's superset
+     gate); and `_checkpoint`'s own docstring still said the per-chunk-
+     checkpointing gap was "tracked as a follow-up" when round 7 had
+     already corrected the identical plan-doc phrasing to "documented
+     here" (no GitHub issue actually filed) without updating this
+     docstring to match.
+  One more nit, from the full comment re-audit itself:
+  `_legacy_test_batch_corpus_members_from_state`'s docstring never
+  disclosed that its own `>= 3` segment-count filter is a real,
+  documented divergence from `batch.py`'s deliberately-unfiltered
+  equivalent (whose own docstring argues against any such filter, for a
+  different reason) -- added a clause noting the divergence and why it's
+  safe today (no `testbatch.py` key generation has ever produced a
+  shorter key). No test changes this round (documentation and comment
+  accuracy only); full suite still green (1100 passed, 2 skipped). Still
+  parked, not pushed/PR'd.
 
 **Progress (2026-09-12v):**
 - Addressed the fifty-sixth Copilot review round on PR #209 (issue #195):
