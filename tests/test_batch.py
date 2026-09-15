@@ -2873,3 +2873,65 @@ def test_generate_module_index_narrative_retry_prompt_carries_provenance_problem
     assert len(prompts) == 2
     assert "Previous attempt failed validation" in prompts[1]
     assert "not present in any given chunk excerpt" in prompts[1]
+
+
+def test_generate_module_index_narrative_accepts_a_multi_citation_generalizing_sentence(tmp_path):
+    """Issue #216: a genuinely whole-module claim spanning more than one
+    chunk has no single citation to copy, so the reconciliation instructions
+    now explicitly allow a comma-separated multi-citation list per sentence
+    -- one citation per chunk excerpt the generalization draws from -- as
+    long as every citation in that list is one already present in the given
+    excerpts (never an invented one). Both the deterministic checks this
+    depends on (validate.py's _uncited_assertions -- a citation anywhere in
+    the sentence satisfies it, however many there are -- and this module's
+    own _uncited_provenance_problems -- checked per citation, not per
+    sentence) already support this; only the prompt text needed to actually
+    invite it."""
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 2, 'irrelevant')")
+    conn.commit()
+
+    def caller(prompt):
+        text = "\n\n".join(
+            f"## {h}\n\nThe module applies the same rule across both routines "
+            "[[FAKEMOD:1]], [[FAKEMOD:2]]."
+            for h in batch_mod.NARRATIVE_SECTIONS
+        )
+        return batch_mod.ModelResponse(text=text, input_tokens=1, output_tokens=1)
+
+    out_path = tmp_path / "FAKEMOD.md"
+
+    def assemble(sections):
+        body = "\n".join(f"## {h}\n\n{sections[h]}\n" for h in batch_mod.NARRATIVE_SECTIONS)
+        return (
+            "---\ntitle: \"FAKEMOD\"\ndoc_type: module_index\nsystem: MOM\n"
+            "generated_by: legacy-functional-docs 0.1.0\ngenerated_at: \"2026-01-01\"\n"
+            "review_status: draft\nconfidence_summary:\n  verified: 1\nsources: [\"FAKEMOD\"]\n---\n"
+            f"\n# FAKEMOD\n\n{body}"
+        )
+
+    ok, attempts, in_tok, out_tok, problems, sections, duration_s, retries = batch_mod._generate_module_index_narrative(
+        conn, "FAKEMOD",
+        [(1, "## Purpose\n\nRoutine one does X [[FAKEMOD:1]]."),
+         (2, "## Purpose\n\nRoutine two does X too [[FAKEMOD:2]].")],
+        caller, "writing rules", None, out_path, assemble, max_attempts=1,
+    )
+    assert ok is True, problems
+    assert attempts == 1
+
+
+def test_uncited_provenance_problems_allows_every_citation_in_a_multi_citation_sentence():
+    """Direct unit check: a reconciled section citing more than one chunk's
+    citation in the same sentence is fine as long as every citation named is
+    in `allowed_citations` -- checked per citation, not per sentence, so a
+    comma-separated list is never itself the failure."""
+    sections = {"Purpose": "Applies across both routines [[FAKEMOD:1]], [[FAKEMOD:2]]."}
+    allowed = {"[[FAKEMOD:1]]", "[[FAKEMOD:2]]"}
+    assert batch_mod._uncited_provenance_problems(sections, allowed) == []
