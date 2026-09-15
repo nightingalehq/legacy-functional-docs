@@ -768,6 +768,12 @@ def _reversed_condition_problems(
         # shape, and is itself a correct, valuable finding to leave alone,
         # not a reversed narration to flag) -- too ambiguous to anchor a
         # single-field polarity reading to just one of the citations in it.
+        # Since issue #216, batch.py's reconciliation prompt deliberately
+        # invites a genuinely cross-chunk generalizing sentence to carry a
+        # multi-citation list -- a known, accepted tradeoff, not an
+        # oversight: this check simply opts out of such sentences rather
+        # than trying to guess which one citation the polarity reading
+        # belongs to.
         return []
     success_hint = bool(SUCCESS_WORDS.search(sentence)) and not FAILURE_WORDS.search(sentence)
     failure_hint = bool(FAILURE_WORDS.search(sentence)) and not SUCCESS_WORDS.search(sentence)

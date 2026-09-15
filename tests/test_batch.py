@@ -2875,18 +2875,48 @@ def test_generate_module_index_narrative_retry_prompt_carries_provenance_problem
     assert "not present in any given chunk excerpt" in prompts[1]
 
 
+def test_reconciliation_instructions_actually_invite_a_multi_citation_list(tmp_path):
+    """Issue #216: the *prompt text* itself must invite a bounded
+    comma-separated multi-citation list for a genuine cross-chunk
+    generalization, not just leave the deterministic checks able to
+    tolerate one if a model happens to produce it. Asserting directly
+    against the real prompt (not a fake caller that ignores its content)
+    is what actually pins the behavior change: a fake caller that only
+    echoes canned text back regardless of prompt content would stay green
+    even if this instruction text were reverted to the old
+    one-citation-per-sentence wording."""
+    prompt = batch_mod.build_reconciliation_prompt("FAKEMOD", ["some excerpt"], "writing rules", None)
+    assert "more than one chunk" in prompt
+    assert "comma-separated" in prompt
+
+
+def test_reconciliation_instructions_contain_no_bracketed_citation_example():
+    """Regression guard for an authoring mistake already hit once while
+    writing this fix: an illustrative bracketed citation like
+    `[[MOD:12]], [[MOD:45]]` inside the instructions text itself gets
+    matched by `validate.CITATION.search(prompt)` -- used by this test
+    module's own `_fake_reconciliation_response` fixture to pull a
+    citation out of the prompt -- before the regex ever reaches the real
+    per-chunk excerpts further down the prompt, breaking several existing
+    tests. The instructions must describe the citation-shape without ever
+    containing a real, matchable one."""
+    assert CITATION.search(batch_mod._RECONCILIATION_INSTRUCTIONS) is None
+
+
 def test_generate_module_index_narrative_accepts_a_multi_citation_generalizing_sentence(tmp_path):
-    """Issue #216: a genuinely whole-module claim spanning more than one
-    chunk has no single citation to copy, so the reconciliation instructions
-    now explicitly allow a comma-separated multi-citation list per sentence
+    """End-to-end: a genuinely whole-module claim spanning more than one
+    chunk has no single citation to copy, so the reconciliation
+    instructions allow a comma-separated multi-citation list per sentence
     -- one citation per chunk excerpt the generalization draws from -- as
-    long as every citation in that list is one already present in the given
-    excerpts (never an invented one). Both the deterministic checks this
-    depends on (validate.py's _uncited_assertions -- a citation anywhere in
-    the sentence satisfies it, however many there are -- and this module's
-    own _uncited_provenance_problems -- checked per citation, not per
-    sentence) already support this; only the prompt text needed to actually
-    invite it."""
+    long as every citation in that list is one already present in the
+    given excerpts (never an invented one). Both the deterministic checks
+    this depends on (validate.py's _uncited_assertions -- a citation
+    anywhere in the sentence satisfies it, however many there are -- and
+    this module's own _uncited_provenance_problems -- checked per
+    citation, not per sentence) already support this; only the prompt text
+    needed to actually invite it (see the prompt-text test above -- this
+    test alone, with a caller that ignores its prompt, would pass even
+    without that wording change)."""
     import sqlite3
     from mfdoc.db import SCHEMA
 
@@ -2935,3 +2965,17 @@ def test_uncited_provenance_problems_allows_every_citation_in_a_multi_citation_s
     sections = {"Purpose": "Applies across both routines [[FAKEMOD:1]], [[FAKEMOD:2]]."}
     allowed = {"[[FAKEMOD:1]]", "[[FAKEMOD:2]]"}
     assert batch_mod._uncited_provenance_problems(sections, allowed) == []
+
+
+def test_uncited_provenance_problems_flags_only_the_invented_citation_in_a_multi_citation_sentence():
+    """The failure mode the #216 prompt wording explicitly calls out: a
+    genuinely-copied citation smuggled into the same comma list as an
+    invented (or interpolated) one. Checked per citation, not per
+    sentence, so this must catch exactly the bad one and not the good one
+    riding alongside it in the same sentence."""
+    sections = {"Purpose": "Applies across both routines [[FAKEMOD:1]], [[FAKEMOD:2]]."}
+    allowed = {"[[FAKEMOD:1]]"}  # FAKEMOD:2 was never given -- invented/interpolated
+    problems = batch_mod._uncited_provenance_problems(sections, allowed)
+    assert len(problems) == 1
+    assert "[[FAKEMOD:2]]" in problems[0]
+    assert "[[FAKEMOD:1]]" not in problems[0]
