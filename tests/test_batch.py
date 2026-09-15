@@ -2873,3 +2873,172 @@ def test_generate_module_index_narrative_retry_prompt_carries_provenance_problem
     assert len(prompts) == 2
     assert "Previous attempt failed validation" in prompts[1]
     assert "not present in any given chunk excerpt" in prompts[1]
+
+
+def test_reconciliation_instructions_actually_invite_a_multi_citation_list():
+    """Issue #216: the *prompt text* itself must invite a bounded
+    comma-separated multi-citation list for a genuine cross-chunk
+    generalization, not just leave the deterministic checks able to
+    tolerate one if a model happens to produce it. Asserting directly
+    against the real prompt (not a fake caller that ignores its content)
+    is what actually pins the behavior change: a fake caller that only
+    echoes canned text back regardless of prompt content would stay green
+    even if this instruction text were reverted to the old
+    one-citation-per-sentence wording."""
+    prompt = batch_mod.build_reconciliation_prompt("FAKEMOD", ["some excerpt"], "writing rules", None)
+    assert "more than one chunk" in prompt
+    assert "comma-separated" in prompt
+
+
+def test_reconciliation_instructions_contain_no_bracketed_citation_example():
+    """Regression guard for an authoring mistake already hit once while
+    writing this fix: an illustrative bracketed citation like
+    `[[MOD:12]], [[MOD:45]]` inside the instructions text itself gets
+    matched by `validate.CITATION.search(prompt)` -- used by this test
+    module's own `_fake_reconciliation_response` fixture to pull a
+    citation out of the prompt -- before the regex ever reaches the real
+    per-chunk excerpts further down the prompt, breaking several existing
+    tests. The instructions must describe the citation-shape without ever
+    containing a real, matchable one. Also covers the bare whole-member
+    form specifically -- `[[MEMBER]]` (no colon/line number) matches
+    `CITATION` too (its `:LINE` group is optional), which is easy to miss
+    since the two-part `[[MOD:12]]` shape is the one that broke tests the
+    first time."""
+    assert CITATION.search(batch_mod._RECONCILIATION_INSTRUCTIONS) is None
+
+
+def test_reconciliation_instructions_recommend_the_whole_member_form_for_genuine_whole_module_claims():
+    """Round-2 review finding: the original fix's comma-separated-list-only
+    guidance contradicted reference/writing-rules.md's own documented
+    whole-member citation form ("[[MEMBER]], for statements about the
+    module as a whole") -- a model correctly using that form for a
+    genuinely whole-module claim had its citation rejected by
+    _uncited_provenance_problems as "not present in any given chunk
+    excerpt", since allowed_citations was built only from the chunk
+    excerpts. The instructions must now steer a whole-module claim toward
+    that form instead of an unbounded citation-stacking list."""
+    prompt = batch_mod.build_reconciliation_prompt("FAKEMOD", ["some excerpt"], "writing rules", None)
+    assert "whole-member" in prompt
+    assert "at most three citations" in prompt
+
+
+def test_generate_module_index_narrative_accepts_a_multi_citation_generalizing_sentence(tmp_path):
+    """End-to-end: a genuinely whole-module claim spanning more than one
+    chunk has no single citation to copy, so the reconciliation
+    instructions allow a comma-separated multi-citation list per sentence
+    -- one citation per chunk excerpt the generalization draws from -- as
+    long as every citation in that list is one already present in the
+    given excerpts (never an invented one). Both the deterministic checks
+    this depends on (validate.py's _uncited_assertions -- a citation
+    anywhere in the sentence satisfies it, however many there are -- and
+    this module's own _uncited_provenance_problems -- checked per
+    citation, not per sentence) already support this; only the prompt text
+    needed to actually invite it (see the prompt-text test above -- this
+    test alone, with a caller that ignores its prompt, would pass even
+    without that wording change)."""
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 2, 'irrelevant')")
+    conn.commit()
+
+    def caller(prompt):
+        text = "\n\n".join(
+            f"## {h}\n\nThe module applies the same rule across both routines "
+            "[[FAKEMOD:1]], [[FAKEMOD:2]]."
+            for h in batch_mod.NARRATIVE_SECTIONS
+        )
+        return batch_mod.ModelResponse(text=text, input_tokens=1, output_tokens=1)
+
+    out_path = tmp_path / "FAKEMOD.md"
+
+    def assemble(sections):
+        body = "\n".join(f"## {h}\n\n{sections[h]}\n" for h in batch_mod.NARRATIVE_SECTIONS)
+        return (
+            "---\ntitle: \"FAKEMOD\"\ndoc_type: module_index\nsystem: MOM\n"
+            "generated_by: legacy-functional-docs 0.1.0\ngenerated_at: \"2026-01-01\"\n"
+            "review_status: draft\nconfidence_summary:\n  verified: 1\nsources: [\"FAKEMOD\"]\n---\n"
+            f"\n# FAKEMOD\n\n{body}"
+        )
+
+    ok, attempts, in_tok, out_tok, problems, sections, duration_s, retries = batch_mod._generate_module_index_narrative(
+        conn, "FAKEMOD",
+        [(1, "## Purpose\n\nRoutine one does X [[FAKEMOD:1]]."),
+         (2, "## Purpose\n\nRoutine two does X too [[FAKEMOD:2]].")],
+        caller, "writing rules", None, out_path, assemble, max_attempts=1,
+    )
+    assert ok is True, problems
+    assert attempts == 1
+
+
+def test_generate_module_index_narrative_accepts_the_bare_whole_member_citation_form(tmp_path):
+    """Round-2 review finding: a genuine whole-module claim ("the module
+    always does X") should use the bare whole-member citation form
+    (reference/writing-rules.md's documented `[[MEMBER]]` shape), not an
+    invented multi-citation stack of every chunk. That form is never
+    literally present in any chunk excerpt (it names the module, not a
+    line), so `_generate_module_index_narrative` must accept it via a
+    seeded allowed_citations entry, not merely tolerate it by accident."""
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
+    conn.commit()
+
+    def caller(prompt):
+        text = "\n\n".join(
+            f"## {h}\n\nThe module as a whole follows one consistent pattern [[FAKEMOD]]."
+            for h in batch_mod.NARRATIVE_SECTIONS
+        )
+        return batch_mod.ModelResponse(text=text, input_tokens=1, output_tokens=1)
+
+    out_path = tmp_path / "FAKEMOD.md"
+
+    def assemble(sections):
+        body = "\n".join(f"## {h}\n\n{sections[h]}\n" for h in batch_mod.NARRATIVE_SECTIONS)
+        return (
+            "---\ntitle: \"FAKEMOD\"\ndoc_type: module_index\nsystem: MOM\n"
+            "generated_by: legacy-functional-docs 0.1.0\ngenerated_at: \"2026-01-01\"\n"
+            "review_status: draft\nconfidence_summary:\n  verified: 1\nsources: [\"FAKEMOD\"]\n---\n"
+            f"\n# FAKEMOD\n\n{body}"
+        )
+
+    ok, attempts, in_tok, out_tok, problems, sections, duration_s, retries = batch_mod._generate_module_index_narrative(
+        conn, "FAKEMOD", [(1, "## Purpose\n\nSomething [[FAKEMOD:1]].")],
+        caller, "writing rules", None, out_path, assemble, max_attempts=1,
+    )
+    assert ok is True, problems
+    assert attempts == 1
+
+
+def test_uncited_provenance_problems_allows_every_citation_in_a_multi_citation_sentence():
+    """Direct unit check: a reconciled section citing more than one chunk's
+    citation in the same sentence is fine as long as every citation named is
+    in `allowed_citations` -- checked per citation, not per sentence, so a
+    comma-separated list is never itself the failure."""
+    sections = {"Purpose": "Applies across both routines [[FAKEMOD:1]], [[FAKEMOD:2]]."}
+    allowed = {"[[FAKEMOD:1]]", "[[FAKEMOD:2]]"}
+    assert batch_mod._uncited_provenance_problems(sections, allowed) == []
+
+
+def test_uncited_provenance_problems_flags_only_the_invented_citation_in_a_multi_citation_sentence():
+    """The failure mode the #216 prompt wording explicitly calls out: a
+    genuinely-copied citation smuggled into the same comma list as an
+    invented (or interpolated) one. Checked per citation, not per
+    sentence, so this must catch exactly the bad one and not the good one
+    riding alongside it in the same sentence."""
+    sections = {"Purpose": "Applies across both routines [[FAKEMOD:1]], [[FAKEMOD:2]]."}
+    allowed = {"[[FAKEMOD:1]]"}  # FAKEMOD:2 was never given -- invented/interpolated
+    problems = batch_mod._uncited_provenance_problems(sections, allowed)
+    assert len(problems) == 1
+    assert "[[FAKEMOD:2]]" in problems[0]
+    assert "[[FAKEMOD:1]]" not in problems[0]
