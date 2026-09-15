@@ -52,6 +52,47 @@ GitHub org.
   re-ran, restored). Two existing tests exercising `_checkpoint`'s old
   3-argument, corpus-sig-folding contract updated to match the new one.
   Full suite green (1086 passed, 2 skipped).
+- First code-review round on the above (adversarial, against #217/#218's
+  own review history) found the initial `_corpus_members` gate was itself
+  incomplete relative to #218's actual fix in `batch.py`:
+  1. **Blocking:** the gate read `state.get("_corpus_members") or []`
+     directly, treating a *legacy* state file (one with `_corpus_sha256`
+     but no `_corpus_members` -- i.e. every state file that predates this
+     fix) as "no prior coverage", which let the very first post-upgrade
+     `--members` subset run against any existing state file reproduce
+     issue #218's bug on the spot. Fixed by adding
+     `_legacy_test_batch_corpus_members_from_state`, mirroring batch.py's
+     `_legacy_corpus_members_from_state`, and branching on `"_corpus_sha256"
+     not in state` / `"_corpus_members" in state` / neither (legacy)
+     exactly as `batch.py` does.
+  2. **Should-fix:** a member leaving the batchable set entirely (its last
+     `test_case` row deleted) permanently froze `_corpus_sha256` forever,
+     since no future `members` list could be a superset of a set
+     containing a member that no longer exists. Fixed by intersecting
+     `prior_corpus_members` with `select_test_batch_members(conn)` before
+     the superset check, mirroring `batch.py`.
+  3. **Should-fix:** the `to_run_chunked` loop's `except Exception` branch
+     built its failure `DocResult` with the default `chunk_state=None`,
+     discarding `prior_chunks` (deliberately preserved by the new
+     not-done pre-write) from the final state write -- a transient
+     failure would force every chunk to re-render on the next resume
+     instead of only the ones actually affected. Fixed with
+     `chunk_state=prior_chunks or {}`.
+  4-5. Two nits (a provably-no-op `|` union, an unconditionally-computed
+     guard variable) folded into the same rewrite while fixing #1/#2.
+  6-7. Test-quality nits: tightened one call-count assertion from `> 0` to
+     an exact count, and added coverage for the `to_run_chunked` half of
+     the routing-loop pre-write (untested by the first round).
+  Four new regression tests added for findings #1-#3 and #7
+  (`test_run_test_batch_legacy_state_file_does_not_reproduce_218_on_
+  first_upgrade_run`, `test_run_test_batch_never_permanently_freezes_
+  corpus_signature_when_a_member_leaves`,
+  `test_run_test_batch_chunked_render_exception_preserves_prior_chunks_
+  for_next_resume`,
+  `test_run_test_batch_kill_before_chunked_members_first_chunk_does_not_
+  leave_it_falsely_done`), each confirmed to fail without its fix by a
+  targeted local revert, re-run, and restore. Full suite green (1090
+  passed, 2 skipped).
 
 **Progress (2026-09-12v):**
 - Addressed the fifty-sixth Copilot review round on PR #209 (issue #195):

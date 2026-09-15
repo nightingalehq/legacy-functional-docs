@@ -5902,7 +5902,10 @@ def test_run_test_batch_subset_run_never_advances_corpus_signature_past_an_untou
     )
     assert third.ok == 2
     saved_after_third = json.loads(state_path.read_text())
-    assert third_caller.calls > 0, "MODB must actually re-render, not be skipped as still current"
+    assert third_caller.calls == 1, (
+        "MODB alone must re-render (MODA's own brief is unchanged since the first run, so it "
+        "stays skipped) -- not be skipped as still current"
+    )
     assert saved_after_third[modb_key]["brief_sha256"] != saved_after_first[modb_key]["brief_sha256"]
     assert sorted(saved_after_third["_corpus_members"]) == ["MODA", "MODB"]
 
@@ -5979,3 +5982,259 @@ def test_run_test_batch_kill_of_one_flat_member_does_not_leave_a_sibling_falsely
     assert json.loads(state_path.read_text())[modb_key]["ok"] is True, (
         "MODB must actually re-render on resume, not be skipped as still done"
     )
+
+
+def test_run_test_batch_legacy_state_file_does_not_reproduce_218_on_first_upgrade_run(tmp_path):
+    """Review finding on issue #219's own fix (round 1): a state file
+    written by the pre-#219 code has `_corpus_sha256` (the old
+    `_checkpoint` wrote it on every call) but no `_corpus_members` --
+    treating that absence as "no prior coverage" (rather than
+    reconstructing it from the state file's own member keys) would let
+    the very first post-upgrade `--members` subset run against any
+    pre-existing state file reproduce issue #218's bug on the spot:
+    trivially "superset of nothing", advancing the signature while
+    recording only its own members and silently orphaning the untouched
+    one."""
+    import sqlite3
+
+    from mfdoc import testbatch
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_two_flat_test_batch_members(conn)
+
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+    caller = _valid_test_doc_caller("python", "pytest")
+    first = testbatch.run_test_batch(
+        conn, ["MODA", "MODB"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path,
+    )
+    assert first.ok == 2
+
+    modb_subdir = testbatch._output_subdir(conn, "MODB")
+    modb_key = f"{modb_subdir.as_posix()}::MODB::python::pytest"
+
+    # Simulate a state file written by the pre-#219 code: it always had
+    # `_corpus_sha256` (folded into every checkpoint) but never had
+    # `_corpus_members` at all.
+    saved = json.loads(state_path.read_text())
+    corpus_sig_after_first = saved["_corpus_sha256"]
+    del saved["_corpus_members"]
+    state_path.write_text(json.dumps(saved), encoding="utf-8")
+
+    # MODB's own test_case genuinely changes.
+    conn.execute("UPDATE test_case SET status='spec' WHERE member_id=2")
+    conn.commit()
+
+    # A subset run that never looks at MODB -- against a legacy state file.
+    second = testbatch.run_test_batch(
+        conn, ["MODA"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path,
+    )
+    assert second.ok == 1
+    saved_after_second = json.loads(state_path.read_text())
+    assert saved_after_second["_corpus_sha256"] == corpus_sig_after_first, (
+        "a subset run against a legacy (no _corpus_members) state file must not advance the "
+        "corpus signature past a member it never touched, reconstructed or not"
+    )
+
+    third_caller = _counting_caller(caller)
+    third = testbatch.run_test_batch(
+        conn, ["MODA", "MODB"], "python", "pytest", out_dir, third_caller,
+        "writing rules text", "template text", state_path=state_path,
+    )
+    assert third.ok == 2
+    assert third_caller.calls == 1, "MODB alone must re-render; a frozen-open hole would skip it"
+    saved_after_third = json.loads(state_path.read_text())
+    assert sorted(saved_after_third["_corpus_members"]) == ["MODA", "MODB"]
+
+
+def test_run_test_batch_never_permanently_freezes_corpus_signature_when_a_member_leaves(tmp_path):
+    """Review finding on issue #219's own fix (round 1): if a member that
+    previously helped establish `_corpus_members` later drops out of the
+    batchable set entirely (e.g. every one of its `test_case` rows is
+    gone -- `select_test_batch_members` no longer lists it), the coverage
+    requirement must shrink to match, or no future run -- however large --
+    could ever be a superset of a set containing a member that no longer
+    qualifies, permanently freezing `_corpus_sha256` with no recovery
+    short of hand-editing the state file."""
+    import sqlite3
+
+    from mfdoc import testbatch
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_two_flat_test_batch_members(conn)
+
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+    caller = _valid_test_doc_caller("python", "pytest")
+    first = testbatch.run_test_batch(
+        conn, ["MODA", "MODB"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path,
+    )
+    assert first.ok == 2
+    corpus_sig_after_first = json.loads(state_path.read_text())["_corpus_sha256"]
+
+    # MODB leaves the batchable set entirely.
+    conn.execute("DELETE FROM test_case WHERE member_id=2")
+    conn.commit()
+    assert "MODB" not in testbatch.select_test_batch_members(conn)
+
+    moda_caller = _counting_caller(caller)
+    second = testbatch.run_test_batch(
+        conn, ["MODA"], "python", "pytest", out_dir, moda_caller,
+        "writing rules text", "template text", state_path=state_path,
+    )
+    assert second.ok == 1
+    saved_after_second = json.loads(state_path.read_text())
+    assert saved_after_second["_corpus_sha256"] != corpus_sig_after_first, (
+        "an --members subset run must still be able to advance the corpus signature once the "
+        "only missing member has genuinely left the batchable set, not stay frozen forever"
+    )
+    assert saved_after_second["_corpus_members"] == ["MODA"]
+
+
+def test_run_test_batch_chunked_render_exception_preserves_prior_chunks_for_next_resume(tmp_path, monkeypatch):
+    """Review finding on issue #219's own fix (round 1): the routing
+    loop's new "mark not-done before any work starts" pre-write carries
+    `prior_chunks` into a chunked member's own "chunks" entry -- but the
+    `to_run_chunked` loop's `except Exception` branch used to build its
+    failure `DocResult` with the default `chunk_state=None`, silently
+    discarding those same prior_chunks from the *final* state write for
+    this pass. A member that fails on a transient error (not on its very
+    first chunk -- this is member-granular, so any failure before
+    generate_member_test_doc returns loses all of this pass's own
+    progress either way) must still keep the previous run's own
+    known-good chunks on record, or the next resume re-renders every
+    chunk from scratch instead of only the ones that actually changed."""
+    import sqlite3
+
+    from mfdoc import testbatch
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_scenarios(conn, 5)  # -> 3 chunks with max_scenarios_per_call=2
+
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+    first = testbatch.run_test_batch(
+        conn, ["FAKEMOD"], "python", "pytest", out_dir, _chunk_aware_caller("python", "pytest"),
+        "writing rules text", "template text", max_scenarios_per_call=2, state_path=state_path,
+    )
+    assert first.ok == 1
+    subdir = testbatch._output_subdir(conn, "FAKEMOD")
+    state_key = f"{subdir.as_posix()}::FAKEMOD::python::pytest"
+    original_chunks = dict(json.loads(state_path.read_text())[state_key]["chunks"])
+    assert set(original_chunks) == {"1", "2", "3"}
+
+    # A genuine change, so this member isn't skipped by the member-level
+    # brief-hash fast path either -- it must actually reach the
+    # to_run_chunked loop and call generate_member_test_doc again.
+    conn.execute("UPDATE test_case SET status='spec' WHERE scenario_name='FAKEMOD:BR-003'")
+    conn.commit()
+
+    def exploding(*args, **kwargs):
+        raise RuntimeError("simulated failure inside generate_member_test_doc")
+
+    monkeypatch.setattr(testbatch, "generate_member_test_doc", exploding)
+    second = testbatch.run_test_batch(
+        conn, ["FAKEMOD"], "python", "pytest", out_dir, _chunk_aware_caller("python", "pytest"),
+        "writing rules text", "template text", max_scenarios_per_call=2, state_path=state_path,
+    )
+    assert second.failed == 1
+    saved_second = json.loads(state_path.read_text())
+    assert saved_second[state_key]["ok"] is False
+    assert saved_second[state_key]["chunks"] == original_chunks, (
+        "a chunked-render exception must not discard prior_chunks -- the previous run's own "
+        "chunk state must survive so the next resume doesn't re-render every chunk from scratch"
+    )
+
+
+def test_run_test_batch_kill_before_chunked_members_first_chunk_does_not_leave_it_falsely_done(tmp_path):
+    """Review finding on issue #219's own fix (round 1): both original
+    regression tests for the routing-loop pre-write used only flat
+    members -- this proves the identical guarantee for a chunked member,
+    killed on its own very first model call, after a sibling flat
+    member's own checkpoint has already completed in the pool loop above
+    (`to_run_chunked` only ever runs after that pool closes)."""
+    import sqlite3
+
+    import pytest
+    from mfdoc.db import insert
+
+    from mfdoc import testbatch
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_scenarios(conn, 5)  # -> 3 chunks with max_scenarios_per_call=2
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (2, 'OTHERMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (2, 1, 'irrelevant')")
+    insert(
+        conn, "test_case", member_id=2, kind="unit", scenario_name="OTHERMOD:BR-001",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "X", "citation": "[[OTHERMOD:1]]"}',
+        then_json='{"citation": "[[OTHERMOD:1]]", "source_excerpt": []}',
+        status="characterization", citation="OTHERMOD:1", confidence="verified",
+    )
+    conn.commit()
+
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+    good_chunked_caller = _chunk_aware_caller("python", "pytest")
+    flat_caller = _valid_test_doc_caller("python", "pytest")
+
+    def caller_for_first(prompt):
+        if "FAKEMOD:BR-" in prompt:
+            return good_chunked_caller(prompt)
+        return flat_caller(prompt)
+
+    first = testbatch.run_test_batch(
+        conn, ["FAKEMOD", "OTHERMOD"], "python", "pytest", out_dir, caller_for_first,
+        "writing rules text", "template text", max_scenarios_per_call=2, state_path=state_path,
+    )
+    assert first.ok == 2
+    fakemod_subdir = testbatch._output_subdir(conn, "FAKEMOD")
+    fakemod_key = f"{fakemod_subdir.as_posix()}::FAKEMOD::python::pytest"
+    othermod_subdir = testbatch._output_subdir(conn, "OTHERMOD")
+    othermod_key = f"{othermod_subdir.as_posix()}::OTHERMOD::python::pytest"
+    assert json.loads(state_path.read_text())[fakemod_key]["ok"] is True
+
+    conn.execute("UPDATE test_case SET status='spec' WHERE scenario_name='FAKEMOD:BR-001'")
+    conn.execute("UPDATE test_case SET status='spec' WHERE member_id=2")
+    conn.commit()
+
+    def killed_on_fakemod(prompt: str) -> ModelResponse:
+        if "FAKEMOD:BR-" in prompt:
+            raise KeyboardInterrupt("simulated hard kill on FAKEMOD's very first chunk call")
+        return flat_caller(prompt)  # OTHERMOD -- must complete and checkpoint first
+
+    with pytest.raises(KeyboardInterrupt):
+        testbatch.run_test_batch(
+            conn, ["FAKEMOD", "OTHERMOD"], "python", "pytest", out_dir, killed_on_fakemod,
+            "writing rules text", "template text", max_scenarios_per_call=2, state_path=state_path,
+        )
+
+    saved = json.loads(state_path.read_text())
+    assert saved[othermod_key]["ok"] is True, "OTHERMOD's own checkpoint must have landed before the kill"
+    assert saved[fakemod_key]["ok"] is False, (
+        "a kill on FAKEMOD's very first chunk call must still mark it not-done, even though "
+        "OTHERMOD's own checkpoint completed first"
+    )
+
+    third_caller = _counting_caller(good_chunked_caller)
+    third = testbatch.run_test_batch(
+        conn, ["FAKEMOD", "OTHERMOD"], "python", "pytest", out_dir, third_caller,
+        "writing rules text", "template text", max_scenarios_per_call=2, state_path=state_path,
+    )
+    assert third.ok == 2
+    assert third_caller.calls > 0, "FAKEMOD must actually re-render on resume, not be skipped as done"

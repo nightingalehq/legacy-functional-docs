@@ -777,6 +777,35 @@ def select_test_batch_members(conn) -> list[str]:
     return [r["name"] for r in rows]
 
 
+_TEST_BATCH_RESERVED_STATE_KEYS = ("_corpus_sha256", "_corpus_members")
+
+
+def _legacy_test_batch_corpus_members_from_state(state: dict) -> set[str]:
+    """Derive the member set that established a *legacy* (pre-issue-#219-
+    fix) state file's `_corpus_sha256` -- one that has that key but not
+    the `_corpus_members` key this fix introduced. Every ordinary member
+    entry is keyed `f"{subdir}::{name}::{language}::{framework}"` (see
+    `run_test_batch`'s own `state_keys`); the bare member name is the
+    second `"::"`-separated segment. Reading such a file's absence of
+    `_corpus_members` as "no prior coverage" (rather than reconstructing
+    it like this) would let the very first subset run against any
+    pre-existing state file reproduce issue #218's bug on the spot --
+    trivially "superset of nothing", advancing the signature while
+    recording only its own members and silently orphaning every member
+    missing from this run. Mirrors batch.py's own
+    `_legacy_corpus_members_from_state` (#218), adapted to testbatch.py's
+    `"::"`-separated state-key shape instead of batch.py's `"/"`-joined
+    one."""
+    members: set[str] = set()
+    for key in state:
+        if key in _TEST_BATCH_RESERVED_STATE_KEYS:
+            continue
+        parts = key.split("::")
+        if len(parts) >= 2:
+            members.add(parts[1])
+    return members
+
+
 _TEST_BATCH_INSTRUCTIONS_TEMPLATE = (
     "You are writing first-draft {language}/{framework} tests for one legacy "
     "mainframe module, from a fact brief that already cites every scenario back "
@@ -2191,11 +2220,39 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
     # `--matrix` run rather than scoped per language/framework -- the
     # same accepted, non-correctness-affecting redundancy already
     # documented there.
-    prior_corpus_members = set(state.get("_corpus_members") or [])
-    corpus_members_grew_or_held = bool(members) and set(members) >= prior_corpus_members
-    if state_path and corpus_members_grew_or_held:
-        state["_corpus_sha256"] = corpus_sig
-        state["_corpus_members"] = sorted(set(members) | prior_corpus_members)
+    if state_path:
+        if "_corpus_sha256" not in state:
+            # First-ever run against this state file: no prior signature,
+            # so there's genuinely no prior coverage to respect.
+            prior_corpus_members: set[str] = set()
+        elif "_corpus_members" in state:
+            prior_corpus_members = set(state["_corpus_members"])
+        else:
+            # Legacy state file, written before this fix: has
+            # `_corpus_sha256` (the old `_checkpoint` wrote it on every
+            # call) but no `_corpus_members`. Treating that as empty
+            # prior coverage (rather than reconstructing it) would
+            # reproduce issue #218's bug on the very first post-upgrade
+            # subset run -- trivially "superset of nothing" -- see
+            # `_legacy_test_batch_corpus_members_from_state`.
+            prior_corpus_members = _legacy_test_batch_corpus_members_from_state(state)
+        # A member that's left the batchable set entirely (no test_case
+        # rows left, e.g. after a derive rebuild) must drop out of the
+        # requirement -- otherwise no future run, however large, could
+        # ever be a superset of a set containing a member that no longer
+        # qualifies, permanently freezing `_corpus_sha256` with no
+        # recovery short of hand-editing the state file.
+        prior_corpus_members &= set(select_test_batch_members(conn))
+        # An empty `members` list (nothing to run) must never establish
+        # or advance coverage.
+        corpus_members_grew_or_held = bool(members) and set(members) >= prior_corpus_members
+        if corpus_members_grew_or_held:
+            state["_corpus_sha256"] = corpus_sig
+            # The guard above already established that `members` is a
+            # superset of `prior_corpus_members` (the intersected-with-
+            # currently-batchable set), so `members` alone already covers
+            # everything the signature depended on -- no union needed.
+            state["_corpus_members"] = sorted(set(members))
     results: list[DocResult] = []
     briefs: dict[str, str] = {}
     to_run: list[tuple[str, str, Path]] = []
@@ -2645,9 +2702,23 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
                 "%s: chunked render raised %s: %s", name, exc.__class__.__name__, exc,
                 exc_info=True,
             )
+            # `chunk_state=prior_chunks or {}` (review finding on issue
+            # #219's own fix), not the `DocResult` default of `None`: this
+            # loop has no per-chunk checkpointing of its own (member-
+            # granular, not chunk-granular -- see `_checkpoint`'s
+            # docstring), so `prior_chunks` -- the previous run's own
+            # last-known-good chunk state, already carried into this
+            # member's "not done yet" entry by the routing loop above --
+            # is the only chunk-reuse information this pass has to offer
+            # on a failure that happened before generate_member_test_doc
+            # ever returned. Discarding it here (the `None` default) would
+            # force a member that died on, say, chunk 9 of 10 to
+            # re-render all 10 chunks on the very next resume, even though
+            # chunks 1-8 were never touched by this failed attempt.
             result = DocResult(
                 name, str(out_path), False, 0, 0, 0,
                 [f"chunked render raised {exc.__class__.__name__}: {exc}"],
+                chunk_state=prior_chunks or {},
             )
         results.append(result)
         state[state_keys[name]] = {
