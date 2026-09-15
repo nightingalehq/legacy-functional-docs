@@ -12,6 +12,40 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-15):**
+- Fixed issue #216: `mfdoc batch`'s module-level narrative-synthesis
+  reconciliation call failed its own citation/hedge validation on
+  high-chunk-count modules, because a genuinely whole-module claim
+  spanning multiple chunks has no single chunk-excerpt citation to copy,
+  but `_RECONCILIATION_INSTRUCTIONS` told the model every sentence needed
+  exactly one, copied from one of the given excerpts.
+- The deterministic checks that matter (`validate.py`'s
+  `_uncited_assertions`, and this module's own
+  `_uncited_provenance_problems`) already tolerated a sentence carrying
+  more than one citation -- only the prompt text needed to invite the
+  pattern. Round-2 review caught that the fix as first written still
+  contradicted `reference/writing-rules.md`'s own documented bare
+  whole-member citation form ("for statements about the module as a
+  whole") -- a model correctly using that form for a genuinely
+  whole-module claim had it rejected as "not present in any given chunk
+  excerpt". Fixed by seeding `_generate_module_index_narrative`'s
+  `allowed_citations` with the bare whole-member form (never a
+  fabrication, since it names the module itself, not a borrowed line),
+  and steering the instructions to prefer it for a true whole-module
+  claim, reserving a bounded (at most three citations) comma-separated
+  list for the narrower case of a claim spanning some, but not all,
+  chunks.
+- `validate.py`'s `_reversed_condition_problems` already opts out of
+  polarity-checking any multi-citation sentence; documented that this is
+  now a known, accepted tradeoff given the reconciliation prompt actively
+  invites the pattern, not an oversight -- no code change, since the
+  reconciled sections rarely narrate IF/ELSE polarity in the first place
+  (that lives in the Business rules section, which reconciliation never
+  touches).
+- Six new regression tests, including two confirmed (by temporarily
+  reverting the relevant code) to fail without their corresponding fix.
+  Full suite green (1091 passed, 2 skipped).
+
 **Progress (2026-09-12v):**
 - Addressed the fifty-sixth Copilot review round on PR #209 (issue #195):
   round 55's deferred chunk-backup rollback had a gap of its own.

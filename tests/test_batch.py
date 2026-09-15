@@ -2899,8 +2899,27 @@ def test_reconciliation_instructions_contain_no_bracketed_citation_example():
     citation out of the prompt -- before the regex ever reaches the real
     per-chunk excerpts further down the prompt, breaking several existing
     tests. The instructions must describe the citation-shape without ever
-    containing a real, matchable one."""
+    containing a real, matchable one. Also covers the bare whole-member
+    form specifically -- `[[MEMBER]]` (no colon/line number) matches
+    `CITATION` too (its `:LINE` group is optional), which is easy to miss
+    since the two-part `[[MOD:12]]` shape is the one that broke tests the
+    first time."""
     assert CITATION.search(batch_mod._RECONCILIATION_INSTRUCTIONS) is None
+
+
+def test_reconciliation_instructions_recommend_the_whole_member_form_for_genuine_whole_module_claims():
+    """Round-2 review finding: the original fix's comma-separated-list-only
+    guidance contradicted reference/writing-rules.md's own documented
+    whole-member citation form ("[[MEMBER]], for statements about the
+    module as a whole") -- a model correctly using that form for a
+    genuinely whole-module claim had its citation rejected by
+    _uncited_provenance_problems as "not present in any given chunk
+    excerpt", since allowed_citations was built only from the chunk
+    excerpts. The instructions must now steer a whole-module claim toward
+    that form instead of an unbounded citation-stacking list."""
+    prompt = batch_mod.build_reconciliation_prompt("FAKEMOD", ["some excerpt"], "writing rules", None)
+    assert "whole-member" in prompt
+    assert "at most three citations" in prompt
 
 
 def test_generate_module_index_narrative_accepts_a_multi_citation_generalizing_sentence(tmp_path):
@@ -2951,6 +2970,50 @@ def test_generate_module_index_narrative_accepts_a_multi_citation_generalizing_s
         conn, "FAKEMOD",
         [(1, "## Purpose\n\nRoutine one does X [[FAKEMOD:1]]."),
          (2, "## Purpose\n\nRoutine two does X too [[FAKEMOD:2]].")],
+        caller, "writing rules", None, out_path, assemble, max_attempts=1,
+    )
+    assert ok is True, problems
+    assert attempts == 1
+
+
+def test_generate_module_index_narrative_accepts_the_bare_whole_member_citation_form(tmp_path):
+    """Round-2 review finding: a genuine whole-module claim ("the module
+    always does X") should use the bare whole-member citation form
+    (reference/writing-rules.md's documented `[[MEMBER]]` shape), not an
+    invented multi-citation stack of every chunk. That form is never
+    literally present in any chunk excerpt (it names the module, not a
+    line), so `_generate_module_index_narrative` must accept it via a
+    seeded allowed_citations entry, not merely tolerate it by accident."""
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (1, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
+    conn.commit()
+
+    def caller(prompt):
+        text = "\n\n".join(
+            f"## {h}\n\nThe module as a whole follows one consistent pattern [[FAKEMOD]]."
+            for h in batch_mod.NARRATIVE_SECTIONS
+        )
+        return batch_mod.ModelResponse(text=text, input_tokens=1, output_tokens=1)
+
+    out_path = tmp_path / "FAKEMOD.md"
+
+    def assemble(sections):
+        body = "\n".join(f"## {h}\n\n{sections[h]}\n" for h in batch_mod.NARRATIVE_SECTIONS)
+        return (
+            "---\ntitle: \"FAKEMOD\"\ndoc_type: module_index\nsystem: MOM\n"
+            "generated_by: legacy-functional-docs 0.1.0\ngenerated_at: \"2026-01-01\"\n"
+            "review_status: draft\nconfidence_summary:\n  verified: 1\nsources: [\"FAKEMOD\"]\n---\n"
+            f"\n# FAKEMOD\n\n{body}"
+        )
+
+    ok, attempts, in_tok, out_tok, problems, sections, duration_s, retries = batch_mod._generate_module_index_narrative(
+        conn, "FAKEMOD", [(1, "## Purpose\n\nSomething [[FAKEMOD:1]].")],
         caller, "writing rules", None, out_path, assemble, max_attempts=1,
     )
     assert ok is True, problems

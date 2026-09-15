@@ -1189,19 +1189,28 @@ _RECONCILIATION_INSTRUCTIONS = (
     "business-rule set was split into for documentation purposes -- into one "
     "coherent whole-module statement. Do not invent any claim, fact, or "
     "citation that is not already present, in substance, in the excerpts "
-    "below. The default, for almost every sentence, is one citation copied "
-    "from one of them. Only for a sentence that genuinely generalizes "
-    "across more than one chunk -- a whole-module claim no single excerpt "
-    "supports on its own -- fall back to a comma-separated list, one "
-    "citation for each chunk excerpt it draws from, instead of dropping the "
-    "citation or inventing one; do not use a multi-citation list where a "
-    "single one would already be accurate. Every citation, in either form, "
-    "must still be copied verbatim, character for character, from the "
-    "excerpts below; never invent a new one, even one that only resembles "
-    "or interpolates between citations you were given. Where excerpts "
-    "genuinely conflict, prefer the more specific or more heavily-cited "
-    "statement and note the discrepancy as an `(unresolved)` item rather "
-    "than silently picking one.\n\n"
+    "below. The default, for almost every sentence, is one member:line "
+    "citation copied from one of them. A sentence that states something "
+    "true of the module as a whole -- not just true of every chunk you "
+    "happen to have seen -- should instead use the bare whole-member "
+    "citation form (this module's own name, no line number -- see the "
+    "writing rules' Citation format section); that form is never a "
+    "fabrication, since it names the module itself rather than a line "
+    "borrowed from any one chunk. Reserve a comma-separated multi-citation "
+    "list (at most three citations) for the narrower case in between -- a "
+    "claim that genuinely generalizes across more than one chunk but isn't "
+    "true of the whole module -- citing one excerpt for each chunk it "
+    "draws from, rather than dropping the citation or inventing one; if a "
+    "claim would need more than three, state it at the level the excerpts "
+    "actually support instead of stacking citations. Every member:line "
+    "citation, in either single or comma-separated form, must still be "
+    "copied verbatim, character for character, from the excerpts below; "
+    "never invent one, even one that only resembles or interpolates "
+    "between citations you were given -- the whole-member form is the one "
+    "exception, since it isn't copied from an excerpt at all. Where "
+    "excerpts genuinely conflict, prefer the more specific or more "
+    "heavily-cited statement and note the discrepancy as an `(unresolved)` "
+    "item rather than silently picking one.\n\n"
     "Output exactly five sections, in this exact order, headed exactly as "
     "shown, and nothing else -- no preamble, no restating these "
     "instructions:\n\n" + "\n".join(f"## {h}" for h in NARRATIVE_SECTIONS)
@@ -1386,6 +1395,17 @@ def _generate_module_index_narrative(conn, member_name: str, chunk_bodies: list[
     allowed_citations: set[str] = set()
     for body in sources:
         allowed_citations |= _citations_in(body)
+    # The bare `[[MEMBER]]` whole-member citation form (reference/writing-
+    # rules.md's "Citation format" section, "for statements about the
+    # module as a whole") is, by construction, never invented: it names
+    # exactly the member this call is reconciling, not a line borrowed
+    # from any one chunk. Allowing it here (issue #216 round-2 review) is
+    # what keeps _RECONCILIATION_INSTRUCTIONS' preference for it, over a
+    # comma-separated multi-citation list, actually enforceable -- without
+    # this, a model correctly following writing_rules.md's own documented
+    # form for a whole-module claim would have that citation rejected as
+    # "not present in any given chunk excerpt".
+    allowed_citations.add(f"[[{member_name.upper()}]]")
     retry_note: str | None = None
     input_tokens = output_tokens = 0
     duration_s = 0.0
