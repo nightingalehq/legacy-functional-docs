@@ -805,8 +805,10 @@ def _legacy_test_batch_corpus_members_from_state(state: dict) -> set[str]:
     further than "at least 3 segments", since (mirroring batch.py's own
     `_legacy_corpus_members_from_state`) over-including a key as a member
     name only tightens `run_test_batch`'s later superset requirement (via
-    the intersection against `select_test_batch_members(conn)` right
-    after this returns), never loosens it."""
+    the intersection against `select_test_batch_members(conn) |
+    set(members)` right after this returns -- round-7 review: not
+    `select_test_batch_members(conn)` alone, see the union rationale at
+    that intersection's own call site), never loosens it."""
     members: set[str] = set()
     for key in state:
         if key in _TEST_BATCH_RESERVED_STATE_KEYS:
@@ -2134,9 +2136,14 @@ def _checkpoint(state: dict, state_path: Path | None) -> None:
 
     Does NOT touch `state["_corpus_sha256"]`/`state["_corpus_members"]`
     (issue #219, mirroring #218's fix in batch.py) -- those are set by
-    `run_test_batch` itself, at most once per run, before this is ever
-    called, gated on this run's own `members` covering everything the
-    currently-stored signature depends on. Folding `_corpus_sha256` into
+    `run_test_batch` itself, before this is ever called: `_corpus_sha256`
+    at most once per run, gated on this run's own `members` covering
+    everything the currently-stored signature depends on; `_corpus_members`
+    on every run that touches `state`, whether or not that gate passes
+    (round-7 review: this docstring used to say both were gated the same
+    way -- only `_corpus_sha256` is; see the `else` branch in
+    `run_test_batch`'s own corpus-signature block for why `_corpus_members`
+    can't be). Folding `_corpus_sha256` into
     *every* checkpoint (this function's own contract before issue #219)
     was actively unsafe, not just redundant: it let the very first member
     to finish flush a new corpus signature to disk while every member

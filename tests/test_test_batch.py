@@ -5907,6 +5907,10 @@ def test_run_test_batch_subset_run_never_advances_corpus_signature_past_an_untou
         "stays skipped) -- not be skipped as still current"
     )
     assert saved_after_third[modb_key]["brief_sha256"] != saved_after_first[modb_key]["brief_sha256"]
+    assert saved_after_third[moda_key] == saved_after_first[moda_key], (
+        "MODA's own entry must be untouched too -- its brief never changed, so the "
+        "per-member brief-hash skip must have kept reusing it across all three runs"
+    )
     assert sorted(saved_after_third["_corpus_members"]) == ["MODA", "MODB"]
 
 
@@ -6039,6 +6043,10 @@ def test_run_test_batch_legacy_state_file_does_not_reproduce_218_on_first_upgrad
     assert saved_after_second["_corpus_sha256"] == corpus_sig_after_first, (
         "a subset run against a legacy (no _corpus_members) state file must not advance the "
         "corpus signature past a member it never touched, reconstructed or not"
+    )
+    assert saved_after_second[modb_key] == saved[modb_key], (
+        "MODB's own entry must be untouched by a run that never covered it, even against a "
+        "legacy state file with no _corpus_members to reconstruct from"
     )
 
     third_caller = _counting_caller(caller)
@@ -6328,9 +6336,9 @@ def test_run_test_batch_departed_member_that_returns_does_not_reopen_the_untouch
     advance the signature, and a later run covering the returned member
     would then read its untouched, stale entry as still current --
     reproducing the exact silent-skip failure this fix exists to close.
-    The state entry must be pruned at the moment a member is recognised
-    as departed, so a returning member has nothing stale to be blessed
-    by."""
+    The state entry must be demoted (`ok: False`) at the moment a member
+    is recognised as departed, so a returning member has nothing stale
+    to be blessed by."""
     import sqlite3
 
     from mfdoc import testbatch
@@ -6426,9 +6434,10 @@ def test_run_test_batch_a_member_outside_select_test_batch_members_is_never_prun
     in `members` for this run. Before this sync, testbatch's own
     `batchable_now` was `set(select_test_batch_members(conn))` alone --
     the same over-strict rule batch.py's own history went through (and
-    fixed) before this fix ever landed here: it wrongly pruned a member's
-    cached chunk state on every single resumed re-run, even with zero
-    content change, as long as that member sat outside the auto-selected
+    fixed) before this fix ever landed here: it wrongly demoted such a
+    member's state entry (`ok: False`) on every single resumed re-run,
+    even with zero content change, losing the corpus-level fast path
+    every time, as long as that member sat outside the auto-selected
     set.
 
     `select_test_batch_members`'s own selection criterion (>=1 test_case
@@ -6696,7 +6705,7 @@ def test_run_test_batch_a_non_advancing_run_still_records_its_own_coverage(tmp_p
         "writing rules text", "template text", state_path=state_path,
     )
     assert final.ok == 3
-    assert final_caller.calls >= 1, (
+    assert final_caller.calls == 1, (
         "MODC's genuine change must not be silently skipped via a stale corpus-level fast "
         "path -- issue #218, reopened via a sequence of ordinary clean-exit subset runs"
     )
@@ -6811,11 +6820,118 @@ def test_run_test_batch_a_shrunk_back_flat_member_keeps_its_chunk_cache_on_a_val
     saved_after_second = json.loads(state_path.read_text())
     assert saved_after_second[state_key]["ok"] is False
     assert saved_after_second[state_key]["attempts"] == 2, (
-        "both the initial call and the retry must have been attempted, reaching the final "
-        "combined write -- not the earlier retry-exception write this test isn't pinning"
+        "both the initial call and the retry must have been attempted -- always_invalid never "
+        "raises, so this reaches the final combined write, not the retry-exception write"
     )
     assert saved_after_second[state_key]["chunks"] == original_chunks, (
         "a shrunk-back flat member's chunk cache must survive a genuine validation failure at "
         "the final combined write too -- dropping it here would force a full unnecessary "
         "re-render of all 3 original chunks later"
     )
+
+
+def test_run_test_batch_an_empty_members_run_never_establishes_coverage(tmp_path):
+    """Round-7 review finding: `corpus_members_grew_or_held = bool(members)
+    and set(members) >= prior_corpus_members` -- the `bool(members) and`
+    guard exists specifically for the case where `prior_corpus_members`
+    is itself empty (a genuinely first-ever run against a fresh state
+    file, or a state file whose recorded coverage is already empty):
+    `set([]) >= set()` is vacuously True, so without this guard, an
+    empty `--members` invocation (nothing to run at all) would establish
+    a full `_corpus_sha256` for a corpus that no member was ever actually
+    examined against. `set(members) >= prior_corpus_members` alone
+    already blocks an empty run from advancing past any *non-empty*
+    recorded coverage (`set()` is never a superset of a non-empty set),
+    so this guard's own effect is narrow but real: it's the difference
+    between an empty run leaving a fresh state file with no
+    `_corpus_sha256` at all (correct) versus one with a `_corpus_sha256`
+    that vouches for a corpus nothing has ever looked at (issue #218's
+    failure mode, from a single no-op invocation). Mirrors batch.py's own
+    identical guard and comment."""
+    import sqlite3
+
+    from mfdoc import testbatch
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_two_flat_test_batch_members(conn)
+
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+    caller = _valid_test_doc_caller("python", "pytest")
+
+    empty = testbatch.run_test_batch(
+        conn, [], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path,
+    )
+    assert empty.ok == 0
+    saved_after_empty = json.loads(state_path.read_text())
+    assert "_corpus_sha256" not in saved_after_empty, (
+        "an empty --members run against a fresh state file must never establish a corpus "
+        "signature for a corpus it never examined"
+    )
+    assert saved_after_empty.get("_corpus_members", []) == []
+
+
+def test_run_test_batch_an_empty_intervening_run_does_not_disturb_established_coverage(tmp_path):
+    """Companion to the test above: once real coverage IS established (a
+    full run over MODA+MODB), a later empty `--members` invocation must
+    be a pure no-op against that state -- it must not reset, advance, or
+    otherwise disturb `_corpus_sha256`/`_corpus_members`, and a
+    subsequent subset run must still correctly refuse to advance the
+    signature past a member (MODB) it doesn't cover."""
+    import sqlite3
+
+    from mfdoc import testbatch
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_two_flat_test_batch_members(conn)
+
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+    caller = _valid_test_doc_caller("python", "pytest")
+
+    first = testbatch.run_test_batch(
+        conn, ["MODA", "MODB"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path,
+    )
+    assert first.ok == 2
+    saved_after_first = json.loads(state_path.read_text())
+
+    empty = testbatch.run_test_batch(
+        conn, [], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path,
+    )
+    assert empty.ok == 0
+    saved_after_empty = json.loads(state_path.read_text())
+    assert saved_after_empty["_corpus_sha256"] == saved_after_first["_corpus_sha256"]
+    assert sorted(saved_after_empty["_corpus_members"]) == sorted(saved_after_first["_corpus_members"])
+
+    # MODB's content genuinely changes; a subset run covering only MODA
+    # must not be able to advance the signature past it, confirming the
+    # intervening empty run left the real, non-empty coverage untouched.
+    conn.execute("UPDATE test_case SET status='spec' WHERE member_id=2")
+    conn.commit()
+    moda_only = testbatch.run_test_batch(
+        conn, ["MODA"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path,
+    )
+    assert moda_only.ok == 1
+    saved_after_moda_only = json.loads(state_path.read_text())
+    assert saved_after_moda_only["_corpus_sha256"] == saved_after_first["_corpus_sha256"], (
+        "MODA alone must not advance the signature past MODB's real change"
+    )
+
+    # A full run must still pick up MODB's real change.
+    final_caller = _counting_caller(caller)
+    final = testbatch.run_test_batch(
+        conn, ["MODA", "MODB"], "python", "pytest", out_dir, final_caller,
+        "writing rules text", "template text", state_path=state_path,
+    )
+    assert final.ok == 2
+    assert final_caller.calls == 1, "MODB alone must re-render; it must not be skipped as still current"

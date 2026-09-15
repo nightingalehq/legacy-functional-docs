@@ -600,10 +600,16 @@ for what these are for and how to introduce the concept to a team.
 - **`mfdoc test-gen`/`mfdoc test-batch` (`testbatch.py`)** — the narrate
   stage for tests: `test_case_brief()` (brief.py's role, for test facts)
   takes the place of `module_brief()`, and `batch.py`'s `ModelCaller`/
-  retry-on-validation-failure/resumable-corpus-signature harness is reused
-  directly. Output is still Markdown (front matter + one fenced code
-  block per file, `doc_type: generated_test`), so `validate_doc` already
-  enforces citations/front-matter on it unmodified.
+  retry-on-validation-failure harness is reused directly. The resumable
+  corpus-signature/per-member resume-state machinery is NOT shared --
+  `testbatch.py` has its own independent implementation, with its own
+  state-key shape (`subdir::member::language::framework`) and its own
+  `.nsp`-sidecar/chunk-file checks, so a resume-safety fix to one (issues
+  #217/#218 in `batch.py`) does not automatically apply to the other and
+  has to be ported deliberately (issue #219). Output is still Markdown
+  (front matter + one fenced code block per file, `doc_type:
+  generated_test`), so `validate_doc` already enforces citations/
+  front-matter on it unmodified.
 
 `--overlay` (test-plan), `--out` (test-overlay-draft), and `--language`/
 `--framework`/`--out` (test-gen/test-batch) all fall back to

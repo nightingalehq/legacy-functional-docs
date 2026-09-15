@@ -313,8 +313,9 @@ GitHub org.
      `_generate_member_test_doc_chunked`/`generate_member_test_doc` is a
      real feature addition, not a small fix, and this issue (#219) is
      scoped to the corpus-signature/departed-member port, not a full
-     #217 port. Filed as a follow-up rather than a silent gap: worth its
-     own issue against `testbatch.py`'s chunked path specifically.
+     #217 port. Documented here as a deliberate follow-up rather than
+     left as a silent gap (no GitHub issue filed yet) -- worth its own
+     issue against `testbatch.py`'s chunked path specifically.
   3. **Should-fix (test-coverage gap):** round 5's fix touched three
      write sites (the flat pre-mark, the retry-exception write, and the
      final combined write) but its one regression test only reached the
@@ -330,6 +331,53 @@ GitHub org.
   on_a_validation_failure`), confirmed to fail without the fix (reverted
   the final-write site locally, re-ran, restored). Full suite green
   (1098 passed, 2 skipped). Still parked, not pushed/PR'd.
+- Seventh review round found two more instances of the same comment/code
+  drift pattern (a 4th and 5th, both pre-existing docstrings this
+  branch's own earlier commits had made stale without updating), one
+  real coverage gap, and doc-accuracy nits in `docs/guides/
+  architecture.md`/`CLAUDE.md` this branch's own premise (that
+  `testbatch.py`'s resume state is an independent implementation, not
+  shared with `batch.py`) directly contradicted:
+  1. **Should-fix (comment drift):** `_legacy_test_batch_corpus_members_
+     from_state`'s docstring named the later intersection as
+     `select_test_batch_members(conn)` alone -- stale since the sync
+     round's union fix; corrected to name the actual
+     `select_test_batch_members(conn) | set(members)` set.
+  2. **Should-fix (comment drift):** `_checkpoint`'s docstring claimed
+     `_corpus_sha256` and `_corpus_members` were both gated the same way
+     on the superset check -- only `_corpus_sha256` is; round 4's `else`
+     branch writes `_corpus_members` on every run regardless. Corrected.
+  3. **Should-fix (real coverage gap):** the `bool(members) and` guard on
+     `corpus_members_grew_or_held` (blocking an empty `--members`
+     invocation from trivially establishing a corpus signature for a
+     corpus nothing was ever examined against) had no regression test --
+     removing it left the full suite green. Added one, confirmed to fail
+     without the guard.
+  4. **Should-fix (stale docs):** `docs/guides/architecture.md` and
+     `CLAUDE.md` both still described `testbatch.py` as reusing
+     `batch.py`'s "resumable-state"/"resumable-corpus-signature"
+     machinery "directly"/"verbatim" -- the opposite of this whole
+     issue's own premise (#219 exists because that machinery is a
+     separate, independently-implemented copy). Corrected both to say so
+     explicitly, per CLAUDE.md's own rule 3 ("update the doc that would
+     mislead someone if left stale").
+  Also addressed: a plan-doc wording overclaim ("filed as a follow-up"
+  when no GitHub issue was actually opened, corrected to "documented
+  here as a deliberate follow-up"), two test docstrings still describing
+  the pre-round-2/pre-sync-round behaviour ("pruned"/"wrongly pruned")
+  rather than the demote-not-delete shape those same tests now pin, one
+  loose `>= 1` call-count assertion tightened to `== 1`, one test
+  assertion message corrected to not overclaim what it discriminates,
+  and two unused local variables (leftover `moda_key`/`modb_key`
+  computed but never asserted against) resolved by adding the missing
+  assertions they were clearly meant for, rather than deleting them.
+  One new regression test added for finding #3
+  (`test_run_test_batch_an_empty_members_run_never_establishes_
+  coverage`, plus a companion
+  `test_run_test_batch_an_empty_intervening_run_does_not_disturb_
+  established_coverage` pinning the surrounding behavior), confirmed to
+  fail without the fix. Full suite green (1100 passed, 2 skipped). Still
+  parked, not pushed/PR'd.
 
 **Progress (2026-09-12v):**
 - Addressed the fifty-sixth Copilot review round on PR #209 (issue #195):
