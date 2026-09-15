@@ -324,6 +324,43 @@ def select_batch_members(conn) -> list[str]:
     return [r["name"] for r in rows]
 
 
+_RESERVED_STATE_KEYS = ("_corpus_sha256", "_corpus_members")
+
+
+def _legacy_corpus_members_from_state(state: dict) -> set[str]:
+    """Derive the prior member set from a state file's own member entries,
+    for every case *other than* one with a well-formed `_corpus_members`
+    list already on it: a *legacy* (pre-#218-fix) state file that has
+    `_corpus_sha256` but not the `_corpus_members` key this fix
+    introduced; a state file with neither key at all (a genuinely
+    first-ever run against an empty/nonexistent file, which reconstructs
+    to the empty set here on its own -- no special-casing needed); and a
+    corrupted/hand-edited `_corpus_members` that isn't a list. Every
+    ordinary member entry is keyed `"<subdir>/<NAME>"` (see `run_batch`'s
+    `state_key`); the bare member name is the last path segment. Reading
+    any of these as "no prior coverage" (rather than reconstructing it
+    like this) would let the very first subset run against such a state
+    file reproduce issue #218 on the spot -- trivially "superset of
+    nothing", advancing the signature while recording only its own
+    members and silently orphaning every member missing from this run.
+
+    Deliberately not restricted to keys containing "/": an even older
+    generation of state file (pre-dating the subdir-qualified state_key
+    itself) has bare-name member entries with no "/" at all. Excluding
+    those would silently under-count that generation's prior coverage --
+    the same class of hole this function exists to close -- for a subtle
+    reason (today's read loop happens to only ever look up the qualified
+    form) that isn't worth relying on. Treating any non-reserved key as a
+    member name is always safe in the "under-count coverage" direction:
+    over-including only makes the superset requirement stricter, never
+    looser."""
+    return {
+        key.rsplit("/", 1)[-1]
+        for key in state
+        if key not in _RESERVED_STATE_KEYS
+    }
+
+
 def _output_subdir(conn, name: str) -> Path:
     """Where this member's output should nest, mirroring the only two
     source-grouping facts actually stored on `member` -- dialect (always
@@ -1189,10 +1226,29 @@ _RECONCILIATION_INSTRUCTIONS = (
     "business-rule set was split into for documentation purposes -- into one "
     "coherent whole-module statement. Do not invent any claim, fact, or "
     "citation that is not already present, in substance, in the excerpts "
-    "below; every sentence you write must carry a citation copied from one "
-    "of them. Where excerpts genuinely conflict, prefer the more specific or "
-    "more heavily-cited statement and note the discrepancy as an "
-    "`(unresolved)` item rather than silently picking one.\n\n"
+    "below. The default, for almost every sentence, is one member:line "
+    "citation copied from one of them. A sentence that generalizes across "
+    "all of the excerpts below -- which together cover every chunk of "
+    "this module, so such a claim is true of the module as a whole, not "
+    "just of the specific excerpts you're reading -- should instead use "
+    "the bare whole-member citation form (this module's own name, no line "
+    "number -- see the writing rules' Citation format section); that form "
+    "is never a fabrication, since it names the module itself rather than "
+    "a line borrowed from any one chunk. Reserve a comma-separated multi-citation "
+    "list (at most three citations) for the narrower case in between -- a "
+    "claim that genuinely generalizes across more than one chunk but isn't "
+    "true of the whole module -- citing one excerpt for each chunk it "
+    "draws from, rather than dropping the citation or inventing one; if a "
+    "claim would need more than three, state it at the level the excerpts "
+    "actually support instead of stacking citations. Every member:line "
+    "citation, in either single or comma-separated form, must still be "
+    "copied verbatim, character for character, from the excerpts below; "
+    "never invent one, even one that only resembles or interpolates "
+    "between citations you were given -- the whole-member form is the one "
+    "exception, since it isn't copied from an excerpt at all. Where "
+    "excerpts genuinely conflict, prefer the more specific or more "
+    "heavily-cited statement and note the discrepancy as an `(unresolved)` "
+    "item rather than silently picking one.\n\n"
     "Output exactly five sections, in this exact order, headed exactly as "
     "shown, and nothing else -- no preamble, no restating these "
     "instructions:\n\n" + "\n".join(f"## {h}" for h in NARRATIVE_SECTIONS)
@@ -1325,10 +1381,11 @@ def _uncited_provenance_problems(sections: dict[str, str], allowed_citations: se
     real source line, not that it was actually copied forward rather than
     invented fresh by the model for a broadened whole-module claim. Checked
     deterministically here, against `allowed_citations` (every citation
-    already present, verbatim, in the excerpts given -- see
-    _generate_module_index_narrative), so this can never pass by construction
-    the way relying on validate_doc's citation-resolution check alone
-    would."""
+    already present, verbatim, in the excerpts given, plus -- since issue
+    #216 -- the one deliberately-seeded exception for a genuine
+    whole-module claim; see _generate_module_index_narrative), so this can
+    never pass by construction the way relying on validate_doc's
+    citation-resolution check alone would."""
     problems = []
     for heading, text in sections.items():
         extra = _citations_in(text) - allowed_citations
@@ -1377,6 +1434,41 @@ def _generate_module_index_narrative(conn, member_name: str, chunk_bodies: list[
     allowed_citations: set[str] = set()
     for body in sources:
         allowed_citations |= _citations_in(body)
+    # The bare `[[MEMBER]]` whole-member citation form (reference/writing-
+    # rules.md's "Citation format" section, "for statements about the
+    # module as a whole") is, by construction, never invented: it names
+    # exactly the member this call is reconciling, not a line borrowed
+    # from any one chunk. Allowing it here (issue #216 round-2 review) is
+    # what keeps _RECONCILIATION_INSTRUCTIONS' preference for it, over a
+    # comma-separated multi-citation list, actually enforceable -- without
+    # this, a model correctly following writing_rules.md's own documented
+    # form for a whole-module claim would have that citation rejected as
+    # "not present in any given chunk excerpt".
+    #
+    # This is a deliberate, narrow widening of the provenance check, not a
+    # loophole: it admits exactly one new citation, for exactly this
+    # member, and nothing else. It does trade away two things the
+    # per-line form gave for free, worth knowing if either check is ever
+    # revisited (round-3 review): `sample.py`'s claim-sampling QA loop
+    # skips any citation with no line number, so a bare-cited sentence is
+    # never sampled for human verification; and `validate.py`'s
+    # `_reversed_condition_problems` already opts out of a multi-citation
+    # sentence entirely (see that function's own comment) -- the
+    # unenforced "at most three citations" guidance above is the only
+    # thing keeping that opt-out rare rather than routine.
+    #
+    # The `CITATION.fullmatch` check guards against a member name with a
+    # colon in it (e.g. an unsanitised `FOO:12`) accidentally producing a
+    # real, resolvable `member:line` citation for a *different* member --
+    # contrived (member names come from the fact store, not free text),
+    # but seeding a citation this function doesn't fully understand the
+    # shape of is exactly the kind of shortcut this check exists to avoid
+    # elsewhere in this module.
+    whole_member_citation = f"[[{member_name.upper()}]]"
+    whole_member_match = CITATION.fullmatch(whole_member_citation)
+    if whole_member_match and whole_member_match.group("member") == member_name.upper() \
+            and whole_member_match.group("from") is None:
+        allowed_citations.add(whole_member_citation)
     retry_note: str | None = None
     input_tokens = output_tokens = 0
     duration_s = 0.0
@@ -1564,6 +1656,54 @@ def _chunk_reuse_ok(conn, prior_chunks: dict | None, i: int, brief_hash: str,
     return validate_doc(conn, chunk_path)["ok"]
 
 
+def _chunked_member_missing_a_chunk_file(out_path: Path, prior_chunks: dict | None) -> bool:
+    """Whether any chunk a chunked member's prior successful run recorded
+    (`prior["chunks"]`, keyed by chunk index as a string, plus a
+    `"_narrative"` entry this function ignores -- see
+    `_generate_module_doc_chunked`'s own `chunk_state`) is now missing on
+    disk.
+
+    Guards the member-level resume-skip fast paths in `run_batch`/
+    `plan_batch` (issue #217 round-4 review): `prior_ok` there only ever
+    checks `out_path` itself, which for a chunked member is the
+    deterministic *index* document, never one of the chunk files it
+    references. Nothing else verifies those chunk files are actually
+    still present -- a chunk file deleted out from under this tool (or
+    lost to some other bug) while the database, resume state, and index
+    itself stay otherwise unchanged would leave `run_batch` skipping this
+    member indefinitely, `corpus_unchanged`/`prior_ok`'s only two
+    conditions both still satisfied. `validate_doc` on the index alone
+    can't catch this either -- it doesn't resolve a markdown link to
+    confirm the linked file exists. Mirrors testbatch.py's own
+    `_chunked_member_missing_a_chunk_file`, which fixed the identical gap
+    for generated tests.
+
+    Chunk file names are reconstructed the same way
+    `_generate_module_doc_chunked` computed them originally --
+    `chunk_width` from the *count* of recorded real chunks (excluding the
+    `"_narrative"` entry, which isn't a chunk index), matching that
+    function's own `len(str(chunk_count))` -- so this only needs the
+    prior state dict, not a fresh `routine_aware_chunk_ranges` call.
+    `False` (nothing missing) for anything that isn't a chunked member's
+    prior state (`prior_chunks` not a non-empty dict) -- a single-document
+    member has no chunks to check here at all."""
+    if not isinstance(prior_chunks, dict):
+        return False
+    chunk_keys = [k for k in prior_chunks if k != "_narrative"]
+    if not chunk_keys:
+        return False
+    chunk_width = len(str(len(chunk_keys)))
+    for key in chunk_keys:
+        try:
+            i = int(key)
+        except (TypeError, ValueError):
+            continue
+        chunk_path = out_path.with_name(f"{out_path.stem}.chunk{i:0{chunk_width}d}{out_path.suffix}")
+        if not chunk_path.exists():
+            return True
+    return False
+
+
 def _routine_chunk_map(routines: list, rule_rows: list, ranges: list[tuple[int, int]]) -> dict[str, int]:
     """Routine name (upper) -> 1-based chunk index whose rule range contains
     that routine's own rules -- the mapping `module_brief`'s `chunk_map`
@@ -1611,7 +1751,8 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
                                   prior_chunks: dict | None = None,
                                   index_template: str | None = None,
                                   sme_notes: dict | None = None,
-                                  member_facts: MemberFacts | None = None) -> DocResult:
+                                  member_facts: MemberFacts | None = None,
+                                  on_chunk_done: Callable[[dict[str, dict]], None] | None = None) -> DocResult:
     """Render one member as several independent chunk documents plus a
     deterministic index doc at `out_path`, instead of asking one completion
     to cover the member's whole rule set. Each chunk goes through the exact
@@ -1639,7 +1780,17 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
     function's chunk loop doesn't gather the same whole-member facts a
     second time (issue #183 review feedback). When omitted (the default,
     e.g. `generate_module_doc` called directly, not via `run_batch`), this
-    function builds its own, exactly as before this parameter existed."""
+    function builds its own, exactly as before this parameter existed.
+
+    `on_chunk_done`, when given, is called with a snapshot of `chunk_state`
+    (a shallow copy, safe for the caller to hold onto) after every chunk
+    completes -- reused or freshly generated -- and again after narrative
+    reconciliation. This is what lets `run_batch` checkpoint a chunked
+    member's progress to `state_path` incrementally instead of only once
+    this whole function returns: without it, a run interrupted partway
+    through a large chunked member has no on-disk record of any chunk it
+    already completed, and a resume regenerates the entire member from
+    scratch (issue #217)."""
     # Resolved up front (not just before the chunk loop below) so `routines`
     # -- needed immediately after, for chunk-range computation and
     # chunk_map -- can come from `member_facts.routines` too, rather than
@@ -1821,6 +1972,8 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
         retries += result.retries
         chunk_entries.append((i, (start, end), chunk_path, result))
         chunk_state[str(i)] = {"ok": result.ok, "brief_sha256": brief_hash}
+        if on_chunk_done is not None:
+            on_chunk_done(dict(chunk_state))
         if not result.ok:
             density_note = format_density_note(density_metrics[i - 1])
             logger.warning(
@@ -1903,6 +2056,8 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
             "ok": narrative_ok, "input_sha256": narrative_input_hash,
             "sections": sections if narrative_ok else None,
         }
+        if on_chunk_done is not None:
+            on_chunk_done(dict(chunk_state))
         if not narrative_ok:
             problems.append("narrative synthesis: " + "; ".join(narrative_problems))
     else:
@@ -1938,7 +2093,8 @@ def generate_module_doc(conn, member_name: str, out_path: Path, caller: ModelCal
                          prior_chunks: dict | None = None,
                          index_template: str | None = None,
                          sme_notes: dict | None = None,
-                         facts: MemberFacts | None = None) -> DocResult:
+                         facts: MemberFacts | None = None,
+                         on_chunk_done: Callable[[dict[str, dict]], None] | None = None) -> DocResult:
     """Single-member version of the harness: brief -> call -> validate ->
     retry once. Used directly for one-off generation and by run_batch's
     per-item work (with the model call itself dispatched to a thread pool
@@ -1961,7 +2117,11 @@ def generate_module_doc(conn, member_name: str, out_path: Path, caller: ModelCal
     passes it straight through to `_generate_module_doc_chunked` as
     `member_facts`, and the non-chunked path passes it to `module_brief`
     itself (`facts=facts`) -- either way, this function never gathers
-    whole-member facts itself when a caller already built them."""
+    whole-member facts itself when a caller already built them.
+
+    `on_chunk_done` is passed straight through to `_generate_module_doc_
+    chunked` (see its docstring) -- ignored on the non-chunked branch
+    below, which has no per-chunk progress to checkpoint."""
     rows, ambiguous_libs = fetch_rule_candidate_rows(conn, member_name)
     threshold = _resolve_max_rules_per_call(max_rules_per_call)
     if not ambiguous_libs and rows and len(rows) > threshold:
@@ -1972,7 +2132,7 @@ def generate_module_doc(conn, member_name: str, out_path: Path, caller: ModelCal
             conn, member_name, system["system"] if system else None, rows, out_path, caller,
             writing_rules, template, redact, lexicon, max_attempts, threshold,
             prior_chunks=prior_chunks, index_template=index_template, sme_notes=sme_notes,
-            member_facts=facts,
+            member_facts=facts, on_chunk_done=on_chunk_done,
         )
 
     brief = module_brief(conn, member_name, redact=redact, lexicon=lexicon, sme_notes=sme_notes, facts=facts)
@@ -2220,12 +2380,188 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
         _corpus_signature(conn, redact, lexicon, sme_notes, extra=[str(threshold)]) if state_path else None
     )
     corpus_unchanged = bool(state_path) and state.get("_corpus_sha256") == corpus_sig
+    # `--members` (cli.py) lets one invocation cover only a subset of the
+    # members sharing this same `--state` file. `_corpus_signature`
+    # hashes the *whole* corpus, not just what this run touched -- so
+    # unconditionally overwriting `_corpus_sha256` on every run (issue
+    # #218) let a subset run advance it while some member outside this
+    # run's `members` never got looked at, making that untouched member
+    # appear current against the new signature. A later run covering that
+    # member would then read its stale `ok: True` entry as still done via
+    # the `corpus_unchanged and prior_ok` fast path, even if its own
+    # source had since changed, silently skipping it forever.
+    #
+    # Fixed by tracking *which* members last established the stored
+    # signature (`_corpus_members`) and only advancing it when this run's
+    # `members` is a superset of that set -- i.e. coverage only ever
+    # grows, never silently shrinks. This preserves the ordinary case of
+    # repeatedly running the exact same subset (every member that
+    # mattered to the signature last time is still covered this time, so
+    # the fast path keeps working across runs) while refusing to advance
+    # when a run leaves out a member the current signature's validity
+    # actually depends on -- *while nothing in the corpus changes*. Once
+    # something does change, a subset run can never re-establish the
+    # signature on its own again -- only a run covering the full recorded
+    # set (or a superset of it) can advance `_corpus_sha256` past that
+    # change; this is expected, not a bug, and is exactly what stops a
+    # *clean-exit* subset run from silently vouching for members it never
+    # looked at. Note this means `_corpus_members` itself is updated on
+    # *every* run that touches `state`, not only one that advances
+    # `_corpus_sha256` -- a non-advancing run still examines/updates a
+    # real, current state entry for every member in its own `members`, so
+    # leaving those out of `_corpus_members` would undercount coverage
+    # relative to what's actually true on disk and let a later, narrower
+    # run trivially satisfy the superset check against that undercounted
+    # set (issue #218 again, reopened via a sequence of ordinary
+    # clean-exit subset runs rather than a single one). See the `else`
+    # branch below.
+    #
+    # `_corpus_sha256` is only ever set in memory here, not saved to disk
+    # by itself -- the first thing that actually flushes it is whichever
+    # `_save_state` call happens to come next. Before issue #217, that
+    # could be a per-member/per-chunk checkpoint from *partway* through
+    # this run, well before every member had a chance to record its own
+    # current state -- a kill right after would leave stale `ok: True`
+    # entries (from a *previous* run) sitting alongside an
+    # already-advanced signature. Issue #217's routing-loop pre-mark now
+    # closes that specific window for every member actually in `to_run`/
+    # `to_run_chunked`: it writes a not-done entry for every one of them,
+    # in the very same `_save_state` call that ends up being the first
+    # one to flush this signature, before the worker pool or the chunked
+    # loop starts -- so nothing here can advance to disk without every
+    # about-to-run member's own entry already being honest about not
+    # being done yet.
+    # The read just above (`corpus_unchanged`) stays unconditional --
+    # comparing against whatever signature is already on disk is always
+    # safe on its own; only the *write* that could make an untouched
+    # member look current is gated.
     if state_path:
-        # Written into `state` up front, before any per-member checkpoint,
-        # so a process killed mid-run still leaves a resumed run able to
-        # take the corpus-level `corpus_unchanged` fast-path above -- not
-        # just a run that reached the very end. See issue #78.
-        state["_corpus_sha256"] = corpus_sig
+        if isinstance(state.get("_corpus_members"), list):
+            prior_corpus_members: set[str] = set(state["_corpus_members"])
+        else:
+            # Every other case -- a state file with no `_corpus_members`
+            # at all (a legacy file written before this fix, or a
+            # genuinely first-ever run against an empty/nonexistent state
+            # file) and a corrupted/hand-edited `_corpus_members` that
+            # isn't a list -- is handled by reconstructing the prior
+            # member set from the state file's own member entries,
+            # rather than special-casing "no `_corpus_sha256` at all" as
+            # empty prior coverage. That special case looked safe (surely
+            # a state file with no recorded signature has no real prior
+            # coverage either) but is false for a real, named generation
+            # of on-disk file: `_corpus_sha256` (issue #37/#9) and the
+            # subdir-qualified `state_key` this reconstruction relies on
+            # (see `_legacy_corpus_members_from_state`) landed as two
+            # separate changes, so a state file written between them (or
+            # one that's had its `_corpus_sha256` manually deleted, the
+            # documented recovery move for a frozen signature) has real
+            # member entries and no `_corpus_sha256` -- and would
+            # otherwise be read as zero prior coverage, reproducing issue
+            # #218 on the very first post-upgrade subset run against it.
+            # A genuinely empty state dict already reconstructs to the
+            # empty set on its own, so this unification costs nothing.
+            prior_corpus_members = _legacy_corpus_members_from_state(state)
+        # A member that's no longer "known" must drop out of the
+        # requirement -- otherwise no future run, however large, could
+        # ever be a superset of a set containing it, permanently freezing
+        # `_corpus_sha256` with no recovery short of hand-editing the
+        # state file. "Known" is deliberately *not*
+        # `select_batch_members(conn)`'s dialect/object_type filter alone:
+        # `run_batch`'s own `members` argument is never required to
+        # satisfy that filter (a caller can pass any member name;
+        # `select_batch_members` is only what an unfiltered `mfdoc batch`
+        # with no `--members` would auto-select), so a member whose
+        # `object_type` happens to be unset or outside
+        # `BATCHABLE_OBJECT_TYPES` -- while still very much present and
+        # being actively run right now (it's in `members`) -- must not be
+        # treated as departed just because it would no longer be
+        # auto-selected. Nor is it *only* `members`: an ordinary
+        # unfiltered `mfdoc batch` (which only ever passes
+        # `select_batch_members`'s own list, per cli.py) must eventually
+        # be able to advance the signature past a member outside both,
+        # once that member is genuinely no longer part of any run. Union,
+        # not member-table existence, is the actual rule in force here --
+        # a raw `SELECT ... FROM member` check adds nothing on top of it
+        # (every name `select_batch_members` or `members` could ever name
+        # already implies the row exists, or isn't a real member at all
+        # and self-heals out on its own next run either way), so it's
+        # left out rather than kept as an inert-looking extra condition.
+        currently_known_members = set(select_batch_members(conn)) | set(members)
+        departed = prior_corpus_members - currently_known_members
+        if departed:
+            # Dropping a departed member from the *requirement* isn't
+            # enough on its own: its own `ok: True` state entry is still
+            # sitting on disk, untouched. If that same member later
+            # becomes "known" again per the definition above (a re-ingest
+            # in flight, a dialect/object_type reclassification, or it's
+            # simply named in a later run's `members`) with genuinely
+            # changed source, a subsequent run satisfying the superset
+            # check would advance the signature, and then a run covering
+            # the returned member would read its stale, never-updated
+            # entry as still current via `corpus_unchanged and prior_ok`
+            # -- reproducing the exact silent-skip failure this fix
+            # exists to close.
+            #
+            # Demoted (ok set False), not deleted: a member can be
+            # "departed" from *this run's* perspective while still being
+            # perfectly fine and actively worked on by other invocations
+            # sharing this state file (outside select_batch_members and
+            # not named here, but named in a concurrent/later run) -- see
+            # the "known" definition above. Deleting its entry outright
+            # would throw away a chunked member's already-paid-for
+            # `chunks`/`_narrative` cache for nothing, forcing a full
+            # re-render the moment it's run again, on every single
+            # ordinary run in between -- reintroducing the exact
+            # unbounded-model-spend waste issue #217 exists to close, via
+            # this sibling code path. `ok: False` alone is enough to
+            # satisfy the "nothing stale to be blessed by" requirement
+            # above: `prior_ok` already requires `ok: True`, and chunk/
+            # brief-hash reuse (`_chunk_reuse_ok`, the brief_sha256 check)
+            # independently re-validates content before ever trusting a
+            # carried-forward `chunks` entry, so keeping it here can't
+            # cause incorrect reuse.
+            for key in [k for k in state
+                        if k not in _RESERVED_STATE_KEYS and k.rsplit("/", 1)[-1] in departed]:
+                entry = state[key]
+                if isinstance(entry, dict):
+                    entry["ok"] = False
+        prior_corpus_members &= currently_known_members
+        # An empty `members` list (nothing to run) must never establish
+        # or advance coverage.
+        corpus_members_grew_or_held = bool(members) and set(members) >= prior_corpus_members
+        if corpus_members_grew_or_held:
+            # Written into `state` up front, before any per-member
+            # checkpoint, so a process killed mid-run still leaves a
+            # resumed run able to take the corpus-level `corpus_unchanged`
+            # fast-path above -- not just a run that reached the very
+            # end. See issue #78.
+            state["_corpus_sha256"] = corpus_sig
+            # The guard above already established that `members` is a
+            # superset of `prior_corpus_members` (already intersected with
+            # `currently_known_members`), so `members` alone already
+            # covers everything the signature depended on -- no union
+            # needed.
+            state["_corpus_members"] = sorted(set(members))
+        else:
+            # Not advancing `_corpus_sha256` this run does NOT mean this
+            # run's own `members` can be left out of `_corpus_members`.
+            # Every member in `members` gets its own state entry
+            # examined/updated below regardless of this guard -- so by
+            # the end of this run, each one's entry is a real, current
+            # answer, not a stale leftover. Leaving them out of
+            # `_corpus_members` would undercount coverage relative to
+            # what's actually true on disk: a later, narrower run could
+            # then trivially satisfy the superset check against this
+            # undercounted prior set and advance `_corpus_sha256` past a
+            # change in one of the members this run legitimately did
+            # check (issue #218 again, reopened via a sequence of
+            # ordinary clean-exit subset runs rather than a single one).
+            # Recording the union here is always safe in the "coverage
+            # only grows" direction regardless of whether the signature
+            # itself advances -- the superset check above is what
+            # actually gates a *future* run's ability to advance the
+            # signature, not this write.
+            state["_corpus_members"] = sorted(prior_corpus_members | set(members))
     results: list[DocResult] = []
     # Keyed by the subdir-qualified state_key computed below, not bare
     # member name: two batchable members can share a name across
@@ -2260,10 +2596,14 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
         state_key = f"{subdir.as_posix()}/{name}"
         prior = state.get(state_key)
         # `prior` is only ever meaningful as this member's own state entry;
-        # guard against the (currently reserved but unenforced) "_corpus_sha256"
-        # key ever being looked up as if it were one -- see cli.py's --members
-        # normalisation, which keeps ordinary member names from colliding with it.
-        prior_ok = isinstance(prior, dict) and prior.get("ok") and out_path.exists()
+        # guard against the (currently reserved but unenforced) "_corpus_sha256"/
+        # "_corpus_members" keys ever being looked up as if they were one --
+        # see cli.py's --members normalisation, which keeps ordinary member
+        # names from colliding with them.
+        prior_ok = (
+            isinstance(prior, dict) and prior.get("ok") and out_path.exists()
+            and not _chunked_member_missing_a_chunk_file(out_path, prior.get("chunks"))
+        )
 
         if corpus_unchanged and prior_ok:
             logger.debug("skip %s: unchanged (corpus signature match, resumed)", name)
@@ -2293,6 +2633,39 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
             briefs[state_key] = brief
             to_run.append((name, brief_hash, out_path, state_key))
 
+    # Mark every member actually about to run as not-done *before* any of
+    # them make a single model call, not just once each one's own work
+    # starts or finishes (issue #217 round-3 review). Every member here
+    # reached `to_run`/`to_run_chunked` precisely because its prior state
+    # entry (if any) is already known-stale -- so writing that down now,
+    # in one save, closes the same "reads as done when it isn't" hole for
+    # ALL of them at once: a flat member killed mid-call in the pool, or
+    # any chunked member whose own turn in the sequential loop below
+    # hasn't come up yet, not just the specific chunked member a kill
+    # happens to land on. Without this, the moment *any* member's
+    # checkpoint flushes the new `_corpus_sha256` to disk (the routing
+    # pass above only updated it in memory), a resume's `corpus_unchanged
+    # and prior_ok` fast path would read every other still-`ok: True`
+    # member here as done and skip it forever -- silently serving stale
+    # output with nothing left to flag it, regardless of whether that
+    # member's own turn to run had even started yet.
+    for name, brief_hash, out_path, state_key in to_run:
+        prior = state.get(state_key)
+        prior_chunks = prior.get("chunks") if isinstance(prior, dict) else None
+        state[state_key] = {
+            "ok": False, "attempts": 0, "brief_sha256": brief_hash,
+            **({"chunks": prior_chunks} if prior_chunks else {}),
+        }
+    for name, brief_hash, out_path, state_key, member_facts in to_run_chunked:
+        prior = state.get(state_key)
+        prior_chunks = prior.get("chunks") if isinstance(prior, dict) else None
+        state[state_key] = {
+            "ok": False, "attempts": 0, "brief_sha256": brief_hash,
+            "chunks": prior_chunks or {},
+        }
+    if state_path and (to_run or to_run_chunked):
+        _save_state(state_path, state)
+
     with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
         futures = {
             pool.submit(_timed_call, caller, build_prompt(briefs[state_key], writing_rules, template)):
@@ -2319,7 +2692,11 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
                     [f"model call failed: {exc.__class__.__name__}: {exc}"],
                 )
                 results.append(result)
-                state[state_key] = {"ok": False, "attempts": 1, "brief_sha256": brief_hash}
+                prior_chunks = (state.get(state_key) or {}).get("chunks")
+                state[state_key] = {
+                    "ok": False, "attempts": 1, "brief_sha256": brief_hash,
+                    **({"chunks": prior_chunks} if prior_chunks else {}),
+                }
                 if state_path:
                     _save_state(state_path, state)
                 continue
@@ -2359,7 +2736,11 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
                         duration_s=duration_s, retries=retries,
                     )
                     results.append(result)
-                    state[state_key] = {"ok": False, "attempts": 2, "brief_sha256": brief_hash}
+                    prior_chunks = (state.get(state_key) or {}).get("chunks")
+                    state[state_key] = {
+                        "ok": False, "attempts": 2, "brief_sha256": brief_hash,
+                        **({"chunks": prior_chunks} if prior_chunks else {}),
+                    }
                     if state_path:
                         _save_state(state_path, state)
                     continue
@@ -2376,7 +2757,11 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
                 validation.get("problems", []), duration_s=duration_s, retries=retries,
             )
             results.append(result)
-            state[state_key] = {"ok": result.ok, "attempts": attempts, "brief_sha256": brief_hash}
+            prior_chunks = (state.get(state_key) or {}).get("chunks") if not result.ok else None
+            state[state_key] = {
+                "ok": result.ok, "attempts": attempts, "brief_sha256": brief_hash,
+                **({"chunks": prior_chunks} if prior_chunks else {}),
+            }
             # Checkpoint after every completed/failed member, not only once
             # at the very end -- otherwise a later member's failure (or the
             # process being killed mid-run) loses every already-completed
@@ -2394,9 +2779,59 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
         # entry survives a sibling chunk's failure), so this try/except is
         # a second line of defense for anything unexpected *outside* that
         # per-chunk loop (chunk-range computation, narrative reconciliation,
-        # ...) -- in that rarer case there's no partial chunk_state from
-        # this pass to report, so prior_chunks (last run's state) is the
-        # best available fallback, same as before. See issue #78.
+        # ...). `_checkpoint_chunk_state` (issue #217) will usually have
+        # already written this pass's own partial progress into `state`
+        # before such an exception; the handler below merges that with
+        # `prior_chunks` (last run's state) rather than relying on either
+        # alone. See issue #78.
+        def _checkpoint_chunk_state(partial_chunk_state: dict, state_key=state_key,
+                                    brief_hash=brief_hash, prior_chunks=prior_chunks) -> None:
+            # Fires after every chunk (and again after narrative
+            # reconciliation) inside generate_module_doc, well before it
+            # returns -- writes the in-progress chunk_state to `state` (and,
+            # if a state_path is configured, straight to disk) so a run
+            # killed partway through this member still has every
+            # already-completed chunk on record for the next resume.
+            #
+            # This member reached `to_run_chunked` precisely because its
+            # prior state entry (if any) is stale -- ok=True there is a
+            # fact about the *previous* run, not this one. Overwriting
+            # "ok"/"attempts"/"brief_sha256" here (not just "chunks") on
+            # every checkpoint, not only when no entry exists yet, is what
+            # stops a kill right after this checkpoint from leaving an
+            # entry that resume's own `corpus_unchanged and prior_ok` /
+            # `prior_ok and prior_hash == brief_hash` skip fast-paths would
+            # read as "this member is already done" -- which would skip a
+            # half-regenerated member forever, mixing new and stale chunk
+            # files under one output with nothing left to flag it. The
+            # real "ok"/"attempts" land here once generate_module_doc
+            # actually returns (state[state_key] = {...} below).
+            #
+            # `partial_chunk_state` only carries entries for chunks this
+            # pass has reached so far -- merged over `prior_chunks` (not
+            # replacing it) so a kill after chunk 2 of 10 doesn't also
+            # discard chunks 3-10's still-good entries from the *previous*
+            # run, which would force them to re-render on resume for no
+            # reason (the exact waste issue #217 is about). Safe to merge
+            # blindly: `_chunk_reuse_ok` re-validates every carried-over
+            # entry's own hash/file-existence/doc-validity before ever
+            # trusting it, so a stale entry here can't cause bad reuse.
+            entry = {
+                "ok": False, "attempts": 0, "brief_sha256": brief_hash,
+                "chunks": {**(prior_chunks or {}), **partial_chunk_state},
+            }
+            state[state_key] = entry
+            if state_path:
+                _save_state(state_path, state)
+
+        # No need to checkpoint "not done yet" here before calling
+        # generate_module_doc -- the routing loop above already wrote and
+        # saved a not-done entry (ok=False, this member's own brief_hash,
+        # `prior_chunks` carried into "chunks") for every member in
+        # `to_run`/`to_run_chunked` before the pool or this loop ever
+        # started (issue #217 round-3 review: closes the same hole for a
+        # flat member, and for a chunked member whose own turn here hasn't
+        # come up yet, not just the one a kill happens to land on).
         try:
             result = generate_module_doc(
                 conn, name, out_path, caller, writing_rules, template, redact=redact,
@@ -2410,20 +2845,55 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
                 # nothing valid to reuse and generate_module_doc must build
                 # its own.
                 facts=member_facts if isinstance(member_facts, MemberFacts) else None,
+                on_chunk_done=_checkpoint_chunk_state,
             )
         except Exception as exc:
             logger.error(
                 "%s: chunked generation failed: %s: %s", name, exc.__class__.__name__, exc,
                 exc_info=True,
             )
+            # Merge whatever `_checkpoint_chunk_state` already wrote into
+            # `state` for this member during this same pass (real progress
+            # made before the exception) with `prior_chunks` (the previous
+            # run's state) -- same reasoning as `_checkpoint_chunk_state`
+            # itself: neither alone is complete. `in_progress_chunks` is
+            # missing any chunk this pass hadn't reached yet (dropping
+            # those would re-render them for nothing on resume, the same
+            # waste issue #217 is about); `prior_chunks` alone would lose
+            # whatever this pass actually completed before the exception.
+            in_progress_entry = state.get(state_key)
+            in_progress_chunks = (
+                in_progress_entry.get("chunks") if isinstance(in_progress_entry, dict) else None
+            )
             result = DocResult(
                 name, str(out_path), False, 0, 0, 0,
-                [f"model call failed: {exc.__class__.__name__}: {exc}"], chunked=True, chunk_state=prior_chunks,
+                [f"model call failed: {exc.__class__.__name__}: {exc}"], chunked=True,
+                chunk_state={**(prior_chunks or {}), **(in_progress_chunks or {})},
             )
         results.append(result)
+        # A normal (non-exception) ok=False return -- e.g. one chunk failed
+        # validation on both attempts -- only ever reflects the chunks
+        # `_generate_module_doc_chunked` itself touched this pass, which
+        # skips `_narrative` entirely once any chunk is unrecoverable (see
+        # its own `else:` branch). Replacing wholesale here would silently
+        # throw away a still-good `_narrative` entry (and any other
+        # not-yet-reached chunk) that `_checkpoint_chunk_state` already
+        # merged into `state` earlier in this same iteration -- the exact
+        # "reads as done when it isn't"/dropped-tail class issue #217 is
+        # about, just on the final write instead of a mid-loop checkpoint.
+        # Merge only on ok=False; an ok=True result's chunk_state is always
+        # this pass's complete, consistent set (see the exception handler's
+        # own comment above for why merging *there* is safe but merging a
+        # successful result would not be -- stale higher-numbered chunk
+        # keys from a since-shrunk member could corrupt
+        # `_chunked_member_missing_a_chunk_file`'s width inference).
+        prior_final_chunks = (state.get(state_key) or {}).get("chunks") if not result.ok else None
         state[state_key] = {
             "ok": result.ok, "attempts": result.attempts, "brief_sha256": brief_hash,
-            "chunks": result.chunk_state,
+            "chunks": (
+                result.chunk_state if result.ok
+                else {**(prior_final_chunks or {}), **(result.chunk_state or {})}
+            ),
         }
         # Checkpoint after every chunked member too -- these are rendered
         # serially and can each involve several model calls of their own, so
@@ -2434,11 +2904,15 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
             _save_state(state_path, state)
 
     if state_path:
-        # `_corpus_sha256` was already written into `state` up front (see
-        # above) so every incremental checkpoint above already carries it --
-        # this final save just persists whatever the last member/chunk loop
-        # iteration didn't already flush (there always is at least one,
-        # from the corpus-signature write itself).
+        # `_corpus_sha256`/`_corpus_members` were already written into
+        # `state` up front, when this run's own coverage didn't shrink
+        # the set of members the stored signature depends on (see above;
+        # issue #218), so every incremental checkpoint above already
+        # carries whatever was already on disk -- this final save just
+        # persists whatever the last member/chunk loop iteration didn't
+        # already flush (a content-identical rewrite, not a true no-op,
+        # when every member was skipped and this run touched nothing at
+        # all -- `_save_state` always rewrites the file).
         _save_state(state_path, state)
 
     total_in = sum(r.input_tokens for r in results)
@@ -2588,7 +3062,10 @@ def plan_batch(conn, members: list[str], out_dir: Path,
         out_path = out_dir / subdir / f"{name}.md"
         state_key = f"{subdir.as_posix()}/{name}"
         prior = state.get(state_key)
-        prior_ok = isinstance(prior, dict) and prior.get("ok") and out_path.exists()
+        prior_ok = (
+            isinstance(prior, dict) and prior.get("ok") and out_path.exists()
+            and not _chunked_member_missing_a_chunk_file(out_path, prior.get("chunks"))
+        )
 
         if corpus_unchanged and prior_ok:
             plans.append(MemberPlan(name, "skip"))
