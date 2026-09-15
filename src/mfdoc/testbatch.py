@@ -2305,7 +2305,7 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
             # coverage looks safe (surely a state file with no recorded
             # signature has no real prior coverage either) but isn't: a
             # state file with its `_corpus_sha256` manually deleted (the
-            # documented recovery move for a frozen signature) has real
+            # usual recovery move for a frozen signature) has real
             # member entries and no `_corpus_sha256`, and would otherwise
             # be read as zero prior coverage -- reproducing issue #218's
             # bug on the very first post-upgrade subset run against it.
@@ -2355,8 +2355,10 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
             # but named in a concurrent/later run) -- see the "batchable
             # now" definition above. Deleting its entry outright would
             # throw away a chunked member's already-paid-for
-            # `prior_chunks`/narrative cache for nothing, forcing a full
-            # re-render the moment it's run again, on every single
+            # `prior_chunks` cache for nothing (this module has no
+            # narrative-cache equivalent -- see `TestMemberPlan`'s own
+            # docstring), forcing a full re-render the moment it's run
+            # again, on every single
             # ordinary run in between. `ok: False` alone is enough to
             # satisfy the "nothing stale to be blessed by" requirement
             # above: `prior_ok` already requires `ok: True`, and this

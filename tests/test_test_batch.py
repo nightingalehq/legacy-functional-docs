@@ -6060,6 +6060,77 @@ def test_run_test_batch_legacy_state_file_does_not_reproduce_218_on_first_upgrad
     assert sorted(saved_after_third["_corpus_members"]) == ["MODA", "MODB"]
 
 
+def test_run_test_batch_subset_run_reconstructs_coverage_from_a_state_file_missing_corpus_sha256(tmp_path):
+    """Review finding on batch.py's sibling #218 fix, round 3 (mirrored
+    here since it was missing a testbatch.py-side test): a state file can
+    have real member entries but no `_corpus_sha256` at all -- not just
+    "genuinely never run before". `_corpus_sha256` and the qualified
+    state-key shape this fix's legacy reconstruction relies on could, in
+    principle, land as separate historical changes, or `_corpus_sha256`
+    alone could be hand-deleted as the usual recovery move for a frozen
+    signature -- either way leaving member entries with no
+    `_corpus_sha256` at all. Special-casing "`_corpus_sha256` not in
+    state" as *zero* prior coverage (rather than reconstructing it the
+    same way a state file missing only `_corpus_members` is handled)
+    would reproduce issue #218 on the very first subset run against such
+    a file: trivially "superset of nothing"."""
+    import sqlite3
+
+    from mfdoc import testbatch
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_two_flat_test_batch_members(conn)
+
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+    caller = _valid_test_doc_caller("python", "pytest")
+    first = testbatch.run_test_batch(
+        conn, ["MODA", "MODB"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path,
+    )
+    assert first.ok == 2
+    modb_subdir = testbatch._output_subdir(conn, "MODB")
+    modb_key = f"{modb_subdir.as_posix()}::MODB::python::pytest"
+    saved_after_first = json.loads(state_path.read_text())
+
+    # Simulate a state file with real member entries but no
+    # `_corpus_sha256` at all -- e.g. a hand-deleted signature.
+    del saved_after_first["_corpus_sha256"]
+    del saved_after_first["_corpus_members"]
+    state_path.write_text(json.dumps(saved_after_first), encoding="utf-8")
+
+    # MODB's own test_case genuinely changes.
+    conn.execute("UPDATE test_case SET status='spec' WHERE member_id=2")
+    conn.commit()
+
+    # A subset run that never looks at MODB at all, against this file.
+    second = testbatch.run_test_batch(
+        conn, ["MODA"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path,
+    )
+    assert second.ok == 1
+    saved_after_second = json.loads(state_path.read_text())
+    assert "_corpus_sha256" not in saved_after_second, (
+        "a subset run against a state file with no _corpus_sha256 at all must not establish a "
+        "signature that leaves MODB looking covered"
+    )
+    assert saved_after_second[modb_key] == saved_after_first[modb_key], (
+        "MODB's own entry must be untouched by a run that never covered it"
+    )
+
+    # A full run must still pick up MODB's real change.
+    third_caller = _counting_caller(caller)
+    third = testbatch.run_test_batch(
+        conn, ["MODA", "MODB"], "python", "pytest", out_dir, third_caller,
+        "writing rules text", "template text", state_path=state_path,
+    )
+    assert third.ok == 2
+    assert third_caller.calls > 0, "MODB must actually re-render, not be skipped as still current"
+
+
 def test_run_test_batch_never_permanently_freezes_corpus_signature_when_a_member_leaves(tmp_path):
     """Review finding on issue #219's own fix (round 1): if a member that
     previously helped establish `_corpus_members` later drops out of the

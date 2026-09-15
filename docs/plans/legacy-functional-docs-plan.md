@@ -442,6 +442,21 @@ GitHub org.
   per this issue's own scope, until `batch.py`'s sibling PR #223 (already
   merged to `origin/main` as of the sync round) is accounted for by
   whoever finalizes this branch.
+- **Finalization round, after merging onto `main` (which now includes
+  #223)**: confirmed the ported logic matches `batch.py`'s final #223
+  shape clause-for-clause (the `select_batch_members(conn) | set(members)`
+  union, demote-not-delete for a departed member, the routing-loop
+  pre-mark). Found and fixed two small issues: a stale batch.py-ism in
+  the departed-member comment referencing a `_narrative` cache this
+  module doesn't have (it reconciles chunked members' index documents
+  deterministically, never via a model call -- see `TestMemberPlan`'s own
+  docstring), and a missing regression test for the "state file has real
+  member entries but no `_corpus_sha256` at all" case (`batch.py` has a
+  dedicated test for this from its own round 3; this module's mirror
+  test only ever deleted `_corpus_members`, never `_corpus_sha256`
+  itself, leaving the fix's own stated justification for that case
+  untested). Added the missing test, confirmed to fail against the
+  bug it guards. Full suite green (1129 passed, 2 skipped).
 
 **Progress (2026-09-15, #218):**
 - Fixed issue #218: `mfdoc batch --members A,B` (a documented, first-class
