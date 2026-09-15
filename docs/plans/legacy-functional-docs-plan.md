@@ -12,6 +12,33 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-15):**
+- Fixed issue #217: `mfdoc batch`'s chunk-level resume state was only
+  persisted to disk once per member (after every one of that member's
+  chunks completed), not once per chunk -- a run interrupted partway
+  through a large chunked member lost every already-completed chunk's
+  work on resume, regenerating the whole member from scratch.
+- Added an `on_chunk_done` callback threaded through `generate_module_doc`/
+  `_generate_module_doc_chunked`, fired with a `chunk_state` snapshot
+  after every chunk (and after narrative reconciliation); `run_batch`
+  wires this to write the partial state to disk immediately.
+- Two rounds of review caught real bugs in the checkpointing logic
+  itself: (1) a mid-flight checkpoint could leave a prior run's stale
+  `ok: True`/`brief_sha256` in place (only "chunks" was overwritten) and
+  could drop not-yet-reached tail chunks' still-good entries by replacing
+  rather than merging with `prior_chunks`; (2) more fundamentally, no
+  member -- chunked or flat -- had its state entry marked not-done until
+  *its own* work produced a result, so a kill on one member, after a
+  sibling member's checkpoint had already flushed a new corpus signature
+  to disk, could leave that member's previous-run `ok: True` entry
+  permanently read as "done" by the corpus-unchanged resume fast path,
+  silently serving stale output forever. Fixed by having the routing loop
+  mark every member about to run as not-done, in one save, before the
+  worker pool or the chunked-member loop ever starts.
+- Six new regression tests, four confirmed (by reverting the relevant
+  code) to fail without their corresponding fix. Full suite green (1089
+  passed, 2 skipped).
+
 **Progress (2026-09-12v):**
 - Addressed the fifty-sixth Copilot review round on PR #209 (issue #195):
   round 55's deferred chunk-backup rollback had a gap of its own.

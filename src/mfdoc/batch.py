@@ -2313,6 +2313,34 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
             briefs[state_key] = brief
             to_run.append((name, brief_hash, out_path, state_key))
 
+    # Mark every member actually about to run as not-done *before* any of
+    # them make a single model call, not just once each one's own work
+    # starts or finishes (issue #217 round-3 review). Every member here
+    # reached `to_run`/`to_run_chunked` precisely because its prior state
+    # entry (if any) is already known-stale -- so writing that down now,
+    # in one save, closes the same "reads as done when it isn't" hole for
+    # ALL of them at once: a flat member killed mid-call in the pool, or
+    # any chunked member whose own turn in the sequential loop below
+    # hasn't come up yet, not just the specific chunked member a kill
+    # happens to land on. Without this, the moment *any* member's
+    # checkpoint flushes the new `_corpus_sha256` to disk (the routing
+    # pass above only updated it in memory), a resume's `corpus_unchanged
+    # and prior_ok` fast path would read every other still-`ok: True`
+    # member here as done and skip it forever -- silently serving stale
+    # output with nothing left to flag it, regardless of whether that
+    # member's own turn to run had even started yet.
+    for name, brief_hash, out_path, state_key in to_run:
+        state[state_key] = {"ok": False, "attempts": 0, "brief_sha256": brief_hash}
+    for name, brief_hash, out_path, state_key, member_facts in to_run_chunked:
+        prior = state.get(state_key)
+        prior_chunks = prior.get("chunks") if isinstance(prior, dict) else None
+        state[state_key] = {
+            "ok": False, "attempts": 0, "brief_sha256": brief_hash,
+            "chunks": prior_chunks or {},
+        }
+    if state_path and (to_run or to_run_chunked):
+        _save_state(state_path, state)
+
     with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
         futures = {
             pool.submit(_timed_call, caller, build_prompt(briefs[state_key], writing_rules, template)):
@@ -2459,24 +2487,14 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
             if state_path:
                 _save_state(state_path, state)
 
-        # Checkpoint once, with nothing processed yet, *before* calling
-        # generate_module_doc at all -- not just inside it. Without this,
-        # a kill between entering this loop and this member's first chunk
-        # actually completing (build_member_facts, _prune_stale_chunk_
-        # files, or the whole of chunk 1's own model call -- easily
-        # minutes of wall clock, the single likeliest moment to be killed)
-        # leaves the *previous* run's on-disk entry untouched. If that
-        # entry read ok=True (this member is re-running precisely because
-        # it's stale, but the state file doesn't know that yet), a later
-        # resume's `corpus_unchanged and prior_ok` fast path would read it
-        # as done and skip this now-half-regenerated member forever --
-        # silently serving stale output with nothing left to flag it.
-        # Safe by the same invariant `_checkpoint_chunk_state` itself
-        # relies on: this member is only ever in `to_run_chunked` because
-        # its prior entry is already known-stale, so marking it not-done
-        # up front is always correct, never a false negative.
-        _checkpoint_chunk_state({})
-
+        # No need to checkpoint "not done yet" here before calling
+        # generate_module_doc -- the routing loop above already wrote and
+        # saved a not-done entry (ok=False, this member's own brief_hash,
+        # `prior_chunks` carried into "chunks") for every member in
+        # `to_run`/`to_run_chunked` before the pool or this loop ever
+        # started (issue #217 round-3 review: closes the same hole for a
+        # flat member, and for a chunked member whose own turn here hasn't
+        # come up yet, not just the one a kill happens to land on).
         try:
             result = generate_module_doc(
                 conn, name, out_path, caller, writing_rules, template, redact=redact,
