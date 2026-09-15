@@ -781,28 +781,39 @@ _TEST_BATCH_RESERVED_STATE_KEYS = ("_corpus_sha256", "_corpus_members")
 
 
 def _legacy_test_batch_corpus_members_from_state(state: dict) -> set[str]:
-    """Derive the member set that established a *legacy* (pre-issue-#219-
-    fix) state file's `_corpus_sha256` -- one that has that key but not
-    the `_corpus_members` key this fix introduced. Every ordinary member
-    entry is keyed `f"{subdir}::{name}::{language}::{framework}"` (see
-    `run_test_batch`'s own `state_keys`); the bare member name is the
-    second `"::"`-separated segment. Reading such a file's absence of
-    `_corpus_members` as "no prior coverage" (rather than reconstructing
-    it like this) would let the very first subset run against any
-    pre-existing state file reproduce issue #218's bug on the spot --
-    trivially "superset of nothing", advancing the signature while
-    recording only its own members and silently orphaning every member
-    missing from this run. Mirrors batch.py's own
-    `_legacy_corpus_members_from_state` (#218), adapted to testbatch.py's
-    `"::"`-separated state-key shape instead of batch.py's `"/"`-joined
-    one."""
+    """Derive the prior member set from a state file's own member entries,
+    for every case *other than* one with a well-formed `_corpus_members`
+    list already on it: a legacy (pre-issue-#219-fix) state file that has
+    `_corpus_sha256` but not `_corpus_members`; a state file with neither
+    key at all (a genuinely first-ever run, which reconstructs to the
+    empty set here on its own); and a corrupted/hand-edited
+    `_corpus_members` that isn't a list. Reading any of these as "no
+    prior coverage" (rather than reconstructing it like this) would let
+    the very first subset run against such a state file reproduce issue
+    #218's bug on the spot -- trivially "superset of nothing", advancing
+    the signature while recording only its own members and silently
+    orphaning every member missing from this run.
+
+    Every ordinary member entry is keyed
+    `f"{subdir}::{name}::{language}::{framework}"` today (see
+    `run_test_batch`'s own `state_keys`); an older generation, pre-dating
+    the subdir-qualified state_key, used
+    `f"{name}::{language}::{framework}"` instead. In both, the last two
+    `"::"`-separated segments are always language/framework, so the bare
+    member name is always the third-from-last segment -- this doesn't
+    try to distinguish the two generations, or validate the shape any
+    further than "at least 3 segments", since (mirroring batch.py's own
+    `_legacy_corpus_members_from_state`) over-including a key as a member
+    name only tightens `run_test_batch`'s later superset requirement (via
+    the intersection against `select_test_batch_members(conn)` right
+    after this returns), never loosens it."""
     members: set[str] = set()
     for key in state:
         if key in _TEST_BATCH_RESERVED_STATE_KEYS:
             continue
         parts = key.split("::")
-        if len(parts) >= 2:
-            members.add(parts[1])
+        if len(parts) >= 3:
+            members.add(parts[-3])
     return members
 
 
@@ -2207,13 +2218,25 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
     # Fixed the same way as batch.py: track which members last
     # established the stored signature (`_corpus_members`) and only
     # advance it when this run's `members` is a superset of that set --
-    # coverage only ever grows, never silently shrinks. Written once, up
-    # front here (not folded into every per-member `_checkpoint` call the
-    # way this used to work, issue #219) -- a member this run hasn't
-    # reached yet still has no "ok": True entry of its own once the
-    # routing loop below marks it not-done, so a resumed run's corpus-
-    # level skip still can't wrongly skip it even though `_corpus_sha256`
-    # already matches.
+    # coverage only ever grows, never silently shrinks. This preserves
+    # the ordinary case of repeatedly running the exact same subset
+    # (every member that mattered to the signature last time is still
+    # covered this time, so the fast path keeps working across runs)
+    # while refusing to advance when a run leaves out a member the
+    # current signature's validity actually depends on -- *while nothing
+    # in the corpus changes*. Once something does change, a subset run
+    # can never re-establish the signature on its own again -- only a run
+    # covering the full recorded set (or a superset of it) can advance
+    # `_corpus_sha256` past that change; this is expected, not a bug, and
+    # is exactly what stops a *clean-exit* subset run from silently
+    # vouching for members it never looked at. This does NOT, on its own,
+    # protect a run interrupted mid-way: `_corpus_sha256` is written once
+    # per run and flushed by the first per-member checkpoint, so a
+    # process killed after some members checkpoint but before others can
+    # still leave stale `ok: True` entries alongside an already-advanced
+    # signature -- a pre-existing gap in the resume design (the same one
+    # `batch.py`'s own #218 fix documents, tracked separately), not
+    # something this fix closes.
     #
     # `_corpus_members`, like `_corpus_sha256` (see this function's own
     # docstring), is one global key shared across every target in a
@@ -2221,20 +2244,25 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
     # same accepted, non-correctness-affecting redundancy already
     # documented there.
     if state_path:
-        if "_corpus_sha256" not in state:
-            # First-ever run against this state file: no prior signature,
-            # so there's genuinely no prior coverage to respect.
-            prior_corpus_members: set[str] = set()
-        elif "_corpus_members" in state:
-            prior_corpus_members = set(state["_corpus_members"])
+        if isinstance(state.get("_corpus_members"), list):
+            prior_corpus_members: set[str] = set(state["_corpus_members"])
         else:
-            # Legacy state file, written before this fix: has
-            # `_corpus_sha256` (the old `_checkpoint` wrote it on every
-            # call) but no `_corpus_members`. Treating that as empty
-            # prior coverage (rather than reconstructing it) would
-            # reproduce issue #218's bug on the very first post-upgrade
-            # subset run -- trivially "superset of nothing" -- see
-            # `_legacy_test_batch_corpus_members_from_state`.
+            # Every other case -- a state file with no `_corpus_members`
+            # at all (a legacy file written before this fix, or a
+            # genuinely first-ever run against an empty/nonexistent
+            # state file) and a corrupted/hand-edited `_corpus_members`
+            # that isn't a list -- is handled by reconstructing the
+            # prior member set from the state file's own member entries.
+            # Special-casing "no `_corpus_sha256` at all" as empty prior
+            # coverage looks safe (surely a state file with no recorded
+            # signature has no real prior coverage either) but isn't: a
+            # state file with its `_corpus_sha256` manually deleted (the
+            # documented recovery move for a frozen signature) has real
+            # member entries and no `_corpus_sha256`, and would otherwise
+            # be read as zero prior coverage -- reproducing issue #218's
+            # bug on the very first post-upgrade subset run against it.
+            # A genuinely empty state dict already reconstructs to the
+            # empty set on its own, so this unification costs nothing.
             prior_corpus_members = _legacy_test_batch_corpus_members_from_state(state)
         # A member that's left the batchable set entirely (no test_case
         # rows left, e.g. after a derive rebuild) must drop out of the
@@ -2242,7 +2270,30 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
         # ever be a superset of a set containing a member that no longer
         # qualifies, permanently freezing `_corpus_sha256` with no
         # recovery short of hand-editing the state file.
-        prior_corpus_members &= set(select_test_batch_members(conn))
+        batchable_now = set(select_test_batch_members(conn))
+        departed = prior_corpus_members - batchable_now
+        if departed:
+            # Dropping a departed member from the *requirement* isn't
+            # enough on its own: its own `ok: True` state entry is still
+            # sitting on disk, untouched. If that same member later
+            # returns to the batchable set (a `test-plan` rerun after a
+            # temporary gap) with genuinely changed content, a subsequent
+            # run over everything currently batchable would satisfy the
+            # superset check (the departed member no longer counts
+            # against it), advance the signature, and then a run covering
+            # the returned member would read its stale, never-updated
+            # entry as still current via `corpus_unchanged and prior_ok`
+            # -- reproducing the exact silent-skip failure this fix
+            # exists to close. Pruning the entry here, at the moment the
+            # member is recognised as departed, means a returning member
+            # has nothing stale to be blessed by.
+            for key in [
+                k for k in state
+                if k not in _TEST_BATCH_RESERVED_STATE_KEYS
+                and len(k.split("::")) >= 3 and k.split("::")[-3] in departed
+            ]:
+                del state[key]
+        prior_corpus_members &= batchable_now
         # An empty `members` list (nothing to run) must never establish
         # or advance coverage.
         corpus_members_grew_or_held = bool(members) and set(members) >= prior_corpus_members

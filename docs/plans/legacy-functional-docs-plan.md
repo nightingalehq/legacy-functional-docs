@@ -93,6 +93,53 @@ GitHub org.
   leave_it_falsely_done`), each confirmed to fail without its fix by a
   targeted local revert, re-run, and restore. Full suite green (1090
   passed, 2 skipped).
+- Second review round (against the round-1 fixes above) found three more
+  real gaps, all in the legacy/corrupted-state and departed-member
+  handling -- the same class of issue the sibling #218 fix in `batch.py`
+  had independently hit and fixed in its own follow-up rounds by the
+  time this round ran, so this rewrite adopts `batch.py`'s final,
+  already-hardened shape rather than re-deriving it independently:
+  1. **Blocking:** the gate checked `"_corpus_members" in state`, not the
+     value's *type* -- a hand-edited or otherwise corrupted
+     `_corpus_members` that isn't a list (a stray string, an int) either
+     raised `TypeError` and aborted the whole run, or (a string) silently
+     reproduced issue #218's bug (`set("MODA")` iterates into single
+     characters, gets intersected away to nothing, and "superset of
+     nothing" advances the signature past an untouched member). Fixed by
+     gating on `isinstance(state.get("_corpus_members"), list)` instead,
+     mirroring `batch.py`'s own final fix -- a non-list value now falls
+     into the same legacy-reconstruction path as a missing key.
+  2. **Should-fix:** the departed-member intersection (round 1's fix for
+     the permanent-freeze bug) dropped a departed member from the
+     *requirement* but left its own stale `ok: True` state entry on disk
+     untouched -- if that member later returned to the batchable set
+     with genuinely different content, a subsequent run could advance
+     the signature without the departed member counting against the
+     superset check, then silently skip the returned member's real
+     change forever via its untouched stale entry. Fixed by pruning that
+     member's own state entry at the moment it's recognised as departed,
+     mirroring `batch.py`'s own fix for the identical hole.
+  3. **Should-fix:** `_legacy_test_batch_corpus_members_from_state`
+     recovered the bare member name as the *second* `"::"`-separated
+     segment (`parts[1]`), which is only correct for the current
+     4-segment state-key shape (`subdir::name::language::framework`); an
+     older, pre-subdir-qualification 3-segment shape
+     (`name::language::framework`) would instead yield the *language* as
+     the "member name". Fixed by reading the *third-from-last* segment
+     instead (`parts[-3]`, correct for both generations, since the last
+     two segments are always language/framework) and dropping the
+     minimum-segment-count filtering down to "at least 3" -- mirroring
+     `batch.py`'s own decision to stop trying to distinguish state-file
+     generations, since over-including a key as a member name only
+     tightens the later superset requirement (via the intersection
+     against `select_test_batch_members`), never loosens it.
+  Three new regression tests added (a corrupted-`_corpus_members`
+  tolerance test, a departed-member-that-returns test, and a direct unit
+  test on `_legacy_test_batch_corpus_members_from_state` covering both
+  key-shape generations), plus one nit fix (a loose `> 0` call-count
+  assertion tightened to an exact count). Findings #1 and #2 each
+  confirmed to fail without their fix by a targeted local revert, re-run,
+  and restore. Full suite green (1093 passed, 2 skipped).
 
 **Progress (2026-09-12v):**
 - Addressed the fifty-sixth Copilot review round on PR #209 (issue #195):

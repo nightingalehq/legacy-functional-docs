@@ -6237,4 +6237,162 @@ def test_run_test_batch_kill_before_chunked_members_first_chunk_does_not_leave_i
         "writing rules text", "template text", max_scenarios_per_call=2, state_path=state_path,
     )
     assert third.ok == 2
-    assert third_caller.calls > 0, "FAKEMOD must actually re-render on resume, not be skipped as done"
+    assert third_caller.calls == 1, (
+        "only FAKEMOD's own chunk 1 (the one whose scenario actually changed) should need a "
+        "real model call -- chunks 2/3 are reusable from the first run, and OTHERMOD is "
+        "unchanged since the kill run, so it stays skipped"
+    )
+
+
+def test_run_test_batch_tolerates_a_corrupted_corpus_members_value(tmp_path):
+    """Round-2 review finding on issue #219's own fix: a hand-edited or
+    otherwise corrupted `_corpus_members` value that isn't a list (e.g. a
+    stray string, or accidentally left as an int) must not raise and
+    abort the whole run, and must not silently fail open by treating
+    prior coverage as smaller than it really was (a plain string would
+    otherwise iterate into single characters). It's treated the same as
+    a legacy state file missing `_corpus_members` altogether --
+    reconstructed from the state file's own member entries."""
+    import sqlite3
+
+    from mfdoc import testbatch
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_two_flat_test_batch_members(conn)
+
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+    caller = _valid_test_doc_caller("python", "pytest")
+    first = testbatch.run_test_batch(
+        conn, ["MODA", "MODB"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path,
+    )
+    assert first.ok == 2
+    modb_subdir = testbatch._output_subdir(conn, "MODB")
+    modb_key = f"{modb_subdir.as_posix()}::MODB::python::pytest"
+    saved_after_first = json.loads(state_path.read_text())
+    corpus_sig_after_first = saved_after_first["_corpus_sha256"]
+
+    # Corrupt `_corpus_members` -- a stray string, not the list it should be.
+    saved_after_first["_corpus_members"] = "corrupted"
+    state_path.write_text(json.dumps(saved_after_first), encoding="utf-8")
+
+    # MODB's own test_case genuinely changes.
+    conn.execute("UPDATE test_case SET status='spec' WHERE member_id=2")
+    conn.commit()
+
+    # A subset run against the corrupted state file must not raise, and
+    # must not advance the signature past the untouched MODB.
+    second = testbatch.run_test_batch(
+        conn, ["MODA"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path,
+    )
+    assert second.ok == 1
+    saved_after_second = json.loads(state_path.read_text())
+    assert saved_after_second["_corpus_sha256"] == corpus_sig_after_first, (
+        "a subset run against a corrupted _corpus_members must not advance the corpus "
+        "signature past an untouched member"
+    )
+    assert saved_after_second[modb_key] == saved_after_first[modb_key], (
+        "MODB's own entry must be untouched by a run that never covered it"
+    )
+
+
+def test_run_test_batch_departed_member_that_returns_does_not_reopen_the_untouched_member_bug(tmp_path):
+    """Round-2 review finding on issue #219's own fix: dropping a departed
+    member from the coverage *requirement* isn't enough on its own -- its
+    own stale `ok: True` state entry was still left on disk. If that
+    member later returns to the batchable set with genuinely changed
+    content, a run over what's currently batchable would satisfy the
+    superset check (the departed member no longer counted against it),
+    advance the signature, and a later run covering the returned member
+    would then read its untouched, stale entry as still current --
+    reproducing the exact silent-skip failure this fix exists to close.
+    The state entry must be pruned at the moment a member is recognised
+    as departed, so a returning member has nothing stale to be blessed
+    by."""
+    import sqlite3
+
+    from mfdoc import testbatch
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_two_flat_test_batch_members(conn)
+
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+    caller = _valid_test_doc_caller("python", "pytest")
+    first = testbatch.run_test_batch(
+        conn, ["MODA", "MODB"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path,
+    )
+    assert first.ok == 2
+
+    # MODB departs the batchable set entirely (every test_case row gone),
+    # and only afterwards does its content genuinely change.
+    conn.execute("DELETE FROM test_case WHERE member_id=2")
+    conn.commit()
+    assert testbatch.select_test_batch_members(conn) == ["MODA"]
+
+    departed = testbatch.run_test_batch(
+        conn, ["MODA"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path,
+    )
+    assert departed.ok == 1
+
+    # MODB returns to the batchable set, with genuinely different content
+    # from what it had the last time it was covered.
+    from mfdoc.db import insert
+
+    insert(
+        conn, "test_case", member_id=2, kind="unit", scenario_name="MODB:BR-001",
+        given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+        when_json='{"construct": "IF", "condition": "Y", "citation": "[[MODB:1]]"}',
+        then_json='{"citation": "[[MODB:1]]", "source_excerpt": []}',
+        status="spec", citation="MODB:1", confidence="verified",
+    )
+    conn.commit()
+    assert testbatch.select_test_batch_members(conn) == ["MODA", "MODB"]
+
+    # A run over what's currently batchable (MODA alone would also
+    # satisfy the superset check now that MODB doesn't count against it)
+    # must not let MODB look covered by a signature established without
+    # ever looking at it again.
+    another_moda_only_run = testbatch.run_test_batch(
+        conn, ["MODA"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path,
+    )
+    assert another_moda_only_run.ok == 1
+
+    # A run that finally covers the returned, changed MODB must still
+    # pick up its real (new) content -- not skip it as stale-but-still-current.
+    final_caller = _counting_caller(caller)
+    final = testbatch.run_test_batch(
+        conn, ["MODA", "MODB"], "python", "pytest", out_dir, final_caller,
+        "writing rules text", "template text", state_path=state_path,
+    )
+    assert final.ok == 2
+    assert final_caller.calls > 0, "MODB must actually render, not be skipped as still current"
+
+
+def test_legacy_test_batch_corpus_members_from_state_handles_both_key_generations():
+    """`_legacy_test_batch_corpus_members_from_state` must recover the
+    bare member name from both the current 4-segment state-key shape
+    (`f"{subdir}::{name}::{language}::{framework}"`) and the older,
+    pre-subdir-qualification 3-segment shape
+    (`f"{name}::{language}::{framework}"`) -- the third-from-last
+    segment is always the member name in either generation, since the
+    last two segments are always language/framework."""
+    from mfdoc.testbatch import _legacy_test_batch_corpus_members_from_state
+
+    state = {
+        "natural::MODA::python::pytest": {"ok": True},
+        "MODB::python::pytest": {"ok": True},  # older, pre-subdir-qualification shape
+        "_corpus_sha256": "irrelevant",
+    }
+    assert _legacy_test_batch_corpus_members_from_state(state) == {"MODA", "MODB"}
