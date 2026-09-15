@@ -2117,12 +2117,20 @@ def _checkpoint(state: dict, state_path: Path | None) -> None:
     since the run started. This is member-granular, not chunk-granular: a
     chunked member's chunks are all rendered by one
     generate_member_test_doc/_generate_member_test_doc_chunked call before
-    its result is checkpointed here (mirrors batch.py's run_batch, which
-    makes the identical member-wide trade-off for module docs), so a crash
-    partway through one large chunked member's chunks still loses that
-    member's progress on this pass, even though a sibling member's chunk
-    failure is isolated and reported per-chunk within the same call.
-    No-op when `state_path` is None (resume tracking disabled).
+    its result is checkpointed here, so a crash partway through one large
+    chunked member's chunks still loses that member's progress on this
+    pass, even though a sibling member's chunk failure is isolated and
+    reported per-chunk within the same call. Round-6 review finding:
+    `batch.py`'s own `run_batch` no longer makes this same trade-off --
+    issue #217 gave it per-chunk checkpointing via
+    `generate_module_doc`'s `on_chunk_done` hook (see
+    `_checkpoint_chunk_state` there), so a kill mid-chunk only ever loses
+    at most one chunk, not the whole member's progress on this pass.
+    `testbatch.py` has no equivalent hook, so it stays member-granular
+    here -- a real, deliberate, currently-unclosed gap relative to #217's
+    full scope (tracked as a follow-up; see this issue's own 2026-09-15
+    plan-doc entry), not a mirrored batch.py behaviour. No-op when
+    `state_path` is None (resume tracking disabled).
 
     Does NOT touch `state["_corpus_sha256"]`/`state["_corpus_members"]`
     (issue #219, mirroring #218's fix in batch.py) -- those are set by
@@ -2521,8 +2529,8 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
         # very next resume if this run is killed or the flat render
         # fails -- exactly the unbounded-model-spend waste #217 exists to
         # close, and exactly why batch.py's own pre-mark preserves it
-        # here too. Every write site below for this member (both
-        # exception-retry-failure writes, and the final combined write)
+        # here too. Every write site below for this member (the
+        # retry-exception write, and the final combined write)
         # re-reads and re-preserves this same `chunks` value on a genuine
         # failure, mirroring batch.py's own shape there -- only a
         # successful render actually drops it, once this member's own

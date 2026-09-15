@@ -6756,3 +6756,66 @@ def test_run_test_batch_a_shrunk_back_flat_member_keeps_its_chunk_cache_on_failu
         "a shrunk-back flat member's chunk cache must survive a genuine failure -- dropping it "
         "here would force a full unnecessary re-render of all 3 original chunks later"
     )
+
+
+def test_run_test_batch_a_shrunk_back_flat_member_keeps_its_chunk_cache_on_a_validation_failure(
+    tmp_path,
+):
+    """Round-6 review finding: the sibling test above (`..._on_failure`)
+    only exercises two of round 5's three fixed write sites -- its
+    `always_raises` caller short-circuits via the model-call-exception
+    branch before ever reaching the final combined write below (reached
+    only once a response is actually produced and *validated*). This
+    pins that third site directly: a caller that returns a document
+    failing `validate_test_doc` on both the initial call and the retry
+    (never raising) must still preserve the shrunk-back member's `chunks`
+    cache in the final combined write's own `not result.ok` branch."""
+    import sqlite3
+
+    from mfdoc import testbatch
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_scenarios(conn, 5)  # -> 3 chunks with max_scenarios_per_call=2
+
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+    state_key = "natural::FAKEMOD::python::pytest"
+
+    first = testbatch.run_test_batch(
+        conn, ["FAKEMOD"], "python", "pytest", out_dir, _chunk_aware_caller("python", "pytest"),
+        "writing rules text", "template text", max_scenarios_per_call=2, state_path=state_path,
+    )
+    assert first.failed == 0
+    original_chunks = dict(json.loads(state_path.read_text())[state_key]["chunks"])
+    assert set(original_chunks) == {"1", "2", "3"}
+
+    # FAKEMOD shrinks back under threshold -- only 1 scenario left, so its
+    # next run routes through the flat `to_run` path, not `to_run_chunked`.
+    conn.execute("DELETE FROM test_case WHERE member_id=1 AND scenario_name != 'FAKEMOD:BR-001'")
+    conn.commit()
+
+    def always_invalid(prompt: str) -> ModelResponse:
+        # No [[MEMBER:LINE]] citation at all -- validate_test_doc must
+        # reject this every time, on both the initial call and the retry,
+        # without ever raising.
+        return ModelResponse(text="not a real generated-test document", input_tokens=1, output_tokens=1)
+
+    second = testbatch.run_test_batch(
+        conn, ["FAKEMOD"], "python", "pytest", out_dir, always_invalid,
+        "writing rules text", "template text", max_scenarios_per_call=2, state_path=state_path,
+    )
+    assert second.failed == 1, "the simulated validation failure must actually be recorded"
+    saved_after_second = json.loads(state_path.read_text())
+    assert saved_after_second[state_key]["ok"] is False
+    assert saved_after_second[state_key]["attempts"] == 2, (
+        "both the initial call and the retry must have been attempted, reaching the final "
+        "combined write -- not the earlier retry-exception write this test isn't pinning"
+    )
+    assert saved_after_second[state_key]["chunks"] == original_chunks, (
+        "a shrunk-back flat member's chunk cache must survive a genuine validation failure at "
+        "the final combined write too -- dropping it here would force a full unnecessary "
+        "re-render of all 3 original chunks later"
+    )

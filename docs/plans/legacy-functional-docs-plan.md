@@ -270,10 +270,9 @@ GitHub org.
      like the chunked half already does, and extended the same
      preservation to both of this path's own failure-write sites further
      down (the retry-exception write and the final combined write) --
-     mirroring `batch.py`'s shape at all three of its own equivalent
-     sites, which drop `chunks` only on a genuine success (once that
-     member's own cleanup has pruned the leftover chunk files it no
-     longer needs).
+     mirroring `batch.py`'s shape at each of its own equivalent sites,
+     which drop `chunks` only on a genuine success (once that member's
+     own cleanup has pruned the leftover chunk files it no longer needs).
   One nit also addressed: round 1's bullet (above) claimed the legacy/
   corrupted-state gate branched on `"_corpus_sha256" not in state` /
   `"_corpus_members" in state` / neither, "exactly as `batch.py` does" --
@@ -286,6 +285,51 @@ GitHub org.
   on_failure`), confirmed to fail without the fix (reverted locally,
   re-ran -- `KeyError: 'chunks'` -- restored). Full suite green (1097
   passed, 2 skipped). Still parked, not pushed/PR'd.
+- Sixth review round found three more issues: a third instance of the
+  same failure mode rounds 4/5 each caught (a comment/docstring asserting
+  parity with `batch.py` that wasn't real), a genuine scope gap that
+  comment was hiding, and one of round 5's own three fixed write sites
+  left unpinned by its regression test.
+  1. **Should-fix (comment/code drift):** `_checkpoint`'s own docstring
+     claimed chunked-member checkpointing being member-granular (not
+     chunk-granular) "mirrors batch.py's run_batch, which makes the
+     identical member-wide trade-off for module docs" -- false against
+     `batch.py`'s post-#223 shape. `batch.py`'s `run_batch` does NOT make
+     this trade-off: issue #217 gave it genuine per-chunk checkpointing
+     via `generate_module_doc`'s `on_chunk_done` hook
+     (`_checkpoint_chunk_state`), so a kill mid-chunk there loses at most
+     one chunk, not the whole in-progress member. Corrected the docstring
+     to say so plainly.
+  2. **Should-fix (real, un-ported scope gap, surfaced by fixing #1):**
+     issue #217 landed two things in `batch.py`: the routing-loop
+     pre-mark (ported here, correctly, across commits `ae54865`-
+     `b26481b`) and per-chunk checkpointing (never ported). The practical
+     consequence: a chunked test member killed partway through its own
+     chunk loop here loses every chunk rendered on *this* pass (not just
+     the one in flight), where `batch.py`'s equivalent kill loses at most
+     one chunk. Deliberately left unported in this round rather than
+     added under review pressure this late in the branch's life --
+     wiring an `on_chunk_done`-style hook through
+     `_generate_member_test_doc_chunked`/`generate_member_test_doc` is a
+     real feature addition, not a small fix, and this issue (#219) is
+     scoped to the corpus-signature/departed-member port, not a full
+     #217 port. Filed as a follow-up rather than a silent gap: worth its
+     own issue against `testbatch.py`'s chunked path specifically.
+  3. **Should-fix (test-coverage gap):** round 5's fix touched three
+     write sites (the flat pre-mark, the retry-exception write, and the
+     final combined write) but its one regression test only reached the
+     first two -- the `always_raises` caller it uses short-circuits via
+     `continue` before ever reaching the final combined write, so that
+     third site was unpinned (confirmed: reverting only that site left
+     the full suite green). Added a sibling test exercising a
+     *validation* failure (not a raised exception) so the final combined
+     write's own `not result.ok` branch is actually reached and pinned.
+  No code changes for finding #2 (documentation of scope only, per the
+  decision above). One new regression test added for finding #3
+  (`test_run_test_batch_a_shrunk_back_flat_member_keeps_its_chunk_cache_
+  on_a_validation_failure`), confirmed to fail without the fix (reverted
+  the final-write site locally, re-ran, restored). Full suite green
+  (1098 passed, 2 skipped). Still parked, not pushed/PR'd.
 
 **Progress (2026-09-12v):**
 - Addressed the fifty-sixth Copilot review round on PR #209 (issue #195):
