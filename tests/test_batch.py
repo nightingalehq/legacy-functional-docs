@@ -2435,16 +2435,19 @@ def test_run_batch_hard_kill_mid_chunk_loop_neither_marks_the_member_falsely_don
     conn.commit()
 
     real_save_state = batch_mod._save_state
-    save_calls = {"n": 0}
+    second_caller = _counting_caller(_chunk_aware_module_caller())
 
-    def kill_after_first_checkpoint(path, state):
-        save_calls["n"] += 1
+    def kill_after_chunk_1_checkpoint(path, state):
         real_save_state(path, state)  # the checkpoint really lands on disk...
-        if save_calls["n"] == 1:
+        # Keyed off the model call count, not which numbered _save_state
+        # call this is -- the pre-loop empty checkpoint (issue #217 review:
+        # a kill before chunk 1 must not leave a stale prior-run entry
+        # either) means chunk 1's own checkpoint is no longer necessarily
+        # the very first save this pass makes.
+        if second_caller.calls == 1:
             raise KeyboardInterrupt("simulated hard kill right after chunk 1's own checkpoint")
 
-    monkeypatch.setattr(batch_mod, "_save_state", kill_after_first_checkpoint)
-    second_caller = _counting_caller(_chunk_aware_module_caller())
+    monkeypatch.setattr(batch_mod, "_save_state", kill_after_chunk_1_checkpoint)
     with pytest.raises(KeyboardInterrupt):
         batch_mod.run_batch(
             conn, ["FAKEMOD"], out_dir, second_caller,
@@ -2475,6 +2478,107 @@ def test_run_batch_hard_kill_mid_chunk_loop_neither_marks_the_member_falsely_don
         "(carried over from before the kill) must all be reused -- a dropped tail would "
         "force chunks 2 and 3 to re-render here for no reason"
     )
+
+
+def test_run_batch_kill_before_any_chunk_completes_does_not_leave_a_falsely_done_entry(
+    monkeypatch, tmp_path,
+):
+    """Code-review finding on the #217 fix (round 2): a kill *before* a
+    chunked member's first chunk has even completed -- during
+    build_member_facts, _prune_stale_chunk_files, or chunk 1's own model
+    call itself, easily minutes of wall clock and the single likeliest
+    moment to actually be killed -- previously left that member's on-disk
+    entry as whatever the *previous* run wrote, which can read ok=True.
+    Reproduced here with a second, flat member whose own checkpoint
+    flushes the new corpus signature to disk before the chunked member is
+    ever reached, then a kill on the chunked member's very first model
+    call, before `_generate_module_doc_chunked`'s own per-chunk checkpoint
+    ever fires. Without the pre-loop `_checkpoint_chunk_state({})` call,
+    the resumed run would read the chunked member's stale ok=True entry
+    against the now-matching corpus signature and skip it entirely --
+    silently serving half-regenerated (here, entirely stale) output."""
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_rules(conn, 5)  # -> 3 chunks with max_rules_per_call=2
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (2, 'OTHERMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (2, 1, 'irrelevant')")
+    insert_rule = "INSERT INTO rule_candidate (member_id, line_no, construct, condition, raw) VALUES (2, 1, 'IF', 'OTHER-COND-1', 'IF OTHER-COND-1')"
+    conn.execute(insert_rule)
+    conn.execute(
+        "INSERT INTO source_file (id, path, sha256, line_count) VALUES (1, 'FAKEMOD.nsp', 'sha-v1', 1)"
+    )
+    conn.commit()
+
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+
+    def caller_v1(prompt):
+        if "# Fact brief:" not in prompt:
+            from tests.test_batch import _fake_reconciliation_response
+            return _fake_reconciliation_response(prompt, input_tokens=1, output_tokens=2)
+        return _chunk_aware_module_caller()(prompt)
+
+    first = batch_mod.run_batch(
+        conn, ["FAKEMOD", "OTHERMOD"], out_dir, caller_v1,
+        "writing rules text", "template text", max_rules_per_call=2, state_path=state_path,
+    )
+    assert first.failed == 0
+    subdir = batch_mod._output_subdir(conn, "FAKEMOD")
+    state_key = f"{subdir.as_posix()}/FAKEMOD"
+    assert json.loads(state_path.read_text())[state_key]["ok"] is True
+
+    # Both members' rules change, plus a real re-ingest (source_file bump)
+    # so run_batch's corpus-level fast path doesn't skip either member
+    # outright.
+    conn.execute("UPDATE rule_candidate SET condition='COND-1-CHANGED' WHERE member_id=1 AND line_no=1")
+    conn.execute("UPDATE rule_candidate SET condition='OTHER-COND-1-CHANGED' WHERE member_id=2 AND line_no=1")
+    conn.execute("UPDATE source_file SET sha256='sha-v2' WHERE id=1")
+    conn.commit()
+
+    def killed_on_fakemod_chunk(prompt):
+        if "# Fact brief: FAKEMOD" in prompt:
+            raise KeyboardInterrupt("simulated hard kill on FAKEMOD's very first chunk call")
+        if "# Fact brief:" not in prompt:
+            from tests.test_batch import _fake_reconciliation_response
+            return _fake_reconciliation_response(prompt, input_tokens=1, output_tokens=2)
+        return _chunk_aware_module_caller()(prompt)  # OTHERMOD -- must complete and checkpoint first
+
+    with pytest.raises(KeyboardInterrupt):
+        batch_mod.run_batch(
+            conn, ["FAKEMOD", "OTHERMOD"], out_dir, killed_on_fakemod_chunk,
+            "writing rules text", "template text", max_rules_per_call=2, state_path=state_path,
+        )
+
+    saved = json.loads(state_path.read_text())
+    # OTHERMOD's own checkpoint really did flush the new corpus signature
+    # to disk before FAKEMOD was ever reached -- otherwise this test
+    # wouldn't reproduce the hole the pre-loop checkpoint closes.
+    other_subdir = batch_mod._output_subdir(conn, "OTHERMOD")
+    assert saved[f"{other_subdir.as_posix()}/OTHERMOD"]["ok"] is True
+    assert saved[state_key]["ok"] is False, (
+        "a kill before FAKEMOD's first chunk even completes must still mark it not-done -- "
+        "otherwise a resume reads the previous run's stale ok=True against the now-matching "
+        "corpus signature and skips this member forever"
+    )
+
+    third_caller = _counting_caller(_chunk_aware_module_caller())
+
+    def third_run_caller(prompt):
+        if "# Fact brief:" not in prompt:
+            from tests.test_batch import _fake_reconciliation_response
+            return _fake_reconciliation_response(prompt, input_tokens=1, output_tokens=2)
+        return third_caller(prompt)
+
+    third = batch_mod.run_batch(
+        conn, ["FAKEMOD", "OTHERMOD"], out_dir, third_run_caller,
+        "writing rules text", "template text", max_rules_per_call=2, state_path=state_path,
+    )
+    assert third.failed == 0
+    assert third_caller.calls > 0, "FAKEMOD must actually re-render on resume, not be skipped as done"
 
 
 def test_plan_batch_reports_a_member_with_no_prior_state_as_render(indexed_db, tmp_path):

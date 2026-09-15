@@ -2420,7 +2420,7 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
         # `prior_chunks` (last run's state) rather than relying on either
         # alone. See issue #78.
         def _checkpoint_chunk_state(partial_chunk_state: dict, state_key=state_key,
-                                     brief_hash=brief_hash, prior_chunks=prior_chunks) -> None:
+                                    brief_hash=brief_hash, prior_chunks=prior_chunks) -> None:
             # Fires after every chunk (and again after narrative
             # reconciliation) inside generate_module_doc, well before it
             # returns -- writes the in-progress chunk_state to `state` (and,
@@ -2458,6 +2458,24 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
             state[state_key] = entry
             if state_path:
                 _save_state(state_path, state)
+
+        # Checkpoint once, with nothing processed yet, *before* calling
+        # generate_module_doc at all -- not just inside it. Without this,
+        # a kill between entering this loop and this member's first chunk
+        # actually completing (build_member_facts, _prune_stale_chunk_
+        # files, or the whole of chunk 1's own model call -- easily
+        # minutes of wall clock, the single likeliest moment to be killed)
+        # leaves the *previous* run's on-disk entry untouched. If that
+        # entry read ok=True (this member is re-running precisely because
+        # it's stale, but the state file doesn't know that yet), a later
+        # resume's `corpus_unchanged and prior_ok` fast path would read it
+        # as done and skip this now-half-regenerated member forever --
+        # silently serving stale output with nothing left to flag it.
+        # Safe by the same invariant `_checkpoint_chunk_state` itself
+        # relies on: this member is only ever in `to_run_chunked` because
+        # its prior entry is already known-stale, so marking it not-done
+        # up front is always correct, never a false negative.
+        _checkpoint_chunk_state({})
 
         try:
             result = generate_module_doc(
