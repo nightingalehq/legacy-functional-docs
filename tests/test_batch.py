@@ -1617,6 +1617,95 @@ def test_batch_subset_run_reconstructs_prior_coverage_from_a_legacy_state_file(t
     assert saved_after_third[modb_key]["brief_sha256"] != saved_after_first[modb_key]["brief_sha256"]
 
 
+def test_legacy_corpus_members_from_state_reads_bare_and_qualified_keys():
+    """`_legacy_corpus_members_from_state` must reconstruct prior coverage
+    from *any* generation of legacy state file -- not just the one with
+    subdir-qualified `"<subdir>/<NAME>"` keys. An even older generation
+    (pre-dating that qualification) has bare member-name keys with no
+    "/" at all; excluding those would silently under-count that
+    generation's prior coverage, reopening the exact "superset of
+    nothing" hole this function exists to close. Reserved keys must
+    still be excluded either way."""
+    state = {
+        "_corpus_sha256": "deadbeef",
+        "natural/MODA": {"ok": True},
+        "MODB": {"ok": True},
+    }
+    assert batch_mod._legacy_corpus_members_from_state(state) == {"MODA", "MODB"}
+
+
+def test_batch_tolerates_a_corrupted_corpus_members_value(tmp_path):
+    """Issue #218 follow-up: a hand-edited or otherwise corrupted
+    `_corpus_members` value that isn't a list (e.g. a stray string, or
+    accidentally left as an int) must not raise and abort the whole run,
+    and must not silently fail open by treating prior coverage as
+    smaller than it really was (a plain string would otherwise iterate
+    into single characters). It's treated the same as a legacy state
+    file missing `_corpus_members` altogether -- reconstructed from the
+    state file's own member entries."""
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    for member_id, name in ((1, "MODA"), (2, "MODB")):
+        conn.execute(
+            "INSERT INTO member (id, name, dialect, object_type) VALUES (?, ?, 'natural', 'program')",
+            (member_id, name),
+        )
+        conn.execute(
+            "INSERT INTO source_line (member_id, line_no, text) VALUES (?, 1, 'irrelevant')", (member_id,)
+        )
+        conn.execute(
+            "INSERT INTO rule_candidate (member_id, line_no, construct, condition, raw) "
+            "VALUES (?, 1, 'IF', ?, ?)",
+            (member_id, f"{name}-COND-1", f"IF {name}-COND-1"),
+        )
+        conn.execute(
+            "INSERT INTO source_file (id, path, sha256, line_count) VALUES (?, ?, 'sha-v1', 1)",
+            (member_id, f"{name}.nsp"),
+        )
+    conn.commit()
+
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+    first = batch_mod.run_batch(
+        conn, ["MODA", "MODB"], out_dir, FakeCaller(), "writing rules text", "template text",
+        state_path=state_path,
+    )
+    assert first.failed == 0
+    modb_subdir = batch_mod._output_subdir(conn, "MODB")
+    modb_key = f"{modb_subdir.as_posix()}/MODB"
+    saved_after_first = json.loads(state_path.read_text())
+    corpus_sig_after_first = saved_after_first["_corpus_sha256"]
+
+    # Corrupt `_corpus_members` -- a stray string, not the list it should be.
+    saved_after_first["_corpus_members"] = "corrupted"
+    state_path.write_text(json.dumps(saved_after_first))
+
+    # MODB's source genuinely changes -- a real re-ingest would bump this.
+    conn.execute("UPDATE rule_candidate SET condition='MODB-COND-1-CHANGED' WHERE member_id=2")
+    conn.execute("UPDATE source_file SET sha256='sha-v2' WHERE id=2")
+    conn.commit()
+
+    # A subset run against the corrupted state file must not raise, and
+    # must not advance the signature past the untouched MODB.
+    second = batch_mod.run_batch(
+        conn, ["MODA"], out_dir, FakeCaller(), "writing rules text", "template text",
+        state_path=state_path,
+    )
+    assert second.failed == 0
+    saved_after_second = json.loads(state_path.read_text())
+    assert saved_after_second["_corpus_sha256"] == corpus_sig_after_first, (
+        "a subset run against a corrupted _corpus_members must not advance "
+        "the corpus signature past an untouched member"
+    )
+    assert saved_after_second[modb_key] == saved_after_first[modb_key], (
+        "MODB's own entry must be untouched by a run that never covered it"
+    )
+
+
 def test_batch_departed_member_does_not_permanently_freeze_corpus_signature(tmp_path):
     """Issue #218 follow-up: `_corpus_members` only ever grows (union) if
     never intersected back down against what's actually batchable today.

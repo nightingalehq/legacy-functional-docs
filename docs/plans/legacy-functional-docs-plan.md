@@ -74,6 +74,43 @@ GitHub org.
   - Two more regression tests added (legacy-state-file migration;
     departed-member permanent-freeze), each confirmed by reverting the
     fix to fail without it. Full suite green (1087 passed, 2 skipped).
+- A second adversarial review round confirmed all three fixes above (by
+  reverting each in isolation and re-running the suite) and found three
+  smaller real issues, all fixed:
+  - `_legacy_corpus_members_from_state`'s `"/" in key` filter silently
+    under-counted an even older generation of state file (bare
+    member-name keys, pre-dating the subdir-qualified `state_key` --
+    `0e45a63`, before `_corpus_sha256` itself, `ef76532`). Not currently
+    exploitable (today's read loop only ever looks up the qualified
+    form), but relying on that coincidence was a trap. Dropped the `"/"
+    in key` clause -- over-including a key as a member name only makes
+    the superset requirement stricter, never looser.
+  - A corrupted/hand-edited `_corpus_members` that isn't a list (a stray
+    string would silently fail open into single-character "members";
+    an int/bool would raise and abort the run) is now handled the same
+    way as a legacy file missing the key entirely --
+    `isinstance(state.get("_corpus_members"), list)` gates the direct
+    read, falling back to `_legacy_corpus_members_from_state`'s
+    reconstruction otherwise.
+  - Two more regression tests (a corrupted `_corpus_members` value; an
+    older-generation state file with bare, unqualified member-name
+    keys), the first confirmed by reverting the fix to fail without it.
+    Full suite green (1089 passed, 2 skipped).
+  - The review also surfaced a real but genuinely out-of-scope gap,
+    pre-dating this fix entirely (traces to the original #78/#37
+    resumable-state design, not to `d99bda4` or anything in this run):
+    `_corpus_sha256` is written into `state` up front and flushed by the
+    *first* per-member checkpoint, so a process interrupted after some
+    members checkpoint but before others can still leave stale `ok:
+    True` entries alongside an already-advanced signature on disk -- the
+    #218 fix's superset guard protects the clean-exit subset-run case,
+    but doesn't gate the fast-path *read* itself, so it doesn't close
+    this interrupted-run variant of the same symptom. Filed as
+    nightingalehq/legacy-functional-docs#221 rather than folded in here;
+    the suggested direction there is to also gate `corpus_unchanged and
+    prior_ok` on per-member coverage, appending to `_corpus_members`
+    incrementally as each member's own checkpoint lands, rather than
+    only ever writing the whole covered set once up front.
 
 **Progress (2026-09-12v):**
 - Addressed the fifty-sixth Copilot review round on PR #209 (issue #195):

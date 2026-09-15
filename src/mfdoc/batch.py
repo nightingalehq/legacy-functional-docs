@@ -338,11 +338,22 @@ def _legacy_corpus_members_from_state(state: dict) -> set[str]:
     pre-existing state file reproduce issue #218 on the spot -- trivially
     "superset of nothing", advancing the signature while recording only
     its own members and silently orphaning every member missing from this
-    run."""
+    run.
+
+    Deliberately not restricted to keys containing "/": an even older
+    generation of state file (pre-dating the subdir-qualified state_key
+    itself) has bare-name member entries with no "/" at all. Excluding
+    those would silently under-count that generation's prior coverage --
+    the same class of hole this function exists to close -- for a subtle
+    reason (today's read loop happens to only ever look up the qualified
+    form) that isn't worth relying on. Treating any non-reserved key as a
+    member name is always safe in the "under-count coverage" direction:
+    over-including only makes the superset requirement stricter, never
+    looser."""
     return {
         key.rsplit("/", 1)[-1]
         for key in state
-        if key not in _RESERVED_STATE_KEYS and "/" in key
+        if key not in _RESERVED_STATE_KEYS
     }
 
 
@@ -2266,7 +2277,14 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
     # signature on its own again -- only a run covering the full recorded
     # set (or a superset of it) can advance `_corpus_sha256` past that
     # change; this is expected, not a bug, and is exactly what stops a
-    # subset run from silently vouching for members it never looked at.
+    # *clean-exit* subset run from silently vouching for members it never
+    # looked at. This does NOT, on its own, protect a run interrupted
+    # mid-way: `_corpus_sha256` is still written up front (issue #78,
+    # just below) and flushed by the first per-member checkpoint, so a
+    # process killed after some members checkpoint but before others can
+    # still leave stale `ok: True` entries alongside an already-advanced
+    # signature -- a pre-existing gap in the resume design, not something
+    # this fix closes; tracked separately.
     # The read just above (`corpus_unchanged`) stays unconditional --
     # comparing against whatever signature is already on disk is always
     # safe on its own; only the *write* that could make an untouched
@@ -2276,14 +2294,19 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
             # First-ever run against this state file: no prior signature,
             # so there's genuinely no prior coverage to respect.
             prior_corpus_members: set[str] = set()
-        elif "_corpus_members" in state:
+        elif isinstance(state.get("_corpus_members"), list):
             prior_corpus_members = set(state["_corpus_members"])
         else:
             # Legacy state file, written before this fix: has
-            # `_corpus_sha256` but no `_corpus_members`. Treating that as
-            # empty prior coverage (rather than reconstructing it) would
-            # reproduce issue #218 on the very first post-upgrade subset
-            # run -- see `_legacy_corpus_members_from_state`.
+            # `_corpus_sha256` but no `_corpus_members` (or a corrupted/
+            # hand-edited `_corpus_members` that isn't a list -- treated
+            # the same way rather than raising or failing open, since a
+            # frozen signature is explicitly recovered by hand-editing
+            # this very file elsewhere in this docstring/comment).
+            # Treating either case as empty prior coverage (rather than
+            # reconstructing it) would reproduce issue #218 on the very
+            # first post-upgrade subset run -- see
+            # `_legacy_corpus_members_from_state`.
             prior_corpus_members = _legacy_corpus_members_from_state(state)
         # A member that's left the corpus entirely (deleted, renamed, no
         # longer batchable) must drop out of the requirement -- otherwise
@@ -2522,8 +2545,9 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
         # issue #218), so every incremental checkpoint above already
         # carries whatever was already on disk -- this final save just
         # persists whatever the last member/chunk loop iteration didn't
-        # already flush (a no-op if every member was skipped and this run touched
-        # nothing at all).
+        # already flush (a content-identical rewrite, not a true no-op,
+        # when every member was skipped and this run touched nothing at
+        # all -- `_save_state` always rewrites the file).
         _save_state(state_path, state)
 
     total_in = sum(r.input_tokens for r in results)
