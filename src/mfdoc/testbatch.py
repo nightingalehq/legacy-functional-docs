@@ -2269,8 +2269,21 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
         # requirement -- otherwise no future run, however large, could
         # ever be a superset of a set containing a member that no longer
         # qualifies, permanently freezing `_corpus_sha256` with no
-        # recovery short of hand-editing the state file.
-        batchable_now = set(select_test_batch_members(conn))
+        # recovery short of hand-editing the state file. "Batchable now"
+        # is deliberately *not* `select_test_batch_members(conn)` alone
+        # (mirroring batch.py's final #218 shape): `run_test_batch`'s own
+        # `members` argument is never required to satisfy that selection
+        # (a caller can pass any member name explicitly), so a member
+        # that's still very much present and actively being run right now
+        # (it's in `members`) must not be treated as departed just
+        # because it wouldn't be auto-selected on its own. Nor is it
+        # *only* `members`: an ordinary unfiltered `mfdoc test-batch`
+        # (which only ever passes `select_test_batch_members`'s own list)
+        # must eventually be able to advance the signature past a member
+        # outside both, once that member is genuinely no longer part of
+        # any run. Union, not `select_test_batch_members` alone, is the
+        # actual rule in force here.
+        batchable_now = set(select_test_batch_members(conn)) | set(members)
         departed = prior_corpus_members - batchable_now
         if departed:
             # Dropping a departed member from the *requirement* isn't
@@ -2284,15 +2297,33 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
             # the returned member would read its stale, never-updated
             # entry as still current via `corpus_unchanged and prior_ok`
             # -- reproducing the exact silent-skip failure this fix
-            # exists to close. Pruning the entry here, at the moment the
-            # member is recognised as departed, means a returning member
-            # has nothing stale to be blessed by.
+            # exists to close.
+            #
+            # Demoted (ok set False), not deleted (mirroring batch.py's
+            # final #218 shape): a member can be "departed" from *this
+            # run's* perspective while still being perfectly fine and
+            # actively worked on by other invocations sharing this state
+            # file (outside select_test_batch_members and not named here,
+            # but named in a concurrent/later run) -- see the "batchable
+            # now" definition above. Deleting its entry outright would
+            # throw away a chunked member's already-paid-for
+            # `prior_chunks`/narrative cache for nothing, forcing a full
+            # re-render the moment it's run again, on every single
+            # ordinary run in between. `ok: False` alone is enough to
+            # satisfy the "nothing stale to be blessed by" requirement
+            # above: `prior_ok` already requires `ok: True`, and this
+            # module's own chunk/brief-hash reuse checks independently
+            # re-validate content before ever trusting a carried-forward
+            # chunk cache, so keeping the entry here can't cause incorrect
+            # reuse.
             for key in [
                 k for k in state
                 if k not in _TEST_BATCH_RESERVED_STATE_KEYS
                 and len(k.split("::")) >= 3 and k.split("::")[-3] in departed
             ]:
-                del state[key]
+                entry = state[key]
+                if isinstance(entry, dict):
+                    entry["ok"] = False
         prior_corpus_members &= batchable_now
         # An empty `members` list (nothing to run) must never establish
         # or advance coverage.

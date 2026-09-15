@@ -159,6 +159,46 @@ GitHub org.
   worth a follow-up issue against both modules together rather than a
   testbatch-only patch that would immediately diverge from its sibling
   again. Full suite green (1093 passed, 2 skipped).
+- Sync round: after round 3 above assessed this branch as matching
+  `batch.py`'s #218 fix "in its final shape," two further review rounds
+  on `batch.py` itself (PR #223) found two more real bugs in that fix,
+  landing after this branch's own round 3. Ported both here:
+  1. The "still known" existence check (`batchable_now` here) was
+     `set(select_test_batch_members(conn))` alone -- the same over-strict
+     rule an earlier `batch.py` iteration had used and then fixed: it
+     wrongly treated a member outside that auto-selected set as
+     "departed" even while it was actively named in `members` for this
+     exact run, deleting its cached chunk state on every single resumed
+     re-run with zero content change. Fixed by unioning with `members`,
+     mirroring `batch.py`'s final shape:
+     `set(select_test_batch_members(conn)) | set(members)`.
+  2. A departed member's state entry was still fully deleted
+     (`del state[key]`), not merely demoted. Round 2's fix (above) added
+     this deletion specifically to close the "departed member returns
+     with stale entry" hole, but review of the `batch.py` sibling found
+     deletion throws away a chunked member's already-paid-for `chunks`
+     cache the moment it's outside `select_test_batch_members` and left
+     out of one intervening run -- forcing a full, unnecessary re-render
+     the next time it's explicitly run again. Fixed by setting `ok:
+     False` on the entry instead of deleting it: `prior_ok` already
+     requires `ok: True`, and per-chunk reuse (`_test_chunk_reuse_ok`,
+     the brief-hash check) independently re-validates content before
+     ever trusting a carried-forward `chunks` entry, so a
+     demoted-but-kept entry can't cause incorrect reuse.
+  Two new regression tests added, mirroring `batch.py`'s own pair for
+  this exact fix
+  (`test_run_test_batch_a_member_outside_select_test_batch_members_is_
+  never_pruned_while_still_run`,
+  `test_run_test_batch_departed_member_keeps_its_chunk_cache_across_an_
+  intervening_unfiltered_run`), each confirmed to fail without its fix by
+  a targeted local revert (via `git stash`), re-run, and restore --
+  `select_test_batch_members` monkeypatched in both, since its own
+  selection criterion (>=1 `test_case` row) has no equivalent to
+  `batch.py`'s object_type filter that can exclude a member with real,
+  unchanged content from auto-selection. Full suite green (1095 passed,
+  2 skipped). Not yet pushed/PR'd: `batch.py`'s own PR #223 hasn't merged
+  yet, so this branch stays parked pending that merge in case it picks up
+  any further last-minute review fixes.
 
 **Progress (2026-09-12v):**
 - Addressed the fifty-sixth Copilot review round on PR #209 (issue #195):

@@ -6415,3 +6415,156 @@ def test_legacy_test_batch_corpus_members_from_state_handles_both_key_generation
         "_corpus_sha256": "irrelevant",
     }
     assert _legacy_test_batch_corpus_members_from_state(state) == {"MODA", "MODB"}
+
+
+def test_run_test_batch_a_member_outside_select_test_batch_members_is_never_pruned_while_still_run(
+    tmp_path, monkeypatch,
+):
+    """Sync with batch.py's final #218 shape (PR #223): a member outside
+    `select_test_batch_members(conn)` must not be treated as "departed"
+    merely because it isn't auto-selected, as long as it's actually named
+    in `members` for this run. Before this sync, testbatch's own
+    `batchable_now` was `set(select_test_batch_members(conn))` alone --
+    the same over-strict rule batch.py's own history went through (and
+    fixed) before this fix ever landed here: it wrongly pruned a member's
+    cached chunk state on every single resumed re-run, even with zero
+    content change, as long as that member sat outside the auto-selected
+    set.
+
+    `select_test_batch_members`'s own selection criterion (>=1 test_case
+    row) has no equivalent to batch.py's object_type filter that can
+    exclude a member with real, unchanged content from auto-selection --
+    so this pins the same shape directly via monkeypatch, standing in for
+    whatever real-world reason a caller might explicitly name a member
+    `select_test_batch_members` wouldn't itself have picked (e.g. a
+    `test-gen --member` style explicit invocation sharing this same
+    `--state` file with a `test-batch` run)."""
+    import sqlite3
+
+    from mfdoc import testbatch
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_scenarios(conn, 5)  # -> 3 chunks with max_scenarios_per_call=2
+
+    # FAKEMOD is never auto-selected for the rest of this test, yet it's
+    # always explicitly named in `members` below -- exactly the shape
+    # that must survive.
+    monkeypatch.setattr(testbatch, "select_test_batch_members", lambda conn: [])
+
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+    state_key = "natural::FAKEMOD::python::pytest"
+
+    first_caller = _counting_caller(_chunk_aware_caller("python", "pytest"))
+    first = testbatch.run_test_batch(
+        conn, ["FAKEMOD"], "python", "pytest", out_dir, first_caller,
+        "writing rules text", "template text", max_scenarios_per_call=2, state_path=state_path,
+    )
+    assert first.failed == 0
+    assert first_caller.calls > 0
+    original_chunks = dict(json.loads(state_path.read_text())[state_key]["chunks"])
+    assert set(original_chunks) == {"1", "2", "3"}
+
+    second_caller = _counting_caller(_chunk_aware_caller("python", "pytest"))
+    second = testbatch.run_test_batch(
+        conn, ["FAKEMOD"], "python", "pytest", out_dir, second_caller,
+        "writing rules text", "template text", max_scenarios_per_call=2, state_path=state_path,
+    )
+    assert second.failed == 0
+    assert second_caller.calls == 0, "nothing changed -- FAKEMOD must be fully reused, not re-rendered"
+    saved_after_second = json.loads(state_path.read_text())
+    assert saved_after_second[state_key]["chunks"] == original_chunks, (
+        "FAKEMOD's cached chunk state must survive a resume even though it's outside "
+        "select_test_batch_members -- it must not be treated as departed while it's still "
+        "being explicitly run"
+    )
+
+
+def test_run_test_batch_departed_member_keeps_its_chunk_cache_across_an_intervening_unfiltered_run(
+    tmp_path, monkeypatch,
+):
+    """Sync with batch.py's final #218 shape (PR #223), round-8 finding: a
+    member outside `select_test_batch_members` and left out of an
+    *intervening* run is genuinely "departed" from that run's own
+    perspective (see the sibling test above for why that's still correct
+    -- an unfiltered run must eventually be able to advance the corpus
+    signature past it). But "departed" must only demote the entry
+    (`ok: False`), never delete it outright: deleting would throw away a
+    chunked member's already-paid-for chunk cache for nothing, forcing a
+    full re-render the moment it's explicitly run again. This pins that a
+    chunked member's cache survives an intervening unfiltered run that
+    never even names it."""
+    import sqlite3
+
+    from mfdoc import testbatch
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_two_flat_test_batch_members(conn)  # MODA (id=1), MODB (id=2) -- only MODA used here
+    # FAKEMOD seeded by hand at member_id=3 to avoid colliding with MODA/MODB
+    # above (see _seed_fakemod_scenarios' own hardcoded member_id=1).
+    from mfdoc.db import insert
+
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (3, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (3, 1, 'irrelevant')")
+    for n in range(1, 6):
+        insert(
+            conn, "test_case", member_id=3, kind="unit", scenario_name=f"FAKEMOD:BR-{n:03d}",
+            given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+            when_json='{"construct": "IF", "condition": "X", "citation": "[[FAKEMOD:1]]"}',
+            then_json='{"citation": "[[FAKEMOD:1]]", "source_excerpt": []}',
+            status="characterization", citation="FAKEMOD:1", confidence="verified",
+        )
+    conn.commit()
+
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+    fakemod_key = "natural::FAKEMOD::python::pytest"
+
+    def caller(prompt: str) -> ModelResponse:
+        if "FAKEMOD" in prompt:
+            return _chunk_aware_caller("python", "pytest")(prompt)
+        return _valid_test_doc_caller("python", "pytest")(prompt)
+
+    first = testbatch.run_test_batch(
+        conn, ["MODA", "FAKEMOD"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", max_scenarios_per_call=2, state_path=state_path,
+    )
+    assert first.failed == 0
+    original_chunks = dict(json.loads(state_path.read_text())[fakemod_key]["chunks"])
+    assert set(original_chunks) == {"1", "2", "3"}
+
+    # FAKEMOD is never auto-selected for the rest of this test -- the
+    # intervening run below (naming only MODA, exactly like an ordinary
+    # unfiltered `mfdoc test-batch` per cli.py) leaves it out entirely,
+    # making it "departed" from that run's own perspective.
+    monkeypatch.setattr(testbatch, "select_test_batch_members", lambda conn: ["MODA"])
+    unfiltered = testbatch.run_test_batch(
+        conn, ["MODA"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path,
+    )
+    assert unfiltered.failed == 0
+    saved_after_unfiltered = json.loads(state_path.read_text())
+    assert saved_after_unfiltered[fakemod_key]["ok"] is False
+    assert saved_after_unfiltered[fakemod_key]["chunks"] == original_chunks, (
+        "a departed member's cached chunk state must survive being demoted -- deleting it "
+        "would force a full unnecessary re-render the next time it's run"
+    )
+
+    # Explicitly running FAKEMOD again, with nothing actually changed,
+    # must be a full cache hit -- not a full re-render paid for nothing.
+    fakemod_caller = _counting_caller(_chunk_aware_caller("python", "pytest"))
+    second = testbatch.run_test_batch(
+        conn, ["FAKEMOD"], "python", "pytest", out_dir, fakemod_caller,
+        "writing rules text", "template text", max_scenarios_per_call=2, state_path=state_path,
+    )
+    assert second.failed == 0
+    assert fakemod_caller.calls == 0, (
+        "FAKEMOD's chunk cache must have survived the intervening unfiltered run -- a deleted "
+        "entry would force all 3 chunks to re-render for nothing"
+    )
