@@ -242,5 +242,10 @@ Two corrections found in review, before this shipped:
   `_uncited_provenance_problems`: every citation actually present in a
   reconciled section is checked, deterministically, against the set of
   citations literally present in the excerpts the call was given
-  (`_citations_in`) -- a citation outside that set fails the attempt and
-  triggers a retry, the same as any other `validate_doc` problem.
+  (`_citations_in`), **plus one deliberately-seeded exception (issue
+  #216): the bare whole-member citation form** (`reference/writing-
+  rules.md`'s documented form for a claim true of the module as a whole),
+  which is never literally present in any excerpt but is also never a
+  fabrication, since it names the module itself, not a borrowed line --
+  a citation outside that set fails the attempt and triggers a retry, the
+  same as any other `validate_doc` problem.

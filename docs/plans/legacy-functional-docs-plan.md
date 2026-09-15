@@ -188,6 +188,159 @@ GitHub org.
     remains separately open and out of scope regardless.
   - One new regression test, confirmed by reverting the fix to fail
     without it. Full suite green (1092 passed, 2 skipped).
+- **Rebase-time fix, found merging onto #217's landed changes**: the
+  departed-member check above used `select_batch_members(conn)` (dialect/
+  object_type-filtered) as its "does this member still exist" ground
+  truth. That's wrong -- `run_batch`'s own `members` argument is never
+  required to satisfy that filter (a caller can pass any member name;
+  `select_batch_members` is only what an unfiltered `mfdoc batch` with no
+  `--members` would auto-select), so a member whose `object_type` happens
+  to be unset (several existing test fixtures never set it, since nothing
+  in `run_batch`'s own logic needed it before this) or outside
+  `BATCHABLE_OBJECT_TYPES` was wrongly treated as "departed" on every run
+  -- pruning its state entry, including a chunked member's cached
+  `_narrative`, even though it was present and being actively processed
+  by that very run. Caught by four pre-existing #217 tests failing after
+  the merge (a chunked member's `_narrative` entry vanishing on any
+  re-run). Fixed by checking existence in the `member` table directly
+  (`SELECT DISTINCT name FROM member`) instead. Full suite green (1109
+  passed, 2 skipped, after merging #217's own additions).
+
+**Progress (2026-09-15, #217):**
+- Fixed issue #217: `mfdoc batch`'s chunk-level resume state was only
+  persisted to disk once per member (after every one of that member's
+  chunks completed), not once per chunk -- a run interrupted partway
+  through a large chunked member lost every already-completed chunk's
+  work on resume, regenerating the whole member from scratch.
+- Added an `on_chunk_done` callback threaded through `generate_module_doc`/
+  `_generate_module_doc_chunked`, fired with a `chunk_state` snapshot
+  after every chunk (and after narrative reconciliation); `run_batch`
+  wires this to write the partial state to disk immediately.
+- Two rounds of review caught real bugs in the checkpointing logic
+  itself: (1) a mid-flight checkpoint could leave a prior run's stale
+  `ok: True`/`brief_sha256` in place (only "chunks" was overwritten) and
+  could drop not-yet-reached tail chunks' still-good entries by replacing
+  rather than merging with `prior_chunks`; (2) more fundamentally, no
+  member -- chunked or flat -- had its state entry marked not-done until
+  *its own* work produced a result, so a kill on one member, after a
+  sibling member's checkpoint had already flushed a new corpus signature
+  to disk, could leave that member's previous-run `ok: True` entry
+  permanently read as "done" by the corpus-unchanged resume fast path,
+  silently serving stale output forever. Fixed by having the routing loop
+  mark every member about to run as not-done, in one save, before the
+  worker pool or the chunked-member loop ever starts.
+- A fourth review round found one more variant of the same "reads as done
+  when it isn't" class, unrelated to checkpoint timing: `prior_ok` (in
+  both `run_batch` and `plan_batch`) only ever checked that a chunked
+  member's own index document exists, never that the chunk files it
+  *links to* are still on disk -- a chunk file lost to an out-of-band
+  delete (or any other bug) while the database, resume state, and index
+  all stayed otherwise unchanged left that member skipped indefinitely,
+  since `validate_doc` never resolves a markdown link to notice the
+  linked file is gone. Fixed with `_chunked_member_missing_a_chunk_file`,
+  mirroring `testbatch.py`'s own fix for the identical gap on generated
+  tests. Filed two related, larger findings from the same review round as
+  their own follow-ups rather than folding them into this fix: #218 (a
+  `--members` subset run advances the *global* corpus signature, which
+  can falsely mark an out-of-scope member as done too) and #219 (port
+  #218's fix, once decided, to `testbatch.py`'s own routing loop, which
+  has the identical gap and none of #217's other fixes either).
+- A fifth review round found that the round-3 routing-loop pre-mark fix
+  itself (above) was asymmetric: the `to_run_chunked` half deliberately
+  carries a member's prior `chunks` forward into its not-done pre-mark
+  entry, but the `to_run` (flat) half didn't, wiping `chunks` the moment
+  a member that used to be chunked (e.g. `max_rules_per_call` raised)
+  routed flat and got pre-marked -- a kill right there lost every one of
+  that member's already-completed chunks' resumable progress even though
+  the chunk files on disk were untouched, forcing a full re-render of all
+  of them once the threshold came back down. Fixed by carrying `chunks`
+  forward in the flat pre-mark too, exactly as the chunked half already
+  does.
+- A sixth review round found the fifth round's fix only covered the
+  window up to a flat member's *own* completion write: all three of the
+  flat pool's own state writes (initial model-call exception, retry-call
+  exception, and normal completion after a validation retry still fails)
+  built a fresh dict with no `chunks` key, wiping the carried-forward
+  value the instant that member's own work finished with `ok: False`. A
+  transient model failure (rate limit, timeout, a validation failure that
+  doesn't clear on retry) -- far more common than a hard kill -- destroyed
+  the same resumable chunk state just as thoroughly. Fixed by carrying
+  `chunks` forward on all three `ok: False` writes too (never on
+  success, where the member is genuinely a single document now).
+- A seventh review round found the chunked loop's own final write
+  (`state[state_key] = {..., "chunks": result.chunk_state}`) still
+  replaced wholesale instead of merging, unlike its own two neighbours in
+  the same loop iteration (`_checkpoint_chunk_state` and the outer
+  except-handler, both of which already merge `prior_chunks` in). When
+  any chunk fails validation, `_generate_module_doc_chunked` never writes
+  a `_narrative` entry into `result.chunk_state` (narrative synthesis is
+  always skipped once any chunk is unrecoverable), so this wholesale
+  write silently discarded a still-good `_narrative` entry
+  `_checkpoint_chunk_state` had already recorded earlier in the same
+  pass -- forcing the most expensive call a chunked member makes (whole-
+  module reconciliation) to re-run on the next resume even when every ok
+  chunk's body was byte-identical to what produced the cached narrative
+  last time. Fixed by merging on `ok: False` here too, matching the same
+  shape as the flat-member fixes above -- deliberately *not* merging on
+  `ok: True`, where the result's own `chunk_state` is always this pass's
+  complete, consistent set (merging stale higher-numbered chunk keys from
+  a since-shrunk member there would corrupt
+  `_chunked_member_missing_a_chunk_file`'s width inference).
+- Thirteen new regression tests, eleven confirmed (by reverting the
+  corresponding code) to fail without their fix. Full suite green (1094
+  passed, 2 skipped).
+
+**Progress (2026-09-15, #216):**
+- Fixed issue #216: `mfdoc batch`'s module-level narrative-synthesis
+  reconciliation call failed its own citation/hedge validation on
+  high-chunk-count modules, because a genuinely whole-module claim
+  spanning multiple chunks has no single chunk-excerpt citation to copy,
+  but `_RECONCILIATION_INSTRUCTIONS` told the model every sentence needed
+  exactly one, copied from one of the given excerpts.
+- The deterministic checks that matter (`validate.py`'s
+  `_uncited_assertions`, and this module's own
+  `_uncited_provenance_problems`) already tolerated a sentence carrying
+  more than one citation -- only the prompt text needed to invite the
+  pattern. Round-2 review caught that the fix as first written still
+  contradicted `reference/writing-rules.md`'s own documented bare
+  whole-member citation form ("for statements about the module as a
+  whole") -- a model correctly using that form for a genuinely
+  whole-module claim had it rejected as "not present in any given chunk
+  excerpt". Fixed by seeding `_generate_module_index_narrative`'s
+  `allowed_citations` with the bare whole-member form (never a
+  fabrication, since it names the module itself, not a borrowed line),
+  and steering the instructions to prefer it for a true whole-module
+  claim, reserving a bounded (at most three citations) comma-separated
+  list for the narrower case of a claim spanning some, but not all,
+  chunks.
+- `validate.py`'s `_reversed_condition_problems` already opts out of
+  polarity-checking any multi-citation sentence; documented that this is
+  now a known, accepted tradeoff given the reconciliation prompt actively
+  invites the pattern, not an oversight -- no code change, since the
+  reconciled sections rarely narrate IF/ELSE polarity in the first place
+  (that lives in the Business rules section, which reconciliation never
+  touches).
+- Round-3 review caught that the whole-member-form guidance's own
+  qualifier ("not just true of every chunk you happen to have seen") was
+  vacuous -- the given excerpts *are* every chunk by construction, once
+  every chunk has validated ok -- and so could talk a careful model back
+  into the comma-list/citation-stacking failure this fix exists to avoid.
+  Reworded to state the actual condition (the claim generalizes across
+  all the excerpts given, which together cover the whole module).
+  Documented two tradeoffs the seeded whole-member citation form
+  introduces, previously unrecorded: it's invisible to `sample.py`'s
+  claim-verification sampling (skips any citation with no line number),
+  and it's an otherwise-unbounded provenance exception for the *claim*
+  even though the *citation* itself can't be a fabrication. Added a cheap
+  `CITATION.fullmatch` guard against a pathological member name (a colon
+  in it) accidentally seeding a real, resolvable line citation for a
+  different member. Updated the design spec's "As built" section and
+  `_uncited_provenance_problems`'s docstring, both now-stale after the
+  round-2 change (CLAUDE.md's "update the doc the change actually
+  touches" rule).
+- Seven new regression tests, four confirmed (by temporarily reverting
+  the relevant code) to fail without their corresponding fix. Full suite
+  green (1091 passed, 2 skipped).
 
 **Progress (2026-09-12v):**
 - Addressed the fifty-sixth Copilot review round on PR #209 (issue #195):
