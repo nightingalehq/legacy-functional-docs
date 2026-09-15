@@ -2602,9 +2602,29 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
                 chunk_state={**(prior_chunks or {}), **(in_progress_chunks or {})},
             )
         results.append(result)
+        # A normal (non-exception) ok=False return -- e.g. one chunk failed
+        # validation on both attempts -- only ever reflects the chunks
+        # `_generate_module_doc_chunked` itself touched this pass, which
+        # skips `_narrative` entirely once any chunk is unrecoverable (see
+        # its own `else:` branch). Replacing wholesale here would silently
+        # throw away a still-good `_narrative` entry (and any other
+        # not-yet-reached chunk) that `_checkpoint_chunk_state` already
+        # merged into `state` earlier in this same iteration -- the exact
+        # "reads as done when it isn't"/dropped-tail class issue #217 is
+        # about, just on the final write instead of a mid-loop checkpoint.
+        # Merge only on ok=False; an ok=True result's chunk_state is always
+        # this pass's complete, consistent set (see the exception handler's
+        # own comment above for why merging *there* is safe but merging a
+        # successful result would not be -- stale higher-numbered chunk
+        # keys from a since-shrunk member could corrupt
+        # `_chunked_member_missing_a_chunk_file`'s width inference).
+        prior_final_chunks = (state.get(state_key) or {}).get("chunks") if not result.ok else None
         state[state_key] = {
             "ok": result.ok, "attempts": result.attempts, "brief_sha256": brief_hash,
-            "chunks": result.chunk_state,
+            "chunks": (
+                result.chunk_state if result.ok
+                else {**(prior_final_chunks or {}), **(result.chunk_state or {})}
+            ),
         }
         # Checkpoint after every chunked member too -- these are rendered
         # serially and can each involve several model calls of their own, so

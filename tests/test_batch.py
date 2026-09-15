@@ -2645,6 +2645,89 @@ def test_run_batch_transient_failure_of_a_chunked_member_pre_marked_flat_keeps_i
     )
 
 
+def test_run_batch_chunked_member_validation_failure_keeps_the_narrative_entry(tmp_path):
+    """Code-review finding (round 7): the chunked loop's own final write
+    (`state[state_key] = {..., "chunks": result.chunk_state}`) replaced
+    wholesale instead of merging, unlike its own neighbours in the same
+    loop iteration (`_checkpoint_chunk_state` and the outer except handler,
+    both of which merge `prior_chunks` in). When any chunk fails
+    validation, `_generate_module_doc_chunked` never writes a `_narrative`
+    entry into `result.chunk_state` (narrative synthesis is skipped
+    outright), so the wholesale-replace write silently threw away a
+    still-good `_narrative` entry `_checkpoint_chunk_state` had already
+    merged into `state` earlier in this same pass -- forcing the
+    (expensive) whole-module reconciliation call to re-run on the next
+    resume even when every ok chunk's body is byte-identical to what
+    produced the cached narrative last time."""
+    import sqlite3
+    from mfdoc.db import SCHEMA
+    from mfdoc.validate import validate_doc
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_rules(conn, 5)  # -> 3 chunks with max_rules_per_call=2: BR-001/2, BR-003/4, BR-005
+    conn.commit()
+
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+
+    first = batch_mod.run_batch(
+        conn, ["FAKEMOD"], out_dir, _chunk_aware_module_caller(),
+        "writing rules text", "template text", max_rules_per_call=2, state_path=state_path,
+    )
+    assert first.failed == 0
+    subdir = batch_mod._output_subdir(conn, "FAKEMOD")
+    state_key = f"{subdir.as_posix()}/FAKEMOD"
+    original_chunks = dict(json.loads(state_path.read_text())[state_key]["chunks"])
+    assert set(original_chunks) == {"1", "2", "3", "_narrative"}
+
+    # Force FAKEMOD to be reprocessed without changing any rule content --
+    # deleting chunk 2's own file is enough to fail its resume check (issue
+    # #217 round-4 guard), same technique as
+    # test_run_batch_never_skips_a_chunked_member_whose_chunk_file_is_missing.
+    (out_dir / subdir / "FAKEMOD.chunk2.md").unlink()
+
+    good_caller = _chunk_aware_module_caller()
+
+    def chunk_2_fails_validation(prompt: str) -> batch_mod.ModelResponse:
+        if "BR-003" in prompt:
+            return batch_mod.ModelResponse(text="not a valid document", input_tokens=1, output_tokens=1)
+        return good_caller(prompt)
+
+    second = batch_mod.run_batch(
+        conn, ["FAKEMOD"], out_dir, chunk_2_fails_validation,
+        "writing rules text", "template text", max_rules_per_call=2, state_path=state_path,
+    )
+    assert second.failed == 1
+
+    entry_after_failure = json.loads(state_path.read_text())[state_key]
+    assert entry_after_failure["ok"] is False
+    assert entry_after_failure["chunks"]["1"] == original_chunks["1"]
+    assert entry_after_failure["chunks"]["3"] == original_chunks["3"]
+    assert entry_after_failure["chunks"]["2"]["ok"] is False
+    assert entry_after_failure["chunks"].get("_narrative") == original_chunks["_narrative"], (
+        "a normal (non-exception) chunk validation failure must still carry the previous run's "
+        "`_narrative` entry forward -- narrative synthesis is always skipped when any chunk "
+        "fails, so replacing `chunks` wholesale here silently discards a still-good, reusable "
+        "narrative the mid-loop checkpoint had already recorded"
+    )
+
+    third_caller = _counting_caller(_chunk_aware_module_caller())
+    third = batch_mod.run_batch(
+        conn, ["FAKEMOD"], out_dir, third_caller,
+        "writing rules text", "template text", max_rules_per_call=2, state_path=state_path,
+    )
+    assert third.failed == 0
+    assert third_caller.calls == 1, (
+        "only chunk 2 (the one that actually failed last run) should need a model call -- "
+        "chunks 1 and 3 reuse their untouched files, and the narrative must reuse its carried-"
+        "forward entry (its input hash is unchanged) rather than re-running the whole-module "
+        "reconciliation call"
+    )
+    assert validate_doc(conn, out_dir / subdir / "FAKEMOD.md")["ok"]
+
+
 def test_run_batch_kill_before_any_chunk_completes_does_not_leave_a_falsely_done_entry(
     monkeypatch, tmp_path,
 ):

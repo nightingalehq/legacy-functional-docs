@@ -73,8 +73,27 @@ GitHub org.
   the same resumable chunk state just as thoroughly. Fixed by carrying
   `chunks` forward on all three `ok: False` writes too (never on
   success, where the member is genuinely a single document now).
-- Eleven new regression tests, nine confirmed (by reverting the
-  corresponding code) to fail without their fix. Full suite green (1093
+- A seventh review round found the chunked loop's own final write
+  (`state[state_key] = {..., "chunks": result.chunk_state}`) still
+  replaced wholesale instead of merging, unlike its own two neighbours in
+  the same loop iteration (`_checkpoint_chunk_state` and the outer
+  except-handler, both of which already merge `prior_chunks` in). When
+  any chunk fails validation, `_generate_module_doc_chunked` never writes
+  a `_narrative` entry into `result.chunk_state` (narrative synthesis is
+  always skipped once any chunk is unrecoverable), so this wholesale
+  write silently discarded a still-good `_narrative` entry
+  `_checkpoint_chunk_state` had already recorded earlier in the same
+  pass -- forcing the most expensive call a chunked member makes (whole-
+  module reconciliation) to re-run on the next resume even when every ok
+  chunk's body was byte-identical to what produced the cached narrative
+  last time. Fixed by merging on `ok: False` here too, matching the same
+  shape as the flat-member fixes above -- deliberately *not* merging on
+  `ok: True`, where the result's own `chunk_state` is always this pass's
+  complete, consistent set (merging stale higher-numbered chunk keys from
+  a since-shrunk member there would corrupt
+  `_chunked_member_missing_a_chunk_file`'s width inference).
+- Thirteen new regression tests, eleven confirmed (by reverting the
+  corresponding code) to fail without their fix. Full suite green (1094
   passed, 2 skipped).
 
 **Progress (2026-09-12v):**
