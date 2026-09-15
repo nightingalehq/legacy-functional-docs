@@ -6300,6 +6300,23 @@ def test_run_test_batch_tolerates_a_corrupted_corpus_members_value(tmp_path):
         "MODB's own entry must be untouched by a run that never covered it"
     )
 
+    # Also the raising case, not just the silently-fails-open case above:
+    # an int is neither iterable (a string is) nor a list, so a naive
+    # `set(state["_corpus_members"])` would raise TypeError and abort the
+    # whole run rather than falling through to legacy reconstruction.
+    saved_after_second["_corpus_members"] = 123
+    state_path.write_text(json.dumps(saved_after_second), encoding="utf-8")
+    third = testbatch.run_test_batch(
+        conn, ["MODA"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path,
+    )
+    assert third.ok == 1
+    saved_after_third = json.loads(state_path.read_text())
+    assert saved_after_third["_corpus_sha256"] == corpus_sig_after_first, (
+        "an int _corpus_members must not raise, and must not advance the corpus signature "
+        "past an untouched member either"
+    )
+
 
 def test_run_test_batch_departed_member_that_returns_does_not_reopen_the_untouched_member_bug(tmp_path):
     """Round-2 review finding on issue #219's own fix: dropping a departed
@@ -6377,7 +6394,9 @@ def test_run_test_batch_departed_member_that_returns_does_not_reopen_the_untouch
         "writing rules text", "template text", state_path=state_path,
     )
     assert final.ok == 2
-    assert final_caller.calls > 0, "MODB must actually render, not be skipped as still current"
+    assert final_caller.calls == 1, (
+        "MODB alone must render (MODA's own brief is unchanged), not be skipped as still current"
+    )
 
 
 def test_legacy_test_batch_corpus_members_from_state_handles_both_key_generations():

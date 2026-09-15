@@ -140,6 +140,25 @@ GitHub org.
   assertion tightened to an exact count). Findings #1 and #2 each
   confirmed to fail without their fix by a targeted local revert, re-run,
   and restore. Full suite green (1093 passed, 2 skipped).
+- Third review round confirmed round 1/2's fixes correctly match
+  `batch.py`'s own final, fully-hardened #218 shape (traced fix-by-fix
+  against all four of its commits) and found no blocking issues -- the
+  branch was assessed as PR-ready from that round. Two small
+  test-quality nits addressed anyway: tightened a remaining loose
+  `> 0` call-count assertion (in the departed-member-returns test) to an
+  exact count, and extended the corrupted-`_corpus_members` test to also
+  cover the raising case (an int, not just a silently-fails-open string).
+  One real but explicitly out-of-scope finding was surfaced and
+  deliberately left unfixed here: neither `run_test_batch` nor its
+  `batch.py` sibling `run_batch` grows `_corpus_members` when the
+  superset gate fails but `corpus_unchanged` is true (a member rendered
+  under an already-current signature, via a *different* subset run that
+  didn't need to advance anything, never gets added to the recorded
+  coverage set) -- a real, narrow silent-skip path, inherited identically
+  from `batch.py`'s current shape rather than introduced by this port;
+  worth a follow-up issue against both modules together rather than a
+  testbatch-only patch that would immediately diverge from its sibling
+  again. Full suite green (1093 passed, 2 skipped).
 
 **Progress (2026-09-12v):**
 - Addressed the fifty-sixth Copilot review round on PR #209 (issue #195):
