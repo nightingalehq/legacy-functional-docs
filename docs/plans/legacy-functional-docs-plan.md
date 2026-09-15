@@ -104,9 +104,12 @@ GitHub org.
     *first* per-member checkpoint, so a process interrupted after some
     members checkpoint but before others can still leave stale `ok:
     True` entries alongside an already-advanced signature on disk -- the
-    #218 fix's superset guard protects the clean-exit subset-run case,
-    but doesn't gate the fast-path *read* itself, so it doesn't close
-    this interrupted-run variant of the same symptom. Filed as
+    #218 fix's superset guard doesn't gate the fast-path *read* itself
+    (only the signature *write*), so it doesn't close this
+    interrupted-run variant of the same symptom (a fourth review round,
+    below, later found and closed a separate way the clean-exit case
+    itself was still incomplete -- this interrupted-run gap remains
+    open regardless). Filed as
     nightingalehq/legacy-functional-docs#221 rather than folded in here;
     the suggested direction there is to also gate `corpus_unchanged and
     prior_ok` on per-member coverage, appending to `_corpus_members`
@@ -151,6 +154,40 @@ GitHub org.
     by.
   - Two more regression tests, each confirmed by reverting its fix to
     fail without it. Full suite green (1091 passed, 2 skipped).
+- A fourth adversarial review round confirmed round three's two fixes
+  (traced the logic by hand and re-verified the `ef76532`/`0e45a63`
+  ordering directly) and found one more genuine correctness hole, closed
+  with a two-line fix plus a regression test:
+  - **A run that failed the superset check (so it correctly didn't
+    advance `_corpus_sha256`) still left its own, now-current members out
+    of `_corpus_members` entirely** -- the `if corpus_members_grew_or_held:`
+    branch was the *only* place `_corpus_members` was ever written, so a
+    non-advancing run's real, freshly-checked member entries were never
+    recorded as covered. That undercounts coverage relative to what's
+    actually true on disk (every member in that run's own `members` gets
+    a real, current state entry regardless of whether the signature
+    advances), and lets a *later*, narrower run trivially satisfy the
+    superset check against the undercounted recorded set -- reopening
+    issue #218 through nothing more than two ordinary, clean-exit
+    `--members` runs in sequence (first `--members A`, establishing
+    `_corpus_members = ["A"]`; then `--members B` while the corpus hasn't
+    changed, correctly not advancing the signature but also not
+    recording B's now-current coverage; then B's source changes for
+    real; then `--members A` again trivially satisfies the superset
+    check against the still-`["A"]`-only recorded set and advances the
+    signature past B's real change). Fixed by adding an `else` branch
+    that still records `sorted(prior_corpus_members | set(members))`
+    into `_corpus_members` on the non-advancing path -- always safe in
+    the "coverage only grows" direction, since it's the superset check
+    itself (not this write) that gates whether a *future* run can
+    advance `_corpus_sha256`.
+  - This also corrects the round-two progress-log wording above, which
+    described the #218 fix's superset guard as protecting "the
+    clean-exit subset-run case" in full -- it didn't, until this fix;
+    the interrupted-run gap (nightingalehq/legacy-functional-docs#221)
+    remains separately open and out of scope regardless.
+  - One new regression test, confirmed by reverting the fix to fail
+    without it. Full suite green (1092 passed, 2 skipped).
 
 **Progress (2026-09-12v):**
 - Addressed the fifty-sixth Copilot review round on PR #209 (issue #195):

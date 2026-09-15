@@ -2282,7 +2282,18 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
     # set (or a superset of it) can advance `_corpus_sha256` past that
     # change; this is expected, not a bug, and is exactly what stops a
     # *clean-exit* subset run from silently vouching for members it never
-    # looked at. This does NOT, on its own, protect a run interrupted
+    # looked at. Note this means `_corpus_members` itself is updated on
+    # *every* run that touches `state`, not only one that advances
+    # `_corpus_sha256` -- a non-advancing run still examines/updates a
+    # real, current state entry for every member in its own `members`, so
+    # leaving those out of `_corpus_members` would undercount coverage
+    # relative to what's actually true on disk and let a later, narrower
+    # run trivially satisfy the superset check against that undercounted
+    # set (issue #218 again, reopened via a sequence of ordinary
+    # clean-exit subset runs rather than a single one). See the `else`
+    # branch below.
+    #
+    # This does NOT, on its own, protect a run interrupted
     # mid-way: `_corpus_sha256` is still written up front (issue #78,
     # just below) and flushed by the first per-member checkpoint, so a
     # process killed after some members checkpoint but before others can
@@ -2362,6 +2373,26 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
             # currently-batchable set), so `members` alone already covers
             # everything the signature depended on -- no union needed.
             state["_corpus_members"] = sorted(set(members))
+        else:
+            # Not advancing `_corpus_sha256` this run does NOT mean this
+            # run's own `members` can be left out of `_corpus_members`.
+            # Every member in `members` gets its own state entry
+            # examined/updated below regardless of this guard -- so by
+            # the end of this run, each one's entry is a real, current
+            # answer, not a stale leftover. Leaving them out of
+            # `_corpus_members` would undercount coverage relative to
+            # what's actually true on disk: a later, narrower run could
+            # then trivially satisfy the superset check against this
+            # undercounted prior set and advance `_corpus_sha256` past a
+            # change in one of the members this run legitimately did
+            # check (issue #218 again, reopened via a sequence of
+            # ordinary clean-exit subset runs rather than a single one).
+            # Recording the union here is always safe in the "coverage
+            # only grows" direction regardless of whether the signature
+            # itself advances -- the superset check above is what
+            # actually gates a *future* run's ability to advance the
+            # signature, not this write.
+            state["_corpus_members"] = sorted(prior_corpus_members | set(members))
     results: list[DocResult] = []
     # Keyed by the subdir-qualified state_key computed below, not bare
     # member name: two batchable members can share a name across

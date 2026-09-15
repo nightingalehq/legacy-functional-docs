@@ -1979,6 +1979,114 @@ def test_batch_departed_member_that_returns_does_not_reopen_the_untouched_member
     assert saved_after_final[modb_key]["brief_sha256"] != saved_after_first[modb_key]["brief_sha256"]
 
 
+def test_batch_a_non_advancing_subset_run_still_records_its_own_coverage(tmp_path):
+    """Issue #218 follow-up (fourth adversarial review round): a run that
+    fails the superset check (so it doesn't advance `_corpus_sha256`)
+    still examines/updates a real, current state entry for every member
+    in its own `members` -- but a prior version of this fix left
+    `_corpus_members` untouched on that path, so those members' up-to-date
+    coverage was never actually recorded.
+
+    That undercounting reopens issue #218 through a sequence of ordinary,
+    clean-exit `--members` runs with no interruption or hand-editing at
+    all: run `--members MODA` first (establishing `_corpus_members =
+    ["MODA"]`), then `--members MODB` while the corpus hasn't changed
+    (fails the superset check against `{"MODA"}`, so `_corpus_sha256`
+    doesn't advance -- but MODB's own entry *is* genuinely rendered and
+    current). If `_corpus_members` isn't updated to include MODB here, a
+    later `--members MODA` run (once MODB's source has since changed for
+    real) trivially satisfies the superset check against the
+    still-`{"MODA"}`-only recorded set and advances `_corpus_sha256` past
+    MODB's real change, without ever looking at MODB again -- reproducing
+    #218 through ordinary use of the flag, not any edge case."""
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    for member_id, name in ((1, "MODA"), (2, "MODB")):
+        conn.execute(
+            "INSERT INTO member (id, name, dialect, object_type) VALUES (?, ?, 'natural', 'program')",
+            (member_id, name),
+        )
+        conn.execute(
+            "INSERT INTO source_line (member_id, line_no, text) VALUES (?, 1, 'irrelevant')", (member_id,)
+        )
+        conn.execute(
+            "INSERT INTO rule_candidate (member_id, line_no, construct, condition, raw) "
+            "VALUES (?, 1, 'IF', ?, ?)",
+            (member_id, f"{name}-COND-1", f"IF {name}-COND-1"),
+        )
+        conn.execute(
+            "INSERT INTO source_file (id, path, sha256, line_count) VALUES (?, ?, 'sha-v1', 1)",
+            (member_id, f"{name}.nsp"),
+        )
+    conn.commit()
+
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+
+    # First-ever run is itself a subset: MODA only.
+    first = batch_mod.run_batch(
+        conn, ["MODA"], out_dir, FakeCaller(), "writing rules text", "template text",
+        state_path=state_path,
+    )
+    assert first.failed == 0
+    assert json.loads(state_path.read_text())["_corpus_members"] == ["MODA"]
+
+    # A second subset run, MODB only, while the corpus hasn't changed at
+    # all since the first run. This fails the superset check against
+    # {"MODA"} (MODB alone isn't a superset of it), so `_corpus_sha256`
+    # must not advance here -- but MODB's own entry is genuinely rendered
+    # and reflects the current (unchanged) source, and that coverage must
+    # be recorded.
+    second = batch_mod.run_batch(
+        conn, ["MODB"], out_dir, FakeCaller(), "writing rules text", "template text",
+        state_path=state_path,
+    )
+    assert second.failed == 0
+    saved_after_second = json.loads(state_path.read_text())
+    assert sorted(saved_after_second["_corpus_members"]) == ["MODA", "MODB"], (
+        "a non-advancing run must still record its own members' now-current coverage, "
+        "not leave them out of _corpus_members"
+    )
+    modb_subdir = batch_mod._output_subdir(conn, "MODB")
+    modb_key = f"{modb_subdir.as_posix()}/MODB"
+    brief_sha_after_second = saved_after_second[modb_key]["brief_sha256"]
+
+    # MODB's source now genuinely changes.
+    conn.execute("UPDATE rule_candidate SET condition='MODB-COND-1-CHANGED' WHERE member_id=2")
+    conn.execute("UPDATE source_file SET sha256='sha-v2' WHERE id=2")
+    conn.commit()
+
+    # A third run, MODA only again, must NOT be able to advance
+    # `_corpus_sha256` past MODB's real change just because
+    # `_corpus_members` under-recorded coverage after the second run.
+    third = batch_mod.run_batch(
+        conn, ["MODA"], out_dir, FakeCaller(), "writing rules text", "template text",
+        state_path=state_path,
+    )
+    assert third.failed == 0
+    saved_after_third = json.loads(state_path.read_text())
+    assert saved_after_third[modb_key]["brief_sha256"] == brief_sha_after_second, (
+        "MODB's entry must be untouched by a MODA-only run"
+    )
+
+    # A run that finally covers MODB again must still pick up its real
+    # change -- not silently skip it as stale-but-still-current via a
+    # corpus signature that was wrongly allowed to advance past it.
+    final_caller = _counting_caller(FakeCaller())
+    final = batch_mod.run_batch(
+        conn, ["MODA", "MODB"], out_dir, final_caller, "writing rules text", "template text",
+        state_path=state_path,
+    )
+    assert final.failed == 0
+    assert final_caller.calls > 0, "MODB must actually re-render, not be skipped as still current"
+    saved_after_final = json.loads(state_path.read_text())
+    assert saved_after_final[modb_key]["brief_sha256"] != brief_sha_after_second
+
+
 def test_batch_recomputes_briefs_when_a_dialect_hash_changes(indexed_db, tmp_path, monkeypatch):
     """issue #194: a dialect-parser code change with no source-file edit at
     all changes `source_file.dialect_hash` (set by `cli.cmd_ingest`) with
