@@ -2381,7 +2381,7 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
     )
     corpus_unchanged = bool(state_path) and state.get("_corpus_sha256") == corpus_sig
     # `--members` (cli.py) lets one invocation cover only a subset of the
-    # batchable set sharing this same `--state` file. `_corpus_signature`
+    # members sharing this same `--state` file. `_corpus_signature`
     # hashes the *whole* corpus, not just what this run touched -- so
     # unconditionally overwriting `_corpus_sha256` on every run (issue
     # #218) let a subset run advance it while some member outside this
@@ -2416,13 +2416,21 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
     # clean-exit subset runs rather than a single one). See the `else`
     # branch below.
     #
-    # This does NOT, on its own, protect a run interrupted
-    # mid-way: `_corpus_sha256` is still written up front (issue #78,
-    # just below) and flushed by the first per-member checkpoint, so a
-    # process killed after some members checkpoint but before others can
-    # still leave stale `ok: True` entries alongside an already-advanced
-    # signature -- a pre-existing gap in the resume design, not something
-    # this fix closes; tracked separately.
+    # `_corpus_sha256` is only ever set in memory here, not saved to disk
+    # by itself -- the first thing that actually flushes it is whichever
+    # `_save_state` call happens to come next. Before issue #217, that
+    # could be a per-member/per-chunk checkpoint from *partway* through
+    # this run, well before every member had a chance to record its own
+    # current state -- a kill right after would leave stale `ok: True`
+    # entries (from a *previous* run) sitting alongside an
+    # already-advanced signature. Issue #217's routing-loop pre-mark now
+    # closes that specific window for every member actually in `to_run`/
+    # `to_run_chunked`: it writes a not-done entry for every one of them,
+    # in the very same `_save_state` call that ends up being the first
+    # one to flush this signature, before the worker pool or the chunked
+    # loop starts -- so nothing here can advance to disk without every
+    # about-to-run member's own entry already being honest about not
+    # being done yet.
     # The read just above (`corpus_unchanged`) stays unconditional --
     # comparing against whatever signature is already on disk is always
     # safe on its own; only the *write* that could make an untouched
@@ -2453,14 +2461,12 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
             # A genuinely empty state dict already reconstructs to the
             # empty set on its own, so this unification costs nothing.
             prior_corpus_members = _legacy_corpus_members_from_state(state)
-        # A member that's left the corpus entirely (deleted, renamed) must
-        # drop out of the requirement -- otherwise no future run, however
-        # large, could ever be a superset of a set containing a member
-        # that no longer exists, permanently freezing `_corpus_sha256`
-        # with no recovery short of hand-editing the state file.
-        #
-        # "Still exists" here is the union of two things, not just
-        # `select_batch_members(conn)`'s dialect/object_type filter:
+        # A member that's no longer "known" must drop out of the
+        # requirement -- otherwise no future run, however large, could
+        # ever be a superset of a set containing it, permanently freezing
+        # `_corpus_sha256` with no recovery short of hand-editing the
+        # state file. "Known" is deliberately *not*
+        # `select_batch_members(conn)`'s dialect/object_type filter alone:
         # `run_batch`'s own `members` argument is never required to
         # satisfy that filter (a caller can pass any member name;
         # `select_batch_members` is only what an unfiltered `mfdoc batch`
@@ -2468,42 +2474,57 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
         # `object_type` happens to be unset or outside
         # `BATCHABLE_OBJECT_TYPES` -- while still very much present and
         # being actively run right now (it's in `members`) -- must not be
-        # treated as "departed" just because it would no longer be
-        # auto-selected. But the member-table existence check alone isn't
-        # enough either: a member that exists in `member` but is outside
-        # both `select_batch_members` *and* this run's own `members`
-        # would then never count as departed, and an ordinary unfiltered
-        # `mfdoc batch` (which only ever passes `select_batch_members`'s
-        # own list, per cli.py) could never be a superset of a
-        # `_corpus_members` set containing it -- permanently freezing the
-        # signature for exactly the reason this whole check exists to
-        # prevent, just via a different route. Intersecting with
-        # `select_batch_members(conn) | set(members)` closes both: a
-        # member counts as "still around" only if it's either
-        # auto-selectable or explicitly named in this very run.
-        currently_known_members = (
-            {r["name"] for r in conn.execute("SELECT DISTINCT name FROM member").fetchall()}
-            & (set(select_batch_members(conn)) | set(members))
-        )
+        # treated as departed just because it would no longer be
+        # auto-selected. Nor is it *only* `members`: an ordinary
+        # unfiltered `mfdoc batch` (which only ever passes
+        # `select_batch_members`'s own list, per cli.py) must eventually
+        # be able to advance the signature past a member outside both,
+        # once that member is genuinely no longer part of any run. Union,
+        # not member-table existence, is the actual rule in force here --
+        # a raw `SELECT ... FROM member` check adds nothing on top of it
+        # (every name `select_batch_members` or `members` could ever name
+        # already implies the row exists, or isn't a real member at all
+        # and self-heals out on its own next run either way), so it's
+        # left out rather than kept as an inert-looking extra condition.
+        currently_known_members = set(select_batch_members(conn)) | set(members)
         departed = prior_corpus_members - currently_known_members
         if departed:
             # Dropping a departed member from the *requirement* isn't
             # enough on its own: its own `ok: True` state entry is still
             # sitting on disk, untouched. If that same member later
             # becomes "known" again per the definition above (a re-ingest
-            # in flight, a file temporarily missing from a drop, or it's
+            # in flight, a dialect/object_type reclassification, or it's
             # simply named in a later run's `members`) with genuinely
             # changed source, a subsequent run satisfying the superset
             # check would advance the signature, and then a run covering
             # the returned member would read its stale, never-updated
             # entry as still current via `corpus_unchanged and prior_ok`
             # -- reproducing the exact silent-skip failure this fix
-            # exists to close. Pruning the entry here, at the moment the
-            # member is recognised as departed, means a returning member
-            # has nothing stale to be blessed by.
+            # exists to close.
+            #
+            # Demoted (ok set False), not deleted: a member can be
+            # "departed" from *this run's* perspective while still being
+            # perfectly fine and actively worked on by other invocations
+            # sharing this state file (outside select_batch_members and
+            # not named here, but named in a concurrent/later run) -- see
+            # the "known" definition above. Deleting its entry outright
+            # would throw away a chunked member's already-paid-for
+            # `chunks`/`_narrative` cache for nothing, forcing a full
+            # re-render the moment it's run again, on every single
+            # ordinary run in between -- reintroducing the exact
+            # unbounded-model-spend waste issue #217 exists to close, via
+            # this sibling code path. `ok: False` alone is enough to
+            # satisfy the "nothing stale to be blessed by" requirement
+            # above: `prior_ok` already requires `ok: True`, and chunk/
+            # brief-hash reuse (`_chunk_reuse_ok`, the brief_sha256 check)
+            # independently re-validates content before ever trusting a
+            # carried-forward `chunks` entry, so keeping it here can't
+            # cause incorrect reuse.
             for key in [k for k in state
                         if k not in _RESERVED_STATE_KEYS and k.rsplit("/", 1)[-1] in departed]:
-                del state[key]
+                entry = state[key]
+                if isinstance(entry, dict):
+                    entry["ok"] = False
         prior_corpus_members &= currently_known_members
         # An empty `members` list (nothing to run) must never establish
         # or advance coverage.

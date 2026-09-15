@@ -2138,6 +2138,97 @@ def test_batch_a_member_outside_select_batch_members_is_never_pruned_while_still
     )
 
 
+def test_batch_departed_member_keeps_its_chunk_cache_across_an_intervening_unfiltered_run(tmp_path):
+    """Round-8 review finding: a member outside `select_batch_members` and
+    left out of an *intervening* run is genuinely "departed" from that
+    run's own perspective (see the test above's sibling for why that's
+    still correct -- an unfiltered run must be able to eventually advance
+    the corpus signature past it). But "departed" must only demote the
+    entry (`ok: False`), never delete it outright: deleting would throw
+    away a chunked member's already-paid-for `chunks`/`_narrative` cache
+    for nothing, forcing a full re-render the moment it's explicitly run
+    again -- reintroducing the exact unbounded-model-spend waste issue
+    #217 exists to close, via this sibling code path. This pins that a
+    chunked member's cache survives an intervening unfiltered run that
+    never even names it."""
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute(
+        "INSERT INTO member (id, name, dialect, object_type) VALUES (1, 'MODA', 'natural', 'program')"
+    )
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
+    conn.execute(
+        "INSERT INTO rule_candidate (member_id, line_no, construct, condition, raw) "
+        "VALUES (1, 1, 'IF', 'MODA-COND-1', 'IF MODA-COND-1')"
+    )
+    conn.execute(
+        "INSERT INTO source_file (id, path, sha256, line_count) VALUES (1, 'MODA.nsp', 'sha-v1', 1)"
+    )
+    # FAKEMOD: no object_type set -- outside select_batch_members. Seeded
+    # by hand at member_id=2 to avoid colliding with MODA above (see the
+    # sibling test's own note on why _seed_fakemod_rules can't be reused
+    # here), but shaped exactly like it -> 3 chunks at max_rules_per_call=2.
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (2, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (2, 1, 'irrelevant')")
+    for n in range(1, 6):
+        conn.execute(
+            "INSERT INTO rule_candidate (member_id, line_no, construct, condition, raw) "
+            "VALUES (2, ?, 'IF', ?, ?)",
+            (n, f"COND-{n}", f"IF COND-{n}"),
+        )
+    conn.commit()
+    assert batch_mod.select_batch_members(conn) == ["MODA"]
+
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+
+    def caller(prompt: str) -> batch_mod.ModelResponse:
+        if "FAKEMOD" in prompt:
+            return _chunk_aware_module_caller()(prompt)
+        return FakeCaller()(prompt)
+
+    first = batch_mod.run_batch(
+        conn, ["MODA", "FAKEMOD"], out_dir, caller, "writing rules text", "template text",
+        max_rules_per_call=2, state_path=state_path,
+    )
+    assert first.failed == 0
+    fakemod_subdir = batch_mod._output_subdir(conn, "FAKEMOD")
+    fakemod_key = f"{fakemod_subdir.as_posix()}/FAKEMOD"
+    original_chunks = dict(json.loads(state_path.read_text())[fakemod_key]["chunks"])
+    assert set(original_chunks) == {"1", "2", "3", "_narrative"}
+
+    # An intervening unfiltered run never names FAKEMOD at all -- it
+    # becomes "departed" from this run's perspective.
+    unfiltered = batch_mod.run_batch(
+        conn, batch_mod.select_batch_members(conn), out_dir, FakeCaller(),
+        "writing rules text", "template text", state_path=state_path,
+    )
+    assert unfiltered.failed == 0
+    saved_after_unfiltered = json.loads(state_path.read_text())
+    assert saved_after_unfiltered[fakemod_key]["ok"] is False
+    assert saved_after_unfiltered[fakemod_key]["chunks"] == original_chunks, (
+        "a departed member's cached chunk_state (including _narrative) must survive being "
+        "demoted -- deleting it would force a full unnecessary re-render the next time it's run"
+    )
+
+    # Explicitly running FAKEMOD again, with nothing actually changed,
+    # must be a full cache hit -- not a full re-render paid for nothing.
+    fakemod_caller = _counting_caller(_chunk_aware_module_caller())
+    second = batch_mod.run_batch(
+        conn, ["FAKEMOD"], out_dir, fakemod_caller, "writing rules text", "template text",
+        max_rules_per_call=2, state_path=state_path,
+    )
+    assert second.failed == 0
+    assert fakemod_caller.calls == 0, (
+        "FAKEMOD's chunk cache must have survived the intervening unfiltered run -- a deleted "
+        "entry would force all 3 chunks plus narrative synthesis to re-render for nothing"
+    )
+
+
 def test_batch_unfiltered_run_can_still_advance_past_a_member_outside_select_batch_members(tmp_path, monkeypatch):
     """Merge-time review finding, other half: a member outside
     `select_batch_members` that is later left OUT of `members` (e.g. an

@@ -224,6 +224,36 @@ GitHub org.
   pinning that an unfiltered run can still eventually recover the corpus
   signature past such a member once it's genuinely left out. Full suite
   green (1111 passed, 2 skipped).
+- **Round 8 (this fix's own review, after the above landed)** found three
+  more issues in the same expression: (1) the member-table-existence term
+  in `currently_known_members` was provably inert (`select_batch_members`
+  is itself a query over `member`, so the union already implies it) --
+  simplified to just `select_batch_members(conn) | set(members)`, with
+  the comment rewritten to describe the one rule actually in force
+  instead of framing the inert term as the load-bearing base of it; (2)
+  more seriously, deleting a departed member's state entry outright
+  (rather than only demoting it) threw away a chunked member's
+  already-paid-for `chunks`/`_narrative` cache the moment it fell outside
+  `select_batch_members` and wasn't named in one intervening run --
+  forcing a full, unnecessary re-render the next time it was explicitly
+  run again, reintroducing on this sibling code path the exact unbounded
+  model-spend waste issue #217 exists to close. Fixed by setting
+  `ok: False` on the departed entry instead of deleting it -- sufficient
+  on its own, since `_chunk_reuse_ok`/`brief_sha256` independently
+  re-validate content before ever trusting a carried-forward `chunks`
+  entry, so nothing stale can be wrongly reused this way; (3) a comment
+  claiming this fix "does NOT, on its own, protect a run interrupted
+  mid-way" (the premise behind
+  nightingalehq/legacy-functional-docs#221, filed during an earlier
+  review round of this same fix, before #217's own later commits landed)
+  turned out to likely already be closed by #217's routing-loop pre-mark,
+  which flushes every about-to-run member's not-done entry in the same
+  atomic save that first writes the corpus signature to disk. Rewrote
+  the comment to describe why, and left a comment on #221 itself flagging
+  this for re-verification rather than closing it outright (an ad hoc
+  repro attempt didn't behave as expected and wasn't chased down
+  further). One new regression test added, confirmed by reverting the
+  fix to fail without it. Full suite green (1112 passed, 2 skipped).
 
 **Progress (2026-09-15, #217):**
 - Fixed issue #217: `mfdoc batch`'s chunk-level resume state was only
