@@ -2083,8 +2083,157 @@ def test_batch_a_non_advancing_subset_run_still_records_its_own_coverage(tmp_pat
     )
     assert final.failed == 0
     assert final_caller.calls > 0, "MODB must actually re-render, not be skipped as still current"
-    saved_after_final = json.loads(state_path.read_text())
-    assert saved_after_final[modb_key]["brief_sha256"] != brief_sha_after_second
+
+
+def test_batch_a_member_outside_select_batch_members_is_never_pruned_while_still_run(tmp_path):
+    """Merge-time review finding: a member present in `member` but outside
+    `select_batch_members(conn)`'s dialect/object_type filter (e.g.
+    `object_type` never set -- true of many hand-built fixtures, and
+    possibly a real project) must not be treated as "departed" merely
+    because it isn't auto-selectable, as long as it's actually named in
+    `members` for this run. The first fix for this (existence in the
+    `member` table alone) over-corrected: it stopped pruning a genuinely
+    unbatchable member's cached state (a chunked member's `_narrative`,
+    specifically) on every single re-run, even with zero source changes,
+    breaking several of issue #217's own regression tests. This pins the
+    corrected rule directly: a chunked member outside
+    `select_batch_members` survives two full resume cycles with no
+    content change, cached `_narrative` intact both times."""
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_rules(conn, 5)  # -> 3 chunks with max_rules_per_call=2
+    assert batch_mod.select_batch_members(conn) == [], (
+        "FAKEMOD has no object_type set -- this test only proves what it claims "
+        "if FAKEMOD is genuinely outside select_batch_members"
+    )
+
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+    first = batch_mod.run_batch(
+        conn, ["FAKEMOD"], out_dir, _chunk_aware_module_caller(),
+        "writing rules text", "template text", max_rules_per_call=2, state_path=state_path,
+    )
+    assert first.failed == 0
+    subdir = batch_mod._output_subdir(conn, "FAKEMOD")
+    state_key = f"{subdir.as_posix()}/FAKEMOD"
+    original_chunks = dict(json.loads(state_path.read_text())[state_key]["chunks"])
+    assert set(original_chunks) == {"1", "2", "3", "_narrative"}
+
+    second_caller = _counting_caller(_chunk_aware_module_caller())
+    second = batch_mod.run_batch(
+        conn, ["FAKEMOD"], out_dir, second_caller,
+        "writing rules text", "template text", max_rules_per_call=2, state_path=state_path,
+    )
+    assert second.failed == 0
+    assert second_caller.calls == 0, "nothing changed -- FAKEMOD must be fully reused, not re-rendered"
+    saved_after_second = json.loads(state_path.read_text())
+    assert saved_after_second[state_key]["chunks"] == original_chunks, (
+        "FAKEMOD's cached chunk_state (including _narrative) must survive a resume even though "
+        "it's outside select_batch_members -- it must not be treated as departed while it's "
+        "still being explicitly run"
+    )
+
+
+def test_batch_unfiltered_run_can_still_advance_past_a_member_outside_select_batch_members(tmp_path, monkeypatch):
+    """Merge-time review finding, other half: a member outside
+    `select_batch_members` that is later left OUT of `members` (e.g. an
+    unfiltered `mfdoc batch`, which per cli.py only ever passes
+    `select_batch_members`'s own list) must still eventually be treated
+    as departed -- otherwise no unfiltered run could ever be a superset
+    of a `_corpus_members` set containing it, permanently freezing
+    `_corpus_sha256` for every future plain `mfdoc batch` invocation."""
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute(
+        "INSERT INTO member (id, name, dialect, object_type) VALUES (1, 'MODA', 'natural', 'program')"
+    )
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (1, 1, 'irrelevant')")
+    conn.execute(
+        "INSERT INTO rule_candidate (member_id, line_no, construct, condition, raw) "
+        "VALUES (1, 1, 'IF', 'MODA-COND-1', 'IF MODA-COND-1')"
+    )
+    conn.execute(
+        "INSERT INTO source_file (id, path, sha256, line_count) VALUES (1, 'MODA.nsp', 'sha-v1', 1)"
+    )
+    # FAKEMOD: no object_type set -- outside select_batch_members. Seeded
+    # by hand (not via _seed_fakemod_rules, which hardcodes member id=1
+    # and would collide with MODA above).
+    conn.execute("INSERT INTO member (id, name, dialect) VALUES (2, 'FAKEMOD', 'natural')")
+    conn.execute("INSERT INTO source_line (member_id, line_no, text) VALUES (2, 1, 'irrelevant')")
+    conn.execute(
+        "INSERT INTO rule_candidate (member_id, line_no, construct, condition, raw) "
+        "VALUES (2, 1, 'IF', 'FAKEMOD-COND-1', 'IF FAKEMOD-COND-1')"
+    )
+    conn.commit()
+    assert batch_mod.select_batch_members(conn) == ["MODA"]
+
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+
+    # A run explicitly naming both members establishes coverage for both.
+    first = batch_mod.run_batch(
+        conn, ["MODA", "FAKEMOD"], out_dir, FakeCaller(), "writing rules text", "template text",
+        state_path=state_path,
+    )
+    assert first.failed == 0
+    assert sorted(json.loads(state_path.read_text())["_corpus_members"]) == ["FAKEMOD", "MODA"]
+
+    # MODA's source changes.
+    conn.execute("UPDATE rule_candidate SET condition='MODA-COND-1-CHANGED' WHERE member_id=1")
+    conn.execute("UPDATE source_file SET sha256='sha-v2' WHERE id=1")
+    conn.commit()
+
+    # An ordinary unfiltered run -- exactly what cli.py sends with no
+    # --members -- picks up MODA's change via the per-member brief-hash
+    # fallback either way (that part doesn't distinguish the bug from the
+    # fix: it works regardless of whether the corpus-level signature ever
+    # advances). The actual symptom of the freeze is that the corpus-level
+    # tier-1 fast path -- skip module_brief() entirely -- never comes back
+    # for *future* runs, because `_corpus_sha256` can never be written
+    # again once `_corpus_members` contains a member no unfiltered run can
+    # ever re-cover. So the real assertion is two runs down the line, not
+    # this one.
+    unfiltered = batch_mod.run_batch(
+        conn, batch_mod.select_batch_members(conn), out_dir, FakeCaller(),
+        "writing rules text", "template text", state_path=state_path,
+    )
+    assert unfiltered.failed == 0
+
+    # Nothing has changed since. A second unfiltered run, with a caller
+    # that explodes if actually called, must be a full corpus-level
+    # tier-1 skip (zero calls, module_brief() never re-derived for
+    # anyone) -- proving the corpus signature was successfully advanced
+    # by the previous run, i.e. the freeze never took hold. Under the bug
+    # (FAKEMOD, outside select_batch_members, never counted as departed
+    # because it still exists in the `member` table), the previous run's
+    # `members` ({"MODA"}) would never have been a superset of
+    # `_corpus_members` ({"MODA", "FAKEMOD"}), `_corpus_sha256` would
+    # never have been written, `corpus_unchanged` would read False here
+    # too, and MODA would be re-examined (though still reused via its own
+    # unchanged brief hash) instead of skipped at the corpus level.
+    def exploding_caller(prompt: str) -> batch_mod.ModelResponse:
+        raise AssertionError("corpus-level fast path should have skipped every member")
+
+    tracked_briefs = _track_module_brief_calls(monkeypatch)
+    final = batch_mod.run_batch(
+        conn, batch_mod.select_batch_members(conn), out_dir, exploding_caller,
+        "writing rules text", "template text", state_path=state_path,
+    )
+    assert final.failed == 0
+    assert final.skipped == 1
+    assert tracked_briefs == [], (
+        "the corpus signature must have been successfully advanced by the previous run -- "
+        "otherwise every member is re-examined via the slower per-member tier instead of the "
+        "corpus-level tier-1 skip, the exact symptom of FAKEMOD permanently freezing the signature"
+    )
 
 
 def test_batch_recomputes_briefs_when_a_dialect_hash_changes(indexed_db, tmp_path, monkeypatch):

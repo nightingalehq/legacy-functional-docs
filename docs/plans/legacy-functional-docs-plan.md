@@ -203,8 +203,27 @@ GitHub org.
   by that very run. Caught by four pre-existing #217 tests failing after
   the merge (a chunked member's `_narrative` entry vanishing on any
   re-run). Fixed by checking existence in the `member` table directly
-  (`SELECT DISTINCT name FROM member`) instead. Full suite green (1109
-  passed, 2 skipped, after merging #217's own additions).
+  (`SELECT DISTINCT name FROM member`) instead -- but this over-corrected:
+  a fresh review round found it created the mirror-image defect. A member
+  that exists in the `member` table but is outside BOTH
+  `select_batch_members` AND the current run's own `members` would then
+  never count as departed, yet an ordinary unfiltered `mfdoc batch`
+  (which only ever passes `select_batch_members`'s own list, per cli.py)
+  could never be a superset of a `_corpus_members` set containing it --
+  permanently freezing `_corpus_sha256` for every future unfiltered run,
+  just via a different route than the original #218 bug. Fixed by
+  intersecting member-table existence with `select_batch_members(conn) |
+  set(members)` -- a member counts as "still around" only if it's either
+  auto-selectable or explicitly named in the current run. Also fixed two
+  stale comments left describing the superseded `select_batch_members`-
+  only rule, which directly contradicted the corrected logic 15 lines
+  away. Two new regression tests added (the original merge-time fix had
+  none of its own, relying only on #217's pre-existing tests happening to
+  catch the first over-pruning bug) -- one pinning that a member outside
+  `select_batch_members` but still in `members` is never pruned, one
+  pinning that an unfiltered run can still eventually recover the corpus
+  signature past such a member once it's genuinely left out. Full suite
+  green (1111 passed, 2 skipped).
 
 **Progress (2026-09-15, #217):**
 - Fixed issue #217: `mfdoc batch`'s chunk-level resume state was only

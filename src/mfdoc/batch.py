@@ -2459,7 +2459,7 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
         # that no longer exists, permanently freezing `_corpus_sha256`
         # with no recovery short of hand-editing the state file.
         #
-        # Deliberately existence in the `member` table, not
+        # "Still exists" here is the union of two things, not just
         # `select_batch_members(conn)`'s dialect/object_type filter:
         # `run_batch`'s own `members` argument is never required to
         # satisfy that filter (a caller can pass any member name;
@@ -2467,28 +2467,40 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
         # with no `--members` would auto-select), so a member whose
         # `object_type` happens to be unset or outside
         # `BATCHABLE_OBJECT_TYPES` -- while still very much present and
-        # being actively run right now -- must not be treated as
-        # "departed" just because it would no longer be auto-selected.
-        currently_known_members = {
-            r["name"] for r in conn.execute("SELECT DISTINCT name FROM member").fetchall()
-        }
+        # being actively run right now (it's in `members`) -- must not be
+        # treated as "departed" just because it would no longer be
+        # auto-selected. But the member-table existence check alone isn't
+        # enough either: a member that exists in `member` but is outside
+        # both `select_batch_members` *and* this run's own `members`
+        # would then never count as departed, and an ordinary unfiltered
+        # `mfdoc batch` (which only ever passes `select_batch_members`'s
+        # own list, per cli.py) could never be a superset of a
+        # `_corpus_members` set containing it -- permanently freezing the
+        # signature for exactly the reason this whole check exists to
+        # prevent, just via a different route. Intersecting with
+        # `select_batch_members(conn) | set(members)` closes both: a
+        # member counts as "still around" only if it's either
+        # auto-selectable or explicitly named in this very run.
+        currently_known_members = (
+            {r["name"] for r in conn.execute("SELECT DISTINCT name FROM member").fetchall()}
+            & (set(select_batch_members(conn)) | set(members))
+        )
         departed = prior_corpus_members - currently_known_members
         if departed:
             # Dropping a departed member from the *requirement* isn't
             # enough on its own: its own `ok: True` state entry is still
             # sitting on disk, untouched. If that same member later
-            # returns to the batchable set (a re-ingest in flight, a
-            # dialect/object_type reclassification, a file temporarily
-            # missing from a drop) with genuinely changed source, a
-            # subsequent run over everything currently batchable would
-            # satisfy the superset check (the departed member no longer
-            # counts against it), advance the signature, and then a run
-            # covering the returned member would read its stale,
-            # never-updated entry as still current via `corpus_unchanged
-            # and prior_ok` -- reproducing the exact silent-skip failure
-            # this fix exists to close. Pruning the entry here, at the
-            # moment the member is recognised as departed, means a
-            # returning member has nothing stale to be blessed by.
+            # becomes "known" again per the definition above (a re-ingest
+            # in flight, a file temporarily missing from a drop, or it's
+            # simply named in a later run's `members`) with genuinely
+            # changed source, a subsequent run satisfying the superset
+            # check would advance the signature, and then a run covering
+            # the returned member would read its stale, never-updated
+            # entry as still current via `corpus_unchanged and prior_ok`
+            # -- reproducing the exact silent-skip failure this fix
+            # exists to close. Pruning the entry here, at the moment the
+            # member is recognised as departed, means a returning member
+            # has nothing stale to be blessed by.
             for key in [k for k in state
                         if k not in _RESERVED_STATE_KEYS and k.rsplit("/", 1)[-1] in departed]:
                 del state[key]
@@ -2504,9 +2516,10 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
             # end. See issue #78.
             state["_corpus_sha256"] = corpus_sig
             # The guard above already established that `members` is a
-            # superset of `prior_corpus_members` (the intersected-with-
-            # currently-batchable set), so `members` alone already covers
-            # everything the signature depended on -- no union needed.
+            # superset of `prior_corpus_members` (already intersected with
+            # `currently_known_members`), so `members` alone already
+            # covers everything the signature depended on -- no union
+            # needed.
             state["_corpus_members"] = sorted(set(members))
         else:
             # Not advancing `_corpus_sha256` this run does NOT mean this
