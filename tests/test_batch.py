@@ -1438,6 +1438,93 @@ def test_batch_recomputes_briefs_when_a_source_file_changes(indexed_db, tmp_path
         indexed_db.commit()
 
 
+def test_batch_subset_run_never_advances_corpus_signature_past_an_untouched_member(tmp_path):
+    """Issue #218: `--members` (cli.py) lets one invocation cover only a
+    subset of the batchable set sharing one `--state` file. Before this
+    fix, `_corpus_sha256` was overwritten unconditionally on every run,
+    regardless of `members` -- so a subset run could advance it to
+    reflect a change made to a member *outside* that run's own
+    `members`, without ever looking at that member itself. A later run
+    covering that member would then read its untouched, stale `ok: True`
+    entry as still current via the `corpus_unchanged and prior_ok` fast
+    path, silently skipping a member whose source had genuinely changed.
+
+    The fix (tracking which members established the stored signature,
+    `_corpus_members`, and only advancing it when a run's own `members`
+    is a superset of that set) must still let the ordinary case --
+    repeatedly running the exact same subset -- keep using the fast path
+    across runs; that's covered by the existing
+    test_batch_skips_module_brief_entirely_when_corpus_unchanged, which
+    already exercises a genuine (not full-corpus) subset consistently."""
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    for member_id, name in ((1, "MODA"), (2, "MODB")):
+        conn.execute("INSERT INTO member (id, name, dialect) VALUES (?, ?, 'natural')", (member_id, name))
+        conn.execute(
+            "INSERT INTO source_line (member_id, line_no, text) VALUES (?, 1, 'irrelevant')", (member_id,)
+        )
+        conn.execute(
+            "INSERT INTO rule_candidate (member_id, line_no, construct, condition, raw) "
+            "VALUES (?, 1, 'IF', ?, ?)",
+            (member_id, f"{name}-COND-1", f"IF {name}-COND-1"),
+        )
+        conn.execute(
+            "INSERT INTO source_file (id, path, sha256, line_count) VALUES (?, ?, 'sha-v1', 1)",
+            (member_id, f"{name}.nsp"),
+        )
+    conn.commit()
+
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+    first = batch_mod.run_batch(
+        conn, ["MODA", "MODB"], out_dir, FakeCaller(), "writing rules text", "template text",
+        state_path=state_path,
+    )
+    assert first.failed == 0
+    moda_subdir = batch_mod._output_subdir(conn, "MODA")
+    modb_subdir = batch_mod._output_subdir(conn, "MODB")
+    moda_key = f"{moda_subdir.as_posix()}/MODA"
+    modb_key = f"{modb_subdir.as_posix()}/MODB"
+    saved_after_first = json.loads(state_path.read_text())
+    corpus_sig_after_first = saved_after_first["_corpus_sha256"]
+
+    # MODB's source genuinely changes -- a real re-ingest would bump this.
+    conn.execute("UPDATE rule_candidate SET condition='MODB-COND-1-CHANGED' WHERE member_id=2")
+    conn.execute("UPDATE source_file SET sha256='sha-v2' WHERE id=2")
+    conn.commit()
+
+    # A subset run that never looks at MODB at all.
+    second = batch_mod.run_batch(
+        conn, ["MODA"], out_dir, FakeCaller(), "writing rules text", "template text",
+        state_path=state_path,
+    )
+    assert second.failed == 0
+    saved_after_second = json.loads(state_path.read_text())
+    assert saved_after_second["_corpus_sha256"] == corpus_sig_after_first, (
+        "a subset run that never touched MODB must not advance the corpus signature past it"
+    )
+    assert saved_after_second[modb_key] == saved_after_first[modb_key], (
+        "MODB's own entry must be untouched by a run that never covered it"
+    )
+
+    # A full run must still pick up MODB's real change -- not silently
+    # skip it because a subset run in between made the corpus signature
+    # look consistent for MODA alone.
+    third_caller = _counting_caller(FakeCaller())
+    third = batch_mod.run_batch(
+        conn, ["MODA", "MODB"], out_dir, third_caller, "writing rules text", "template text",
+        state_path=state_path,
+    )
+    assert third.failed == 0
+    saved_after_third = json.loads(state_path.read_text())
+    assert third_caller.calls > 0, "MODB must actually re-render, not be skipped as still current"
+    assert saved_after_third[modb_key]["brief_sha256"] != saved_after_first[modb_key]["brief_sha256"]
+
+
 def test_batch_recomputes_briefs_when_a_dialect_hash_changes(indexed_db, tmp_path, monkeypatch):
     """issue #194: a dialect-parser code change with no source-file edit at
     all changes `source_file.dialect_hash` (set by `cli.cmd_ingest`) with

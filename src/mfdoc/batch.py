@@ -2220,12 +2220,38 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
         _corpus_signature(conn, redact, lexicon, sme_notes, extra=[str(threshold)]) if state_path else None
     )
     corpus_unchanged = bool(state_path) and state.get("_corpus_sha256") == corpus_sig
-    if state_path:
+    # `--members` (cli.py) lets one invocation cover only a subset of the
+    # batchable set sharing this same `--state` file. `_corpus_signature`
+    # hashes the *whole* corpus, not just what this run touched -- so
+    # unconditionally overwriting `_corpus_sha256` on every run (issue
+    # #218) let a subset run advance it while some member outside this
+    # run's `members` never got looked at, making that untouched member
+    # appear current against the new signature. A later run covering that
+    # member would then read its stale `ok: True` entry as still done via
+    # the `corpus_unchanged and prior_ok` fast path, even if its own
+    # source had since changed, silently skipping it forever.
+    #
+    # Fixed by tracking *which* members last established the stored
+    # signature (`_corpus_members`) and only advancing it when this run's
+    # `members` is a superset of that set -- i.e. coverage only ever
+    # grows, never silently shrinks. This preserves the ordinary case of
+    # repeatedly running the exact same subset (every member that
+    # mattered to the signature last time is still covered this time, so
+    # the fast path keeps working across runs) while refusing to advance
+    # when a run leaves out a member the current signature's validity
+    # actually depends on. The read just above (`corpus_unchanged`) stays
+    # unconditional -- comparing against whatever signature is already on
+    # disk is always safe on its own; only the *write* that could make an
+    # untouched member look current is gated.
+    prior_corpus_members = set(state.get("_corpus_members") or [])
+    corpus_members_grew_or_held = bool(members) and set(members) >= prior_corpus_members
+    if state_path and corpus_members_grew_or_held:
         # Written into `state` up front, before any per-member checkpoint,
         # so a process killed mid-run still leaves a resumed run able to
         # take the corpus-level `corpus_unchanged` fast-path above -- not
         # just a run that reached the very end. See issue #78.
         state["_corpus_sha256"] = corpus_sig
+        state["_corpus_members"] = sorted(set(members) | prior_corpus_members)
     results: list[DocResult] = []
     # Keyed by the subdir-qualified state_key computed below, not bare
     # member name: two batchable members can share a name across
@@ -2260,9 +2286,10 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
         state_key = f"{subdir.as_posix()}/{name}"
         prior = state.get(state_key)
         # `prior` is only ever meaningful as this member's own state entry;
-        # guard against the (currently reserved but unenforced) "_corpus_sha256"
-        # key ever being looked up as if it were one -- see cli.py's --members
-        # normalisation, which keeps ordinary member names from colliding with it.
+        # guard against the (currently reserved but unenforced) "_corpus_sha256"/
+        # "_corpus_members" keys ever being looked up as if they were one --
+        # see cli.py's --members normalisation, which keeps ordinary member
+        # names from colliding with them.
         prior_ok = isinstance(prior, dict) and prior.get("ok") and out_path.exists()
 
         if corpus_unchanged and prior_ok:
@@ -2434,11 +2461,14 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
             _save_state(state_path, state)
 
     if state_path:
-        # `_corpus_sha256` was already written into `state` up front (see
-        # above) so every incremental checkpoint above already carries it --
-        # this final save just persists whatever the last member/chunk loop
-        # iteration didn't already flush (there always is at least one,
-        # from the corpus-signature write itself).
+        # `_corpus_sha256`/`_corpus_members` were already written into
+        # `state` up front, when this run's own coverage didn't shrink
+        # the set of members the stored signature depends on (see above;
+        # issue #218), so every incremental checkpoint above already
+        # carries whatever was already on disk -- this final save just
+        # persists whatever the last member/chunk loop iteration didn't
+        # already flush (a no-op if every member was skipped and this run touched
+        # nothing at all).
         _save_state(state_path, state)
 
     total_in = sum(r.input_tokens for r in results)

@@ -12,6 +12,33 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-15):**
+- Fixed issue #218: `mfdoc batch --members A,B` (a documented, first-class
+  flag) shares one `--state` file with a full run, but `run_batch`
+  overwrote `state["_corpus_sha256"]` unconditionally on every run,
+  regardless of `members` -- while `_corpus_signature` itself hashes the
+  *whole* corpus, independent of which members a given invocation
+  covers. A subset run could therefore advance the signature to reflect
+  a change made to a member *outside* its own `members`, without ever
+  looking at that member. A later run covering that member would then
+  read its untouched, stale `ok: True` entry as still current via the
+  `corpus_unchanged and prior_ok` fast path, silently skipping a member
+  whose source had genuinely changed.
+- Fixed by tracking which members established the currently-stored
+  signature (`_corpus_members`, a new reserved state-file key alongside
+  `_corpus_sha256`) and only advancing it when a run's own `members` is a
+  superset of that recorded set -- coverage only ever grows, never
+  silently shrinks. This preserves the existing, already-tested pattern
+  of repeatedly running the exact same (genuine, not full-corpus) subset
+  and still getting the fast path on repeat runs, while refusing to
+  advance when a run leaves out a member the signature's validity
+  actually depends on.
+- One new regression test, confirmed (by reverting the fix) to fail
+  without it. Full suite green (1085 passed, 2 skipped).
+- Filed as a follow-up rather than folded in here: porting the equivalent
+  fix to `testbatch.py`'s own, separately-implemented corpus-signature
+  handling (nightingalehq/legacy-functional-docs#219).
+
 **Progress (2026-09-12v):**
 - Addressed the fifty-sixth Copilot review round on PR #209 (issue #195):
   round 55's deferred chunk-backup rollback had a gap of its own.

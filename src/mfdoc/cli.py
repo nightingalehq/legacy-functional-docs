@@ -1294,7 +1294,7 @@ def cmd_batch(args) -> int:
     # Normalise the same way ingest does (normalise.derive_member_name /
     # split_members both .upper() the stored name) -- an un-normalised
     # --members value could otherwise collide with a reserved state-file key
-    # such as run_batch()'s "_corpus_sha256" sentinel.
+    # such as run_batch()'s "_corpus_sha256"/"_corpus_members" sentinels.
     members = ([m.strip().upper() for m in args.members.split(",")] if args.members
                else batch_mod.select_batch_members(conn))
     if not members:
