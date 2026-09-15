@@ -1619,6 +1619,54 @@ def _chunk_reuse_ok(conn, prior_chunks: dict | None, i: int, brief_hash: str,
     return validate_doc(conn, chunk_path)["ok"]
 
 
+def _chunked_member_missing_a_chunk_file(out_path: Path, prior_chunks: dict | None) -> bool:
+    """Whether any chunk a chunked member's prior successful run recorded
+    (`prior["chunks"]`, keyed by chunk index as a string, plus a
+    `"_narrative"` entry this function ignores -- see
+    `_generate_module_doc_chunked`'s own `chunk_state`) is now missing on
+    disk.
+
+    Guards the member-level resume-skip fast paths in `run_batch`/
+    `plan_batch` (issue #217 round-4 review): `prior_ok` there only ever
+    checks `out_path` itself, which for a chunked member is the
+    deterministic *index* document, never one of the chunk files it
+    references. Nothing else verifies those chunk files are actually
+    still present -- a chunk file deleted out from under this tool (or
+    lost to some other bug) while the database, resume state, and index
+    itself stay otherwise unchanged would leave `run_batch` skipping this
+    member indefinitely, `corpus_unchanged`/`prior_ok`'s only two
+    conditions both still satisfied. `validate_doc` on the index alone
+    can't catch this either -- it doesn't resolve a markdown link to
+    confirm the linked file exists. Mirrors testbatch.py's own
+    `_chunked_member_missing_a_chunk_file`, which fixed the identical gap
+    for generated tests.
+
+    Chunk file names are reconstructed the same way
+    `_generate_module_doc_chunked` computed them originally --
+    `chunk_width` from the *count* of recorded real chunks (excluding the
+    `"_narrative"` entry, which isn't a chunk index), matching that
+    function's own `len(str(chunk_count))` -- so this only needs the
+    prior state dict, not a fresh `routine_aware_chunk_ranges` call.
+    `False` (nothing missing) for anything that isn't a chunked member's
+    prior state (`prior_chunks` not a non-empty dict) -- a single-document
+    member has no chunks to check here at all."""
+    if not isinstance(prior_chunks, dict):
+        return False
+    chunk_keys = [k for k in prior_chunks if k != "_narrative"]
+    if not chunk_keys:
+        return False
+    chunk_width = len(str(len(chunk_keys)))
+    for key in chunk_keys:
+        try:
+            i = int(key)
+        except (TypeError, ValueError):
+            continue
+        chunk_path = out_path.with_name(f"{out_path.stem}.chunk{i:0{chunk_width}d}{out_path.suffix}")
+        if not chunk_path.exists():
+            return True
+    return False
+
+
 def _routine_chunk_map(routines: list, rule_rows: list, ranges: list[tuple[int, int]]) -> dict[str, int]:
     """Routine name (upper) -> 1-based chunk index whose rule range contains
     that routine's own rules -- the mapping `module_brief`'s `chunk_map`
@@ -1666,7 +1714,8 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
                                   prior_chunks: dict | None = None,
                                   index_template: str | None = None,
                                   sme_notes: dict | None = None,
-                                  member_facts: MemberFacts | None = None) -> DocResult:
+                                  member_facts: MemberFacts | None = None,
+                                  on_chunk_done: Callable[[dict[str, dict]], None] | None = None) -> DocResult:
     """Render one member as several independent chunk documents plus a
     deterministic index doc at `out_path`, instead of asking one completion
     to cover the member's whole rule set. Each chunk goes through the exact
@@ -1694,7 +1743,17 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
     function's chunk loop doesn't gather the same whole-member facts a
     second time (issue #183 review feedback). When omitted (the default,
     e.g. `generate_module_doc` called directly, not via `run_batch`), this
-    function builds its own, exactly as before this parameter existed."""
+    function builds its own, exactly as before this parameter existed.
+
+    `on_chunk_done`, when given, is called with a snapshot of `chunk_state`
+    (a shallow copy, safe for the caller to hold onto) after every chunk
+    completes -- reused or freshly generated -- and again after narrative
+    reconciliation. This is what lets `run_batch` checkpoint a chunked
+    member's progress to `state_path` incrementally instead of only once
+    this whole function returns: without it, a run interrupted partway
+    through a large chunked member has no on-disk record of any chunk it
+    already completed, and a resume regenerates the entire member from
+    scratch (issue #217)."""
     # Resolved up front (not just before the chunk loop below) so `routines`
     # -- needed immediately after, for chunk-range computation and
     # chunk_map -- can come from `member_facts.routines` too, rather than
@@ -1876,6 +1935,8 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
         retries += result.retries
         chunk_entries.append((i, (start, end), chunk_path, result))
         chunk_state[str(i)] = {"ok": result.ok, "brief_sha256": brief_hash}
+        if on_chunk_done is not None:
+            on_chunk_done(dict(chunk_state))
         if not result.ok:
             density_note = format_density_note(density_metrics[i - 1])
             logger.warning(
@@ -1958,6 +2019,8 @@ def _generate_module_doc_chunked(conn, member_name: str, system: str | None, rul
             "ok": narrative_ok, "input_sha256": narrative_input_hash,
             "sections": sections if narrative_ok else None,
         }
+        if on_chunk_done is not None:
+            on_chunk_done(dict(chunk_state))
         if not narrative_ok:
             problems.append("narrative synthesis: " + "; ".join(narrative_problems))
     else:
@@ -1993,7 +2056,8 @@ def generate_module_doc(conn, member_name: str, out_path: Path, caller: ModelCal
                          prior_chunks: dict | None = None,
                          index_template: str | None = None,
                          sme_notes: dict | None = None,
-                         facts: MemberFacts | None = None) -> DocResult:
+                         facts: MemberFacts | None = None,
+                         on_chunk_done: Callable[[dict[str, dict]], None] | None = None) -> DocResult:
     """Single-member version of the harness: brief -> call -> validate ->
     retry once. Used directly for one-off generation and by run_batch's
     per-item work (with the model call itself dispatched to a thread pool
@@ -2016,7 +2080,11 @@ def generate_module_doc(conn, member_name: str, out_path: Path, caller: ModelCal
     passes it straight through to `_generate_module_doc_chunked` as
     `member_facts`, and the non-chunked path passes it to `module_brief`
     itself (`facts=facts`) -- either way, this function never gathers
-    whole-member facts itself when a caller already built them."""
+    whole-member facts itself when a caller already built them.
+
+    `on_chunk_done` is passed straight through to `_generate_module_doc_
+    chunked` (see its docstring) -- ignored on the non-chunked branch
+    below, which has no per-chunk progress to checkpoint."""
     rows, ambiguous_libs = fetch_rule_candidate_rows(conn, member_name)
     threshold = _resolve_max_rules_per_call(max_rules_per_call)
     if not ambiguous_libs and rows and len(rows) > threshold:
@@ -2027,7 +2095,7 @@ def generate_module_doc(conn, member_name: str, out_path: Path, caller: ModelCal
             conn, member_name, system["system"] if system else None, rows, out_path, caller,
             writing_rules, template, redact, lexicon, max_attempts, threshold,
             prior_chunks=prior_chunks, index_template=index_template, sme_notes=sme_notes,
-            member_facts=facts,
+            member_facts=facts, on_chunk_done=on_chunk_done,
         )
 
     brief = module_brief(conn, member_name, redact=redact, lexicon=lexicon, sme_notes=sme_notes, facts=facts)
@@ -2318,7 +2386,10 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
         # guard against the (currently reserved but unenforced) "_corpus_sha256"
         # key ever being looked up as if it were one -- see cli.py's --members
         # normalisation, which keeps ordinary member names from colliding with it.
-        prior_ok = isinstance(prior, dict) and prior.get("ok") and out_path.exists()
+        prior_ok = (
+            isinstance(prior, dict) and prior.get("ok") and out_path.exists()
+            and not _chunked_member_missing_a_chunk_file(out_path, prior.get("chunks"))
+        )
 
         if corpus_unchanged and prior_ok:
             logger.debug("skip %s: unchanged (corpus signature match, resumed)", name)
@@ -2348,6 +2419,39 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
             briefs[state_key] = brief
             to_run.append((name, brief_hash, out_path, state_key))
 
+    # Mark every member actually about to run as not-done *before* any of
+    # them make a single model call, not just once each one's own work
+    # starts or finishes (issue #217 round-3 review). Every member here
+    # reached `to_run`/`to_run_chunked` precisely because its prior state
+    # entry (if any) is already known-stale -- so writing that down now,
+    # in one save, closes the same "reads as done when it isn't" hole for
+    # ALL of them at once: a flat member killed mid-call in the pool, or
+    # any chunked member whose own turn in the sequential loop below
+    # hasn't come up yet, not just the specific chunked member a kill
+    # happens to land on. Without this, the moment *any* member's
+    # checkpoint flushes the new `_corpus_sha256` to disk (the routing
+    # pass above only updated it in memory), a resume's `corpus_unchanged
+    # and prior_ok` fast path would read every other still-`ok: True`
+    # member here as done and skip it forever -- silently serving stale
+    # output with nothing left to flag it, regardless of whether that
+    # member's own turn to run had even started yet.
+    for name, brief_hash, out_path, state_key in to_run:
+        prior = state.get(state_key)
+        prior_chunks = prior.get("chunks") if isinstance(prior, dict) else None
+        state[state_key] = {
+            "ok": False, "attempts": 0, "brief_sha256": brief_hash,
+            **({"chunks": prior_chunks} if prior_chunks else {}),
+        }
+    for name, brief_hash, out_path, state_key, member_facts in to_run_chunked:
+        prior = state.get(state_key)
+        prior_chunks = prior.get("chunks") if isinstance(prior, dict) else None
+        state[state_key] = {
+            "ok": False, "attempts": 0, "brief_sha256": brief_hash,
+            "chunks": prior_chunks or {},
+        }
+    if state_path and (to_run or to_run_chunked):
+        _save_state(state_path, state)
+
     with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
         futures = {
             pool.submit(_timed_call, caller, build_prompt(briefs[state_key], writing_rules, template)):
@@ -2374,7 +2478,11 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
                     [f"model call failed: {exc.__class__.__name__}: {exc}"],
                 )
                 results.append(result)
-                state[state_key] = {"ok": False, "attempts": 1, "brief_sha256": brief_hash}
+                prior_chunks = (state.get(state_key) or {}).get("chunks")
+                state[state_key] = {
+                    "ok": False, "attempts": 1, "brief_sha256": brief_hash,
+                    **({"chunks": prior_chunks} if prior_chunks else {}),
+                }
                 if state_path:
                     _save_state(state_path, state)
                 continue
@@ -2414,7 +2522,11 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
                         duration_s=duration_s, retries=retries,
                     )
                     results.append(result)
-                    state[state_key] = {"ok": False, "attempts": 2, "brief_sha256": brief_hash}
+                    prior_chunks = (state.get(state_key) or {}).get("chunks")
+                    state[state_key] = {
+                        "ok": False, "attempts": 2, "brief_sha256": brief_hash,
+                        **({"chunks": prior_chunks} if prior_chunks else {}),
+                    }
                     if state_path:
                         _save_state(state_path, state)
                     continue
@@ -2431,7 +2543,11 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
                 validation.get("problems", []), duration_s=duration_s, retries=retries,
             )
             results.append(result)
-            state[state_key] = {"ok": result.ok, "attempts": attempts, "brief_sha256": brief_hash}
+            prior_chunks = (state.get(state_key) or {}).get("chunks") if not result.ok else None
+            state[state_key] = {
+                "ok": result.ok, "attempts": attempts, "brief_sha256": brief_hash,
+                **({"chunks": prior_chunks} if prior_chunks else {}),
+            }
             # Checkpoint after every completed/failed member, not only once
             # at the very end -- otherwise a later member's failure (or the
             # process being killed mid-run) loses every already-completed
@@ -2449,9 +2565,59 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
         # entry survives a sibling chunk's failure), so this try/except is
         # a second line of defense for anything unexpected *outside* that
         # per-chunk loop (chunk-range computation, narrative reconciliation,
-        # ...) -- in that rarer case there's no partial chunk_state from
-        # this pass to report, so prior_chunks (last run's state) is the
-        # best available fallback, same as before. See issue #78.
+        # ...). `_checkpoint_chunk_state` (issue #217) will usually have
+        # already written this pass's own partial progress into `state`
+        # before such an exception; the handler below merges that with
+        # `prior_chunks` (last run's state) rather than relying on either
+        # alone. See issue #78.
+        def _checkpoint_chunk_state(partial_chunk_state: dict, state_key=state_key,
+                                    brief_hash=brief_hash, prior_chunks=prior_chunks) -> None:
+            # Fires after every chunk (and again after narrative
+            # reconciliation) inside generate_module_doc, well before it
+            # returns -- writes the in-progress chunk_state to `state` (and,
+            # if a state_path is configured, straight to disk) so a run
+            # killed partway through this member still has every
+            # already-completed chunk on record for the next resume.
+            #
+            # This member reached `to_run_chunked` precisely because its
+            # prior state entry (if any) is stale -- ok=True there is a
+            # fact about the *previous* run, not this one. Overwriting
+            # "ok"/"attempts"/"brief_sha256" here (not just "chunks") on
+            # every checkpoint, not only when no entry exists yet, is what
+            # stops a kill right after this checkpoint from leaving an
+            # entry that resume's own `corpus_unchanged and prior_ok` /
+            # `prior_ok and prior_hash == brief_hash` skip fast-paths would
+            # read as "this member is already done" -- which would skip a
+            # half-regenerated member forever, mixing new and stale chunk
+            # files under one output with nothing left to flag it. The
+            # real "ok"/"attempts" land here once generate_module_doc
+            # actually returns (state[state_key] = {...} below).
+            #
+            # `partial_chunk_state` only carries entries for chunks this
+            # pass has reached so far -- merged over `prior_chunks` (not
+            # replacing it) so a kill after chunk 2 of 10 doesn't also
+            # discard chunks 3-10's still-good entries from the *previous*
+            # run, which would force them to re-render on resume for no
+            # reason (the exact waste issue #217 is about). Safe to merge
+            # blindly: `_chunk_reuse_ok` re-validates every carried-over
+            # entry's own hash/file-existence/doc-validity before ever
+            # trusting it, so a stale entry here can't cause bad reuse.
+            entry = {
+                "ok": False, "attempts": 0, "brief_sha256": brief_hash,
+                "chunks": {**(prior_chunks or {}), **partial_chunk_state},
+            }
+            state[state_key] = entry
+            if state_path:
+                _save_state(state_path, state)
+
+        # No need to checkpoint "not done yet" here before calling
+        # generate_module_doc -- the routing loop above already wrote and
+        # saved a not-done entry (ok=False, this member's own brief_hash,
+        # `prior_chunks` carried into "chunks") for every member in
+        # `to_run`/`to_run_chunked` before the pool or this loop ever
+        # started (issue #217 round-3 review: closes the same hole for a
+        # flat member, and for a chunked member whose own turn here hasn't
+        # come up yet, not just the one a kill happens to land on).
         try:
             result = generate_module_doc(
                 conn, name, out_path, caller, writing_rules, template, redact=redact,
@@ -2465,20 +2631,55 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
                 # nothing valid to reuse and generate_module_doc must build
                 # its own.
                 facts=member_facts if isinstance(member_facts, MemberFacts) else None,
+                on_chunk_done=_checkpoint_chunk_state,
             )
         except Exception as exc:
             logger.error(
                 "%s: chunked generation failed: %s: %s", name, exc.__class__.__name__, exc,
                 exc_info=True,
             )
+            # Merge whatever `_checkpoint_chunk_state` already wrote into
+            # `state` for this member during this same pass (real progress
+            # made before the exception) with `prior_chunks` (the previous
+            # run's state) -- same reasoning as `_checkpoint_chunk_state`
+            # itself: neither alone is complete. `in_progress_chunks` is
+            # missing any chunk this pass hadn't reached yet (dropping
+            # those would re-render them for nothing on resume, the same
+            # waste issue #217 is about); `prior_chunks` alone would lose
+            # whatever this pass actually completed before the exception.
+            in_progress_entry = state.get(state_key)
+            in_progress_chunks = (
+                in_progress_entry.get("chunks") if isinstance(in_progress_entry, dict) else None
+            )
             result = DocResult(
                 name, str(out_path), False, 0, 0, 0,
-                [f"model call failed: {exc.__class__.__name__}: {exc}"], chunked=True, chunk_state=prior_chunks,
+                [f"model call failed: {exc.__class__.__name__}: {exc}"], chunked=True,
+                chunk_state={**(prior_chunks or {}), **(in_progress_chunks or {})},
             )
         results.append(result)
+        # A normal (non-exception) ok=False return -- e.g. one chunk failed
+        # validation on both attempts -- only ever reflects the chunks
+        # `_generate_module_doc_chunked` itself touched this pass, which
+        # skips `_narrative` entirely once any chunk is unrecoverable (see
+        # its own `else:` branch). Replacing wholesale here would silently
+        # throw away a still-good `_narrative` entry (and any other
+        # not-yet-reached chunk) that `_checkpoint_chunk_state` already
+        # merged into `state` earlier in this same iteration -- the exact
+        # "reads as done when it isn't"/dropped-tail class issue #217 is
+        # about, just on the final write instead of a mid-loop checkpoint.
+        # Merge only on ok=False; an ok=True result's chunk_state is always
+        # this pass's complete, consistent set (see the exception handler's
+        # own comment above for why merging *there* is safe but merging a
+        # successful result would not be -- stale higher-numbered chunk
+        # keys from a since-shrunk member could corrupt
+        # `_chunked_member_missing_a_chunk_file`'s width inference).
+        prior_final_chunks = (state.get(state_key) or {}).get("chunks") if not result.ok else None
         state[state_key] = {
             "ok": result.ok, "attempts": result.attempts, "brief_sha256": brief_hash,
-            "chunks": result.chunk_state,
+            "chunks": (
+                result.chunk_state if result.ok
+                else {**(prior_final_chunks or {}), **(result.chunk_state or {})}
+            ),
         }
         # Checkpoint after every chunked member too -- these are rendered
         # serially and can each involve several model calls of their own, so
@@ -2643,7 +2844,10 @@ def plan_batch(conn, members: list[str], out_dir: Path,
         out_path = out_dir / subdir / f"{name}.md"
         state_key = f"{subdir.as_posix()}/{name}"
         prior = state.get(state_key)
-        prior_ok = isinstance(prior, dict) and prior.get("ok") and out_path.exists()
+        prior_ok = (
+            isinstance(prior, dict) and prior.get("ok") and out_path.exists()
+            and not _chunked_member_missing_a_chunk_file(out_path, prior.get("chunks"))
+        )
 
         if corpus_unchanged and prior_ok:
             plans.append(MemberPlan(name, "skip"))

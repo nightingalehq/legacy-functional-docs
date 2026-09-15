@@ -13,6 +13,90 @@ GitHub org.
   flows and the gap register, where judgement matters most.
 
 **Progress (2026-09-15):**
+- Fixed issue #217: `mfdoc batch`'s chunk-level resume state was only
+  persisted to disk once per member (after every one of that member's
+  chunks completed), not once per chunk -- a run interrupted partway
+  through a large chunked member lost every already-completed chunk's
+  work on resume, regenerating the whole member from scratch.
+- Added an `on_chunk_done` callback threaded through `generate_module_doc`/
+  `_generate_module_doc_chunked`, fired with a `chunk_state` snapshot
+  after every chunk (and after narrative reconciliation); `run_batch`
+  wires this to write the partial state to disk immediately.
+- Two rounds of review caught real bugs in the checkpointing logic
+  itself: (1) a mid-flight checkpoint could leave a prior run's stale
+  `ok: True`/`brief_sha256` in place (only "chunks" was overwritten) and
+  could drop not-yet-reached tail chunks' still-good entries by replacing
+  rather than merging with `prior_chunks`; (2) more fundamentally, no
+  member -- chunked or flat -- had its state entry marked not-done until
+  *its own* work produced a result, so a kill on one member, after a
+  sibling member's checkpoint had already flushed a new corpus signature
+  to disk, could leave that member's previous-run `ok: True` entry
+  permanently read as "done" by the corpus-unchanged resume fast path,
+  silently serving stale output forever. Fixed by having the routing loop
+  mark every member about to run as not-done, in one save, before the
+  worker pool or the chunked-member loop ever starts.
+- A fourth review round found one more variant of the same "reads as done
+  when it isn't" class, unrelated to checkpoint timing: `prior_ok` (in
+  both `run_batch` and `plan_batch`) only ever checked that a chunked
+  member's own index document exists, never that the chunk files it
+  *links to* are still on disk -- a chunk file lost to an out-of-band
+  delete (or any other bug) while the database, resume state, and index
+  all stayed otherwise unchanged left that member skipped indefinitely,
+  since `validate_doc` never resolves a markdown link to notice the
+  linked file is gone. Fixed with `_chunked_member_missing_a_chunk_file`,
+  mirroring `testbatch.py`'s own fix for the identical gap on generated
+  tests. Filed two related, larger findings from the same review round as
+  their own follow-ups rather than folding them into this fix: #218 (a
+  `--members` subset run advances the *global* corpus signature, which
+  can falsely mark an out-of-scope member as done too) and #219 (port
+  #218's fix, once decided, to `testbatch.py`'s own routing loop, which
+  has the identical gap and none of #217's other fixes either).
+- A fifth review round found that the round-3 routing-loop pre-mark fix
+  itself (above) was asymmetric: the `to_run_chunked` half deliberately
+  carries a member's prior `chunks` forward into its not-done pre-mark
+  entry, but the `to_run` (flat) half didn't, wiping `chunks` the moment
+  a member that used to be chunked (e.g. `max_rules_per_call` raised)
+  routed flat and got pre-marked -- a kill right there lost every one of
+  that member's already-completed chunks' resumable progress even though
+  the chunk files on disk were untouched, forcing a full re-render of all
+  of them once the threshold came back down. Fixed by carrying `chunks`
+  forward in the flat pre-mark too, exactly as the chunked half already
+  does.
+- A sixth review round found the fifth round's fix only covered the
+  window up to a flat member's *own* completion write: all three of the
+  flat pool's own state writes (initial model-call exception, retry-call
+  exception, and normal completion after a validation retry still fails)
+  built a fresh dict with no `chunks` key, wiping the carried-forward
+  value the instant that member's own work finished with `ok: False`. A
+  transient model failure (rate limit, timeout, a validation failure that
+  doesn't clear on retry) -- far more common than a hard kill -- destroyed
+  the same resumable chunk state just as thoroughly. Fixed by carrying
+  `chunks` forward on all three `ok: False` writes too (never on
+  success, where the member is genuinely a single document now).
+- A seventh review round found the chunked loop's own final write
+  (`state[state_key] = {..., "chunks": result.chunk_state}`) still
+  replaced wholesale instead of merging, unlike its own two neighbours in
+  the same loop iteration (`_checkpoint_chunk_state` and the outer
+  except-handler, both of which already merge `prior_chunks` in). When
+  any chunk fails validation, `_generate_module_doc_chunked` never writes
+  a `_narrative` entry into `result.chunk_state` (narrative synthesis is
+  always skipped once any chunk is unrecoverable), so this wholesale
+  write silently discarded a still-good `_narrative` entry
+  `_checkpoint_chunk_state` had already recorded earlier in the same
+  pass -- forcing the most expensive call a chunked member makes (whole-
+  module reconciliation) to re-run on the next resume even when every ok
+  chunk's body was byte-identical to what produced the cached narrative
+  last time. Fixed by merging on `ok: False` here too, matching the same
+  shape as the flat-member fixes above -- deliberately *not* merging on
+  `ok: True`, where the result's own `chunk_state` is always this pass's
+  complete, consistent set (merging stale higher-numbered chunk keys from
+  a since-shrunk member there would corrupt
+  `_chunked_member_missing_a_chunk_file`'s width inference).
+- Thirteen new regression tests, eleven confirmed (by reverting the
+  corresponding code) to fail without their fix. Full suite green (1094
+  passed, 2 skipped).
+
+**Progress (2026-09-15, #216):**
 - Fixed issue #216: `mfdoc batch`'s module-level narrative-synthesis
   reconciliation call failed its own citation/hedge validation on
   high-chunk-count modules, because a genuinely whole-module claim
