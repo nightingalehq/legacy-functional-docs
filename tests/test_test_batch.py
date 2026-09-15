@@ -4397,7 +4397,13 @@ def test_checkpoint_never_leaves_a_truncated_state_file_on_a_mid_write_crash(tmp
     whole point of checkpointing after every member. The atomic rename is
     made to raise partway through a second checkpoint, and the prior good
     state file is asserted to survive untouched, with no leftover temp
-    file."""
+    file.
+
+    `_checkpoint` no longer takes/writes a corpus signature itself (issue
+    #219) -- that responsibility moved to run_test_batch's own routing
+    logic, gated on `members` coverage (mirroring #218's fix in
+    batch.py), so this test only exercises the atomicity guarantee now,
+    not any corpus-signature bookkeeping."""
     import json
     import os as os_mod
 
@@ -4407,7 +4413,7 @@ def test_checkpoint_never_leaves_a_truncated_state_file_on_a_mid_write_crash(tmp
 
     state_path = tmp_path / "state.json"
     good_state = {"natural::GOODMOD::python::pytest": {"ok": True, "attempts": 1}}
-    _checkpoint(dict(good_state), state_path, "sig-1")
+    _checkpoint(dict(good_state), state_path)
     assert json.loads(state_path.read_text(encoding="utf-8"))["natural::GOODMOD::python::pytest"]["ok"] is True
 
     real_replace = os_mod.replace
@@ -4421,13 +4427,13 @@ def test_checkpoint_never_leaves_a_truncated_state_file_on_a_mid_write_crash(tmp
             _checkpoint(
                 {"natural::GOODMOD::python::pytest": {"ok": True, "attempts": 1},
                  "natural::BADMOD::python::pytest": {"ok": False, "attempts": 2}},
-                state_path, "sig-2",
+                state_path,
             )
     finally:
         os_mod.replace = real_replace
 
     state = json.loads(state_path.read_text(encoding="utf-8"))
-    assert state == good_state | {"_corpus_sha256": "sig-1"}
+    assert state == good_state
     leftover_tmp_files = [p for p in tmp_path.iterdir() if p.name != "state.json"]
     assert leftover_tmp_files == [], f"temp file(s) leaked: {leftover_tmp_files}"
 
@@ -4469,11 +4475,14 @@ def test_checkpoint_is_member_granular_not_chunk_granular_for_chunked_members(tm
         )
 
     assert summary.ok == 1
-    # One save for FAKEMOD's own checkpoint, plus run_test_batch's final
-    # unconditional save at the very end -- never one per chunk (which
-    # would be 2+ here, one per chunk, on top of those).
-    assert len(save_calls) == 2, (
-        f"expected exactly 2 _save_state calls (per-member checkpoint + final), got {len(save_calls)}"
+    # One save for the routing loop's up-front "mark FAKEMOD not-done"
+    # write (issue #219), one for FAKEMOD's own checkpoint once it
+    # actually finishes, plus run_test_batch's final unconditional save at
+    # the very end -- never one per chunk (which would be 2+ here, one
+    # per chunk, on top of those).
+    assert len(save_calls) == 3, (
+        f"expected exactly 3 _save_state calls (not-done + per-member checkpoint + final), "
+        f"got {len(save_calls)}"
     )
 
 
@@ -5790,4 +5799,183 @@ def _insert_rc(conn, member_id, line_no):
     return insert(
         conn, "rule_candidate", member_id=member_id, line_no=line_no, construct="IF",
         condition="COND", raw="IF COND",
+    )
+
+
+# --- Issue #219: port #217/#218's batch.py resume-safety fixes to
+# run_test_batch's own routing loop. ---
+
+def _seed_two_flat_test_batch_members(conn):
+    """Two ordinary (non-chunked) members, each with exactly one test_case
+    scenario -- MODA and MODB, invented names per this repo's "never commit
+    client-specific content" policy. Used by the issue #219 regression
+    tests below, which need two members sharing one run so one member's
+    own checkpoint can be shown to affect (issue #217) or not affect
+    (issue #218) a sibling member's resume-state entry."""
+    from mfdoc.db import insert
+
+    for member_id, name in ((1, "MODA"), (2, "MODB")):
+        conn.execute("INSERT INTO member (id, name, dialect) VALUES (?, ?, 'natural')", (member_id, name))
+        conn.execute(
+            "INSERT INTO source_line (member_id, line_no, text) VALUES (?, 1, 'irrelevant')", (member_id,)
+        )
+        insert(
+            conn, "test_case", member_id=member_id, kind="unit", scenario_name=f"{name}:BR-001",
+            given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+            when_json=f'{{"construct": "IF", "condition": "X", "citation": "[[{name}:1]]"}}',
+            then_json=f'{{"citation": "[[{name}:1]]", "source_excerpt": []}}',
+            status="characterization", citation=f"{name}:1", confidence="verified",
+        )
+    conn.commit()
+
+
+def test_run_test_batch_subset_run_never_advances_corpus_signature_past_an_untouched_member(tmp_path):
+    """Issue #219, porting #218: `--members` (cli.py's test-batch subcommand
+    has the identical flag) lets one invocation cover only a subset of the
+    batchable set sharing one `--state` file. Before this fix, testbatch's
+    `_checkpoint` folded `state["_corpus_sha256"] = corpus_sig` into every
+    single per-member checkpoint call -- worse than batch.py's pre-#218
+    unconditional-per-run overwrite, since even a *full* run would flush
+    the new corpus signature to disk the moment its first member finished,
+    while every other member (subset or not) still carried a stale
+    `ok: True` entry. A later run covering an untouched member would then
+    read its stale entry as still current via the `corpus_unchanged and
+    prior_ok` fast path, silently skipping a member whose source had
+    genuinely changed.
+
+    Fixed the same way as batch.py: `_corpus_sha256`/`_corpus_members` are
+    now written once, up front, gated on this run's `members` being a
+    superset of whichever members last established the stored signature."""
+    import sqlite3
+
+    from mfdoc import testbatch
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_two_flat_test_batch_members(conn)
+
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+    caller = _valid_test_doc_caller("python", "pytest")
+    first = testbatch.run_test_batch(
+        conn, ["MODA", "MODB"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path,
+    )
+    assert first.ok == 2, first.results
+
+    moda_subdir = testbatch._output_subdir(conn, "MODA")
+    modb_subdir = testbatch._output_subdir(conn, "MODB")
+    moda_key = f"{moda_subdir.as_posix()}::MODA::python::pytest"
+    modb_key = f"{modb_subdir.as_posix()}::MODB::python::pytest"
+    saved_after_first = json.loads(state_path.read_text())
+    corpus_sig_after_first = saved_after_first["_corpus_sha256"]
+    assert sorted(saved_after_first["_corpus_members"]) == ["MODA", "MODB"]
+
+    # MODB's own test_case genuinely changes -- a real `mfdoc test-plan`
+    # rerun after a source edit would do exactly this.
+    conn.execute("UPDATE test_case SET status='spec' WHERE member_id=2")
+    conn.commit()
+
+    # A subset run that never looks at MODB at all.
+    second = testbatch.run_test_batch(
+        conn, ["MODA"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path,
+    )
+    assert second.ok == 1
+    saved_after_second = json.loads(state_path.read_text())
+    assert saved_after_second["_corpus_sha256"] == corpus_sig_after_first, (
+        "a subset run that never touched MODB must not advance the corpus signature past it"
+    )
+    assert saved_after_second[modb_key] == saved_after_first[modb_key], (
+        "MODB's own entry must be untouched by a run that never covered it"
+    )
+
+    # A full run must still pick up MODB's real change -- not silently
+    # skip it because a subset run in between made the corpus signature
+    # look consistent for MODA alone.
+    third_caller = _counting_caller(caller)
+    third = testbatch.run_test_batch(
+        conn, ["MODA", "MODB"], "python", "pytest", out_dir, third_caller,
+        "writing rules text", "template text", state_path=state_path,
+    )
+    assert third.ok == 2
+    saved_after_third = json.loads(state_path.read_text())
+    assert third_caller.calls > 0, "MODB must actually re-render, not be skipped as still current"
+    assert saved_after_third[modb_key]["brief_sha256"] != saved_after_first[modb_key]["brief_sha256"]
+    assert sorted(saved_after_third["_corpus_members"]) == ["MODA", "MODB"]
+
+
+def test_run_test_batch_kill_of_one_flat_member_does_not_leave_a_sibling_falsely_done(tmp_path):
+    """Issue #219, porting #217: the "reads as done when it isn't" hole
+    isn't specific to chunked members -- two ordinary flat (non-chunked)
+    members in the same run reproduce it just as easily, and testbatch.py
+    had no equivalent of #217's routing-loop fix at all. Member A completes
+    and, before this fix, its own `_checkpoint` call would have flushed the
+    new corpus signature to disk (issue #218's variant of the same bug,
+    fixed separately above); member B, still carrying the *previous* run's
+    `ok: True` entry (its own turn in the pool hasn't produced a result
+    yet), is killed mid-call. Without a routing loop marking every
+    about-to-run member not-done before the pool starts, a resume would
+    read B's stale entry against the now-matching corpus signature and skip
+    it forever."""
+    import sqlite3
+
+    import pytest
+
+    from mfdoc import testbatch
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_two_flat_test_batch_members(conn)
+
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+    caller = _valid_test_doc_caller("python", "pytest")
+    first = testbatch.run_test_batch(
+        conn, ["MODA", "MODB"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path, concurrency=1,
+    )
+    assert first.ok == 2
+
+    modb_subdir = testbatch._output_subdir(conn, "MODB")
+    modb_key = f"{modb_subdir.as_posix()}::MODB::python::pytest"
+    moda_subdir = testbatch._output_subdir(conn, "MODA")
+    moda_key = f"{moda_subdir.as_posix()}::MODA::python::pytest"
+    assert json.loads(state_path.read_text())[modb_key]["ok"] is True
+
+    conn.execute("UPDATE test_case SET status='spec' WHERE member_id=1")
+    conn.execute("UPDATE test_case SET status='spec' WHERE member_id=2")
+    conn.commit()
+
+    def killed_on_modb(prompt: str) -> ModelResponse:
+        if "MODB:BR-" in prompt:
+            raise KeyboardInterrupt("simulated hard kill on MODB's own call")
+        return caller(prompt)  # MODA -- must complete and checkpoint first
+
+    with pytest.raises(KeyboardInterrupt):
+        testbatch.run_test_batch(
+            conn, ["MODA", "MODB"], "python", "pytest", out_dir, killed_on_modb,
+            "writing rules text", "template text", state_path=state_path, concurrency=1,
+        )
+
+    saved = json.loads(state_path.read_text())
+    assert saved[moda_key]["ok"] is True, "MODA's own checkpoint must have landed before the kill"
+    assert saved[modb_key]["ok"] is False, (
+        "a kill on MODB's own call must still mark it not-done, even though it never got a "
+        "chance to checkpoint itself -- otherwise a resume reads MODB's stale ok=True entry "
+        "against the now-matching corpus signature (flushed once MODA's own turn completes) "
+        "and skips it forever"
+    )
+
+    third = testbatch.run_test_batch(
+        conn, ["MODA", "MODB"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path, concurrency=1,
+    )
+    assert third.ok == 2
+    assert json.loads(state_path.read_text())[modb_key]["ok"] is True, (
+        "MODB must actually re-render on resume, not be skipped as still done"
     )

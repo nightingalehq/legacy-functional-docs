@@ -2068,7 +2068,7 @@ def _corpus_signature(conn, language: str, framework: str, threshold: int,
     return _base_corpus_signature(conn, redact=redact, sme_notes=sme_notes, extra=extra)
 
 
-def _checkpoint(state: dict, state_path: Path | None, corpus_sig: str | None) -> None:
+def _checkpoint(state: dict, state_path: Path | None) -> None:
     """Persist `state` to `state_path` immediately -- called after every
     member this run finishes (single-call or chunked), not just once at the
     very end, so a crash partway through (a caller exception this harness
@@ -2081,18 +2081,27 @@ def _checkpoint(state: dict, state_path: Path | None, corpus_sig: str | None) ->
     makes the identical member-wide trade-off for module docs), so a crash
     partway through one large chunked member's chunks still loses that
     member's progress on this pass, even though a sibling member's chunk
-    failure is isolated and reported per-chunk within the same call. Folding
-    `corpus_sig` into every checkpoint, not just the final one, is safe, not
-    just convenient: a member this run hasn't reached yet has no "ok": True
-    entry of its own, so a resumed run's corpus-level skip still can't
-    wrongly skip it even though `_corpus_sha256` already matches -- and
-    doing this early is what lets that fast path benefit the members that
-    did finish before a crash, instead of only ones from a run that reached
-    its own end cleanly. No-op when `state_path` is None (resume tracking
-    disabled)."""
+    failure is isolated and reported per-chunk within the same call.
+    No-op when `state_path` is None (resume tracking disabled).
+
+    Does NOT touch `state["_corpus_sha256"]`/`state["_corpus_members"]`
+    (issue #219, mirroring #218's fix in batch.py) -- those are set by
+    `run_test_batch` itself, at most once per run, before this is ever
+    called, gated on this run's own `members` covering everything the
+    currently-stored signature depends on. Folding `_corpus_sha256` into
+    *every* checkpoint (this function's own contract before issue #219)
+    was actively unsafe, not just redundant: it let the very first member
+    to finish flush a new corpus signature to disk while every member
+    whose own turn hasn't come up yet still carried a stale `ok: True`
+    entry from a previous run -- exactly the "reads as done when it
+    isn't" hole issue #217 closed in batch.py's `run_batch`, except here
+    every sibling member was exposed to it, not just one killed mid-call.
+    `run_test_batch`'s routing loop now writes a not-done entry for every
+    member about to run before this function -- or the pool/chunked
+    loop -- is ever reached, which is what actually closes that hole; see
+    its own comment there."""
     if state_path is None:
         return
-    state["_corpus_sha256"] = corpus_sig
     _save_state(state_path, state)
 
 
@@ -2154,6 +2163,39 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
         _corpus_signature(conn, language, framework, threshold, redact, sme_notes) if state_path else None
     )
     corpus_unchanged = bool(state_path) and state.get("_corpus_sha256") == corpus_sig
+    # `--members` (cli.py) lets one invocation cover only a subset of the
+    # batchable set sharing this same `--state` file. `_corpus_signature`
+    # hashes the *whole* corpus, not just what this run touched -- so
+    # unconditionally overwriting `_corpus_sha256` on every run (issue
+    # #218, ported here as #219) let a subset run advance it while some
+    # member outside this run's `members` never got looked at, making
+    # that untouched member appear current against the new signature. A
+    # later run covering that member would then read its stale
+    # `ok: True` entry as still current via the `corpus_unchanged and
+    # prior_ok` fast path, even if its own source had since changed,
+    # silently skipping it forever.
+    #
+    # Fixed the same way as batch.py: track which members last
+    # established the stored signature (`_corpus_members`) and only
+    # advance it when this run's `members` is a superset of that set --
+    # coverage only ever grows, never silently shrinks. Written once, up
+    # front here (not folded into every per-member `_checkpoint` call the
+    # way this used to work, issue #219) -- a member this run hasn't
+    # reached yet still has no "ok": True entry of its own once the
+    # routing loop below marks it not-done, so a resumed run's corpus-
+    # level skip still can't wrongly skip it even though `_corpus_sha256`
+    # already matches.
+    #
+    # `_corpus_members`, like `_corpus_sha256` (see this function's own
+    # docstring), is one global key shared across every target in a
+    # `--matrix` run rather than scoped per language/framework -- the
+    # same accepted, non-correctness-affecting redundancy already
+    # documented there.
+    prior_corpus_members = set(state.get("_corpus_members") or [])
+    corpus_members_grew_or_held = bool(members) and set(members) >= prior_corpus_members
+    if state_path and corpus_members_grew_or_held:
+        state["_corpus_sha256"] = corpus_sig
+        state["_corpus_members"] = sorted(set(members) | prior_corpus_members)
     results: list[DocResult] = []
     briefs: dict[str, str] = {}
     to_run: list[tuple[str, str, Path]] = []
@@ -2268,6 +2310,34 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
             briefs[name] = brief
             to_run.append((name, brief_hash, out_path))
 
+    # Mark every member actually about to run as not-done *before* any of
+    # them make a single model call, not just once each one's own work
+    # starts or finishes (issue #219, porting #217's fix from batch.py).
+    # Every member here reached `to_run`/`to_run_chunked` precisely
+    # because its prior state entry (if any) is already known-stale -- so
+    # writing that down now, in one save, closes the "reads as done when
+    # it isn't" hole for ALL of them at once: a flat member killed
+    # mid-call in the pool, or any chunked member whose own turn in the
+    # sequential loop below hasn't come up yet, not just the specific
+    # member a kill happens to land on. Without this, the moment *any*
+    # member's checkpoint flushes the new `_corpus_sha256` to disk (the
+    # write above only updated it in memory), a resume's
+    # `corpus_unchanged and prior_ok` fast path would read every other
+    # still-`ok: True` member here as done and skip it forever -- silently
+    # serving stale output with nothing left to flag it, regardless of
+    # whether that member's own turn to run had even started yet.
+    for name, brief_hash, out_path in to_run:
+        state[state_keys[name]] = {"ok": False, "attempts": 0, "brief_sha256": brief_hash}
+    for name, brief_hash, out_path in to_run_chunked:
+        prior = state.get(state_keys[name])
+        prior_chunks = prior.get("chunks") if isinstance(prior, dict) else None
+        state[state_keys[name]] = {
+            "ok": False, "attempts": 0, "brief_sha256": brief_hash,
+            "chunks": prior_chunks or {},
+        }
+    if state_path and (to_run or to_run_chunked):
+        _save_state(state_path, state)
+
     with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
         futures = {
             pool.submit(
@@ -2321,7 +2391,7 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
                     state[state_keys[name]] = {
                         "ok": False, "attempts": 2, "brief_sha256": brief_hash,
                     }
-                    _checkpoint(state, state_path, corpus_sig)
+                    _checkpoint(state, state_path)
                     continue
                 attempts = 2
             input_tokens, output_tokens = response.input_tokens, response.output_tokens
@@ -2524,7 +2594,7 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
             state[state_keys[name]] = {
                 "ok": result.ok, "attempts": attempts, "brief_sha256": brief_hash,
             }
-            _checkpoint(state, state_path, corpus_sig)
+            _checkpoint(state, state_path)
 
     # Large members (chunked) render serially, on this thread, after the
     # pool above closes -- generate_member_test_doc touches `conn`
@@ -2537,6 +2607,16 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
     for name, brief_hash, out_path in to_run_chunked:
         prior = state.get(state_keys[name])
         prior_chunks = prior.get("chunks") if isinstance(prior, dict) else None
+        # No need to write a "not done yet" entry here before calling
+        # generate_member_test_doc -- the routing loop above already
+        # wrote and saved a not-done entry (ok=False, this member's own
+        # brief_hash, `prior_chunks` carried into "chunks") for every
+        # member in `to_run`/`to_run_chunked` before this loop (or the
+        # pool above) ever started (issue #219, mirroring #217's round-3
+        # review finding in batch.py): a kill on this member's own turn,
+        # or on a sibling flat member whose checkpoint has already
+        # flushed a new `_corpus_sha256` to disk, can no longer leave
+        # this member's stale `ok: True` entry reading as done.
         try:
             result = generate_member_test_doc(
                 conn, name, language, framework, out_path, caller, writing_rules, template,
@@ -2574,9 +2654,9 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
             "ok": result.ok, "attempts": result.attempts, "brief_sha256": brief_hash,
             "chunks": result.chunk_state,
         }
-        _checkpoint(state, state_path, corpus_sig)
+        _checkpoint(state, state_path)
 
-    _checkpoint(state, state_path, corpus_sig)
+    _checkpoint(state, state_path)
 
     return TestBatchSummary(
         results=sorted(results, key=lambda r: r.member),

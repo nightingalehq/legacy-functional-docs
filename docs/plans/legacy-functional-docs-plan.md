@@ -12,6 +12,47 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-15):**
+- Issue #219: ported #217/#218's `batch.py` resume-safety fixes to
+  `testbatch.py`'s own routing loop (`run_test_batch`), which shared
+  neither and had one variant worse than what #217 found.
+  1. `run_test_batch` now marks every member about to run (flat or
+     chunked) as not-done -- `{"ok": False, "attempts": 0,
+     "brief_sha256": ...}` (plus `"chunks": prior_chunks or {}` for a
+     chunked member) -- in one `_save_state` call, before the worker pool
+     or the sequential chunked-member loop ever starts. Without this, a
+     kill on one member after a sibling's checkpoint had already flushed
+     a new corpus signature to disk could leave that first member's
+     previous-run `ok: True` entry permanently read as done by the
+     corpus-unchanged resume fast path.
+  2. `_checkpoint` no longer folds `state["_corpus_sha256"]` into every
+     per-member checkpoint call -- it did so unconditionally on *every*
+     call, not just an initial one, which was strictly worse than
+     batch.py's pre-#218 bug: even a full (non-subset) run would flush
+     the new corpus signature to disk the moment its first member
+     finished, exposing every sibling member's stale `ok: True` entry to
+     the same "reads as done when it isn't" hole. `run_test_batch` now
+     tracks which members established the stored signature
+     (`state["_corpus_members"]`, mirroring #218) and only advances
+     `_corpus_sha256`/`_corpus_members` once, up front, when this run's
+     `members` is a superset of the previously-recorded set -- the same
+     "coverage only ever grows" rule #218 established for `batch.py`,
+     applied here too so a `--members` subset run of `mfdoc test-batch`
+     can't silently advance the signature past a member it never looked
+     at either.
+  `testbatch.py`'s own, independently-fixed `_chunked_member_missing_a_
+  chunk_file` (predating and more complete than #217's version in
+  `batch.py`) needed no change -- confirmed by re-reading it, not ported
+  in either direction.
+- Two new regression tests in `tests/test_test_batch.py`
+  (`test_run_test_batch_subset_run_never_advances_corpus_signature_past_
+  an_untouched_member`, `test_run_test_batch_kill_of_one_flat_member_
+  does_not_leave_a_sibling_falsely_done`), each confirmed to fail without
+  its corresponding fix (reverted `src/mfdoc/testbatch.py` locally,
+  re-ran, restored). Two existing tests exercising `_checkpoint`'s old
+  3-argument, corpus-sig-folding contract updated to match the new one.
+  Full suite green (1086 passed, 2 skipped).
+
 **Progress (2026-09-12v):**
 - Addressed the fifty-sixth Copilot review round on PR #209 (issue #195):
   round 55's deferred chunk-backup rollback had a gap of its own.
