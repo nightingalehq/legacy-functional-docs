@@ -1796,6 +1796,189 @@ def test_batch_departed_member_does_not_permanently_freeze_corpus_signature(tmp_
     assert saved_after_final[moda_key]["brief_sha256"] != saved_after_first[moda_key]["brief_sha256"]
 
 
+def test_batch_subset_run_reconstructs_coverage_from_a_state_file_missing_corpus_sha256(tmp_path):
+    """Issue #218 follow-up (third adversarial review round): a state
+    file can have real member entries but no `_corpus_sha256` at all --
+    not just "genuinely never run before". `_corpus_sha256` (issue
+    #37/#9) and the subdir-qualified `state_key` this fix's legacy
+    reconstruction relies on landed as two separate historical changes,
+    so a state file written between them (or one that's had
+    `_corpus_sha256` manually deleted -- the documented recovery move
+    for a frozen signature) has member entries with no `_corpus_sha256`.
+    Special-casing "`_corpus_sha256` not in state" as *zero* prior
+    coverage (rather than reconstructing it the same way a legacy file
+    missing only `_corpus_members` is handled) reproduces issue #218 on
+    the very first subset run against such a file: trivially "superset
+    of nothing"."""
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    for member_id, name in ((1, "MODA"), (2, "MODB")):
+        conn.execute(
+            "INSERT INTO member (id, name, dialect, object_type) VALUES (?, ?, 'natural', 'program')",
+            (member_id, name),
+        )
+        conn.execute(
+            "INSERT INTO source_line (member_id, line_no, text) VALUES (?, 1, 'irrelevant')", (member_id,)
+        )
+        conn.execute(
+            "INSERT INTO rule_candidate (member_id, line_no, construct, condition, raw) "
+            "VALUES (?, 1, 'IF', ?, ?)",
+            (member_id, f"{name}-COND-1", f"IF {name}-COND-1"),
+        )
+        conn.execute(
+            "INSERT INTO source_file (id, path, sha256, line_count) VALUES (?, ?, 'sha-v1', 1)",
+            (member_id, f"{name}.nsp"),
+        )
+    conn.commit()
+
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+    first = batch_mod.run_batch(
+        conn, ["MODA", "MODB"], out_dir, FakeCaller(), "writing rules text", "template text",
+        state_path=state_path,
+    )
+    assert first.failed == 0
+    modb_subdir = batch_mod._output_subdir(conn, "MODB")
+    modb_key = f"{modb_subdir.as_posix()}/MODB"
+    saved_after_first = json.loads(state_path.read_text())
+
+    # Simulate a state file with real member entries but no
+    # `_corpus_sha256` at all -- e.g. a hand-deleted signature.
+    del saved_after_first["_corpus_sha256"]
+    del saved_after_first["_corpus_members"]
+    state_path.write_text(json.dumps(saved_after_first))
+
+    # MODB's source genuinely changes -- a real re-ingest would bump this.
+    conn.execute("UPDATE rule_candidate SET condition='MODB-COND-1-CHANGED' WHERE member_id=2")
+    conn.execute("UPDATE source_file SET sha256='sha-v2' WHERE id=2")
+    conn.commit()
+
+    # A subset run that never looks at MODB at all, against this file.
+    second = batch_mod.run_batch(
+        conn, ["MODA"], out_dir, FakeCaller(), "writing rules text", "template text",
+        state_path=state_path,
+    )
+    assert second.failed == 0
+    saved_after_second = json.loads(state_path.read_text())
+    assert "_corpus_sha256" not in saved_after_second, (
+        "a subset run against a state file with no _corpus_sha256 at all must not "
+        "establish a signature that leaves MODB looking covered"
+    )
+    assert saved_after_second[modb_key] == saved_after_first[modb_key], (
+        "MODB's own entry must be untouched by a run that never covered it"
+    )
+
+    # A full run must still pick up MODB's real change.
+    third_caller = _counting_caller(FakeCaller())
+    third = batch_mod.run_batch(
+        conn, ["MODA", "MODB"], out_dir, third_caller, "writing rules text", "template text",
+        state_path=state_path,
+    )
+    assert third.failed == 0
+    saved_after_third = json.loads(state_path.read_text())
+    assert third_caller.calls > 0, "MODB must actually re-render, not be skipped as still current"
+    assert saved_after_third[modb_key]["brief_sha256"] != saved_after_first[modb_key]["brief_sha256"]
+
+
+def test_batch_departed_member_that_returns_does_not_reopen_the_untouched_member_bug(tmp_path):
+    """Issue #218 follow-up (third adversarial review round): dropping a
+    departed member from the *requirement* (the prior fix) isn't enough
+    on its own -- its own stale `ok: True` state entry was still left on
+    disk. If that member later returns to the batchable set with
+    genuinely changed source, a run over what's currently batchable
+    would satisfy the superset check (the departed member no longer
+    counted against it), advance the signature, and a later run covering
+    the returned member would then read its untouched, stale entry as
+    still current -- reproducing the exact silent-skip failure this fix
+    exists to close. The state entry must be pruned at the moment a
+    member is recognised as departed, so a returning member has nothing
+    stale to be blessed by."""
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    for member_id, name in ((1, "MODA"), (2, "MODB")):
+        conn.execute(
+            "INSERT INTO member (id, name, dialect, object_type) VALUES (?, ?, 'natural', 'program')",
+            (member_id, name),
+        )
+        conn.execute(
+            "INSERT INTO source_line (member_id, line_no, text) VALUES (?, 1, 'irrelevant')", (member_id,)
+        )
+        conn.execute(
+            "INSERT INTO rule_candidate (member_id, line_no, construct, condition, raw) "
+            "VALUES (?, 1, 'IF', ?, ?)",
+            (member_id, f"{name}-COND-1", f"IF {name}-COND-1"),
+        )
+        conn.execute(
+            "INSERT INTO source_file (id, path, sha256, line_count) VALUES (?, ?, 'sha-v1', 1)",
+            (member_id, f"{name}.nsp"),
+        )
+    conn.commit()
+
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+    first = batch_mod.run_batch(
+        conn, ["MODA", "MODB"], out_dir, FakeCaller(), "writing rules text", "template text",
+        state_path=state_path,
+    )
+    assert first.failed == 0
+    modb_subdir = batch_mod._output_subdir(conn, "MODB")
+    modb_key = f"{modb_subdir.as_posix()}/MODB"
+    saved_after_first = json.loads(state_path.read_text())
+
+    # MODB departs the batchable set entirely (e.g. mid-reingest, or a
+    # dialect/object_type reclassification), and only afterwards does its
+    # source genuinely change.
+    conn.execute("UPDATE member SET object_type='view' WHERE id=2")
+    conn.commit()
+    assert batch_mod.select_batch_members(conn) == ["MODA"]
+
+    departed = batch_mod.run_batch(
+        conn, ["MODA"], out_dir, FakeCaller(), "writing rules text", "template text",
+        state_path=state_path,
+    )
+    assert departed.failed == 0
+
+    conn.execute("UPDATE rule_candidate SET condition='MODB-COND-1-CHANGED' WHERE member_id=2")
+    conn.execute("UPDATE source_file SET sha256='sha-v2' WHERE id=2")
+    conn.commit()
+
+    # MODB returns to the batchable set.
+    conn.execute("UPDATE member SET object_type='program' WHERE id=2")
+    conn.commit()
+    assert batch_mod.select_batch_members(conn) == ["MODA", "MODB"]
+
+    # A run over what's currently batchable (MODA alone would also
+    # satisfy the superset check now that MODB doesn't count against it,
+    # so this exercises the realistic "someone reruns the full corpus"
+    # path once MODB is back) must not let MODB look covered by a
+    # signature established without ever looking at it again.
+    another_moda_only_run = batch_mod.run_batch(
+        conn, ["MODA"], out_dir, FakeCaller(), "writing rules text", "template text",
+        state_path=state_path,
+    )
+    assert another_moda_only_run.failed == 0
+
+    # A run that finally covers the returned, changed MODB must still
+    # pick up its real change -- not skip it as stale-but-still-current.
+    final_caller = _counting_caller(FakeCaller())
+    final = batch_mod.run_batch(
+        conn, ["MODA", "MODB"], out_dir, final_caller, "writing rules text", "template text",
+        state_path=state_path,
+    )
+    assert final.failed == 0
+    assert final_caller.calls > 0, "MODB must actually re-render, not be skipped as still current"
+    saved_after_final = json.loads(state_path.read_text())
+    assert saved_after_final[modb_key]["brief_sha256"] != saved_after_first[modb_key]["brief_sha256"]
+
+
 def test_batch_recomputes_briefs_when_a_dialect_hash_changes(indexed_db, tmp_path, monkeypatch):
     """issue #194: a dialect-parser code change with no source-file edit at
     all changes `source_file.dialect_hash` (set by `cli.cmd_ingest`) with

@@ -80,7 +80,8 @@ GitHub org.
   - `_legacy_corpus_members_from_state`'s `"/" in key` filter silently
     under-counted an even older generation of state file (bare
     member-name keys, pre-dating the subdir-qualified `state_key` --
-    `0e45a63`, before `_corpus_sha256` itself, `ef76532`). Not currently
+    `0e45a63`) than the generation this fix's `_corpus_sha256`
+    (`ef76532`, which predates `0e45a63`) checks for. Not currently
     exploitable (today's read loop only ever looks up the qualified
     form), but relying on that coincidence was a trap. Dropped the `"/"
     in key` clause -- over-including a key as a member name only makes
@@ -111,6 +112,45 @@ GitHub org.
     prior_ok` on per-member coverage, appending to `_corpus_members`
     incrementally as each member's own checkpoint lands, rather than
     only ever writing the whole covered set once up front.
+- A third adversarial review round confirmed the round-1/round-2 fixes
+  (by reverting each in isolation and re-running the suite -- all still
+  pass) and corrected an inverted-history claim in this entry (`ef76532`,
+  which added `_corpus_sha256`, actually *predates* `0e45a63`, which
+  added the subdir-qualified `state_key` -- fixed above), then found and
+  fixed two more real correctness holes, both of which reopen issue #218
+  itself under specific conditions:
+  - **A state file with real member entries but no `_corpus_sha256` at
+    all was still treated as zero prior coverage.** The
+    `"_corpus_sha256" not in state` special case (meant to mean
+    "genuinely first-ever run") short-circuited before
+    `_legacy_corpus_members_from_state` ever ran -- but a state file can
+    have member entries and no `_corpus_sha256` for reasons other than
+    "never run before": `_corpus_sha256` and the subdir-qualified
+    `state_key` this fix's reconstruction relies on landed as two
+    separate historical changes, so a file written between them
+    qualifies, and so does one that's had `_corpus_sha256` manually
+    deleted (the documented recovery move for a frozen signature). Fixed
+    by removing the special case entirely -- a genuinely empty state
+    dict already reconstructs to the empty set via
+    `_legacy_corpus_members_from_state` on its own, so unifying the two
+    paths costs nothing.
+  - **A departed member's stale state entry survived its departure, so a
+    return-with-real-change cycle reopened the bug.** The
+    intersect-with-`select_batch_members` fix (round one) correctly
+    drops a departed member from the *requirement*, but left its own
+    `ok: True` state entry untouched on disk. If that member later
+    returned to the batchable set (a re-ingest in flight, a
+    dialect/object_type reclassification) with genuinely changed source,
+    a run over what's currently batchable would satisfy the superset
+    check (the departed member no longer counted against it), advance
+    the signature, and a later run covering the returned member would
+    then read its untouched, stale entry as still current -- the exact
+    silent-skip failure this whole fix exists to close. Fixed by pruning
+    a departed member's state entry at the moment it's recognised as
+    departed, so a returning member has nothing stale left to be blessed
+    by.
+  - Two more regression tests, each confirmed by reverting its fix to
+    fail without it. Full suite green (1091 passed, 2 skipped).
 
 **Progress (2026-09-12v):**
 - Addressed the fifty-sixth Copilot review round on PR #209 (issue #195):

@@ -328,17 +328,21 @@ _RESERVED_STATE_KEYS = ("_corpus_sha256", "_corpus_members")
 
 
 def _legacy_corpus_members_from_state(state: dict) -> set[str]:
-    """Derive the member set that established a *legacy* (pre-#218-fix)
-    state file's `_corpus_sha256` -- one that has that key but not the
-    `_corpus_members` key this fix introduced. Every ordinary member entry
-    is keyed `"<subdir>/<NAME>"` (see `run_batch`'s `state_key`); the bare
-    member name is the last path segment. Reading such a file's absence of
-    `_corpus_members` as "no prior coverage" (rather than reconstructing it
-    like this) would let the very first subset run against any
-    pre-existing state file reproduce issue #218 on the spot -- trivially
-    "superset of nothing", advancing the signature while recording only
-    its own members and silently orphaning every member missing from this
-    run.
+    """Derive the prior member set from a state file's own member entries,
+    for every case *other than* one with a well-formed `_corpus_members`
+    list already on it: a *legacy* (pre-#218-fix) state file that has
+    `_corpus_sha256` but not the `_corpus_members` key this fix
+    introduced; a state file with neither key at all (a genuinely
+    first-ever run against an empty/nonexistent file, which reconstructs
+    to the empty set here on its own -- no special-casing needed); and a
+    corrupted/hand-edited `_corpus_members` that isn't a list. Every
+    ordinary member entry is keyed `"<subdir>/<NAME>"` (see `run_batch`'s
+    `state_key`); the bare member name is the last path segment. Reading
+    any of these as "no prior coverage" (rather than reconstructing it
+    like this) would let the very first subset run against such a state
+    file reproduce issue #218 on the spot -- trivially "superset of
+    nothing", advancing the signature while recording only its own
+    members and silently orphaning every member missing from this run.
 
     Deliberately not restricted to keys containing "/": an even older
     generation of state file (pre-dating the subdir-qualified state_key
@@ -2290,23 +2294,30 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
     # safe on its own; only the *write* that could make an untouched
     # member look current is gated.
     if state_path:
-        if "_corpus_sha256" not in state:
-            # First-ever run against this state file: no prior signature,
-            # so there's genuinely no prior coverage to respect.
-            prior_corpus_members: set[str] = set()
-        elif isinstance(state.get("_corpus_members"), list):
-            prior_corpus_members = set(state["_corpus_members"])
+        if isinstance(state.get("_corpus_members"), list):
+            prior_corpus_members: set[str] = set(state["_corpus_members"])
         else:
-            # Legacy state file, written before this fix: has
-            # `_corpus_sha256` but no `_corpus_members` (or a corrupted/
-            # hand-edited `_corpus_members` that isn't a list -- treated
-            # the same way rather than raising or failing open, since a
-            # frozen signature is explicitly recovered by hand-editing
-            # this very file elsewhere in this docstring/comment).
-            # Treating either case as empty prior coverage (rather than
-            # reconstructing it) would reproduce issue #218 on the very
-            # first post-upgrade subset run -- see
-            # `_legacy_corpus_members_from_state`.
+            # Every other case -- a state file with no `_corpus_members`
+            # at all (a legacy file written before this fix, or a
+            # genuinely first-ever run against an empty/nonexistent state
+            # file) and a corrupted/hand-edited `_corpus_members` that
+            # isn't a list -- is handled by reconstructing the prior
+            # member set from the state file's own member entries,
+            # rather than special-casing "no `_corpus_sha256` at all" as
+            # empty prior coverage. That special case looked safe (surely
+            # a state file with no recorded signature has no real prior
+            # coverage either) but is false for a real, named generation
+            # of on-disk file: `_corpus_sha256` (issue #37/#9) and the
+            # subdir-qualified `state_key` this reconstruction relies on
+            # (see `_legacy_corpus_members_from_state`) landed as two
+            # separate changes, so a state file written between them (or
+            # one that's had its `_corpus_sha256` manually deleted, the
+            # documented recovery move for a frozen signature) has real
+            # member entries and no `_corpus_sha256` -- and would
+            # otherwise be read as zero prior coverage, reproducing issue
+            # #218 on the very first post-upgrade subset run against it.
+            # A genuinely empty state dict already reconstructs to the
+            # empty set on its own, so this unification costs nothing.
             prior_corpus_members = _legacy_corpus_members_from_state(state)
         # A member that's left the corpus entirely (deleted, renamed, no
         # longer batchable) must drop out of the requirement -- otherwise
@@ -2314,7 +2325,28 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
         # containing a member that no longer exists, permanently freezing
         # `_corpus_sha256` with no recovery short of hand-editing the
         # state file.
-        prior_corpus_members &= set(select_batch_members(conn))
+        batchable_now = set(select_batch_members(conn))
+        departed = prior_corpus_members - batchable_now
+        if departed:
+            # Dropping a departed member from the *requirement* isn't
+            # enough on its own: its own `ok: True` state entry is still
+            # sitting on disk, untouched. If that same member later
+            # returns to the batchable set (a re-ingest in flight, a
+            # dialect/object_type reclassification, a file temporarily
+            # missing from a drop) with genuinely changed source, a
+            # subsequent run over everything currently batchable would
+            # satisfy the superset check (the departed member no longer
+            # counts against it), advance the signature, and then a run
+            # covering the returned member would read its stale,
+            # never-updated entry as still current via `corpus_unchanged
+            # and prior_ok` -- reproducing the exact silent-skip failure
+            # this fix exists to close. Pruning the entry here, at the
+            # moment the member is recognised as departed, means a
+            # returning member has nothing stale to be blessed by.
+            for key in [k for k in state
+                        if k not in _RESERVED_STATE_KEYS and k.rsplit("/", 1)[-1] in departed]:
+                del state[key]
+        prior_corpus_members &= batchable_now
         # An empty `members` list (nothing to run) must never establish
         # or advance coverage.
         corpus_members_grew_or_held = bool(members) and set(members) >= prior_corpus_members
