@@ -13,6 +13,266 @@ GitHub org.
   flows and the gap register, where judgement matters most.
 
 **Progress (2026-09-15):**
+- Fixed issue #218: `mfdoc batch --members A,B` (a documented, first-class
+  flag) shares one `--state` file with a full run, but `run_batch`
+  overwrote `state["_corpus_sha256"]` unconditionally on every run,
+  regardless of `members` -- while `_corpus_signature` itself hashes the
+  *whole* corpus, independent of which members a given invocation
+  covers. A subset run could therefore advance the signature to reflect
+  a change made to a member *outside* its own `members`, without ever
+  looking at that member. A later run covering that member would then
+  read its untouched, stale `ok: True` entry as still current via the
+  `corpus_unchanged and prior_ok` fast path, silently skipping a member
+  whose source had genuinely changed.
+- Fixed by tracking which members established the currently-stored
+  signature (`_corpus_members`, a new reserved state-file key alongside
+  `_corpus_sha256`) and only advancing it when a run's own `members` is a
+  superset of that recorded set -- coverage only ever grows, never
+  silently shrinks. This preserves the existing, already-tested pattern
+  of repeatedly running the exact same (genuine, not full-corpus) subset
+  and still getting the fast path on repeat runs, while refusing to
+  advance when a run leaves out a member the signature's validity
+  actually depends on.
+- One new regression test, confirmed (by reverting the fix) to fail
+  without it. Full suite green (1085 passed, 2 skipped).
+- Filed as a follow-up rather than folded in here: porting the equivalent
+  fix to `testbatch.py`'s own, separately-implemented corpus-signature
+  handling (nightingalehq/legacy-functional-docs#219).
+- An adversarial re-review of the above found two further gaps and
+  fixed both:
+  - **Legacy state files weren't covered at all.** `state.get("_corpus_members")
+    or []` read a state file written *before* this fix (has
+    `_corpus_sha256`, no `_corpus_members`) as empty prior coverage --
+    which made the very first subset run against any pre-existing state
+    file trivially "superset of nothing", reproducing issue #218 on the
+    spot. Fixed by reconstructing the prior member set from the state
+    file's own member entries (state keys are `"<subdir>/<NAME>"`; the
+    bare name is the last path segment, skipping the reserved
+    `_corpus_sha256`/`_corpus_members` keys) whenever `_corpus_sha256` is
+    present but `_corpus_members` is not -- only a state file with no
+    `_corpus_sha256` at all (a genuine first-ever run) is treated as
+    having no prior coverage. See `_legacy_corpus_members_from_state`.
+  - **A departed member permanently froze the signature.** Because the
+    recorded set only ever grew (union), a member that left the corpus
+    entirely (deleted, renamed, no longer batchable) stayed in
+    `_corpus_members` forever -- after that, no future run, however
+    large, could ever be a superset of a set containing a member that no
+    longer exists, so `_corpus_sha256` could never advance again, with no
+    recovery short of hand-editing the state file. Fixed by intersecting
+    the prior recorded set with what `select_batch_members(conn)` says is
+    actually batchable *before* the superset comparison, so a departed
+    member drops out of the requirement instead of permanently blocking
+    progress.
+  - Documented (in the code comment and here) a caveat on the "repeated
+    subset keeps the fast path" claim above: that's only true *before*
+    anything in the corpus changes. Once something changes, a subset run
+    can never re-establish the signature on its own -- only a run
+    covering the full recorded set (or a superset of it) can advance
+    `_corpus_sha256` past that change. This is expected/correct, not a
+    bug; it's exactly what stops a subset run from vouching for a member
+    it never looked at.
+  - Two more regression tests added (legacy-state-file migration;
+    departed-member permanent-freeze), each confirmed by reverting the
+    fix to fail without it. Full suite green (1087 passed, 2 skipped).
+- A second adversarial review round confirmed all three fixes above (by
+  reverting each in isolation and re-running the suite) and found three
+  smaller real issues, all fixed:
+  - `_legacy_corpus_members_from_state`'s `"/" in key` filter silently
+    under-counted an even older generation of state file (bare
+    member-name keys, pre-dating the subdir-qualified `state_key` --
+    `0e45a63`) than the generation this fix's `_corpus_sha256`
+    (`ef76532`, which predates `0e45a63`) checks for. Not currently
+    exploitable (today's read loop only ever looks up the qualified
+    form), but relying on that coincidence was a trap. Dropped the `"/"
+    in key` clause -- over-including a key as a member name only makes
+    the superset requirement stricter, never looser.
+  - A corrupted/hand-edited `_corpus_members` that isn't a list (a stray
+    string would silently fail open into single-character "members";
+    an int/bool would raise and abort the run) is now handled the same
+    way as a legacy file missing the key entirely --
+    `isinstance(state.get("_corpus_members"), list)` gates the direct
+    read, falling back to `_legacy_corpus_members_from_state`'s
+    reconstruction otherwise.
+  - Two more regression tests (a corrupted `_corpus_members` value; an
+    older-generation state file with bare, unqualified member-name
+    keys), the first confirmed by reverting the fix to fail without it.
+    Full suite green (1089 passed, 2 skipped).
+  - The review also surfaced a real but genuinely out-of-scope gap,
+    pre-dating this fix entirely (traces to the original #78/#37
+    resumable-state design, not to `d99bda4` or anything in this run):
+    `_corpus_sha256` is written into `state` up front and flushed by the
+    *first* per-member checkpoint, so a process interrupted after some
+    members checkpoint but before others can still leave stale `ok:
+    True` entries alongside an already-advanced signature on disk -- the
+    #218 fix's superset guard doesn't gate the fast-path *read* itself
+    (only the signature *write*), so it doesn't close this
+    interrupted-run variant of the same symptom (a fourth review round,
+    below, later found and closed a separate way the clean-exit case
+    itself was still incomplete -- this interrupted-run gap remains
+    open regardless). Filed as
+    nightingalehq/legacy-functional-docs#221 rather than folded in here;
+    the suggested direction there is to also gate `corpus_unchanged and
+    prior_ok` on per-member coverage, appending to `_corpus_members`
+    incrementally as each member's own checkpoint lands, rather than
+    only ever writing the whole covered set once up front.
+- A third adversarial review round confirmed the round-1/round-2 fixes
+  (by reverting each in isolation and re-running the suite -- all still
+  pass) and corrected an inverted-history claim in this entry (`ef76532`,
+  which added `_corpus_sha256`, actually *predates* `0e45a63`, which
+  added the subdir-qualified `state_key` -- fixed above), then found and
+  fixed two more real correctness holes, both of which reopen issue #218
+  itself under specific conditions:
+  - **A state file with real member entries but no `_corpus_sha256` at
+    all was still treated as zero prior coverage.** The
+    `"_corpus_sha256" not in state` special case (meant to mean
+    "genuinely first-ever run") short-circuited before
+    `_legacy_corpus_members_from_state` ever ran -- but a state file can
+    have member entries and no `_corpus_sha256` for reasons other than
+    "never run before": `_corpus_sha256` and the subdir-qualified
+    `state_key` this fix's reconstruction relies on landed as two
+    separate historical changes, so a file written between them
+    qualifies, and so does one that's had `_corpus_sha256` manually
+    deleted (the documented recovery move for a frozen signature). Fixed
+    by removing the special case entirely -- a genuinely empty state
+    dict already reconstructs to the empty set via
+    `_legacy_corpus_members_from_state` on its own, so unifying the two
+    paths costs nothing.
+  - **A departed member's stale state entry survived its departure, so a
+    return-with-real-change cycle reopened the bug.** The
+    intersect-with-`select_batch_members` fix (round one) correctly
+    drops a departed member from the *requirement*, but left its own
+    `ok: True` state entry untouched on disk. If that member later
+    returned to the batchable set (a re-ingest in flight, a
+    dialect/object_type reclassification) with genuinely changed source,
+    a run over what's currently batchable would satisfy the superset
+    check (the departed member no longer counted against it), advance
+    the signature, and a later run covering the returned member would
+    then read its untouched, stale entry as still current -- the exact
+    silent-skip failure this whole fix exists to close. Fixed by pruning
+    a departed member's state entry at the moment it's recognised as
+    departed, so a returning member has nothing stale left to be blessed
+    by.
+  - Two more regression tests, each confirmed by reverting its fix to
+    fail without it. Full suite green (1091 passed, 2 skipped).
+- A fourth adversarial review round confirmed round three's two fixes
+  (traced the logic by hand and re-verified the `ef76532`/`0e45a63`
+  ordering directly) and found one more genuine correctness hole, closed
+  with a two-line fix plus a regression test:
+  - **A run that failed the superset check (so it correctly didn't
+    advance `_corpus_sha256`) still left its own, now-current members out
+    of `_corpus_members` entirely** -- the `if corpus_members_grew_or_held:`
+    branch was the *only* place `_corpus_members` was ever written, so a
+    non-advancing run's real, freshly-checked member entries were never
+    recorded as covered. That undercounts coverage relative to what's
+    actually true on disk (every member in that run's own `members` gets
+    a real, current state entry regardless of whether the signature
+    advances), and lets a *later*, narrower run trivially satisfy the
+    superset check against the undercounted recorded set -- reopening
+    issue #218 through nothing more than two ordinary, clean-exit
+    `--members` runs in sequence (first `--members A`, establishing
+    `_corpus_members = ["A"]`; then `--members B` while the corpus hasn't
+    changed, correctly not advancing the signature but also not
+    recording B's now-current coverage; then B's source changes for
+    real; then `--members A` again trivially satisfies the superset
+    check against the still-`["A"]`-only recorded set and advances the
+    signature past B's real change). Fixed by adding an `else` branch
+    that still records `sorted(prior_corpus_members | set(members))`
+    into `_corpus_members` on the non-advancing path -- always safe in
+    the "coverage only grows" direction, since it's the superset check
+    itself (not this write) that gates whether a *future* run can
+    advance `_corpus_sha256`.
+  - This also corrects the round-two progress-log wording above, which
+    described the #218 fix's superset guard as protecting "the
+    clean-exit subset-run case" in full -- it didn't, until this fix;
+    the interrupted-run gap (nightingalehq/legacy-functional-docs#221)
+    remains separately open and out of scope regardless.
+  - One new regression test, confirmed by reverting the fix to fail
+    without it. Full suite green (1092 passed, 2 skipped).
+- **Rebase-time fix, found merging onto #217's landed changes**: the
+  departed-member check above used `select_batch_members(conn)` (dialect/
+  object_type-filtered) as its "does this member still exist" ground
+  truth. That's wrong -- `run_batch`'s own `members` argument is never
+  required to satisfy that filter (a caller can pass any member name;
+  `select_batch_members` is only what an unfiltered `mfdoc batch` with no
+  `--members` would auto-select), so a member whose `object_type` happens
+  to be unset (several existing test fixtures never set it, since nothing
+  in `run_batch`'s own logic needed it before this) or outside
+  `BATCHABLE_OBJECT_TYPES` was wrongly treated as "departed" on every run
+  -- pruning its state entry, including a chunked member's cached
+  `_narrative`, even though it was present and being actively processed
+  by that very run. Caught by four pre-existing #217 tests failing after
+  the merge (a chunked member's `_narrative` entry vanishing on any
+  re-run). Fixed by checking existence in the `member` table directly
+  (`SELECT DISTINCT name FROM member`) instead -- but this over-corrected:
+  a fresh review round found it created the mirror-image defect. A member
+  that exists in the `member` table but is outside BOTH
+  `select_batch_members` AND the current run's own `members` would then
+  never count as departed, yet an ordinary unfiltered `mfdoc batch`
+  (which only ever passes `select_batch_members`'s own list, per cli.py)
+  could never be a superset of a `_corpus_members` set containing it --
+  permanently freezing `_corpus_sha256` for every future unfiltered run,
+  just via a different route than the original #218 bug. Fixed by
+  intersecting member-table existence with `select_batch_members(conn) |
+  set(members)` -- a member counts as "still around" only if it's either
+  auto-selectable or explicitly named in the current run. Also fixed two
+  stale comments left describing the superseded `select_batch_members`-
+  only rule, which directly contradicted the corrected logic 15 lines
+  away. Two new regression tests added (the original merge-time fix had
+  none of its own, relying only on #217's pre-existing tests happening to
+  catch the first over-pruning bug) -- one pinning that a member outside
+  `select_batch_members` but still in `members` is never pruned, one
+  pinning that an unfiltered run can still eventually recover the corpus
+  signature past such a member once it's genuinely left out. Full suite
+  green (1111 passed, 2 skipped).
+- **Round 8 (this fix's own review, after the above landed)** found three
+  more issues in the same expression: (1) the member-table-existence term
+  in `currently_known_members` was provably inert (`select_batch_members`
+  is itself a query over `member`, so the union already implies it) --
+  simplified to just `select_batch_members(conn) | set(members)`, with
+  the comment rewritten to describe the one rule actually in force
+  instead of framing the inert term as the load-bearing base of it; (2)
+  more seriously, deleting a departed member's state entry outright
+  (rather than only demoting it) threw away a chunked member's
+  already-paid-for `chunks`/`_narrative` cache the moment it fell outside
+  `select_batch_members` and wasn't named in one intervening run --
+  forcing a full, unnecessary re-render the next time it was explicitly
+  run again, reintroducing on this sibling code path the exact unbounded
+  model-spend waste issue #217 exists to close. Fixed by setting
+  `ok: False` on the departed entry instead of deleting it -- sufficient
+  on its own, since `_chunk_reuse_ok`/`brief_sha256` independently
+  re-validate content before ever trusting a carried-forward `chunks`
+  entry, so nothing stale can be wrongly reused this way; (3) a comment
+  claiming this fix "does NOT, on its own, protect a run interrupted
+  mid-way" (the premise behind
+  nightingalehq/legacy-functional-docs#221, filed during an earlier
+  review round of this same fix, before #217's own later commits landed)
+  turned out to already be closed by #217's routing-loop pre-mark, which
+  flushes every about-to-run member's not-done entry in the same atomic
+  save that first writes the corpus signature to disk. Rewrote the
+  comment to describe why, and left a comment on #221 flagging this for
+  re-verification. One new regression test added, confirmed by reverting
+  the fix to fail without it. Full suite green (1112 passed, 2 skipped).
+- **Round 9 (independent adversarial pass, 4000-seed randomized fuzz
+  harness over multi-run sequences)** found no further defects in this
+  fix -- confirmed round 8's fixes are all correct, confirmed round 8's
+  #221 comment empirically (killing on either of two members in a
+  from-scratch repro correctly leaves both entries `ok: False`, resume
+  makes exactly the right number of model calls both ways), and
+  confirmed #221's originally-recorded repro no longer reproduces --
+  its *read-side* diagnosis (the `corpus_unchanged and prior_ok` fast
+  path has no per-member coverage check of its own, only the write side
+  is now gated) is still structurally correct as a hardening
+  opportunity, just not reachable as a live bug through any path this
+  round could construct. Commented on #221 with the full write-up;
+  left the retitle/re-scope decision to the issue owner rather than
+  closing it. Also surfaced (not filed, since it's exactly issue #219's
+  own scope): `testbatch.py`'s `_checkpoint` still folds
+  `_corpus_sha256` into every per-member checkpoint unconditionally,
+  reproducing #218 verbatim for `mfdoc test-batch --members` -- #219
+  needs to pick up this fix's final shape (demote-not-delete,
+  simplified `currently_known_members`) once this PR lands.
+
+**Progress (2026-09-15, #217):**
 - Fixed issue #217: `mfdoc batch`'s chunk-level resume state was only
   persisted to disk once per member (after every one of that member's
   chunks completed), not once per chunk -- a run interrupted partway

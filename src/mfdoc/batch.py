@@ -324,6 +324,43 @@ def select_batch_members(conn) -> list[str]:
     return [r["name"] for r in rows]
 
 
+_RESERVED_STATE_KEYS = ("_corpus_sha256", "_corpus_members")
+
+
+def _legacy_corpus_members_from_state(state: dict) -> set[str]:
+    """Derive the prior member set from a state file's own member entries,
+    for every case *other than* one with a well-formed `_corpus_members`
+    list already on it: a *legacy* (pre-#218-fix) state file that has
+    `_corpus_sha256` but not the `_corpus_members` key this fix
+    introduced; a state file with neither key at all (a genuinely
+    first-ever run against an empty/nonexistent file, which reconstructs
+    to the empty set here on its own -- no special-casing needed); and a
+    corrupted/hand-edited `_corpus_members` that isn't a list. Every
+    ordinary member entry is keyed `"<subdir>/<NAME>"` (see `run_batch`'s
+    `state_key`); the bare member name is the last path segment. Reading
+    any of these as "no prior coverage" (rather than reconstructing it
+    like this) would let the very first subset run against such a state
+    file reproduce issue #218 on the spot -- trivially "superset of
+    nothing", advancing the signature while recording only its own
+    members and silently orphaning every member missing from this run.
+
+    Deliberately not restricted to keys containing "/": an even older
+    generation of state file (pre-dating the subdir-qualified state_key
+    itself) has bare-name member entries with no "/" at all. Excluding
+    those would silently under-count that generation's prior coverage --
+    the same class of hole this function exists to close -- for a subtle
+    reason (today's read loop happens to only ever look up the qualified
+    form) that isn't worth relying on. Treating any non-reserved key as a
+    member name is always safe in the "under-count coverage" direction:
+    over-including only makes the superset requirement stricter, never
+    looser."""
+    return {
+        key.rsplit("/", 1)[-1]
+        for key in state
+        if key not in _RESERVED_STATE_KEYS
+    }
+
+
 def _output_subdir(conn, name: str) -> Path:
     """Where this member's output should nest, mirroring the only two
     source-grouping facts actually stored on `member` -- dialect (always
@@ -2343,12 +2380,188 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
         _corpus_signature(conn, redact, lexicon, sme_notes, extra=[str(threshold)]) if state_path else None
     )
     corpus_unchanged = bool(state_path) and state.get("_corpus_sha256") == corpus_sig
+    # `--members` (cli.py) lets one invocation cover only a subset of the
+    # members sharing this same `--state` file. `_corpus_signature`
+    # hashes the *whole* corpus, not just what this run touched -- so
+    # unconditionally overwriting `_corpus_sha256` on every run (issue
+    # #218) let a subset run advance it while some member outside this
+    # run's `members` never got looked at, making that untouched member
+    # appear current against the new signature. A later run covering that
+    # member would then read its stale `ok: True` entry as still done via
+    # the `corpus_unchanged and prior_ok` fast path, even if its own
+    # source had since changed, silently skipping it forever.
+    #
+    # Fixed by tracking *which* members last established the stored
+    # signature (`_corpus_members`) and only advancing it when this run's
+    # `members` is a superset of that set -- i.e. coverage only ever
+    # grows, never silently shrinks. This preserves the ordinary case of
+    # repeatedly running the exact same subset (every member that
+    # mattered to the signature last time is still covered this time, so
+    # the fast path keeps working across runs) while refusing to advance
+    # when a run leaves out a member the current signature's validity
+    # actually depends on -- *while nothing in the corpus changes*. Once
+    # something does change, a subset run can never re-establish the
+    # signature on its own again -- only a run covering the full recorded
+    # set (or a superset of it) can advance `_corpus_sha256` past that
+    # change; this is expected, not a bug, and is exactly what stops a
+    # *clean-exit* subset run from silently vouching for members it never
+    # looked at. Note this means `_corpus_members` itself is updated on
+    # *every* run that touches `state`, not only one that advances
+    # `_corpus_sha256` -- a non-advancing run still examines/updates a
+    # real, current state entry for every member in its own `members`, so
+    # leaving those out of `_corpus_members` would undercount coverage
+    # relative to what's actually true on disk and let a later, narrower
+    # run trivially satisfy the superset check against that undercounted
+    # set (issue #218 again, reopened via a sequence of ordinary
+    # clean-exit subset runs rather than a single one). See the `else`
+    # branch below.
+    #
+    # `_corpus_sha256` is only ever set in memory here, not saved to disk
+    # by itself -- the first thing that actually flushes it is whichever
+    # `_save_state` call happens to come next. Before issue #217, that
+    # could be a per-member/per-chunk checkpoint from *partway* through
+    # this run, well before every member had a chance to record its own
+    # current state -- a kill right after would leave stale `ok: True`
+    # entries (from a *previous* run) sitting alongside an
+    # already-advanced signature. Issue #217's routing-loop pre-mark now
+    # closes that specific window for every member actually in `to_run`/
+    # `to_run_chunked`: it writes a not-done entry for every one of them,
+    # in the very same `_save_state` call that ends up being the first
+    # one to flush this signature, before the worker pool or the chunked
+    # loop starts -- so nothing here can advance to disk without every
+    # about-to-run member's own entry already being honest about not
+    # being done yet.
+    # The read just above (`corpus_unchanged`) stays unconditional --
+    # comparing against whatever signature is already on disk is always
+    # safe on its own; only the *write* that could make an untouched
+    # member look current is gated.
     if state_path:
-        # Written into `state` up front, before any per-member checkpoint,
-        # so a process killed mid-run still leaves a resumed run able to
-        # take the corpus-level `corpus_unchanged` fast-path above -- not
-        # just a run that reached the very end. See issue #78.
-        state["_corpus_sha256"] = corpus_sig
+        if isinstance(state.get("_corpus_members"), list):
+            prior_corpus_members: set[str] = set(state["_corpus_members"])
+        else:
+            # Every other case -- a state file with no `_corpus_members`
+            # at all (a legacy file written before this fix, or a
+            # genuinely first-ever run against an empty/nonexistent state
+            # file) and a corrupted/hand-edited `_corpus_members` that
+            # isn't a list -- is handled by reconstructing the prior
+            # member set from the state file's own member entries,
+            # rather than special-casing "no `_corpus_sha256` at all" as
+            # empty prior coverage. That special case looked safe (surely
+            # a state file with no recorded signature has no real prior
+            # coverage either) but is false for a real, named generation
+            # of on-disk file: `_corpus_sha256` (issue #37/#9) and the
+            # subdir-qualified `state_key` this reconstruction relies on
+            # (see `_legacy_corpus_members_from_state`) landed as two
+            # separate changes, so a state file written between them (or
+            # one that's had its `_corpus_sha256` manually deleted, the
+            # documented recovery move for a frozen signature) has real
+            # member entries and no `_corpus_sha256` -- and would
+            # otherwise be read as zero prior coverage, reproducing issue
+            # #218 on the very first post-upgrade subset run against it.
+            # A genuinely empty state dict already reconstructs to the
+            # empty set on its own, so this unification costs nothing.
+            prior_corpus_members = _legacy_corpus_members_from_state(state)
+        # A member that's no longer "known" must drop out of the
+        # requirement -- otherwise no future run, however large, could
+        # ever be a superset of a set containing it, permanently freezing
+        # `_corpus_sha256` with no recovery short of hand-editing the
+        # state file. "Known" is deliberately *not*
+        # `select_batch_members(conn)`'s dialect/object_type filter alone:
+        # `run_batch`'s own `members` argument is never required to
+        # satisfy that filter (a caller can pass any member name;
+        # `select_batch_members` is only what an unfiltered `mfdoc batch`
+        # with no `--members` would auto-select), so a member whose
+        # `object_type` happens to be unset or outside
+        # `BATCHABLE_OBJECT_TYPES` -- while still very much present and
+        # being actively run right now (it's in `members`) -- must not be
+        # treated as departed just because it would no longer be
+        # auto-selected. Nor is it *only* `members`: an ordinary
+        # unfiltered `mfdoc batch` (which only ever passes
+        # `select_batch_members`'s own list, per cli.py) must eventually
+        # be able to advance the signature past a member outside both,
+        # once that member is genuinely no longer part of any run. Union,
+        # not member-table existence, is the actual rule in force here --
+        # a raw `SELECT ... FROM member` check adds nothing on top of it
+        # (every name `select_batch_members` or `members` could ever name
+        # already implies the row exists, or isn't a real member at all
+        # and self-heals out on its own next run either way), so it's
+        # left out rather than kept as an inert-looking extra condition.
+        currently_known_members = set(select_batch_members(conn)) | set(members)
+        departed = prior_corpus_members - currently_known_members
+        if departed:
+            # Dropping a departed member from the *requirement* isn't
+            # enough on its own: its own `ok: True` state entry is still
+            # sitting on disk, untouched. If that same member later
+            # becomes "known" again per the definition above (a re-ingest
+            # in flight, a dialect/object_type reclassification, or it's
+            # simply named in a later run's `members`) with genuinely
+            # changed source, a subsequent run satisfying the superset
+            # check would advance the signature, and then a run covering
+            # the returned member would read its stale, never-updated
+            # entry as still current via `corpus_unchanged and prior_ok`
+            # -- reproducing the exact silent-skip failure this fix
+            # exists to close.
+            #
+            # Demoted (ok set False), not deleted: a member can be
+            # "departed" from *this run's* perspective while still being
+            # perfectly fine and actively worked on by other invocations
+            # sharing this state file (outside select_batch_members and
+            # not named here, but named in a concurrent/later run) -- see
+            # the "known" definition above. Deleting its entry outright
+            # would throw away a chunked member's already-paid-for
+            # `chunks`/`_narrative` cache for nothing, forcing a full
+            # re-render the moment it's run again, on every single
+            # ordinary run in between -- reintroducing the exact
+            # unbounded-model-spend waste issue #217 exists to close, via
+            # this sibling code path. `ok: False` alone is enough to
+            # satisfy the "nothing stale to be blessed by" requirement
+            # above: `prior_ok` already requires `ok: True`, and chunk/
+            # brief-hash reuse (`_chunk_reuse_ok`, the brief_sha256 check)
+            # independently re-validates content before ever trusting a
+            # carried-forward `chunks` entry, so keeping it here can't
+            # cause incorrect reuse.
+            for key in [k for k in state
+                        if k not in _RESERVED_STATE_KEYS and k.rsplit("/", 1)[-1] in departed]:
+                entry = state[key]
+                if isinstance(entry, dict):
+                    entry["ok"] = False
+        prior_corpus_members &= currently_known_members
+        # An empty `members` list (nothing to run) must never establish
+        # or advance coverage.
+        corpus_members_grew_or_held = bool(members) and set(members) >= prior_corpus_members
+        if corpus_members_grew_or_held:
+            # Written into `state` up front, before any per-member
+            # checkpoint, so a process killed mid-run still leaves a
+            # resumed run able to take the corpus-level `corpus_unchanged`
+            # fast-path above -- not just a run that reached the very
+            # end. See issue #78.
+            state["_corpus_sha256"] = corpus_sig
+            # The guard above already established that `members` is a
+            # superset of `prior_corpus_members` (already intersected with
+            # `currently_known_members`), so `members` alone already
+            # covers everything the signature depended on -- no union
+            # needed.
+            state["_corpus_members"] = sorted(set(members))
+        else:
+            # Not advancing `_corpus_sha256` this run does NOT mean this
+            # run's own `members` can be left out of `_corpus_members`.
+            # Every member in `members` gets its own state entry
+            # examined/updated below regardless of this guard -- so by
+            # the end of this run, each one's entry is a real, current
+            # answer, not a stale leftover. Leaving them out of
+            # `_corpus_members` would undercount coverage relative to
+            # what's actually true on disk: a later, narrower run could
+            # then trivially satisfy the superset check against this
+            # undercounted prior set and advance `_corpus_sha256` past a
+            # change in one of the members this run legitimately did
+            # check (issue #218 again, reopened via a sequence of
+            # ordinary clean-exit subset runs rather than a single one).
+            # Recording the union here is always safe in the "coverage
+            # only grows" direction regardless of whether the signature
+            # itself advances -- the superset check above is what
+            # actually gates a *future* run's ability to advance the
+            # signature, not this write.
+            state["_corpus_members"] = sorted(prior_corpus_members | set(members))
     results: list[DocResult] = []
     # Keyed by the subdir-qualified state_key computed below, not bare
     # member name: two batchable members can share a name across
@@ -2383,9 +2596,10 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
         state_key = f"{subdir.as_posix()}/{name}"
         prior = state.get(state_key)
         # `prior` is only ever meaningful as this member's own state entry;
-        # guard against the (currently reserved but unenforced) "_corpus_sha256"
-        # key ever being looked up as if it were one -- see cli.py's --members
-        # normalisation, which keeps ordinary member names from colliding with it.
+        # guard against the (currently reserved but unenforced) "_corpus_sha256"/
+        # "_corpus_members" keys ever being looked up as if they were one --
+        # see cli.py's --members normalisation, which keeps ordinary member
+        # names from colliding with them.
         prior_ok = (
             isinstance(prior, dict) and prior.get("ok") and out_path.exists()
             and not _chunked_member_missing_a_chunk_file(out_path, prior.get("chunks"))
@@ -2690,11 +2904,15 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
             _save_state(state_path, state)
 
     if state_path:
-        # `_corpus_sha256` was already written into `state` up front (see
-        # above) so every incremental checkpoint above already carries it --
-        # this final save just persists whatever the last member/chunk loop
-        # iteration didn't already flush (there always is at least one,
-        # from the corpus-signature write itself).
+        # `_corpus_sha256`/`_corpus_members` were already written into
+        # `state` up front, when this run's own coverage didn't shrink
+        # the set of members the stored signature depends on (see above;
+        # issue #218), so every incremental checkpoint above already
+        # carries whatever was already on disk -- this final save just
+        # persists whatever the last member/chunk loop iteration didn't
+        # already flush (a content-identical rewrite, not a true no-op,
+        # when every member was skipped and this run touched nothing at
+        # all -- `_save_state` always rewrites the file).
         _save_state(state_path, state)
 
     total_in = sum(r.input_tokens for r in results)
