@@ -51,8 +51,19 @@ GitHub org.
   can falsely mark an out-of-scope member as done too) and #219 (port
   #218's fix, once decided, to `testbatch.py`'s own routing loop, which
   has the identical gap and none of #217's other fixes either).
-- Eight new regression tests, six confirmed (by reverting the relevant
-  code) to fail without their corresponding fix. Full suite green (1091
+- A fifth review round found that the round-3 routing-loop pre-mark fix
+  itself (above) was asymmetric: the `to_run_chunked` half deliberately
+  carries a member's prior `chunks` forward into its not-done pre-mark
+  entry, but the `to_run` (flat) half didn't, wiping `chunks` the moment
+  a member that used to be chunked (e.g. `max_rules_per_call` raised)
+  routed flat and got pre-marked -- a kill right there lost every one of
+  that member's already-completed chunks' resumable progress even though
+  the chunk files on disk were untouched, forcing a full re-render of all
+  of them once the threshold came back down. Fixed by carrying `chunks`
+  forward in the flat pre-mark too, exactly as the chunked half already
+  does.
+- Nine new regression tests, seven confirmed (by reverting the
+  corresponding code) to fail without their fix. Full suite green (1092
   passed, 2 skipped).
 
 **Progress (2026-09-12v):**

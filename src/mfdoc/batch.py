@@ -2381,7 +2381,12 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
     # output with nothing left to flag it, regardless of whether that
     # member's own turn to run had even started yet.
     for name, brief_hash, out_path, state_key in to_run:
-        state[state_key] = {"ok": False, "attempts": 0, "brief_sha256": brief_hash}
+        prior = state.get(state_key)
+        prior_chunks = prior.get("chunks") if isinstance(prior, dict) else None
+        state[state_key] = {
+            "ok": False, "attempts": 0, "brief_sha256": brief_hash,
+            **({"chunks": prior_chunks} if prior_chunks else {}),
+        }
     for name, brief_hash, out_path, state_key, member_facts in to_run_chunked:
         prior = state.get(state_key)
         prior_chunks = prior.get("chunks") if isinstance(prior, dict) else None

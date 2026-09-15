@@ -2480,6 +2480,96 @@ def test_run_batch_hard_kill_mid_chunk_loop_neither_marks_the_member_falsely_don
     )
 
 
+def test_run_batch_kill_of_a_chunked_member_pre_marked_flat_keeps_its_chunks(
+    monkeypatch, tmp_path,
+):
+    """Code-review finding (round 5): the routing-loop pre-mark (commit 4,
+    issue #217 round-3 fix) writes a bare `{ok: False, attempts: 0,
+    brief_sha256: ...}` entry for every member about to run *flat*, with no
+    `chunks` key -- unlike the `to_run_chunked` half, which deliberately
+    carries `prior_chunks` forward. A member that was chunked in a prior
+    run and now routes flat (e.g. `max_rules_per_call` raised) loses its
+    on-disk `chunks` the instant that pre-mark save lands, even though the
+    chunk files themselves are untouched. If the process is killed right
+    there -- before the flat member's own completion write ever runs -- and
+    a later run brings the threshold back down so the member chunks again,
+    every chunk must be regenerated from scratch even though nothing about
+    them actually changed."""
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_rules(conn, 5)  # -> 3 chunks with max_rules_per_call=2
+    conn.execute(
+        "INSERT INTO source_file (id, path, sha256, line_count) VALUES (1, 'FAKEMOD.nsp', 'sha-v1', 1)"
+    )
+    conn.commit()
+
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+
+    first = batch_mod.run_batch(
+        conn, ["FAKEMOD"], out_dir, _chunk_aware_module_caller(),
+        "writing rules text", "template text", max_rules_per_call=2, state_path=state_path,
+    )
+    assert first.failed == 0
+    subdir = batch_mod._output_subdir(conn, "FAKEMOD")
+    state_key = f"{subdir.as_posix()}/FAKEMOD"
+    original_chunks = dict(json.loads(state_path.read_text())[state_key]["chunks"])
+    assert set(original_chunks) == {"1", "2", "3", "_narrative"}
+
+    # Raise the threshold so FAKEMOD (5 rows) now routes flat instead of
+    # chunked. The threshold is folded into both the corpus signature and
+    # the per-member brief hash, so this alone is enough to force
+    # reprocessing without touching any rule content or chunk file.
+    real_save_state = batch_mod._save_state
+    save_calls = {"n": 0}
+
+    def kill_on_first_save(path, state):
+        save_calls["n"] += 1
+        if save_calls["n"] == 1:
+            real_save_state(path, state)  # the pre-mark checkpoint really lands...
+            raise KeyboardInterrupt("simulated hard kill right after the flat pre-mark save")
+        real_save_state(path, state)
+
+    monkeypatch.setattr(batch_mod, "_save_state", kill_on_first_save)
+    with pytest.raises(KeyboardInterrupt):
+        batch_mod.run_batch(
+            conn, ["FAKEMOD"], out_dir, _chunk_aware_module_caller(),
+            "writing rules text", "template text", max_rules_per_call=100, state_path=state_path,
+        )
+    monkeypatch.setattr(batch_mod, "_save_state", real_save_state)
+
+    entry_after_kill = json.loads(state_path.read_text())[state_key]
+    assert entry_after_kill["ok"] is False
+    assert entry_after_kill.get("chunks") == original_chunks, (
+        "the flat pre-mark must carry a chunked member's prior `chunks` forward too, exactly "
+        "like the to_run_chunked half already does -- dropping them here loses resumable "
+        "progress on every chunk the moment the pre-mark save lands, even though the chunk "
+        "files on disk are untouched"
+    )
+
+    # All three original chunk files (and the narrative doc) are still on
+    # disk, byte-for-byte from run 1 -- nothing about them changed.
+    assert (out_dir / subdir / "FAKEMOD.md").exists()
+
+    # Bring the threshold back down: FAKEMOD routes chunked again, with the
+    # exact same rule content and chunk briefs as run 1.
+    third_caller = _counting_caller(_chunk_aware_module_caller())
+    third = batch_mod.run_batch(
+        conn, ["FAKEMOD"], out_dir, third_caller,
+        "writing rules text", "template text", max_rules_per_call=2, state_path=state_path,
+    )
+    assert third.failed == 0
+    assert third_caller.calls == 0, (
+        "every chunk (and the narrative) is unchanged from run 1 and must be fully reused -- "
+        "dropping `chunks` in the flat pre-mark forces all of them to re-render for nothing, "
+        "the exact waste issue #217 exists to eliminate"
+    )
+
+
 def test_run_batch_kill_before_any_chunk_completes_does_not_leave_a_falsely_done_entry(
     monkeypatch, tmp_path,
 ):
