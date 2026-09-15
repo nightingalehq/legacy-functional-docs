@@ -148,17 +148,15 @@ GitHub org.
   `> 0` call-count assertion (in the departed-member-returns test) to an
   exact count, and extended the corrupted-`_corpus_members` test to also
   cover the raising case (an int, not just a silently-fails-open string).
-  One real but explicitly out-of-scope finding was surfaced and
-  deliberately left unfixed here: neither `run_test_batch` nor its
-  `batch.py` sibling `run_batch` grows `_corpus_members` when the
-  superset gate fails but `corpus_unchanged` is true (a member rendered
-  under an already-current signature, via a *different* subset run that
-  didn't need to advance anything, never gets added to the recorded
-  coverage set) -- a real, narrow silent-skip path, inherited identically
-  from `batch.py`'s current shape rather than introduced by this port;
-  worth a follow-up issue against both modules together rather than a
-  testbatch-only patch that would immediately diverge from its sibling
-  again. Full suite green (1093 passed, 2 skipped).
+  One finding was surfaced and (incorrectly, see the round-4 bullet below)
+  assessed as out of scope: `run_test_batch` doesn't grow `_corpus_members`
+  when the superset gate fails (a member rendered under an
+  already-current signature, via a *different* subset run that didn't
+  need to advance anything, never gets added to the recorded coverage
+  set). This was assumed at the time to be "inherited identically from
+  `batch.py`'s current shape" and deferred as a follow-up issue against
+  both modules together -- that premise turned out to be false (see
+  round 4). Full suite green (1093 passed, 2 skipped).
 - Sync round: after round 3 above assessed this branch as matching
   `batch.py`'s #218 fix "in its final shape," two further review rounds
   on `batch.py` itself (PR #223) found two more real bugs in that fix,
@@ -196,9 +194,46 @@ GitHub org.
   selection criterion (>=1 `test_case` row) has no equivalent to
   `batch.py`'s object_type filter that can exclude a member with real,
   unchanged content from auto-selection. Full suite green (1095 passed,
-  2 skipped). Not yet pushed/PR'd: `batch.py`'s own PR #223 hasn't merged
-  yet, so this branch stays parked pending that merge in case it picks up
-  any further last-minute review fixes.
+  2 skipped). `batch.py`'s own PR #223 had not merged at the time this
+  round started; it merged partway through this session, ahead of this
+  branch (see round 4 below).
+- Fourth review round (against the sync-round commit above) found one
+  blocking gap the round-3 "out-of-scope" write-up (above) had wrongly
+  assumed was shared with `batch.py`: `batch.py`'s own final #218 shape
+  (merged as PR #223) actually *does* have an `else` branch after the
+  `corpus_members_grew_or_held` check, recording
+  `state["_corpus_members"] = sorted(prior_corpus_members | set(members))`
+  for a non-advancing run -- `run_test_batch` never had this, so a
+  non-advancing subset run's own real, current coverage silently never
+  made it into `_corpus_members`. This reopens issue #218 across a
+  *sequence* of otherwise-unremarkable subset runs: run 1 covers {A, B}
+  and establishes `_corpus_members`; run 2 covers {B, C} (not a superset
+  of {A, B}, so it doesn't advance the signature) and genuinely renders C
+  for the first time, but without this fix that render's coverage is
+  dropped on the floor; C's content then changes; a later run over just
+  {A, B} now trivially satisfies the superset check against the
+  undercounted `_corpus_members` and advances the signature past C's real
+  change; a final full run reads C's stale `ok: True` entry as still
+  current via `corpus_unchanged and prior_ok` and silently skips it
+  forever. Ported the missing `else` branch verbatim (adapted to this
+  module's own comments), plus the matching explanatory paragraph in the
+  block-level comment above it. Also tightened the first sync-round test
+  (`..._is_never_pruned_while_still_run`), which review found only
+  discriminated the *pair* of that round's two fixes together, not the
+  union fix on its own (with only the union reverted, the demotion fix
+  alone still made the reused-cache assertion pass for the wrong reason)
+  -- added an explicit `skipped is True` assertion pinning that the
+  corpus-level fast path, not per-chunk cache reuse, is what actually
+  produced the zero-model-calls result. Corrected this progress log's own
+  round-3 entry (above) to stop calling the missing-`else`-branch gap
+  "inherited identically from `batch.py`'s current shape" -- it wasn't.
+  One new regression test added
+  (`test_run_test_batch_a_non_advancing_run_still_records_its_own_
+  coverage`), confirmed to fail without the `else` branch (reverted
+  locally, re-ran, restored) and to pass with it. Full suite green (1096
+  passed, 2 skipped). Still not pushed/PR'd, per this issue's own scope:
+  stays parked for now regardless of #223's merge status, pending an
+  explicit decision to finalize.
 
 **Progress (2026-09-12v):**
 - Addressed the fifty-sixth Copilot review round on PR #209 (issue #195):

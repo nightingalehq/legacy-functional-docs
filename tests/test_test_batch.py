@@ -6475,6 +6475,19 @@ def test_run_test_batch_a_member_outside_select_test_batch_members_is_never_prun
     )
     assert second.failed == 0
     assert second_caller.calls == 0, "nothing changed -- FAKEMOD must be fully reused, not re-rendered"
+    # Review finding: `second_caller.calls == 0` alone doesn't discriminate
+    # the union fix on its own -- if `batchable_now` wrongly excluded
+    # FAKEMOD (the pre-fix bug) but the demotion fix (ok: False, not
+    # deleted) were in place, FAKEMOD would still get demoted-then-reused
+    # via per-chunk cache reuse, making zero calls for the wrong reason.
+    # Asserting the corpus-level fast path (skipped=True) was actually
+    # taken pins the union fix specifically: only staying "known" the
+    # whole time keeps `prior_ok` true and the member out of `departed`,
+    # so it never gets demoted at all.
+    assert second.results[0].skipped is True, (
+        "FAKEMOD must be skipped outright via the corpus fast path -- not demoted and "
+        "re-rendered from cache, which a broken batchable_now would also allow"
+    )
     saved_after_second = json.loads(state_path.read_text())
     assert saved_after_second[state_key]["chunks"] == original_chunks, (
         "FAKEMOD's cached chunk state must survive a resume even though it's outside "
@@ -6567,4 +6580,123 @@ def test_run_test_batch_departed_member_keeps_its_chunk_cache_across_an_interven
     assert fakemod_caller.calls == 0, (
         "FAKEMOD's chunk cache must have survived the intervening unfiltered run -- a deleted "
         "entry would force all 3 chunks to re-render for nothing"
+    )
+
+
+def _seed_three_flat_test_batch_members(conn):
+    """Three ordinary (non-chunked) members, each with exactly one test_case
+    scenario -- MODA, MODB, MODC, invented names per this repo's "never
+    commit client-specific content" policy. Used by the regression test
+    below, which needs a *sequence* of overlapping-but-not-identical subset
+    runs (A+B, then B+C, then A+B again) to exercise `_corpus_members`
+    coverage tracking across more than two runs."""
+    from mfdoc.db import insert
+
+    for member_id, name in ((1, "MODA"), (2, "MODB"), (3, "MODC")):
+        conn.execute("INSERT INTO member (id, name, dialect) VALUES (?, ?, 'natural')", (member_id, name))
+        conn.execute(
+            "INSERT INTO source_line (member_id, line_no, text) VALUES (?, 1, 'irrelevant')", (member_id,)
+        )
+        insert(
+            conn, "test_case", member_id=member_id, kind="unit", scenario_name=f"{name}:BR-001",
+            given_json='{"parameters": [], "mocks": {"entities": [], "callees": []}}',
+            when_json=f'{{"construct": "IF", "condition": "X", "citation": "[[{name}:1]]"}}',
+            then_json=f'{{"citation": "[[{name}:1]]", "source_excerpt": []}}',
+            status="characterization", citation=f"{name}:1", confidence="verified",
+        )
+    conn.commit()
+
+
+def test_run_test_batch_a_non_advancing_run_still_records_its_own_coverage(tmp_path):
+    """Round-4 (post-commit) review finding: a run whose `members` fails
+    the superset check (so it doesn't advance `_corpus_sha256`) must still
+    fold its own `members` into `_corpus_members` -- the `else` branch
+    batch.py's own final #218 shape has (mirroring its comment: "not
+    advancing `_corpus_sha256` this run does NOT mean this run's own
+    `members` can be left out of `_corpus_members`"). Without it, a
+    *sequence* of ordinary, non-overlapping-in-full subset runs can
+    reopen issue #218 even though no single run in the sequence looks
+    buggy on its own:
+
+    1. A run covering {MODA, MODB} establishes `_corpus_members` = [A, B].
+    2. A later run covering {MODB, MODC} doesn't advance the signature
+       (not a superset of [A, B]) -- but it DOES render MODC and record a
+       real, current `ok: True` entry for it. If that render isn't also
+       folded into `_corpus_members`, the recorded coverage set is still
+       just [A, B] -- silently *smaller* than what's actually true on
+       disk.
+    3. MODC's content genuinely changes.
+    4. A run covering only {MODA, MODB} again now trivially satisfies the
+       superset check against the undercounted [A, B] set (MODC was never
+       in it), advancing `_corpus_sha256` past MODC's real change.
+    5. A later full run reads the now-current corpus signature plus
+       MODC's stale `ok: True` entry as still good via the
+       `corpus_unchanged and prior_ok` fast path -- silently skipping
+       MODC's genuine change forever."""
+    import sqlite3
+
+    from mfdoc import testbatch
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_three_flat_test_batch_members(conn)
+
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+    caller = _valid_test_doc_caller("python", "pytest")
+
+    first = testbatch.run_test_batch(
+        conn, ["MODA", "MODB"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path,
+    )
+    assert first.ok == 2
+    assert sorted(json.loads(state_path.read_text())["_corpus_members"]) == ["MODA", "MODB"]
+
+    # A non-advancing run (not a superset of {MODA, MODB}) that renders
+    # MODC for the first time.
+    second = testbatch.run_test_batch(
+        conn, ["MODB", "MODC"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path,
+    )
+    assert second.ok == 2
+    saved_after_second = json.loads(state_path.read_text())
+    assert sorted(saved_after_second["_corpus_members"]) == ["MODA", "MODB", "MODC"], (
+        "a non-advancing run must still fold its own members into _corpus_members -- "
+        "leaving MODC out undercounts real, current coverage on disk"
+    )
+
+    # MODC's own test_case genuinely changes.
+    conn.execute(
+        "UPDATE test_case SET when_json = "
+        "'{\"construct\": \"IF\", \"condition\": \"CHANGED\", \"citation\": \"[[MODC:1]]\"}' "
+        "WHERE member_id = 3"
+    )
+    conn.commit()
+
+    # A subset run over {MODA, MODB} must NOT be able to satisfy the
+    # superset check against an undercounted _corpus_members -- it must
+    # not advance the signature past MODC's real change.
+    third = testbatch.run_test_batch(
+        conn, ["MODA", "MODB"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path,
+    )
+    assert third.ok == 2
+    saved_after_third = json.loads(state_path.read_text())
+    assert saved_after_third["_corpus_sha256"] == saved_after_second["_corpus_sha256"], (
+        "a subset run over {MODA, MODB} must not advance the corpus signature past MODC's "
+        "real change just because a prior non-advancing run's coverage went unrecorded"
+    )
+
+    # A full run must still pick up MODC's real change.
+    final_caller = _counting_caller(caller)
+    final = testbatch.run_test_batch(
+        conn, ["MODA", "MODB", "MODC"], "python", "pytest", out_dir, final_caller,
+        "writing rules text", "template text", state_path=state_path,
+    )
+    assert final.ok == 3
+    assert final_caller.calls >= 1, (
+        "MODC's genuine change must not be silently skipped via a stale corpus-level fast "
+        "path -- issue #218, reopened via a sequence of ordinary clean-exit subset runs"
     )

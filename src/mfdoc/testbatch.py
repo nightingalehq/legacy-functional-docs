@@ -2238,6 +2238,16 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
     # `batch.py`'s own #218 fix documents, tracked separately), not
     # something this fix closes.
     #
+    # Note this means `_corpus_members` itself is updated on *every* run
+    # that touches `state`, not only one that advances `_corpus_sha256`
+    # -- a non-advancing run still examines/updates a real, current state
+    # entry for every member in its own `members`, so leaving those out
+    # of `_corpus_members` would undercount coverage relative to what's
+    # actually true on disk and let a later, narrower run trivially
+    # satisfy the superset check against that undercounted set (issue
+    # #218 again, reopened via a sequence of ordinary clean-exit subset
+    # runs rather than a single one). See the `else` branch below.
+    #
     # `_corpus_members`, like `_corpus_sha256` (see this function's own
     # docstring), is one global key shared across every target in a
     # `--matrix` run rather than scoped per language/framework -- the
@@ -2335,6 +2345,29 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
             # currently-batchable set), so `members` alone already covers
             # everything the signature depended on -- no union needed.
             state["_corpus_members"] = sorted(set(members))
+        else:
+            # Not advancing `_corpus_sha256` this run does NOT mean this
+            # run's own `members` can be left out of `_corpus_members`
+            # (mirroring batch.py's final #218 shape, missed by this
+            # branch's own round 3, which wrongly assessed this gap as
+            # "inherited identically from batch.py" -- batch.py actually
+            # closed it). Every member in `members` gets its own state
+            # entry examined/updated below regardless of this guard -- so
+            # by the end of this run, each one's entry is a real, current
+            # answer, not a stale leftover. Leaving them out of
+            # `_corpus_members` would undercount coverage relative to
+            # what's actually true on disk: a later, narrower run could
+            # then trivially satisfy the superset check against this
+            # undercounted prior set and advance `_corpus_sha256` past a
+            # change in one of the members this run legitimately did
+            # check (issue #218 again, reopened via a sequence of
+            # ordinary clean-exit subset runs rather than a single one).
+            # Recording the union here is always safe in the "coverage
+            # only grows" direction regardless of whether the signature
+            # itself advances -- the superset check above is what
+            # actually gates a *future* run's ability to advance the
+            # signature, not this write.
+            state["_corpus_members"] = sorted(prior_corpus_members | set(members))
     results: list[DocResult] = []
     briefs: dict[str, str] = {}
     to_run: list[tuple[str, str, Path]] = []
