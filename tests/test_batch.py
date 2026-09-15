@@ -2302,6 +2302,80 @@ def test_run_batch_persists_chunk_state_and_reuses_it_across_calls(indexed_db, t
     assert chunk_count_first_run > 0
 
 
+def test_generate_module_doc_chunked_reports_progress_incrementally_via_on_chunk_done(tmp_path):
+    """`on_chunk_done` (issue #217) must fire after every individual chunk
+    completes -- not just once, after the whole member is done -- carrying a
+    growing snapshot each time. This is what lets a caller (run_batch)
+    checkpoint a chunked member's progress to disk chunk by chunk instead of
+    only once the whole member (which can be many model calls) returns."""
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_rules(conn, 5)  # -> 3 chunks with max_rules_per_call=2
+
+    out_path = tmp_path / "FAKEMOD.md"
+    snapshots: list[dict] = []
+    result = batch_mod.generate_module_doc(
+        conn, "FAKEMOD", out_path, _chunk_aware_module_caller(),
+        "writing rules text", "template text", max_rules_per_call=2,
+        on_chunk_done=lambda snapshot: snapshots.append(dict(snapshot)),
+    )
+    assert result.ok is True
+    # One callback per chunk (3) plus one for narrative reconciliation.
+    assert len(snapshots) == 4
+    assert [set(s) for s in snapshots] == [
+        {"1"}, {"1", "2"}, {"1", "2", "3"}, {"1", "2", "3", "_narrative"},
+    ]
+    # Each snapshot is a real copy, not a live view onto chunk_state that
+    # later mutates out from under whatever the caller did with it.
+    assert snapshots[0] == {"1": snapshots[-1]["1"]}
+    assert snapshots[-1] == result.chunk_state
+
+
+def test_run_batch_resume_after_interruption_keeps_already_completed_chunks(indexed_db, tmp_path):
+    """Reproduces issue #217: a run interrupted partway through a chunked
+    member (here, simulated as an exception during whole-module narrative
+    reconciliation -- the step after every individual chunk has already
+    completed) must not lose the chunks that already finished. A resume
+    should only redo the interrupted step, never regenerate every chunk from
+    scratch."""
+    state_path = tmp_path / "state.json"
+    good_caller = FakeCaller()
+
+    def interrupted_caller(prompt: str) -> batch_mod.ModelResponse:
+        if "# Fact brief:" not in prompt:
+            raise RuntimeError("simulated interruption during narrative reconciliation")
+        return good_caller(prompt)
+
+    summary1 = batch_mod.run_batch(
+        indexed_db, ["MMP0100"], tmp_path / "out", interrupted_caller, "rules", "template",
+        max_rules_per_call=1, state_path=state_path,
+    )
+    assert summary1.failed == 1
+
+    saved = json.loads(state_path.read_text())
+    subdir = batch_mod._output_subdir(indexed_db, "MMP0100")
+    state_key = f"{subdir.as_posix()}/MMP0100"
+    persisted_chunks = saved[state_key]["chunks"]
+    real_chunk_keys = {k for k in persisted_chunks if k != "_narrative"}
+    assert real_chunk_keys, "at least one chunk must have checkpointed before the interruption"
+    assert all(persisted_chunks[k]["ok"] for k in real_chunk_keys)
+
+    def exploding_for_completed_chunks(prompt: str) -> batch_mod.ModelResponse:
+        if "# Fact brief:" not in prompt:
+            return FakeCaller()(prompt)
+        raise AssertionError("must not re-render a chunk already checkpointed as ok")
+
+    summary2 = batch_mod.run_batch(
+        indexed_db, ["MMP0100"], tmp_path / "out", exploding_for_completed_chunks, "rules", "template",
+        max_rules_per_call=1, state_path=state_path,
+    )
+    assert summary2.failed == 0
+
+
 def test_plan_batch_reports_a_member_with_no_prior_state_as_render(indexed_db, tmp_path):
     """No --state file at all (or an empty one) -- every member is a fresh
     render, never chunked here (MMP0100's rule count is under any
