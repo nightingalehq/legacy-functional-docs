@@ -6700,3 +6700,59 @@ def test_run_test_batch_a_non_advancing_run_still_records_its_own_coverage(tmp_p
         "MODC's genuine change must not be silently skipped via a stale corpus-level fast "
         "path -- issue #218, reopened via a sequence of ordinary clean-exit subset runs"
     )
+
+
+def test_run_test_batch_a_shrunk_back_flat_member_keeps_its_chunk_cache_on_failure(tmp_path):
+    """Round-5 review finding: a member that was chunked on a prior run and
+    later shrinks back under `max_scenarios_per_call` (fewer `test_case`
+    rows, here) routes through the flat (non-chunked) `to_run` path
+    instead of `to_run_chunked` on its next run. That flat path's own
+    routing-loop pre-mark (and its own failure-write sites) must still
+    carry the member's existing `chunks` cache forward on a genuine
+    failure -- mirroring batch.py's own flat pre-mark/failure-write shape
+    -- so a model-call failure doesn't also cost this member its
+    already-paid-for chunk cache on top of the failure itself (that cache
+    is still exactly what a *later* run explicitly re-covering all 5
+    original scenarios, or a run after this one succeeds without ever
+    growing back past threshold, would want to reuse)."""
+    import sqlite3
+
+    from mfdoc import testbatch
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_fakemod_scenarios(conn, 5)  # -> 3 chunks with max_scenarios_per_call=2
+
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+    state_key = "natural::FAKEMOD::python::pytest"
+
+    first = testbatch.run_test_batch(
+        conn, ["FAKEMOD"], "python", "pytest", out_dir, _chunk_aware_caller("python", "pytest"),
+        "writing rules text", "template text", max_scenarios_per_call=2, state_path=state_path,
+    )
+    assert first.failed == 0
+    original_chunks = dict(json.loads(state_path.read_text())[state_key]["chunks"])
+    assert set(original_chunks) == {"1", "2", "3"}
+
+    # FAKEMOD shrinks back under threshold -- only 1 scenario left, so its
+    # next run routes through the flat `to_run` path, not `to_run_chunked`.
+    conn.execute("DELETE FROM test_case WHERE member_id=1 AND scenario_name != 'FAKEMOD:BR-001'")
+    conn.commit()
+
+    def always_raises(prompt: str) -> ModelResponse:
+        raise RuntimeError("simulated model call failure")
+
+    second = testbatch.run_test_batch(
+        conn, ["FAKEMOD"], "python", "pytest", out_dir, always_raises,
+        "writing rules text", "template text", max_scenarios_per_call=2, state_path=state_path,
+    )
+    assert second.failed == 1, "the simulated failure must actually be recorded, not silently absorbed"
+    saved_after_second = json.loads(state_path.read_text())
+    assert saved_after_second[state_key]["ok"] is False
+    assert saved_after_second[state_key]["chunks"] == original_chunks, (
+        "a shrunk-back flat member's chunk cache must survive a genuine failure -- dropping it "
+        "here would force a full unnecessary re-render of all 3 original chunks later"
+    )

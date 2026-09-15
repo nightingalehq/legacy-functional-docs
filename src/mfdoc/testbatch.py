@@ -2229,14 +2229,27 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
     # covering the full recorded set (or a superset of it) can advance
     # `_corpus_sha256` past that change; this is expected, not a bug, and
     # is exactly what stops a *clean-exit* subset run from silently
-    # vouching for members it never looked at. This does NOT, on its own,
-    # protect a run interrupted mid-way: `_corpus_sha256` is written once
-    # per run and flushed by the first per-member checkpoint, so a
-    # process killed after some members checkpoint but before others can
-    # still leave stale `ok: True` entries alongside an already-advanced
-    # signature -- a pre-existing gap in the resume design (the same one
-    # `batch.py`'s own #218 fix documents, tracked separately), not
-    # something this fix closes.
+    # vouching for members it never looked at.
+    #
+    # `_corpus_sha256` is only ever set in memory here, not saved to disk
+    # by itself -- the first thing that actually flushes it is whichever
+    # `_save_state` call happens to come next, which before issue #219's
+    # own port of #217 could be a per-member checkpoint from partway
+    # through this run. Round-5 review finding: the paragraph that used
+    # to sit here claimed this was still an open, tracked-separately gap
+    # "the same one batch.py's own #218 fix documents" -- both halves of
+    # that were wrong. batch.py's own final shape documents this hole as
+    # *closed*, not open; and this branch's own routing-loop pre-mark
+    # below (issue #219, porting #217's fix) already closes it here too:
+    # it writes a not-done entry for every member in `to_run`/
+    # `to_run_chunked`, in the very same `_save_state` call that is the
+    # first to flush this signature, before the pool or the chunked loop
+    # starts -- so nothing here can advance to disk without every
+    # about-to-run member's own entry already being honest about not
+    # being done yet. The read just above (`corpus_unchanged`) stays
+    # unconditional -- comparing against whatever signature is already on
+    # disk is always safe on its own; only the *write* that could make an
+    # untouched member look current is gated.
     #
     # Note this means `_corpus_members` itself is updated on *every* run
     # that touches `state`, not only one that advances `_corpus_sha256`
@@ -2499,7 +2512,28 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
     # serving stale output with nothing left to flag it, regardless of
     # whether that member's own turn to run had even started yet.
     for name, brief_hash, out_path in to_run:
-        state[state_keys[name]] = {"ok": False, "attempts": 0, "brief_sha256": brief_hash}
+        # Round-5 review finding: a flat member can still carry a prior
+        # chunked run's `chunks` cache (the "shrunk back under threshold"
+        # case above -- fewer test_case rows, or a raised
+        # max_scenarios_per_call, routes what used to be chunked through
+        # this flat path instead). Dropping that cache here, before the
+        # render is even attempted, would force a full re-render on the
+        # very next resume if this run is killed or the flat render
+        # fails -- exactly the unbounded-model-spend waste #217 exists to
+        # close, and exactly why batch.py's own pre-mark preserves it
+        # here too. Every write site below for this member (both
+        # exception-retry-failure writes, and the final combined write)
+        # re-reads and re-preserves this same `chunks` value on a genuine
+        # failure, mirroring batch.py's own shape there -- only a
+        # successful render actually drops it, once this member's own
+        # deferred cleanup has pruned the leftover chunk files it no
+        # longer needs.
+        prior = state.get(state_keys[name])
+        prior_chunks = prior.get("chunks") if isinstance(prior, dict) else None
+        state[state_keys[name]] = {
+            "ok": False, "attempts": 0, "brief_sha256": brief_hash,
+            **({"chunks": prior_chunks} if prior_chunks else {}),
+        }
     for name, brief_hash, out_path in to_run_chunked:
         prior = state.get(state_keys[name])
         prior_chunks = prior.get("chunks") if isinstance(prior, dict) else None
@@ -2560,8 +2594,16 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
                         + cleanup_problems_by_name.get(name, []),
                     )
                     results.append(result)
+                    # Round-5 review finding, mirroring batch.py's own
+                    # failure-path writes: preserve a shrunk-back member's
+                    # already-paid-for chunk cache across a genuine
+                    # failure too, not just the pre-mark above -- a
+                    # failed attempt must not cost this member its cache
+                    # on top of the failure itself.
+                    prior_chunks = (state.get(state_keys[name]) or {}).get("chunks")
                     state[state_keys[name]] = {
                         "ok": False, "attempts": 2, "brief_sha256": brief_hash,
+                        **({"chunks": prior_chunks} if prior_chunks else {}),
                     }
                     _checkpoint(state, state_path)
                     continue
@@ -2763,8 +2805,17 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
                 input_tokens, output_tokens, list(validation.get("problems", [])) + member_cleanup_problems,
             )
             results.append(result)
+            # Round-5 review finding, mirroring batch.py's own final
+            # write: preserve a shrunk-back member's chunk cache on
+            # failure (`not result.ok`), same as the retry-exception
+            # write above -- only a genuine success actually needs no
+            # `chunks` going forward (its own dispatch-time/deferred
+            # cleanup above has already pruned the leftover chunk files
+            # this member no longer needs).
+            prior_chunks = (state.get(state_keys[name]) or {}).get("chunks") if not result.ok else None
             state[state_keys[name]] = {
                 "ok": result.ok, "attempts": attempts, "brief_sha256": brief_hash,
+                **({"chunks": prior_chunks} if prior_chunks else {}),
             }
             _checkpoint(state, state_path)
 

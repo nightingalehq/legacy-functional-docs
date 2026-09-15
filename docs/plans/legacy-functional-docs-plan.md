@@ -64,7 +64,14 @@ GitHub org.
      `_legacy_test_batch_corpus_members_from_state`, mirroring batch.py's
      `_legacy_corpus_members_from_state`, and branching on `"_corpus_sha256"
      not in state` / `"_corpus_members" in state` / neither (legacy)
-     exactly as `batch.py` does.
+     exactly as `batch.py` does. (Round-5 review nit: round 2 below
+     replaced *both* of these two branches with a single
+     `isinstance(..., list)` gate, not just the `"_corpus_members" in
+     state` half -- the more consequential removal, since a state file
+     with `_corpus_sha256` manually deleted has real member entries and
+     no `_corpus_sha256`, and treating that as zero coverage reproduces
+     #218 too; round 2's own bullet describes only the `isinstance`
+     change, not this.)
   2. **Should-fix:** a member leaving the batchable set entirely (its last
      `test_case` row deleted) permanently froze `_corpus_sha256` forever,
      since no future `members` list could be a superset of a set
@@ -234,6 +241,51 @@ GitHub org.
   passed, 2 skipped). Still not pushed/PR'd, per this issue's own scope:
   stays parked for now regardless of #223's merge status, pending an
   explicit decision to finalize.
+- Fifth review round (against round 4's commit) found two more real
+  issues, both a further instance of the same failure mode round 4 named:
+  a comment or code path asserting parity with `batch.py` that wasn't
+  actually there.
+  1. **Should-fix (comment/code drift):** the corpus-signature block's
+     own comment claimed the mid-run-kill hole (a process killed after
+     some members checkpoint but before others, leaving stale `ok: True`
+     entries alongside an already-advanced signature) was still open and
+     "the same one `batch.py`'s own #218 fix documents, tracked
+     separately" -- both halves false. `batch.py`'s final shape documents
+     that hole as *closed*; and this branch's own first commit (`ae54865`)
+     already closed it here too, via the routing-loop pre-mark ported
+     from #217. Corrected the comment to describe the pre-mark as closing
+     it, mirroring `batch.py`'s own paragraph at the equivalent point.
+  2. **Should-fix (real, un-ported divergence):** the flat (non-chunked)
+     half of the routing-loop pre-mark unconditionally dropped `chunks`
+     (`state[key] = {"ok": False, "attempts": 0, "brief_sha256": ...}`,
+     no `chunks`), where `batch.py`'s equivalent carries a prior
+     `chunks` cache forward on its own flat pre-mark too. Reachable: a
+     member that was chunked on a prior run and later shrinks back under
+     threshold (fewer `test_case` rows, or a raised
+     `max_scenarios_per_call`) routes through this flat path -- the
+     pre-mark was destroying its already-paid-for chunk cache before the
+     render was even attempted, forcing a full re-render on a kill or a
+     flat-render failure (the exact unbounded-model-spend waste #217/#218
+     exist to close). Fixed the pre-mark to carry `prior_chunks` forward
+     like the chunked half already does, and extended the same
+     preservation to both of this path's own failure-write sites further
+     down (the retry-exception write and the final combined write) --
+     mirroring `batch.py`'s shape at all three of its own equivalent
+     sites, which drop `chunks` only on a genuine success (once that
+     member's own cleanup has pruned the leftover chunk files it no
+     longer needs).
+  One nit also addressed: round 1's bullet (above) claimed the legacy/
+  corrupted-state gate branched on `"_corpus_sha256" not in state` /
+  `"_corpus_members" in state` / neither, "exactly as `batch.py` does" --
+  round 2 actually replaced *both* of those branches with a single
+  `isinstance(..., list)` gate, not just the second one, and round 2's
+  own bullet only mentions the `isinstance` change. Annotated round 1's
+  bullet to say so.
+  One new regression test added for finding #2
+  (`test_run_test_batch_a_shrunk_back_flat_member_keeps_its_chunk_cache_
+  on_failure`), confirmed to fail without the fix (reverted locally,
+  re-ran -- `KeyError: 'chunks'` -- restored). Full suite green (1097
+  passed, 2 skipped). Still parked, not pushed/PR'd.
 
 **Progress (2026-09-12v):**
 - Addressed the fifty-sixth Copilot review round on PR #209 (issue #195):
