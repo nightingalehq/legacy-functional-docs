@@ -1463,7 +1463,10 @@ def test_batch_subset_run_never_advances_corpus_signature_past_an_untouched_memb
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
     for member_id, name in ((1, "MODA"), (2, "MODB")):
-        conn.execute("INSERT INTO member (id, name, dialect) VALUES (?, ?, 'natural')", (member_id, name))
+        conn.execute(
+            "INSERT INTO member (id, name, dialect, object_type) VALUES (?, ?, 'natural', 'program')",
+            (member_id, name),
+        )
         conn.execute(
             "INSERT INTO source_line (member_id, line_no, text) VALUES (?, 1, 'irrelevant')", (member_id,)
         )
@@ -1523,6 +1526,185 @@ def test_batch_subset_run_never_advances_corpus_signature_past_an_untouched_memb
     saved_after_third = json.loads(state_path.read_text())
     assert third_caller.calls > 0, "MODB must actually re-render, not be skipped as still current"
     assert saved_after_third[modb_key]["brief_sha256"] != saved_after_first[modb_key]["brief_sha256"]
+
+
+def test_batch_subset_run_reconstructs_prior_coverage_from_a_legacy_state_file(tmp_path):
+    """Issue #218 follow-up: a state file written *before* this fix has
+    `_corpus_sha256` but no `_corpus_members` key at all. Reading that
+    absence as "no prior coverage" (rather than reconstructing the prior
+    member set from the state file's own member entries) would let the
+    very first subset run against any pre-existing state file reproduce
+    the original bug on the spot -- trivially "superset of nothing",
+    advancing the signature while recording only its own members and
+    silently orphaning every member missing from that run.
+
+    Simulates a legacy file by deleting `_corpus_members` after a normal
+    full run (mirroring the reviewer's empirical repro), then confirms a
+    subsequent MODA-only subset run -- after MODB's source has genuinely
+    changed -- does not advance the signature, and that a later full run
+    still re-renders MODB rather than skipping it."""
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    for member_id, name in ((1, "MODA"), (2, "MODB")):
+        conn.execute(
+            "INSERT INTO member (id, name, dialect, object_type) VALUES (?, ?, 'natural', 'program')",
+            (member_id, name),
+        )
+        conn.execute(
+            "INSERT INTO source_line (member_id, line_no, text) VALUES (?, 1, 'irrelevant')", (member_id,)
+        )
+        conn.execute(
+            "INSERT INTO rule_candidate (member_id, line_no, construct, condition, raw) "
+            "VALUES (?, 1, 'IF', ?, ?)",
+            (member_id, f"{name}-COND-1", f"IF {name}-COND-1"),
+        )
+        conn.execute(
+            "INSERT INTO source_file (id, path, sha256, line_count) VALUES (?, ?, 'sha-v1', 1)",
+            (member_id, f"{name}.nsp"),
+        )
+    conn.commit()
+
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+    first = batch_mod.run_batch(
+        conn, ["MODA", "MODB"], out_dir, FakeCaller(), "writing rules text", "template text",
+        state_path=state_path,
+    )
+    assert first.failed == 0
+    modb_subdir = batch_mod._output_subdir(conn, "MODB")
+    modb_key = f"{modb_subdir.as_posix()}/MODB"
+    saved_after_first = json.loads(state_path.read_text())
+    corpus_sig_after_first = saved_after_first["_corpus_sha256"]
+
+    # Simulate a state file written before this fix existed: it has
+    # `_corpus_sha256` but no `_corpus_members` key.
+    del saved_after_first["_corpus_members"]
+    state_path.write_text(json.dumps(saved_after_first))
+
+    # MODB's source genuinely changes -- a real re-ingest would bump this.
+    conn.execute("UPDATE rule_candidate SET condition='MODB-COND-1-CHANGED' WHERE member_id=2")
+    conn.execute("UPDATE source_file SET sha256='sha-v2' WHERE id=2")
+    conn.commit()
+
+    # A subset run that never looks at MODB at all, against the legacy file.
+    second = batch_mod.run_batch(
+        conn, ["MODA"], out_dir, FakeCaller(), "writing rules text", "template text",
+        state_path=state_path,
+    )
+    assert second.failed == 0
+    saved_after_second = json.loads(state_path.read_text())
+    assert saved_after_second["_corpus_sha256"] == corpus_sig_after_first, (
+        "a subset run against a legacy (pre-_corpus_members) state file must not "
+        "advance the corpus signature past an untouched member"
+    )
+    assert saved_after_second[modb_key] == saved_after_first[modb_key], (
+        "MODB's own entry must be untouched by a run that never covered it"
+    )
+
+    # A full run must still pick up MODB's real change.
+    third_caller = _counting_caller(FakeCaller())
+    third = batch_mod.run_batch(
+        conn, ["MODA", "MODB"], out_dir, third_caller, "writing rules text", "template text",
+        state_path=state_path,
+    )
+    assert third.failed == 0
+    saved_after_third = json.loads(state_path.read_text())
+    assert third_caller.calls > 0, "MODB must actually re-render, not be skipped as still current"
+    assert saved_after_third[modb_key]["brief_sha256"] != saved_after_first[modb_key]["brief_sha256"]
+
+
+def test_batch_departed_member_does_not_permanently_freeze_corpus_signature(tmp_path):
+    """Issue #218 follow-up: `_corpus_members` only ever grows (union) if
+    never intersected back down against what's actually batchable today.
+    A member that leaves the corpus entirely (deleted, renamed, no longer
+    batchable) would then stay in `_corpus_members` forever -- and no
+    future run, however large, could ever be a superset of a set
+    containing a member that no longer exists, permanently freezing
+    `_corpus_sha256` with no recovery short of hand-editing the state
+    file.
+
+    Runs a full {MODA, MODB} batch, removes MODB from the batchable set
+    entirely (deletes its member row), then confirms a subsequent full
+    run over the remaining corpus (just MODA) still advances the
+    signature and picks up a later MODA change -- rather than getting
+    silently stuck forever because `_corpus_members` still says MODB."""
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    for member_id, name in ((1, "MODA"), (2, "MODB")):
+        conn.execute(
+            "INSERT INTO member (id, name, dialect, object_type) VALUES (?, ?, 'natural', 'program')",
+            (member_id, name),
+        )
+        conn.execute(
+            "INSERT INTO source_line (member_id, line_no, text) VALUES (?, 1, 'irrelevant')", (member_id,)
+        )
+        conn.execute(
+            "INSERT INTO rule_candidate (member_id, line_no, construct, condition, raw) "
+            "VALUES (?, 1, 'IF', ?, ?)",
+            (member_id, f"{name}-COND-1", f"IF {name}-COND-1"),
+        )
+        conn.execute(
+            "INSERT INTO source_file (id, path, sha256, line_count) VALUES (?, ?, 'sha-v1', 1)",
+            (member_id, f"{name}.nsp"),
+        )
+    conn.commit()
+
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+    first = batch_mod.run_batch(
+        conn, ["MODA", "MODB"], out_dir, FakeCaller(), "writing rules text", "template text",
+        state_path=state_path,
+    )
+    assert first.failed == 0
+    moda_subdir = batch_mod._output_subdir(conn, "MODA")
+    moda_key = f"{moda_subdir.as_posix()}/MODA"
+    saved_after_first = json.loads(state_path.read_text())
+    assert sorted(saved_after_first["_corpus_members"]) == ["MODA", "MODB"]
+
+    # MODB leaves the corpus entirely.
+    conn.execute("DELETE FROM rule_candidate WHERE member_id=2")
+    conn.execute("DELETE FROM source_line WHERE member_id=2")
+    conn.execute("DELETE FROM source_file WHERE id=2")
+    conn.execute("DELETE FROM member WHERE id=2")
+    conn.commit()
+    assert batch_mod.select_batch_members(conn) == ["MODA"]
+
+    # Three consecutive full runs over what remains of the corpus -- none
+    # of them should get permanently stuck because `_corpus_members` still
+    # remembers a member that's gone.
+    for _ in range(3):
+        run = batch_mod.run_batch(
+            conn, ["MODA"], out_dir, FakeCaller(), "writing rules text", "template text",
+            state_path=state_path,
+        )
+        assert run.failed == 0
+    saved_after_runs = json.loads(state_path.read_text())
+    assert saved_after_runs["_corpus_members"] == ["MODA"], (
+        "a departed member must drop out of _corpus_members, not freeze it forever"
+    )
+
+    # MODA's own source now genuinely changes; a full run over the
+    # (now MODA-only) corpus must still pick it up.
+    conn.execute("UPDATE rule_candidate SET condition='MODA-COND-1-CHANGED' WHERE member_id=1")
+    conn.execute("UPDATE source_file SET sha256='sha-v2' WHERE id=1")
+    conn.commit()
+    final_caller = _counting_caller(FakeCaller())
+    final = batch_mod.run_batch(
+        conn, ["MODA"], out_dir, final_caller, "writing rules text", "template text",
+        state_path=state_path,
+    )
+    assert final.failed == 0
+    assert final_caller.calls > 0, "MODA must actually re-render, not be skipped as still current"
+    saved_after_final = json.loads(state_path.read_text())
+    assert saved_after_final[moda_key]["brief_sha256"] != saved_after_first[moda_key]["brief_sha256"]
 
 
 def test_batch_recomputes_briefs_when_a_dialect_hash_changes(indexed_db, tmp_path, monkeypatch):

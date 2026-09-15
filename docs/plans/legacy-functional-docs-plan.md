@@ -38,6 +38,42 @@ GitHub org.
 - Filed as a follow-up rather than folded in here: porting the equivalent
   fix to `testbatch.py`'s own, separately-implemented corpus-signature
   handling (nightingalehq/legacy-functional-docs#219).
+- An adversarial re-review of the above found two further gaps and
+  fixed both:
+  - **Legacy state files weren't covered at all.** `state.get("_corpus_members")
+    or []` read a state file written *before* this fix (has
+    `_corpus_sha256`, no `_corpus_members`) as empty prior coverage --
+    which made the very first subset run against any pre-existing state
+    file trivially "superset of nothing", reproducing issue #218 on the
+    spot. Fixed by reconstructing the prior member set from the state
+    file's own member entries (state keys are `"<subdir>/<NAME>"`; the
+    bare name is the last path segment, skipping the reserved
+    `_corpus_sha256`/`_corpus_members` keys) whenever `_corpus_sha256` is
+    present but `_corpus_members` is not -- only a state file with no
+    `_corpus_sha256` at all (a genuine first-ever run) is treated as
+    having no prior coverage. See `_legacy_corpus_members_from_state`.
+  - **A departed member permanently froze the signature.** Because the
+    recorded set only ever grew (union), a member that left the corpus
+    entirely (deleted, renamed, no longer batchable) stayed in
+    `_corpus_members` forever -- after that, no future run, however
+    large, could ever be a superset of a set containing a member that no
+    longer exists, so `_corpus_sha256` could never advance again, with no
+    recovery short of hand-editing the state file. Fixed by intersecting
+    the prior recorded set with what `select_batch_members(conn)` says is
+    actually batchable *before* the superset comparison, so a departed
+    member drops out of the requirement instead of permanently blocking
+    progress.
+  - Documented (in the code comment and here) a caveat on the "repeated
+    subset keeps the fast path" claim above: that's only true *before*
+    anything in the corpus changes. Once something changes, a subset run
+    can never re-establish the signature on its own -- only a run
+    covering the full recorded set (or a superset of it) can advance
+    `_corpus_sha256` past that change. This is expected/correct, not a
+    bug; it's exactly what stops a subset run from vouching for a member
+    it never looked at.
+  - Two more regression tests added (legacy-state-file migration;
+    departed-member permanent-freeze), each confirmed by reverting the
+    fix to fail without it. Full suite green (1087 passed, 2 skipped).
 
 **Progress (2026-09-12v):**
 - Addressed the fifty-sixth Copilot review round on PR #209 (issue #195):
