@@ -5914,6 +5914,120 @@ def test_run_test_batch_subset_run_never_advances_corpus_signature_past_an_untou
     assert sorted(saved_after_third["_corpus_members"]) == ["MODA", "MODB"]
 
 
+def test_run_test_batch_read_side_rejects_fast_path_when_corpus_members_was_hand_tampered(tmp_path, monkeypatch):
+    """Issue #221, ported from batch.py's run_batch: the `corpus_unchanged
+    and prior_ok` fast path is only safe today because of a write-side
+    invariant maintained elsewhere in run_test_batch -- `ok: True` for a
+    member implies its bare name is in `_corpus_members`. This is
+    defense-in-depth for that invariant: it hand-breaks the invariant
+    directly (simulating some future write-side change that fails to
+    maintain it as carefully as issue #219 does today) and confirms the
+    read side refuses to trust `ok: True` for a member `_corpus_members`
+    doesn't actually cover, even though `corpus_unchanged and prior_ok`
+    alone would say yes.
+
+    Without the fix, this reproduces the original failure mode by hand:
+    MODB's stale `ok: True` entry is silently read as still current,
+    `test_case_brief()` is never called for it, and its output is never
+    regenerated."""
+    import sqlite3
+
+    from mfdoc import testbatch
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_two_flat_test_batch_members(conn)
+
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+    caller = _valid_test_doc_caller("python", "pytest")
+    first = testbatch.run_test_batch(
+        conn, ["MODA", "MODB"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path,
+    )
+    assert first.ok == 2, first.results
+
+    saved_after_first = json.loads(state_path.read_text())
+    assert sorted(saved_after_first["_corpus_members"]) == ["MODA", "MODB"]
+
+    # Hand-break the write-side invariant: MODB's own entry still reads
+    # `ok: True` and the corpus signature is untouched (so `corpus_unchanged`
+    # will read True next run), but `_corpus_members` no longer lists MODB.
+    saved_after_first["_corpus_members"] = ["MODA"]
+    state_path.write_text(json.dumps(saved_after_first))
+
+    calls: list[str] = []
+    real_test_case_brief = testbatch.test_case_brief
+
+    def counting_test_case_brief(*args, **kwargs):
+        calls.append(args[1] if len(args) > 1 else kwargs.get("member_name"))
+        return real_test_case_brief(*args, **kwargs)
+
+    monkeypatch.setattr(testbatch, "test_case_brief", counting_test_case_brief)
+
+    second = testbatch.run_test_batch(
+        conn, ["MODA", "MODB"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path,
+    )
+    assert second.failed == 0
+    assert "MODB" in calls, (
+        "MODB's bare name is missing from _corpus_members, so the corpus-level "
+        "fast path must not trust its stale ok:True entry even though "
+        "corpus_unchanged and prior_ok both hold"
+    )
+
+
+def test_plan_test_batch_read_side_rejects_fast_path_when_corpus_members_was_hand_tampered(tmp_path, monkeypatch):
+    """plan_test_batch mirror of the run_test_batch test above -- a
+    --dry-run preview must not take the corpus-level fast path for a
+    member the recorded `_corpus_members` doesn't actually cover, even
+    though a legitimate tier-2 (per-member brief hash) skip is still
+    expected once test_case_brief is actually computed."""
+    import sqlite3
+
+    from mfdoc import testbatch
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_two_flat_test_batch_members(conn)
+
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+    caller = _valid_test_doc_caller("python", "pytest")
+    first = testbatch.run_test_batch(
+        conn, ["MODA", "MODB"], "python", "pytest", out_dir, caller,
+        "writing rules text", "template text", state_path=state_path,
+    )
+    assert first.ok == 2, first.results
+
+    saved_after_first = json.loads(state_path.read_text())
+    saved_after_first["_corpus_members"] = ["MODA"]
+    state_path.write_text(json.dumps(saved_after_first))
+
+    calls: list[str] = []
+    real_test_case_brief = testbatch.test_case_brief
+
+    def counting_test_case_brief(*args, **kwargs):
+        calls.append(args[1] if len(args) > 1 else kwargs.get("member_name"))
+        return real_test_case_brief(*args, **kwargs)
+
+    monkeypatch.setattr(testbatch, "test_case_brief", counting_test_case_brief)
+
+    plan = testbatch.plan_test_batch(conn, ["MODA", "MODB"], "python", "pytest", out_dir, state_path=state_path)
+    assert plan.corpus_unchanged is True, "corpus signature itself was never touched"
+    assert "MODB" in calls, (
+        "MODB's bare name is missing from _corpus_members, so the preview must not "
+        "take the corpus-level fast path for it (which never calls test_case_brief at "
+        "all) even though corpus_unchanged and prior_ok both hold"
+    )
+    by_name = {p.member: p.status for p in plan.members}
+    assert by_name["MODB"] == "skip", "tier-2 brief-hash skip is still legitimate once test_case_brief is actually called"
+
+
 def test_run_test_batch_kill_of_one_flat_member_does_not_leave_a_sibling_falsely_done(tmp_path):
     """Issue #219, porting #217: the "reads as done when it isn't" hole
     isn't specific to chunked members -- two ordinary flat (non-chunked)

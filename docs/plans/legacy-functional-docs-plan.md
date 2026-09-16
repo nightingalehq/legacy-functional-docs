@@ -12,6 +12,94 @@ GitHub org.
   high-volume, formulaic module docs; CLI stays for system overview, process
   flows and the gap register, where judgement matters most.
 
+**Progress (2026-09-16):**
+- Issue #221: hardened `batch.py`'s `run_batch`/`plan_batch` corpus-level
+  resume fast path (`corpus_unchanged and prior_ok`) with an independent
+  read-side check, rather than relying solely on the write-side invariant
+  #218/#223 established (`ok: True` implies the member's bare name is in
+  `_corpus_members`). The original correctness bug this issue described was
+  already fixed by #217's routing-loop pre-mark (verified two ways,
+  including a 4000-seed randomized fuzz harness with zero violations); what
+  remained was defense-in-depth so a future change to the write side that
+  doesn't hold that invariant as carefully can't silently reopen the same
+  class of bug on the read side.
+  - Both fast-path conditions now also require
+    `name in prior_corpus_members`, where `prior_corpus_members` is the
+    same reconstructed-or-listed set `run_batch`'s own write-side superset
+    check already computes (`state["_corpus_members"]` when it's a
+    well-formed list, else `_legacy_corpus_members_from_state`). Read
+    *before* this run's own union/superset write, since a member named in
+    `members` can never be "departed" from `run_batch`'s perspective either
+    (`currently_known_members` is always a superset of `members`), so the
+    pre-write snapshot and any post-write value agree for every name this
+    check ever looks at.
+  - `plan_batch` (the `--dry-run` preview) had no equivalent computation at
+    all — added the same reconstruction (list-or-legacy), without needing
+    the departed-member/superset logic `run_batch` has, for the same reason
+    above: every name it checks is drawn from `members`, so it can't be
+    "departed" either.
+  - Two new regression tests
+    (`test_batch_read_side_rejects_fast_path_when_corpus_members_was_hand_
+    tampered`, `test_plan_batch_read_side_rejects_fast_path_when_corpus_
+    members_was_hand_tampered`), each hand-editing a saved state file's
+    `_corpus_members` to drop a member whose entry still reads `ok: True`
+    (simulating a future write-side bug, not exercised via any real
+    write-side code path) and confirming the fast path refuses to skip
+    that member even though `corpus_unchanged and prior_ok` alone would
+    say yes. Both confirmed to fail without the fix (reverted the two
+    condition changes in `src/mfdoc/batch.py` locally via a backup copy,
+    re-ran, restored — never `git checkout --`). Full suite green (1131
+    passed, 2 skipped).
+  - No currently-passing test's behavior changed: the write-side invariant
+    already holds in every case the existing suite exercises, so the new
+    check is a no-op there by construction.
+  - First code-review round (adversarial, against #217/#218/#219's own
+    review history) mutation-tested the fix (reverted both condition
+    changes, confirmed both new tests fail with the intended assertion,
+    restored) and found the core logic sound, plus:
+    1. **Should-fix:** the identical fast path in `testbatch.py`'s
+       `run_test_batch`/`plan_test_batch` carries the byte-for-byte
+       equivalent write-side machinery (`_legacy_test_batch_corpus_
+       members_from_state`, the departed/superset block, `batchable_now =
+       select_test_batch_members(conn) | set(members)`) but was left
+       unhardened -- issue #219 exists precisely to keep these two modules
+       in lockstep, so leaving #221 applied to only `batch.py` would
+       reopen that drift. Ported the identical two-part change (the
+       `name in prior_corpus_members` check in `run_test_batch`, plus the
+       same list-or-legacy reconstruction newly added to
+       `plan_test_batch`, which had no equivalent computation at all) and
+       two mirrored regression tests
+       (`test_run_test_batch_read_side_rejects_fast_path_when_corpus_
+       members_was_hand_tampered`,
+       `test_plan_test_batch_read_side_rejects_fast_path_when_corpus_
+       members_was_hand_tampered` in `tests/test_test_batch.py`), each
+       confirmed to fail without the fix.
+    2. **Nit:** hoisted `prior_corpus_members: set[str] = set()` in
+       `run_batch` above the `if state_path:` block (it was already safe
+       via `corpus_unchanged`'s short-circuit, but only incidentally so) --
+       matches `plan_batch`'s own initialization.
+    3. **Nit:** added an explicit caveat comment at all four fast-path
+       check sites (`run_batch`/`plan_batch`/`run_test_batch`/
+       `plan_test_batch`): the new check is bare-name, same as
+       `_corpus_members` itself, while `prior_ok` is keyed on a
+       subdir(/language/framework)-qualified state key -- so a genuine
+       bare-name collision across libraries/dialects could still let one
+       colliding member's presence in `_corpus_members` bless a stale
+       entry for another. Inherited from the write side's bare-name
+       storage format (#218/#219), not introduced by this fix, and
+       explicitly out of scope for this defense-in-depth change.
+    - Full suite green after this round (1133 passed, 2 skipped).
+  - Second code-review round (mutation-tested the `testbatch.py` port the
+    same way, confirmed all four fast-path sites covered, confirmed the
+    `::`-separated state-key/`_legacy_test_batch_corpus_members_from_state`
+    reconstruction still matches every generation the docstring describes)
+    found one leftover nit: `run_test_batch`'s own
+    `prior_corpus_members: set[str] = set(...)` was still only assigned
+    inside `if state_path:` -- round-1's hoist had been applied to
+    `run_batch` and both `plan_*` functions but missed this one. Hoisted
+    to match. Full suite green (1133 passed, 2 skipped). No further
+    findings; review round considered clean.
+
 **Progress (2026-09-15):**
 - Issue #219: ported #217/#218's `batch.py` resume-safety fixes to
   `testbatch.py`'s own routing loop (`run_test_batch`), which shared

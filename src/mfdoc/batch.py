@@ -2435,9 +2435,17 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
     # comparing against whatever signature is already on disk is always
     # safe on its own; only the *write* that could make an untouched
     # member look current is gated.
+    #
+    # Initialized here (not just inside the `if state_path:` block below)
+    # so the per-member loop's `name in prior_corpus_members` check (issue
+    # #221) is structurally safe rather than incidentally so -- today it's
+    # only ever reached when `corpus_unchanged` is True, which already
+    # implies `state_path` truthy via short-circuit, but this doesn't rely
+    # on that staying true if the fast-path condition is ever reordered.
+    prior_corpus_members: set[str] = set()
     if state_path:
         if isinstance(state.get("_corpus_members"), list):
-            prior_corpus_members: set[str] = set(state["_corpus_members"])
+            prior_corpus_members = set(state["_corpus_members"])
         else:
             # Every other case -- a state file with no `_corpus_members`
             # at all (a legacy file written before this fix, or a
@@ -2605,7 +2613,34 @@ def run_batch(conn, members: list[str], out_dir: Path, caller: ModelCaller,
             and not _chunked_member_missing_a_chunk_file(out_path, prior.get("chunks"))
         )
 
-        if corpus_unchanged and prior_ok:
+        # Issue #221 (defense-in-depth): the corpus-level fast path is only
+        # actually safe because of a write-side invariant maintained
+        # elsewhere in this function -- `ok: True` for a member implies its
+        # bare name is in `_corpus_members` (see the superset-check block
+        # above). That invariant has needed correction in nearly every
+        # review round across issues #217/#218/#219, so this re-checks it
+        # independently here rather than trusting it silently: a member
+        # whose own bare name isn't in `prior_corpus_members` never takes
+        # this fast path, even when `corpus_unchanged and prior_ok` alone
+        # would say yes. `prior_corpus_members` here is read *before* this
+        # run's own union/superset write above -- but that write can only
+        # ever grow the set (never remove `name` once it's a member this
+        # run is examining), and `name` can never be in `departed` (it's a
+        # member of `members`, which is always a subset of
+        # `currently_known_members`), so checking it here is equivalent to
+        # checking the on-disk value this run resumed from.
+        #
+        # Caveat (code review, issue #221): this check is bare-name, same as
+        # `_corpus_members` itself, while `prior_ok` above is keyed on the
+        # subdir-qualified `state_key` -- so in a corpus with a genuine
+        # bare-name collision across libraries/dialects (see the `briefs`
+        # comment above), a stale `ok: True` entry for one colliding member
+        # can still be blessed by *another* same-named member's presence in
+        # `_corpus_members`. This is inherited from the write side's
+        # bare-name storage format, not introduced here; closing it would
+        # mean changing what `_corpus_members` itself stores, which is out
+        # of scope for this defense-in-depth read-side check.
+        if corpus_unchanged and prior_ok and name in prior_corpus_members:
             logger.debug("skip %s: unchanged (corpus signature match, resumed)", name)
             results.append(_skip_result(name, out_path, prior))
             continue
@@ -3055,6 +3090,23 @@ def plan_batch(conn, members: list[str], out_dir: Path,
         _corpus_signature(conn, redact, lexicon, sme_notes, extra=[str(threshold)]) if state_path else None
     )
     corpus_unchanged = bool(state_path) and state.get("_corpus_sha256") == corpus_sig
+    # Mirrors run_batch's own read-side check (issue #221): the corpus-level
+    # fast path below must not be satisfiable for a member whose bare name
+    # isn't recorded (or reconstructible, for a legacy state file -- see
+    # `_legacy_corpus_members_from_state`) in `_corpus_members`, so this
+    # preview stays behaviorally consistent with what a real run would
+    # actually do. No departed-member adjustment is needed here the way
+    # run_batch has one: `name` is always drawn from `members`, and a
+    # member named in `members` can never be "departed" from run_batch's
+    # own perspective either (its `currently_known_members` is always a
+    # superset of `members`) -- so the raw reconstructed set already agrees
+    # with run_batch's post-adjustment one for every name this loop checks.
+    prior_corpus_members: set[str] = set()
+    if state_path:
+        if isinstance(state.get("_corpus_members"), list):
+            prior_corpus_members = set(state["_corpus_members"])
+        else:
+            prior_corpus_members = _legacy_corpus_members_from_state(state)
 
     plans: list[MemberPlan] = []
     for name in members:
@@ -3067,7 +3119,11 @@ def plan_batch(conn, members: list[str], out_dir: Path,
             and not _chunked_member_missing_a_chunk_file(out_path, prior.get("chunks"))
         )
 
-        if corpus_unchanged and prior_ok:
+        # See run_batch's matching check for the bare-name-vs-collision
+        # caveat -- same limitation applies here (this preview must stay
+        # behaviorally consistent with what a real run would do, including
+        # that limitation, not just its intended behavior).
+        if corpus_unchanged and prior_ok and name in prior_corpus_members:
             plans.append(MemberPlan(name, "skip"))
             continue
 
