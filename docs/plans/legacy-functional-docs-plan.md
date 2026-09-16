@@ -53,6 +53,42 @@ GitHub org.
   - No currently-passing test's behavior changed: the write-side invariant
     already holds in every case the existing suite exercises, so the new
     check is a no-op there by construction.
+  - First code-review round (adversarial, against #217/#218/#219's own
+    review history) mutation-tested the fix (reverted both condition
+    changes, confirmed both new tests fail with the intended assertion,
+    restored) and found the core logic sound, plus:
+    1. **Should-fix:** the identical fast path in `testbatch.py`'s
+       `run_test_batch`/`plan_test_batch` carries the byte-for-byte
+       equivalent write-side machinery (`_legacy_test_batch_corpus_
+       members_from_state`, the departed/superset block, `batchable_now =
+       select_test_batch_members(conn) | set(members)`) but was left
+       unhardened -- issue #219 exists precisely to keep these two modules
+       in lockstep, so leaving #221 applied to only `batch.py` would
+       reopen that drift. Ported the identical two-part change (the
+       `name in prior_corpus_members` check in `run_test_batch`, plus the
+       same list-or-legacy reconstruction newly added to
+       `plan_test_batch`, which had no equivalent computation at all) and
+       two mirrored regression tests
+       (`test_run_test_batch_read_side_rejects_fast_path_when_corpus_
+       members_was_hand_tampered`,
+       `test_plan_test_batch_read_side_rejects_fast_path_when_corpus_
+       members_was_hand_tampered` in `tests/test_test_batch.py`), each
+       confirmed to fail without the fix.
+    2. **Nit:** hoisted `prior_corpus_members: set[str] = set()` in
+       `run_batch` above the `if state_path:` block (it was already safe
+       via `corpus_unchanged`'s short-circuit, but only incidentally so) --
+       matches `plan_batch`'s own initialization.
+    3. **Nit:** added an explicit caveat comment at all four fast-path
+       check sites (`run_batch`/`plan_batch`/`run_test_batch`/
+       `plan_test_batch`): the new check is bare-name, same as
+       `_corpus_members` itself, while `prior_ok` is keyed on a
+       subdir(/language/framework)-qualified state key -- so a genuine
+       bare-name collision across libraries/dialects could still let one
+       colliding member's presence in `_corpus_members` bless a stale
+       entry for another. Inherited from the write side's bare-name
+       storage format (#218/#219), not introduced by this fix, and
+       explicitly out of scope for this defense-in-depth change.
+    - Full suite green after this round (1133 passed, 2 skipped).
 
 **Progress (2026-09-15):**
 - Issue #219: ported #217/#218's `batch.py` resume-safety fixes to

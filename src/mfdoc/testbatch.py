@@ -2451,7 +2451,27 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
             and not _chunked_member_missing_a_chunk_file(out_path, prior.get("chunks"), language)
         )
 
-        if corpus_unchanged and prior_ok:
+        # Issue #221 (defense-in-depth, ported from batch.py's run_batch):
+        # the corpus-level fast path is only actually safe because of the
+        # write-side invariant above -- `ok: True` for a member implies its
+        # bare name is in `_corpus_members`. Re-check it independently here
+        # rather than trusting it silently, so a future change to the
+        # write-side logic that doesn't maintain that invariant as
+        # carefully can't silently reopen the #217/#218 class of bug.
+        # `prior_corpus_members` is read *before* this run's own write to
+        # `state["_corpus_members"]` above -- but `name` can never be in
+        # `departed` (it's a member of `members`, always a subset of
+        # `batchable_now`), so checking it here agrees with the on-disk
+        # value this run resumed from.
+        #
+        # Caveat (mirrors batch.py's run_batch): this check is bare-name,
+        # same as `_corpus_members` itself, while `prior_ok` above is keyed
+        # on the subdir/language/framework-qualified `key` -- so a genuine
+        # bare-name collision across libraries/dialects could let one
+        # colliding member's presence in `_corpus_members` bless a stale
+        # `ok: True` entry for another. Inherited from the write side's
+        # bare-name storage format, not introduced here.
+        if corpus_unchanged and prior_ok and name in prior_corpus_members:
             logger.debug("skip %s: unchanged (corpus signature match, resumed)", name)
             results.append(_skip_result(name, out_path, prior))
             continue
@@ -3048,6 +3068,25 @@ def plan_test_batch(conn, members: list[str], language: str, framework: str, out
         _corpus_signature(conn, language, framework, threshold, redact, sme_notes) if state_path else None
     )
     corpus_unchanged = bool(state_path) and state.get("_corpus_sha256") == corpus_sig
+    # Mirrors run_test_batch's own read-side check (issue #221, ported from
+    # batch.py's plan_batch): the corpus-level fast path below must not be
+    # satisfiable for a member whose bare name isn't recorded (or
+    # reconstructible, for a legacy state file -- see
+    # `_legacy_test_batch_corpus_members_from_state`) in `_corpus_members`,
+    # so this preview stays behaviorally consistent with what a real run
+    # would actually do. No departed-member adjustment is needed here the
+    # way run_test_batch has one: `name` is always drawn from `members`, and
+    # a member named in `members` can never be "departed" from
+    # run_test_batch's own perspective either (its `batchable_now` is
+    # always a superset of `members`) -- so the raw reconstructed set
+    # already agrees with run_test_batch's post-adjustment one for every
+    # name this loop checks.
+    prior_corpus_members: set[str] = set()
+    if state_path:
+        if isinstance(state.get("_corpus_members"), list):
+            prior_corpus_members = set(state["_corpus_members"])
+        else:
+            prior_corpus_members = _legacy_test_batch_corpus_members_from_state(state)
     # Shared across every member's chunk-reuse check below, not just within
     # one member (Copilot review; see _lazy_valid_scenarios's docstring) --
     # a --matrix dry-run over many chunked members would otherwise pay for
@@ -3071,7 +3110,11 @@ def plan_test_batch(conn, members: list[str], language: str, framework: str, out
             and not _chunked_member_missing_a_chunk_file(out_path, prior.get("chunks"), language)
         )
 
-        if corpus_unchanged and prior_ok:
+        # See run_test_batch's matching check for the bare-name-vs-collision
+        # caveat -- same limitation applies here (this preview must stay
+        # behaviorally consistent with what a real run would do, including
+        # that limitation, not just its intended behavior).
+        if corpus_unchanged and prior_ok and name in prior_corpus_members:
             plans.append(TestMemberPlan(name, "skip"))
             continue
 
