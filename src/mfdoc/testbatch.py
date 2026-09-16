@@ -2291,9 +2291,15 @@ def run_test_batch(conn, members: list[str], language: str, framework: str, out_
     # `--matrix` run rather than scoped per language/framework -- the
     # same accepted, non-correctness-affecting redundancy already
     # documented there.
+    #
+    # Initialized here (not just inside the `if state_path:` block below),
+    # mirroring batch.py's run_batch -- so the per-member loop's `name in
+    # prior_corpus_members` check (issue #221) is structurally safe rather
+    # than incidentally so.
+    prior_corpus_members: set[str] = set()
     if state_path:
         if isinstance(state.get("_corpus_members"), list):
-            prior_corpus_members: set[str] = set(state["_corpus_members"])
+            prior_corpus_members = set(state["_corpus_members"])
         else:
             # Every other case -- a state file with no `_corpus_members`
             # at all (a legacy file written before this fix, or a

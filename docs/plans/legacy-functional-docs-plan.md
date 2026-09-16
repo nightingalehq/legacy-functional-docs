@@ -89,6 +89,16 @@ GitHub org.
        storage format (#218/#219), not introduced by this fix, and
        explicitly out of scope for this defense-in-depth change.
     - Full suite green after this round (1133 passed, 2 skipped).
+  - Second code-review round (mutation-tested the `testbatch.py` port the
+    same way, confirmed all four fast-path sites covered, confirmed the
+    `::`-separated state-key/`_legacy_test_batch_corpus_members_from_state`
+    reconstruction still matches every generation the docstring describes)
+    found one leftover nit: `run_test_batch`'s own
+    `prior_corpus_members: set[str] = set(...)` was still only assigned
+    inside `if state_path:` -- round-1's hoist had been applied to
+    `run_batch` and both `plan_*` functions but missed this one. Hoisted
+    to match. Full suite green (1133 passed, 2 skipped). No further
+    findings; review round considered clean.
 
 **Progress (2026-09-15):**
 - Issue #219: ported #217/#218's `batch.py` resume-safety fixes to
