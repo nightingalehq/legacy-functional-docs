@@ -1706,6 +1706,127 @@ def test_batch_tolerates_a_corrupted_corpus_members_value(tmp_path):
     )
 
 
+def _seed_moda_modb(conn) -> None:
+    """Two minimal batchable members, MODA/MODB, sharing the shape used by
+    test_batch_tolerates_a_corrupted_corpus_members_value -- factored out
+    so the read-side hardening test below (issue #221) can reuse it."""
+    for member_id, name in ((1, "MODA"), (2, "MODB")):
+        conn.execute(
+            "INSERT INTO member (id, name, dialect, object_type) VALUES (?, ?, 'natural', 'program')",
+            (member_id, name),
+        )
+        conn.execute(
+            "INSERT INTO source_line (member_id, line_no, text) VALUES (?, 1, 'irrelevant')", (member_id,)
+        )
+        conn.execute(
+            "INSERT INTO rule_candidate (member_id, line_no, construct, condition, raw) "
+            "VALUES (?, 1, 'IF', ?, ?)",
+            (member_id, f"{name}-COND-1", f"IF {name}-COND-1"),
+        )
+        conn.execute(
+            "INSERT INTO source_file (id, path, sha256, line_count) VALUES (?, ?, 'sha-v1', 1)",
+            (member_id, f"{name}.nsp"),
+        )
+    conn.commit()
+
+
+def test_batch_read_side_rejects_fast_path_when_corpus_members_was_hand_tampered(tmp_path, monkeypatch):
+    """Issue #221: the `corpus_unchanged and prior_ok` fast path is only
+    safe today because of a write-side invariant maintained elsewhere in
+    run_batch -- `ok: True` for a member implies its bare name is in
+    `_corpus_members`. This is defense-in-depth for that invariant: it
+    hand-breaks the invariant directly (simulating some future write-side
+    change that fails to maintain it as carefully as #218/#223 do today)
+    and confirms the read side refuses to trust `ok: True` for a member
+    `_corpus_members` doesn't actually cover, even though `corpus_unchanged
+    and prior_ok` alone would say yes.
+
+    Without the fix, this reproduces the original issue #221/#218 failure
+    mode by hand: MODB's stale `ok: True` entry is silently read as still
+    current, module_brief() is never called for it, and its output is
+    never regenerated."""
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_moda_modb(conn)
+
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+    first = batch_mod.run_batch(
+        conn, ["MODA", "MODB"], out_dir, FakeCaller(), "writing rules text", "template text",
+        state_path=state_path,
+    )
+    assert first.failed == 0 and first.ok == 2
+
+    saved_after_first = json.loads(state_path.read_text())
+    assert sorted(saved_after_first["_corpus_members"]) == ["MODA", "MODB"]
+
+    # Hand-break the write-side invariant: MODB's own entry still reads
+    # `ok: True` and the corpus signature is untouched (so `corpus_unchanged`
+    # will read True next run), but `_corpus_members` no longer lists MODB --
+    # exactly the shape a future write-side bug in the superset-check logic
+    # could produce.
+    saved_after_first["_corpus_members"] = ["MODA"]
+    state_path.write_text(json.dumps(saved_after_first))
+
+    calls = _track_module_brief_calls(monkeypatch)
+    second = batch_mod.run_batch(
+        conn, ["MODA", "MODB"], out_dir, FakeCaller(), "writing rules text", "template text",
+        state_path=state_path,
+    )
+    assert second.failed == 0
+    assert "MODB" in calls, (
+        "MODB's bare name is missing from _corpus_members, so the corpus-level "
+        "fast path must not trust its stale ok:True entry even though "
+        "corpus_unchanged and prior_ok both hold"
+    )
+
+
+def test_plan_batch_read_side_rejects_fast_path_when_corpus_members_was_hand_tampered(tmp_path, monkeypatch):
+    """plan_batch mirror of the run_batch test above -- a --dry-run preview
+    must not take the *corpus-level* fast path for a member the recorded
+    `_corpus_members` doesn't actually cover, even though a legitimate
+    tier-2 (per-member brief hash) skip is still expected once module_brief
+    is actually computed: MODB's brief text genuinely hasn't changed, so
+    the preview correctly reports "skip" in the end -- but only after
+    actually calling module_brief() for it, not via the corpus-level
+    fast path alone (which never calls module_brief at all -- see
+    run_batch's own docstring on the two skip tiers)."""
+    import sqlite3
+    from mfdoc.db import SCHEMA
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    _seed_moda_modb(conn)
+
+    out_dir = tmp_path / "out"
+    state_path = tmp_path / "state.json"
+    first = batch_mod.run_batch(
+        conn, ["MODA", "MODB"], out_dir, FakeCaller(), "writing rules text", "template text",
+        state_path=state_path,
+    )
+    assert first.failed == 0
+
+    saved_after_first = json.loads(state_path.read_text())
+    saved_after_first["_corpus_members"] = ["MODA"]
+    state_path.write_text(json.dumps(saved_after_first))
+
+    calls = _track_module_brief_calls(monkeypatch)
+    plan = batch_mod.plan_batch(conn, ["MODA", "MODB"], out_dir, state_path=state_path)
+    assert plan.corpus_unchanged is True, "corpus signature itself was never touched"
+    assert "MODB" in calls, (
+        "MODB's bare name is missing from _corpus_members, so the preview must not "
+        "take the corpus-level fast path for it (which never calls module_brief at "
+        "all) even though corpus_unchanged and prior_ok both hold"
+    )
+    by_name = {p.member: p.status for p in plan.members}
+    assert by_name["MODB"] == "skip", "tier-2 brief-hash skip is still legitimate once module_brief is actually called"
+
+
 def test_batch_departed_member_does_not_permanently_freeze_corpus_signature(tmp_path):
     """Issue #218 follow-up: `_corpus_members` only ever grows (union) if
     never intersected back down against what's actually batchable today.
