@@ -104,7 +104,7 @@ def _write_project(tmp_path, natural_dir):
     return config_path
 
 
-def test_second_ingest_skips_every_unchanged_file(tmp_path, capsys):
+def test_second_ingest_skips_every_unchanged_file(tmp_path, caplog):
     natural_dir = tmp_path / "natural"
     natural_dir.mkdir()
     (natural_dir / "PROGA.nsp").write_text(PROGRAM_A_V1, encoding="utf-8")
@@ -112,10 +112,11 @@ def test_second_ingest_skips_every_unchanged_file(tmp_path, capsys):
     config_path = _write_project(tmp_path, natural_dir)
     args = SimpleNamespace(config=str(config_path))
 
-    assert cli.cmd_ingest(args) == 0
-    capsys.readouterr()
-    assert cli.cmd_ingest(args) == 0
-    out = capsys.readouterr().out
+    with caplog.at_level("INFO", logger="mfdoc.cli"):
+        assert cli.cmd_ingest(args) == 0
+        caplog.clear()
+        assert cli.cmd_ingest(args) == 0
+    out = caplog.text
     assert "2 unchanged file(s) skipped" in out
 
     conn = _connect(args)

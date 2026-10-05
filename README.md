@@ -1,5 +1,18 @@
 # legacy-functional-docs
 
+## Diagnostic logging
+
+Global options go before the subcommand: `mfdoc --log-format json ingest --config project.yml`
+emits one JSON diagnostic record per line on stderr, including UTC timestamp,
+level, logger, message and available stage/member/run identifiers. `--verbose`
+(`-v`) enables debug logs; `--quiet` (`-q`) keeps warnings and errors. These two
+options are mutually exclusive. `--log-file` uses the same selected format.
+
+Ingestion progress is diagnostic output on stderr. Command results, including
+the JSON printed by `derive`, remain on stdout and can be piped separately.
+This logging conversion currently covers ingestion and the existing batch/retry
+loggers; other diagnostic print call sites remain incremental follow-up work.
+
 A Claude Code skill that builds first-draft functional documentation from legacy
 mainframe 4GL codebases — Natural/Adabas and Mantis/Supra — plus the surrounding
 data definitions and orchestration (Adabas FDT, Natural DDM, Supra directory,

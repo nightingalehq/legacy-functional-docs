@@ -62,6 +62,8 @@ from .redact import Redactor
 # accurate.
 from . import __version__ as VERSION
 
+logger = logging.getLogger(__name__)
+
 #: Each entry takes `(conn, mid, lines, name, options)` -- `options` is the
 #: resolved `cfg["options"]` dict from the project config being ingested.
 #: Almost every dialect ignores it today (its extractor has no config-driven
@@ -289,14 +291,14 @@ def cmd_ingest(args) -> int:
             for g in globs:
                 files.extend(p for p in root.glob(g) if p.is_file())
         if not files:
-            print(f"  ! no files matched {root} {globs}", file=sys.stderr)
+            logger.warning("no files matched %s %s", root, globs, extra={"stage": "ingest"})
 
         for path in sorted(set(files)):
             try:
                 lines, enc, sha = normalise.read_source(path, forced_enc)
             except normalise.SourceTooLargeError as exc:
                 add_gap(conn, "source_too_large", str(exc), severity="high")
-                print(f"  ! skipped {path}: {exc}", file=sys.stderr)
+                logger.warning("skipped %s: %s", path, exc, extra={"stage": "ingest"})
                 continue
 
             # Dialect must be known before the incremental-ingest skip check
@@ -453,7 +455,7 @@ def cmd_ingest(args) -> int:
             for stale_id in prior_member_ids - touched_member_ids:
                 purge_member(conn, stale_id)
             conn.commit()
-        print(f"  ingested {spec['path']} -> {total_members} members so far")
+        logger.info("ingested %s -> %s members so far", spec["path"], total_members, extra={"stage": "ingest"})
 
     conn.commit()
     # Report the true total in the index, not just what this run touched --
@@ -462,8 +464,8 @@ def cmd_ingest(args) -> int:
     # been emptied rather than confirmed unchanged.
     index_total = conn.execute("SELECT COUNT(*) FROM member").fetchone()[0]
     skip_note = f", {skipped_unchanged} unchanged file(s) skipped" if skipped_unchanged else ""
-    print(f"ingest complete: {index_total} members in index "
-          f"({total_members} (re-)processed this run{skip_note})")
+    logger.info("ingest complete: %s members in index (%s (re-)processed this run%s)",
+                index_total, total_members, skip_note, extra={"stage": "ingest"})
     return 0
 
 
@@ -1777,7 +1779,27 @@ def cmd_export(args) -> int:
     return 0
 
 
-def _configure_logging(verbose: bool, log_file: str | None) -> None:
+class _JSONLogFormatter(logging.Formatter):
+    """Encode one diagnostic record per line, including available pipeline fields."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        result = {
+            "timestamp": _dt.datetime.fromtimestamp(record.created, _dt.timezone.utc).isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        for name in ("stage", "member", "run_id"):
+            if hasattr(record, name):
+                result[name] = getattr(record, name)
+        if record.exc_info:
+            result["exception"] = self.formatException(record.exc_info)
+        return json.dumps(result, ensure_ascii=False, default=str)
+
+
+def _configure_logging(
+    verbose: bool, log_file: str | None, quiet: bool = False, log_format: str = "text",
+) -> None:
     """Set up the root logger for this process -- issue #83. Every `mfdoc`
     module's own progress/diagnostic logging (batch.py, testbatch.py,
     retry.py, ...) goes through `logging.getLogger("mfdoc.*")`, which
@@ -1796,7 +1818,7 @@ def _configure_logging(verbose: bool, log_file: str | None) -> None:
     take effect each time, rather than being a no-op after the first call
     the way plain `logging.basicConfig` would be.
     """
-    level = logging.DEBUG if verbose else logging.INFO
+    level = logging.WARNING if quiet else logging.DEBUG if verbose else logging.INFO
     handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
     if log_file:
         handlers.append(logging.FileHandler(log_file, encoding="utf-8"))
@@ -1806,15 +1828,23 @@ def _configure_logging(verbose: bool, log_file: str | None) -> None:
         handlers=handlers,
         force=True,
     )
+    if log_format == "json":
+        for handler in handlers:
+            handler.setFormatter(_JSONLogFormatter())
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="mfdoc", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--verbose", "-v", action="store_true",
+    verbosity = ap.add_mutually_exclusive_group()
+    verbosity.add_argument("--verbose", "-v", action="store_true",
                      help="emit DEBUG-level diagnostic logging (e.g. per-chunk batch "
                           "progress, retries) in addition to INFO -- applies to every "
                           "subcommand, not just batch/test-batch")
+    verbosity.add_argument("--quiet", "-q", action="store_true",
+                           help="suppress diagnostic logging below WARNING; command output is unchanged")
+    ap.add_argument("--log-format", choices=("text", "json"), default="text",
+                    help="diagnostic format on stderr and in --log-file (default: text)")
     ap.add_argument("--log-file",
                      help="also write diagnostic logging to this path, in addition to "
                           "stderr -- useful for an unattended, engagement-scale "
@@ -2153,7 +2183,7 @@ def main(argv=None) -> int:
 
     args = ap.parse_args(argv)
     try:
-        _configure_logging(args.verbose, args.log_file)
+        _configure_logging(args.verbose, args.log_file, quiet=args.quiet, log_format=args.log_format)
     except OSError as exc:
         # e.g. --log-file pointing at an unwritable path or a missing
         # parent directory -- a bad CLI argument, not an internal error,
