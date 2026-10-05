@@ -32,6 +32,7 @@ import functools
 import hashlib
 import inspect
 import json
+import linecache
 import logging
 import re
 import sys
@@ -208,6 +209,13 @@ def _dialect_parser_hash(dialect: str) -> str:
         h.update(mod.__name__.encode("utf-8"))
         h.update(b"\x00")
         try:
+            # A source fingerprint must not reuse inspect's linecache entry:
+            # loader-backed entries have no mtime, and same-size filesystem
+            # edits can preserve timestamps. Evict only this module's source,
+            # then let inspect reload it through the filesystem or its loader.
+            source_file = inspect.getsourcefile(mod)
+            if source_file is not None:
+                linecache.cache.pop(source_file, None)
             # inspect.getsource() goes through the module's own loader
             # (linecache honours a PEP 302 loader's get_source()), so this
             # still works under zipimport/frozen installs where a bare
