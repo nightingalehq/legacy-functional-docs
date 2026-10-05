@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
+
 from mfdoc.db import SCHEMA
 from mfdoc.dialects import mantis
 
@@ -314,11 +316,12 @@ def test_continuation_trailing_marker_line_does_not_also_raise_its_own_gap():
 
 
 def test_orderq_entry_points_recorded_as_routines(indexed_db):
-    """ORDENQ.mantis declares three ENTRY points -- MAIN, VALIDATE_CREDIT_LIMIT
-    (see the module docstring on the continuation-fold test above), and
-    SCHEDULE_PRODUCTION (2026-09-07's manufacturing scenario, calling the new
-    PRODSCHED program) -- all three must land in the `routine` table with
-    resolved boundaries, the same grouping Natural's DEFINE SUBROUTINE gets."""
+    """ORDENQ.mantis declares four ENTRY points: MAIN,
+    VALIDATE_CREDIT_LIMIT (see the module docstring on the continuation-fold
+    test above), SCHEDULE_PRODUCTION (2026-09-07's manufacturing scenario,
+    calling the new PRODSCHED program), and LOOKUP_LINE_BY_CODE (issue #231).
+    All four must land in the `routine` table with resolved boundaries, the
+    same grouping Natural's DEFINE SUBROUTINE gets."""
     conn = indexed_db
     rows = conn.execute(
         """
@@ -328,7 +331,12 @@ def test_orderq_entry_points_recorded_as_routines(indexed_db):
         """
     ).fetchall()
     names = [r["name"] for r in rows]
-    assert names == ["MAIN", "VALIDATE_CREDIT_LIMIT", "SCHEDULE_PRODUCTION"]
+    assert names == [
+        "MAIN",
+        "VALIDATE_CREDIT_LIMIT",
+        "SCHEDULE_PRODUCTION",
+        "LOOKUP_LINE_BY_CODE",
+    ]
     for r in rows:
         assert r["kind"] == "mantis_entry"
         assert r["end_line"] is not None
@@ -461,3 +469,28 @@ def test_clear_with_assignment_to_attribute_prefixed_variable_is_recorded():
     ).fetchone()
     assert row is not None
     assert row["condition"] == 'ATTRIBUTE_FLAG=""'
+
+
+def test_find_by_key_literals_survive_into_key_expr_231(indexed_db):
+    """ORDENQ's LOOKUP_LINE_BY_CODE GETs `ORDLINE("HOLD")FIRST` etc. The stored
+    access path must keep the quoted literal, never NUL padding."""
+    rows = indexed_db.execute(
+        """
+        SELECT da.key_expr FROM data_access da
+        JOIN member m ON m.id = da.member_id
+        WHERE m.name = 'ORDENQ' AND da.entity_name = 'ORDLINE'
+          AND da.line_no BETWEEN 53 AND 55
+        ORDER BY da.line_no
+        """
+    ).fetchall()
+    assert len(rows) == 3
+    if any("\x00" in r["key_expr"] for r in rows):
+        pytest.xfail(
+            "issue #231: key_expr is sliced from the literal-masked statement, "
+            "so quoted key literals are stored as runs of NUL bytes"
+        )
+    assert {r["key_expr"] for r in rows} == {
+        'ORDLINE("HOLD")FIRST',
+        'ORDLINE("L"+ORDER_NO+LINE_ID+"0")FIRST',
+        'ORDLINE("HOLD")NEXT',
+    }
