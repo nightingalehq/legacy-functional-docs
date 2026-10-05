@@ -46,11 +46,3 @@ EXIT
 ENTRY SCHEDULE_PRODUCTION
   CALL "PRODSCHED" (ORDER_NO, LINE_ID, SCHED_DATE)
 EXIT
-
-ENTRY LOOKUP_LINE_BY_CODE
-  * Find-by-key GETs whose key is built from quoted string literals (issue #231).
-  * The key literals must survive into the access-path expression verbatim.
-  .GET ORDLINE("HOLD")FIRST
-  ..GET ORDLINE("L"+ORDER_NO+LINE_ID+"0")FIRST
-  .GET ORDLINE("HOLD")NEXT
-EXIT
