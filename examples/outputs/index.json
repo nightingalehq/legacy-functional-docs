@@ -285,7 +285,7 @@
       "system": "OE",
       "source_file_id": 24,
       "first_line": 1,
-      "last_line": 49,
+      "last_line": 57,
       "mode": null
     },
     {
@@ -2098,6 +2098,57 @@
     },
     {
       "id": 18,
+      "member_id": 24,
+      "line_no": 53,
+      "verb": "GET",
+      "crud": "R",
+      "entity_name": "ORDLINE",
+      "entity_id": 14,
+      "via_view": null,
+      "key_expr": "ORDLINE(\u0000\u0000\u0000\u0000\u0000\u0000)FIRST",
+      "descriptor": null,
+      "key_source_line": null,
+      "key_source_expr": null,
+      "raw": "GET ORDLINE(\"HOLD\")FIRST",
+      "confidence": "verified",
+      "end_line": null
+    },
+    {
+      "id": 19,
+      "member_id": 24,
+      "line_no": 54,
+      "verb": "GET",
+      "crud": "R",
+      "entity_name": "ORDLINE",
+      "entity_id": 14,
+      "via_view": null,
+      "key_expr": "ORDLINE(\u0000\u0000\u0000+ORDER_NO+LINE_ID+\u0000\u0000\u0000)FIRST",
+      "descriptor": null,
+      "key_source_line": null,
+      "key_source_expr": null,
+      "raw": "GET ORDLINE(\"L\"+ORDER_NO+LINE_ID+\"0\")FIRST",
+      "confidence": "verified",
+      "end_line": null
+    },
+    {
+      "id": 20,
+      "member_id": 24,
+      "line_no": 55,
+      "verb": "GET",
+      "crud": "R",
+      "entity_name": "ORDLINE",
+      "entity_id": 14,
+      "via_view": null,
+      "key_expr": "ORDLINE(\u0000\u0000\u0000\u0000\u0000\u0000)NEXT",
+      "descriptor": null,
+      "key_source_line": null,
+      "key_source_expr": null,
+      "raw": "GET ORDLINE(\"HOLD\")NEXT",
+      "confidence": "verified",
+      "end_line": null
+    },
+    {
+      "id": 21,
       "member_id": 25,
       "line_no": 15,
       "verb": "ADD-M",
@@ -5697,19 +5748,19 @@
       "id": 86,
       "scope": "ORDENQ",
       "name": "mantis.lines",
-      "value": "49"
+      "value": "57"
     },
     {
       "id": 87,
       "scope": "ORDENQ",
       "name": "mantis.code_lines",
-      "value": "45"
+      "value": "50"
     },
     {
       "id": 88,
       "scope": "ORDENQ",
       "name": "mantis.comment_lines",
-      "value": "1"
+      "value": "3"
     },
     {
       "id": 89,
@@ -5919,7 +5970,7 @@
       "id": 143,
       "scope": "global",
       "name": "coverage.source_lines",
-      "value": "650"
+      "value": "658"
     },
     {
       "id": 144,
@@ -5931,7 +5982,7 @@
       "id": 145,
       "scope": "global",
       "name": "coverage.line_recognition_rate",
-      "value": "0.9938"
+      "value": "0.9939"
     },
     {
       "id": 146,
@@ -5961,7 +6012,7 @@
       "id": 150,
       "scope": "global",
       "name": "coverage.data_accesses",
-      "value": "18"
+      "value": "21"
     },
     {
       "id": 151,
