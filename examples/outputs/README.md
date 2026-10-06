@@ -22,6 +22,9 @@ outputs/
   rules-register.md            mfdoc rules-register (doc_type: register)
   test-plan-register.md        mfdoc test-plan --out (doc_type: register)
   testability-advisory.md      mfdoc test-advisory --out (doc_type: register)
+  reference/
+    language-guide-{dialect}.md          mfdoc lang-guide (deterministic tier; natural, mantis, mantis_screen, supra_dir)
+    language-guide-narrative-{dialect}.md  hand/session-written narrative tier (natural, mantis)
   docs/
     system-overview.md         cross-cutting: whole-system narrative
     interface-matrix.md        cross-cutting: screen-and-key interface matrix (mode x panel x map x PF-label x routine x outcome)
@@ -66,6 +69,8 @@ doesn't fit them.
 |---|---|---|
 | `index.db`, `index.json`, `coverage.json`, `rules-register.md`, `test-plan-register.md`, `testability-advisory.md` | Fully deterministic — no model call anywhere in `ingest`/`derive`/`coverage`/`test-plan`/`test-advisory`/`rules-register`/`export` | CI, automatically, on every push to `main` (see `.github/workflows/ci.yml`'s `update-examples` job) — committed back with `[skip ci]` so it doesn't retrigger itself |
 | `docs/natural/`, `docs/mantis/`, `tests/natural/`, `tests/mantis/` | `mfdoc batch`/`mfdoc test-batch --matrix`, run for real via `--provider claude-code` (the local Claude Code CLI, no `ANTHROPIC_API_KEY` needed); `tests/` covers every configured `options.testgen.matrix` target, not just one language | Whoever re-runs the commands below — CI does not call any model, by design (see the root README's security/compliance guide) |
+| `reference/language-guide-*.md` (deterministic tier) | `mfdoc lang-guide --dialect ...` -- no model call | CI, automatically, alongside the rows above |
+| `reference/language-guide-narrative-*.md` | Written directly from the deterministic tier's cited rows, per `templates/language-guide.md` | Hand/session-produced; CI only validates citations |
 | `docs/entities/`, `docs/process-flows/`, `docs/system-overview.md`, `docs/interface-matrix.md`, `docs/gap-register.md` | Written directly, from `mfdoc brief --entity`/`--system`/`--interface-matrix` output — the interactive Claude Code path these five doc types are designed for (no automated CLI path exists for them) | Same as above — hand/session-produced, CI only validates they haven't drifted |
 
 CI's `test` job runs `mfdoc validate`/`mfdoc test-validate` against this whole
@@ -84,6 +89,9 @@ mfdoc coverage --config project.yml --json examples/outputs/coverage.json
 
 mfdoc rules-register --config project.yml --out examples/outputs/rules-register.md
 mfdoc export         --config project.yml --json examples/outputs/index.json
+for d in natural mantis mantis_screen supra_dir; do
+  mfdoc lang-guide --config project.yml --dialect $d --out examples/outputs/reference/language-guide-$d.md
+done
 cp .mfdoc/index.db examples/outputs/index.db
 
 mfdoc test-plan      --config project.yml --out examples/outputs/test-plan-register.md
