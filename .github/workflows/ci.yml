@@ -70,7 +70,7 @@ jobs:
 
       - name: Regenerate deterministic example artifacts
         # No model call in any of these -- ingest/derive/coverage/test-plan/
-        # test-advisory/rules-register/export are all model-free per
+        # test-advisory/rules-register/lang-guide/export are all model-free per
         # CLAUDE.md's extraction/narrative split, safe to run and commit
         # unattended. Narrative docs and generated tests under
         # examples/outputs/docs and examples/outputs/tests are hand/session
@@ -85,6 +85,10 @@ jobs:
           mfdoc test-advisory  --config project.yml --out examples/outputs/testability-advisory.md
           mfdoc rules-register --config project.yml --out examples/outputs/rules-register.md
           mfdoc export         --config project.yml --json examples/outputs/index.json
+          mfdoc lang-guide     --config project.yml --dialect natural --out examples/outputs/reference/language-guide-natural.md
+          mfdoc lang-guide     --config project.yml --dialect mantis --out examples/outputs/reference/language-guide-mantis.md
+          mfdoc lang-guide     --config project.yml --dialect mantis_screen --out examples/outputs/reference/language-guide-mantis_screen.md
+          mfdoc lang-guide     --config project.yml --dialect supra_dir --out examples/outputs/reference/language-guide-supra_dir.md
           cp .mfdoc/index.db examples/outputs/index.db
 
       - name: Commit and push if changed
