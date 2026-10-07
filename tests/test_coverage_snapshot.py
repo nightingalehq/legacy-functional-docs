@@ -136,6 +136,12 @@ lines never raised a gap either before or after -- only rule_candidates
 moves, from 35 to 39 for this change alone (later paragraphs below push
 the final EXPECTED_COVERAGE total further, to 41).
 
+2026-10-05 (issue #231): ORDENQ.mantis gets a further appended entry,
+`LOOKUP_LINE_BY_CODE`, with three find-by-key GETs whose key is built from
+quoted string literals -- the shape that exposes `key_expr` being stored from
+the *masked* statement (literals replaced by NULs). +8 source_lines, +3
+data_accesses; see tests/test_mantis_rules.py's conditional-xfail guard.
+
 2026-09-01: mantis.py also folds a run of `'`-marked continuation lines onto
 the statement they continue (the same real client export's style, same
 session as the depth-dot calibration above), instead of leaving a multi-line
@@ -312,14 +318,14 @@ from mfdoc import graph
 EXPECTED_COVERAGE = {
     "members": 32,
     "code_members": 20,
-    "source_lines": 650,
+    "source_lines": 658,
     "unparsed_lines": 4,
-    "line_recognition_rate": 0.9938,
+    "line_recognition_rate": 0.9939,
     "entities": 19,
     "entities_with_definition": 14,
     "entity_definition_rate": 0.7368,
     "entity_fields": 71,
-    "data_accesses": 18,
+    "data_accesses": 21,
     "rule_candidates": 59,
     "invocation_edges": 15,
     "invocations_resolved": 3,
