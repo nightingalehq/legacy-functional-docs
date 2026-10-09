@@ -152,6 +152,9 @@ resolve.
 - **Architecture overview** — [`docs/guides/architecture.md`](docs/guides/architecture.md)
   covers the pipeline stage by stage, the data model, and where a model can
   and can't reach.
+- **The fact store** — [`docs/guides/fact-store.md`](docs/guides/fact-store.md)
+  explains the SQLite database: every table and index, how they relate, which
+  stage writes what, and what is deterministic versus LLM-derived.
 - **Security, data handling and compliance due diligence** —
   [`docs/guides/security-and-compliance.md`](docs/guides/security-and-compliance.md)
   covers what leaves the machine, redaction, credentials found in source,
