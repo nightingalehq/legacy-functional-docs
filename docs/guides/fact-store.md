@@ -389,7 +389,7 @@ Suppose a synthetic member `MEMBER_A` contains, at line 42, a conditional on
 
 ## Schema object inventory
 
-The schema contains **23 tables**, **0 views**, **0 triggers**, **0 virtual
+The schema contains **24 tables**, **0 views**, **0 triggers**, **0 virtual
 (FTS) tables**, **17 explicitly created indexes** (14 plain, 3 expression
 indexes) and **5 implicit indexes** SQLite creates for `UNIQUE`/composite
 primary key constraints. There is no separate migration table; see
